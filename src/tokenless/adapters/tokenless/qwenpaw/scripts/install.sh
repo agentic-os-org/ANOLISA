@@ -127,6 +127,7 @@ wheel_url_for_host() {
         Linux/x86_64)  pattern='manylinux_2_17_x86_64' ;;
         Linux/aarch64) pattern='manylinux_2_17_aarch64' ;;
         Darwin/arm64)  pattern='macosx_11_0_arm64' ;;
+        Darwin/x86_64) pattern='macosx_11_0_x86_64' ;;
         *)             return 0 ;;
     esac
     sed -n "s|^anolisa-tokenless @ \(https://[^ ;]*${pattern}[^ ;]*\.whl\).*|\1|p" \

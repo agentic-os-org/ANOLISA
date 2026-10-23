@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.14.3
+
+Combined release notes for the 0.14.2 and 0.14.3 release work. Previously shipped fixes recorded in 0.14.2 are identified separately below.
+
+### Features
+- Add read-only Hermes `state.db` trajectory collection and Claude SDK session discovery, including tool-result matching by call ID. (#8713)
+- Add Gemini CLI chat-file conversion to ATIF, including legacy JSON files and replay of conversation corrections; automatic discovery of `~/.gemini` chat files is not included. (#8801)
+- Add type, state and agent filters to interruption queries where applicable, agent-scoped summary totals, and JSON output for interruption resolution.
+- Add batch ATIF export without analysis and configurable parallel batch analysis.
+- Add `token --db`, `summary --tokenless-db`, and per-agent metrics in JSON for offline queries and scripts.
+- Add remote Tokenless statistics, refresh savings before queries, and count only savings from applied transformations.
+- Add daily skill-hotness reporting and RSS/CPU benchmark metrics.
+
+### Performance
+- Reduce capture overhead and database work, stream batch JSONL conversion, and reuse benchmark metric snapshots.
+- Add cooperative CPU pacing through `runtime_limits.cpu_budget_percent` (default 25% of one logical CPU; `0` disables pacing) and increase the default connection capacity from 32 to 128.
+
+### Fixes
+- Resolve gateway prefixes, vendor names and dated model aliases to usable tokenizers, including Gemini 2.5/latest/preview, GLM 4.5, Qwen 3.6, Kimi K2, GPT-5, and OpenAI audio/realtime families.
+- Preserve response text, reasoning, refusals, server-tool blocks and stop reasons across Anthropic, Gemini, Responses, OpenAI-compatible, GLM, Codex and DashScope providers, including incomplete, filtered and non-streaming responses.
+- Count streamed, cached and replayed token usage without duplication; retain complete token observations and fall back to raw-token counting when template rendering fails.
+- Keep parallel tool calls and results associated by choice and call ID, preserve partial tool inputs, and report tool outcomes and first-output timing accurately.
+- Preserve pending SysOM metadata and session attribution; retain main sessions, reasoning-only steps and parallel tool results during batch conversion, and isolate individual analysis failures.
+- Keep slow TLS handshakes from blocking new connections, isolate cancelled HTTP/2 streams, preserve final headers after interim HTTP responses, and report HTTP/2 first-token latency.
+- Include custom `serve --db` files in the storage budget and support BOM-prefixed storage, optimization and Tokenless configs.
+- Require credentials for storage settings and LLM-spending endpoints, use the Agent Security V2 socket, handle IPv4-mapped rule addresses, and bound Agent Security response lines.
+- Keep collected trajectories inspectable without GenAI records, refresh audit filters and trajectory savings, preserve UTF-8 previews, and retire stale model labels when content changes.
+- Improve session search, preference counting and causal evidence matching; distinguish handled tool failures from unresolved failures and require continuous evidence for recovery claims.
+- Record idle-agent OOM interruptions without duplicate kill reports, preserve truncated-turn state, and handle malformed counters, missing CPU measurements and failed reads explicitly.
+- Reuse the global Prometheus recorder and initialize metrics before workers; skip Python executables during static-SSL probing.
+
+### Previously shipped fixes recorded in 0.14.2
+- Preserve calls with no response body when an agent exits, and keep recap-only sessions inspectable with correct analyzer-row classification and per-session aggregates. These fixes were already present in 0.14.1 and are included here for the combined release summary, not as new 0.14.3 behavior. (#7271)
+
+### Upgrade notes
+- Review CPU pacing and connection limits before rollout; explicit existing connection limits are preserved, and CPU pacing is a cooperative target rather than a hard quota.
+- Scripts changing storage settings or invoking LLM-spending endpoints must supply credentials. Trajectory collection remains opt-in; Hermes collection requires access to its database and WAL files.
+
+## 0.14.2
+
+### Fixes
+- Record previously shipped fixes for calls with no response body at agent exit and recap-only session inspection, analyzer-row classification and per-session aggregates; the code was already included in 0.14.1. (#7271)
+
 ## 0.14.1
 
 ### Features

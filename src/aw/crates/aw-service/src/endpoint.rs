@@ -252,6 +252,10 @@ fn private_directory(path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn same_user(stream: &UnixStream) -> io::Result<()> {
+    peer_credentials(stream).map(|_| ())
+}
+
+pub(crate) fn peer_credentials(stream: &UnixStream) -> io::Result<libc::ucred> {
     // ucred is a plain C structure and getsockopt initializes it on success.
     let mut credentials = unsafe { std::mem::zeroed::<libc::ucred>() };
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -270,7 +274,7 @@ pub(crate) fn same_user(stream: &UnixStream) -> io::Result<()> {
     if length as usize != std::mem::size_of::<libc::ucred>() || credentials.uid != current_uid() {
         return Err(permission("service peer must belong to the current user"));
     }
-    Ok(())
+    Ok(credentials)
 }
 
 #[cfg(test)]

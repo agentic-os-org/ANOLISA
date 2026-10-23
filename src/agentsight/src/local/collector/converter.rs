@@ -51,6 +51,24 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Gemini CLI chats are an append-only record stream: a leading
+    // `{sessionId, projectHash}` metadata record, `id`-keyed message records
+    // and `$`-prefixed corrections. The substrings mirror `is_gemini_chat`'s
+    // record markers, so foreign content stays on the Claude/Qoder path.
+    if content.contains("projectHash")
+        || content.contains("$rewindTo")
+        || content.contains("$patch")
+        || content.contains("$set")
+    {
+        let events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
+        if agentsight_trajectory_collector::gemini::is_gemini_chat(&events) {
+            return agentsight_trajectory_collector::gemini::convert_gemini_events(
+                &events,
+                "gemini-cli",
+            );
+        }
+    }
+
     // Codex's shared loader already consumes its BOM; normalize only this path.
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
@@ -487,6 +505,26 @@ mod tests {
         // delegation would incorrectly accept a second leading mark.
         let traj = convert_jsonl_content_to_atif(&format!("\u{feff}\u{feff}{content}")).unwrap();
         assert_eq!(traj.session_id, None);
+    }
+
+    #[test]
+    fn gemini_chat_delegates_to_gemini_converter() {
+        // A Gemini chat record stream: id-keyed message records plus the
+        // leading partial-metadata record. The Claude-style path would see no
+        // `message`-wrapped events and emit zero steps.
+        let content = concat!(
+            "{\"sessionId\":\"g-1\",\"projectHash\":\"h\",\"startTime\":\"2026-08-03T09:00:00.000Z\"}\n",
+            "{\"id\":\"m1\",\"timestamp\":\"2026-08-03T09:00:01.000Z\",\"type\":\"user\",\"content\":\"hi\"}\n",
+            "{\"id\":\"m2\",\"timestamp\":\"2026-08-03T09:00:02.000Z\",\"type\":\"gemini\",\"content\":\"hello\"}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "gemini-cli");
+        assert_eq!(traj.session_id.as_deref(), Some("g-1"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "hi");
+        assert_eq!(traj.steps[1].source, StepSource::Agent);
+        assert_eq!(traj.steps[1].message, "hello");
     }
 
     #[test]

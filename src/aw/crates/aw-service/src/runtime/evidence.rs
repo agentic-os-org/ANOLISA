@@ -54,7 +54,6 @@ impl Settings {
 use aw_adapter::association::source_matches_adapter;
 
 pub(super) struct Contexts {
-    document: Value,
     sources: BTreeMap<String, Settings>,
     registry: Registry,
     // Claims live until the owning instance has drained all its observation work.
@@ -131,8 +130,17 @@ impl Contexts {
             .ok_or_else(|| rejected("context_configuration"))?
         {
             if let Some(value) = agent.get("evidence") {
-                let mut settings: Settings = serde_json::from_value(value.clone())
-                    .map_err(|_| rejected("context_configuration"))?;
+                let mut value = value.clone();
+                // Schema-validated evidence limits fit u32 and are exact as f64;
+                // serde integer fields otherwise reject integral decimals/exponents.
+                for field in ["query_timeout_ms", "query_bytes", "max_items", "max_bytes"] {
+                    value[field] = json!(value[field]
+                        .as_f64()
+                        .ok_or_else(|| rejected("context_configuration"))?
+                        as u64);
+                }
+                let mut settings: Settings =
+                    serde_json::from_value(value).map_err(|_| rejected("context_configuration"))?;
                 settings.endpoint = agentsight::origin(&settings.endpoint)
                     .map_err(|_| rejected("evidence_endpoint_invalid"))?;
                 if settings.endpoint.starts_with("https://")
@@ -147,7 +155,6 @@ impl Contexts {
             }
         }
         Ok(Self {
-            document,
             sources,
             registry: Registry::new().map_err(contract)?,
             sessions: Mutex::new(SessionClaims::default()),
@@ -169,13 +176,14 @@ impl Contexts {
         event: &Value,
         association: Value,
         deadline: Instant,
+        document: &Value,
     ) -> Result<Seed> {
         let target = subject["binding_id"]
             .as_str()
             .ok_or_else(|| rejected("context_subject"))?;
         let constraints = projection::content(&json!({
-            "execution": self.document["spec"]["execution"],
-            "events": self.document["spec"]["events"],
+            "execution": document["spec"]["execution"],
+            "events": document["spec"]["events"],
             "config_revision": subject["config_revision"],
         }))?;
         Ok(Seed {

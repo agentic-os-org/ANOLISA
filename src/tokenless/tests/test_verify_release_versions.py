@@ -43,7 +43,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 _COMPONENT = Path(__file__).resolve().parents[1]
 _SCRIPT = _COMPONENT / "packaging" / "raw" / "verify-release.py"
 _spec = importlib.util.spec_from_file_location("verify_release", _SCRIPT)
@@ -326,14 +325,15 @@ class TestStampedRequirementsPipeline(unittest.TestCase):
     def test_prerelease_stamps_both_spellings(self):
         """A Cargo 0.9.0-rc.1 keeps its tag and normalizes its filenames."""
         text = self.assert_stamps_and_verifies("0.9.0-rc.1", "0.9.0rc1")
-        self.assertEqual(text.count("/tokenless/v0.9.0-rc.1/"), 3)
-        self.assertEqual(text.count("anolisa_tokenless-0.9.0rc1-cp311-abi3-"), 3)
+        self.assertEqual(text.count("/tokenless/v0.9.0-rc.1/"), 4)
+        self.assertEqual(text.count("anolisa_tokenless-0.9.0rc1-cp311-abi3-"), 4)
+        self.assertIn("anolisa_tokenless-0.9.0rc1-cp311-abi3-macosx_11_0_x86_64.whl", text)
 
     def test_plain_release_urls_are_unchanged(self):
         """An ordinary release stamps one spelling into both positions."""
         text = self.assert_stamps_and_verifies("9.8.7", "9.8.7")
-        self.assertEqual(text.count("/tokenless/v9.8.7/"), 3)
-        self.assertEqual(text.count("anolisa_tokenless-9.8.7-cp311-abi3-"), 3)
+        self.assertEqual(text.count("/tokenless/v9.8.7/"), 4)
+        self.assertEqual(text.count("anolisa_tokenless-9.8.7-cp311-abi3-"), 4)
 
 
 if __name__ == "__main__":

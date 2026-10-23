@@ -33,7 +33,7 @@
 ### 变更
 
 - **agent-memory**：**不兼容变更：** OpenClaw 工具更名为 `anolisa_memory_search` 和 `anolisa_memory_get`，Agent 可以同时访问 ANOLISA 记忆和 OpenClaw 自带记忆工具，避免名称冲突；升级时需更新提示词及工具 allowlist、重启 gateway 并开启新会话。内部 MCP 名称和已存储记忆保持不变（#3347）
-- **agent-memory**：在 OpenClaw 的 `coding` profile 中声明全部四个插件工具，Agent 在该 profile 下无需禁用 `memory-core` 即可访问插件工具；自定义策略仍需显式添加工具条目，中间版本安装器留下的禁用标记需按[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)手动恢复（#3347）
+- **agent-memory**：在 OpenClaw 的 `coding` profile 中声明全部四个插件工具，Agent 在该 profile 下无需禁用 `memory-core` 即可访问插件工具；自定义策略仍需显式添加工具条目，中间版本安装器留下的禁用标记需按[用户指南](../../docs/user-guide/zh/agent-memory/index.md)手动恢复（#3347）
 
 ### 修复
 

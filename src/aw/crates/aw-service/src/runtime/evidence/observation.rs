@@ -409,9 +409,9 @@ impl Runtime {
             }
             state.claims.insert(correlation, digest);
         }
-        let seed = self.contexts.seed(json!({"generation":self.identity.generation,"config_revision":self.identity.config_revision,
+        let seed = self.contexts.seed(json!({"generation":self.identity.generation,"config_revision":host.revision(),
             "binding_id":host.target(),"instance_id":instance_id,"event_id":self.identifier()?,"adapter":host.capabilities().adapter}),
-            &event, association, deadline)?;
+            &event, association, deadline, host.configuration().as_value())?;
         observation.enqueue(self, &seed)?;
         Ok(json!({"observed":true,"duplicate":false}))
     }

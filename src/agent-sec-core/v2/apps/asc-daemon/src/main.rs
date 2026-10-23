@@ -19,7 +19,7 @@ use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder, QueryHandler};
 use asc_daemon_service::ShutdownToken;
 use asc_event_sink::ConfiguredSecurityEventSinks;
 use asc_pap::{PapRepository, PapService, ScopeDiscovery};
-use asc_policy_repository_sqlite::SqlitePolicyRepository;
+use asc_policy_repository_sqlite::{SqlitePolicyRepository, select_policy_database_path};
 use asc_policy_runtime::reconciliation::ReconciliationRuntime;
 use asc_policy_types::scope::ScopeStatus;
 use asc_security_events::config::daemon_security_event_paths;
@@ -50,6 +50,7 @@ const FINAL_PASS_BUDGET: Duration = Duration::from_secs(5);
 /// The telemetry runtime's own shutdown grace, reserved at the end of the
 /// unit stop budget.
 const TELEMETRY_SHUTDOWN: Duration = Duration::from_secs(2);
+const FALLBACK_POLICY_DATABASE: &str = "/var/lib/agent-sec/policy/policy-state.db";
 
 fn main() -> ExitCode {
     install_panic_hook();
@@ -86,7 +87,20 @@ fn main() -> ExitCode {
     };
     let paths = asc_security_events::config::DaemonDataDirEnv::from_process();
     let data_dir = paths.override_dir.as_ref().unwrap_or(&paths.system_dir);
-    let repository = match SqlitePolicyRepository::open(&data_dir.join("policy-state.db")) {
+    let fallback = paths
+        .override_dir
+        .is_none()
+        .then(|| Path::new(FALLBACK_POLICY_DATABASE));
+    let repository = select_policy_database_path(&data_dir.join("policy-state.db"), fallback)
+        .map_err(std::io::Error::other)
+        .and_then(|path| {
+            tracing::info!(target: "asc_process_diagnostic", path = %path.display(), "Policy database selected");
+            SqlitePolicyRepository::open(&path).map_err(|error| std::io::Error::other(format!(
+                "cannot open Policy database '{}': {error}; refusing to switch databases; existing Policy state must be preserved",
+                path.display()
+            )))
+        });
+    let repository = match repository {
         Ok(repository) => Arc::new(repository),
         Err(problem) => {
             report_error(&telemetry, &problem);

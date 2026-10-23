@@ -3,7 +3,7 @@
 [English](../../en/aw/configuration.md)
 
 本文说明当前配置校验器接受的字段。起步模板、可用能力及 Agent
-使用流程见[用户指南](../../../user-guide/zh/user-entrypoint/aw/README.md)。
+使用流程见[用户指南](../../../user-guide/zh/aw/index.md)。
 
 [随包 Schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 定义公共字段结构，Rust 校验器另行检查引用及字段之间的关系。本地 Host 负责
@@ -26,7 +26,7 @@ CLI 版本，要求 >=1.1.64 而不固定一个版本；OpenClaw、QwenPaw、Her
 | `execution.guarantee` | 仅 `native_hook`，不提供 OS、final 或 protected 保证 |
 | `execution.default_event_budget_ms` | 必填正整数共享事件预算，各步骤不会获得重新开始的预算 |
 | `audit.enabled`、`audit.payload` | 本版本固定为 `true`、`metadata_only`；服务持久保存执行元数据 |
-| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`openclaw`、`hermes`、`pi`、`claude-sdk` 或 `agentscope`；识别名称不等于运行效果已认证 |
+| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`hermes`、`pi`、`claude-sdk` 或 `agentscope`；识别名称不等于运行效果已认证 |
 | `agents.<id>.argv` | 非空程序/参数数组；首项不可为空，不隐式调用 shell 或插值 |
 | `agents.<id>.qoder.sequential` | `adapter: qoder` 专属的可选布尔值；将生成的原生组标为顺序执行，false 不覆盖其他匹配组 |
 | `providers.<id>.protocol` | 缺省为仅执行 invoke 的 `aw-hook/v1alpha1`；显式 `aw-provider/v1alpha1` 保留结构化消息，`native-hook/v1alpha1` 保留原生回调字节 |
@@ -137,8 +137,15 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 
 解析器接受一份 UTF-8 YAML 或 JSON，输入及展开后 JSON 均不超过 4 MiB，嵌套
 深度不超过 32。重复键、非字符串键、自定义 YAML tag、merge key、非有限数值
-及多文档均拒绝；普通 alias 在限额内展开。诊断包含字段路径或源码位置与约束，
-不回显字段值。
+及多文档均拒绝；普通 alias 在限额内展开。JSON 输入沿用同一套 YAML 标量解析
+规则：`1e3` 这类指数写法会以浮点 `1000.0` 到达，Schema 的 integer 类型接受
+整数值。JSON 入门文档与 YAML 入门文档一一对应：
+[aw.minimal.json](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.minimal.json)。
+超出有符号和无符号 128 位范围的十进制整数 scalar 会被拒绝，不会舍入成浮点数，
+标记为 `!!float` 的 scalar 也适用。浮点值使用指数或小数写法；需要精确保留的大型
+标识符使用带引号的字符串。这不扩大现有整数值的支持范围。
+
+诊断包含字段路径或源码位置与约束，不回显字段值。
 
 本 alpha 配置与已有能力 wire 记录、Schema ID/摘要分开演进，不应将 Provider
 配置送入仅支持整数的 wire canonicalizer。校验器不安装或修改任何原生文件；

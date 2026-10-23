@@ -248,3 +248,63 @@ fn cancellation_during_final_host_call_cannot_return_proceed() {
         .get("candidate")
         .is_some());
 }
+
+#[test]
+fn command_denial_survives_overlapping_cancellation() {
+    for (reply, verdict, decision) in [
+        (Reply::Deny, "deny", "deny"),
+        (Reply::Warn, "warn", "deny"),
+        (Reply::Allow, "allow", "cancelled"),
+    ] {
+        for multiple in [false, true] {
+            let core = Core::new().unwrap();
+            let mut host = Host::new();
+            host.replies = vec![reply];
+            let flag = Rc::new(Cell::new(false));
+            host.cancel_after_call = Some(flag.clone());
+            let mut req = request(true);
+            if multiple {
+                second_provider(&mut req, &mut host);
+            }
+            let prepared = core.prepare(req, &host, 1000).unwrap();
+            let mut journal = MemoryJournal::default();
+            let result = core
+                .execute(
+                    prepared,
+                    &mut host,
+                    &mut journal,
+                    &FixedClock(1100),
+                    &CancelFlag(flag),
+                )
+                .unwrap();
+            assert_eq!(
+                result.record()["decision"],
+                decision,
+                "{verdict}, multiple={multiple}"
+            );
+            assert_eq!(result.record()["steps"][0]["outcome"], "cancelled");
+            assert_eq!(
+                result.record()["steps"][0]["reason"],
+                "cancellation_requested"
+            );
+            assert_eq!(result.record()["steps"][1]["outcome"], "skipped");
+            assert_eq!(
+                result.record()["steps"][0]["invocations"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(host.invoked.len(), 1);
+            assert_eq!(result.calls().len(), 1);
+            assert_eq!(
+                result.calls()[0].result().output.as_ref().unwrap()["decision"]["verdict"],
+                verdict
+            );
+            assert_eq!(
+                journal.records.last().unwrap()["execution"],
+                *result.record()
+            );
+        }
+    }
+}

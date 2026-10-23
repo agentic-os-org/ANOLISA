@@ -85,11 +85,13 @@ pub fn stops_before(adapter: &str, output: Option<&HookOutput>, on_error: &str) 
                 _ => on_error == "block",
             }
         }
-        ("claude-sdk" | "agentscope" | "qwenpaw", Some(output)) => {
+        ("qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw", Some(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
-        ("pi" | "openclaw" | "claude-sdk" | "agentscope" | "qwenpaw", None) => on_error == "block",
+        ("pi" | "openclaw" | "qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw", None) => {
+            on_error == "block"
+        }
         _ => false,
     }
 }
@@ -131,9 +133,9 @@ pub fn response(
             (None, Some(signal @ 1..=64)) => Exit::Signal(signal as i32),
             _ => return Err("invalid native exit status".into()),
         };
-        let claude_before = adapter_id == "claude-sdk" && event == "tool.before";
+        let sdk_before = matches!(adapter_id, "claude-sdk" | "qoder-sdk") && event == "tool.before";
         // Validate before success so fail-closed vetoes use the existing event closure.
-        if claude_before {
+        if sdk_before {
             diagnostics.write_all(&stderr)?;
             diagnostics.flush()?;
             if code == Some(2) {
@@ -146,7 +148,7 @@ pub fn response(
                 return Ok(reply);
             }
         }
-        if claude_before && code == Some(0) {
+        if sdk_before && code == Some(0) {
             let value: Value =
                 serde_json::from_slice(if stdout.iter().all(u8::is_ascii_whitespace) {
                     b"{}"
@@ -175,7 +177,7 @@ pub fn response(
         return Ok(HookOutput {
             exit,
             stdout,
-            stderr: if claude_before { Vec::new() } else { stderr },
+            stderr: if sdk_before { Vec::new() } else { stderr },
         });
     }
     if output["kind"] != "provider" {
@@ -349,7 +351,7 @@ mod tests {
 
     #[test]
     fn sdk_early_close_preserves_denial_exit_and_failure_policy() {
-        for adapter in ["agentscope", "claude-sdk", "qwenpaw"] {
+        for adapter in ["agentscope", "claude-sdk", "qwenpaw", "qoder-sdk"] {
             for (exit, on_error, expected) in [
                 (Exit::Code(0), "block", false),
                 (Exit::Code(0), "report", false),

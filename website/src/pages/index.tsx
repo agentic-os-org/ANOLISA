@@ -533,10 +533,10 @@ const scenarios = {
         {
           label: 'cosh-ng',
           description: 'Run Agents in the terminal and take control at any time.',
-          href: '/docs/user-guide/user-entrypoint/cosh-ng/quickstart',
+          href: '/docs/user-guide/cosh-ng/#quick-start',
         },
       ],
-      href: '/docs/user-guide/user-entrypoint/cosh-ng/quickstart',
+      href: '/docs/user-guide/cosh-ng/#quick-start',
       accent: 'cyan',
     },
     {
@@ -555,15 +555,15 @@ const scenarios = {
         {
           label: 'Tokenless',
           description: 'Compress tool output before it enters the model context.',
-          href: '/docs/user-guide/token-saving/tokenless/quickstart',
+          href: '/docs/user-guide/tokenless/#quick-start',
         },
         {
           label: 'AgentSight',
           description: 'Inspect trajectories and track Token usage on Linux.',
-          href: '/docs/user-guide/agent-observability/agentsight',
+          href: '/docs/user-guide/agentsight/',
         },
       ],
-      href: '/docs/user-guide/token-saving/tokenless/quickstart',
+      href: '/docs/user-guide/tokenless/#quick-start',
       accent: 'lime',
     },
     {
@@ -583,20 +583,20 @@ const scenarios = {
         {
           label: 'ws-ckpt',
           description: 'Create workspace checkpoints and roll back file changes.',
-          href: '/docs/user-guide/runtime/ws-ckpt',
+          href: '/docs/user-guide/ws-ckpt/',
         },
         {
           label: 'SkillFS',
           description: 'Expose selected Skills through a mounted filesystem.',
-          href: '/docs/user-guide/runtime/skillfs',
+          href: '/docs/user-guide/skillfs/',
         },
         {
           label: 'Agent Sec Core',
           description: 'Classify risky commands and apply sandbox policies.',
-          href: '/docs/user-guide/agent-security/agent-sec-core/quickstart',
+          href: '/docs/user-guide/agent-sec-core/',
         },
       ],
-      href: '/docs/user-guide/runtime/ws-ckpt',
+      href: '/docs/user-guide/ws-ckpt/',
       accent: 'amber',
     },
   ],
@@ -616,10 +616,10 @@ const scenarios = {
         {
           label: 'cosh-ng',
           description: '在终端中运行 Agent，需要时随时接管。',
-          href: '/docs/user-guide/user-entrypoint/cosh-ng/quickstart',
+          href: '/docs/user-guide/cosh-ng/#quick-start',
         },
       ],
-      href: '/docs/user-guide/user-entrypoint/cosh-ng/quickstart',
+      href: '/docs/user-guide/cosh-ng/#quick-start',
       accent: 'cyan',
     },
     {
@@ -637,15 +637,15 @@ const scenarios = {
         {
           label: 'Tokenless',
           description: '在工具输出进入模型上下文前完成压缩。',
-          href: '/docs/user-guide/token-saving/tokenless/quickstart',
+          href: '/docs/user-guide/tokenless/#quick-start',
         },
         {
           label: 'AgentSight',
           description: '查看运行轨迹，并在 Linux 上统计 Token 用量。',
-          href: '/docs/user-guide/agent-observability/agentsight',
+          href: '/docs/user-guide/agentsight/',
         },
       ],
-      href: '/docs/user-guide/token-saving/tokenless/quickstart',
+      href: '/docs/user-guide/tokenless/#quick-start',
       accent: 'lime',
     },
     {
@@ -663,20 +663,20 @@ const scenarios = {
         {
           label: 'ws-ckpt',
           description: '创建工作区检查点，出现问题时回滚文件变更。',
-          href: '/docs/user-guide/runtime/ws-ckpt',
+          href: '/docs/user-guide/ws-ckpt/',
         },
         {
           label: 'SkillFS',
           description: '通过挂载文件系统向 Agent 提供指定 Skills。',
-          href: '/docs/user-guide/runtime/skillfs',
+          href: '/docs/user-guide/skillfs/',
         },
         {
           label: 'Agent Sec Core',
           description: '判断命令风险，并为执行过程应用沙箱策略。',
-          href: '/docs/user-guide/agent-security/agent-sec-core/quickstart',
+          href: '/docs/user-guide/agent-sec-core/',
         },
       ],
-      href: '/docs/user-guide/runtime/ws-ckpt',
+      href: '/docs/user-guide/ws-ckpt/',
       accent: 'amber',
     },
   ],
@@ -770,7 +770,7 @@ function CoshVisual({locale}: {locale: Locale}) {
       </nav>
 
       <section className={`coshStage coshStage--${activeView}`} key={activeView}>
-        <header className="featureStageHeader"><span><i /> cosh-ng · bash/zsh</span><b>{zh ? '人机共驾' : 'COPILOT SHELL'}</b></header>
+        <header className="featureStageHeader"><span><i /> cosh-ng · bash/zsh</span><b>{zh ? '人机共驾' : 'TERMINAL COLLABORATION'}</b></header>
 
         {activeView === 'handoff' && (
           <div className="coshHandoffScene">
@@ -1504,11 +1504,11 @@ export default function Home() {
               <div className="buttonRow">
                 <SiteLink
                   locale={locale}
-                  to="/docs/user-guide/token-saving/tokenless/quickstart"
+                  to="/docs/user-guide/tokenless/#quick-start"
                   className="primaryButton">
                   {t.startTokenless} →
                 </SiteLink>
-                <SiteLink locale={locale} to="/docs/quickstart" className="secondaryButton">
+                <SiteLink locale={locale} to="/docs/user-guide/getting-started/quickstart/" className="secondaryButton">
                   {t.exploreAnolisa}
                 </SiteLink>
               </div>
@@ -1566,7 +1566,7 @@ export default function Home() {
                 <h2>{t.scenariosTitle}</h2>
                 <p>{t.scenariosIntro}</p>
               </div>
-              <SiteLink locale={locale} to="/docs/quickstart" className="textLink">
+              <SiteLink locale={locale} to="/docs/user-guide/getting-started/quickstart/" className="textLink">
                 {t.openGuide} →
               </SiteLink>
             </div>

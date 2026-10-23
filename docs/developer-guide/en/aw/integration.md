@@ -8,7 +8,7 @@ Hermes. Start with a boolean command for a simple rule; implement a full Provide
 when your component needs its own operations or structured effects.
 
 AW is a Preview. `anolisa install aw` and RPM distribution are not available.
-For prebuilt binaries, follow the [Preview package guide](../../../user-guide/en/user-entrypoint/aw/installation.md).
+For prebuilt binaries, follow the [Preview package guide](../../../user-guide/en/aw/installation.md).
 The source path below needs no sec-core installation or model account until you
 choose the sec-core or native Agent steps.
 
@@ -24,35 +24,33 @@ From a checkout of the desired reviewed commit:
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
+cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
 export AW_SOURCE="$PWD"
 export AW_BIN="$AW_SOURCE/target/debug/aw"
-export AW_PACKAGE="$AW_SOURCE/target/debug/aw-package"
 export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 "$AW_BIN" --help
-"$AW_PACKAGE" --help
 ```
 
 This builds debug binaries in `src/aw/target/debug`; it installs no system
 service. For distributable release packages, use `aw-build` as described in the
-[package build instructions](building.md).
+[package build instructions](../../../../contribute/en/aw/building.md).
 Core builds independently of sec-core. Do not mix installed core and Provider
 packages from different source commits or package versions.
 
 ## 2. Prepare one configuration for four frameworks
 
-An initial `aw.yaml` must exist before any `aw-package config add-*` command.
-For an installed core with Qoder/OpenClaw, use `aw-package configure` to create
+An initial `aw.yaml` must exist before any `aw config add-*` command.
+For an installed core with Qoder/OpenClaw, use `aw config init` to create
 it; omitting `--provider` creates an empty policy configuration. Follow the
-[initialization and editing flow](packages.md#edit-existing-provider-and-hook-configuration)
-for `configure` → `add-provider` → `add-event` → `add-hook` → `validate`.
-`configure` verifies an installed package prefix; source binaries alone do not
+[initialization and editing flow](../../../user-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration)
+for `aw config init` → `aw config add-provider` → `aw config add-event` → `aw config add-hook` → `aw config validate`.
+`aw config init` verifies an installed package prefix; source binaries alone do not
 supply it. It creates a new file and refuses to overwrite an existing one.
 
 For this source walkthrough and for QwenPaw/Hermes, start from the complete
 four-framework sample below. The generator currently supports Qoder/OpenClaw
 only; the editor does not add Agent entries. The sample already declares both
-tool events, so only an absent event needs `add-event` before `add-hook`.
+tool events, so only an absent event needs `aw config add-event` before `aw config add-hook`.
 
 Keep these variables in the same terminal. In another terminal, export the
 printed absolute paths again; do not create another demo directory by accident.
@@ -91,15 +89,15 @@ step. The sample requests a block when a before-tool input contains
 `AW_DENY_TEST`, and an observation after a tool completes. It demonstrates wiring, not a production security rule.
 
 The [configuration reference](configuration.md) explains all fields. The
-generator `aw-package configure` currently creates Qoder/OpenClaw entries only;
+generator `aw config init` currently creates Qoder/OpenClaw entries only;
 copying this YAML is the path for a four-framework configuration. The
-[configuration editor](packages.md#edit-existing-provider-and-hook-configuration)
+[configuration editor](../../../user-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration)
 can add/remove Providers and Hook steps; it does not edit Agent entries.
 
 ```bash
 "$AW_BIN" validate --config "$AW_CONFIG"
-"$AW_PACKAGE" config show --config "$AW_CONFIG" --event tool.before
-"$AW_PACKAGE" config validate --config "$AW_CONFIG"
+"$AW_BIN" config show --config "$AW_CONFIG" --event tool.before
+"$AW_BIN" config validate --config "$AW_CONFIG"
 ```
 
 Validation checks document structure and references. It does not run the policy,
@@ -162,7 +160,7 @@ by substituting false.
 
 For a full Provider, start with the existing
 [Rust example](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-provider/examples/policy.rs), built in
-step 1, and the [protocol reference](../../../../src/aw/docs/design/provider-protocol.md).
+step 1, and the [protocol reference](providers/protocol.md).
 These two calls exercise its discovery and private configuration contract:
 
 ```bash
@@ -179,7 +177,7 @@ or importing your component's crates into it. Your executable and its runtime
 dependencies must be installed where the Agent runs. AW starts a fresh process
 per method; any long-lived backend belongs to your component.
 
-Use the [sec-core walkthrough](../../../user-guide/en/user-entrypoint/aw/security.md)
+Use the [sec-core walkthrough](../../../user-guide/en/aw/security.md)
 for a concrete bridge to an existing CLI/daemon. Map the **actual tool name and
 input JSON Pointer for each framework**; a standard event envelope does not
 make every tool's arguments identical. The Preview-generated sec-core mapping
@@ -199,7 +197,7 @@ For component changes, run the appropriate checks from `AW_SOURCE`:
 
 ```bash
 cd "$AW_SOURCE"
-cargo test --locked -p aw-host -p aw-service
+cargo test --locked -p aw-host -p aw-service -p aw-cli
 ```
 
 Before submitting AW implementation changes, run the full Linux gate from the
@@ -217,7 +215,7 @@ are all owned by this demo directory. Preserve needed audit evidence, then:
 cd "$AW_SOURCE"
 rm -r -- "$AW_DEMO"
 test ! -e "$AW_DEMO"
-unset AW_CONFIG AW_DEMO AW_HOST AW_PACKAGE AW_BIN AW_SOURCE
+unset AW_CONFIG AW_DEMO AW_HOST AW_BIN AW_SOURCE
 ```
 
 The framework installations and profiles remain untouched by this cleanup;

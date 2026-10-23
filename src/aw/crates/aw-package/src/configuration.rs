@@ -1,10 +1,7 @@
 //! Private configuration publication for selected Agents and explicit policy templates.
 
-use crate::{
-    filesystem as paths,
-    install::{selected_receipts, verified_files},
-    require, Result,
-};
+use crate::{filesystem as paths, require, Result};
+mod installed;
 mod templates;
 
 use serde_json::Value;
@@ -79,7 +76,6 @@ pub(crate) fn configure_using(
         node,
         openclaw,
     } = settings;
-    let _lock = paths::shared_lock(prefix)?;
     let mut names = vec!["aw-core"];
     if matches!(policy, Policy::Tokenless | Policy::SecCoreTokenless { .. }) {
         names.push("aw-provider-tokenless");
@@ -91,7 +87,8 @@ pub(crate) fn configure_using(
         names.push("aw-provider-sec-core");
     }
 
-    let installed = selected_receipts(prefix, Some(&names))?;
+    let selection = installed::Selection::read(prefix, &names)?;
+    let installed = &selection.packages;
     require(
         installed.contains_key("aw-core"),
         "install AW core before configuring",
@@ -111,7 +108,7 @@ pub(crate) fn configure_using(
             "install the Tokenless Provider before selecting its template",
         )?;
     }
-    verified_files(prefix, &installed)?;
+    selection.verify(prefix)?;
     for path in [*config, *state] {
         paths::absolute(path)?;
     }
@@ -169,7 +166,7 @@ pub(crate) fn configure_using(
             "managed RTK directory cannot be represented in PATH",
         )?;
         let payload = component.files.get(name).ok_or_else(|| {
-            crate::Error::Invalid("installed Tokenless receipt lacks managed RTK".into())
+            crate::Error::Invalid("installed Tokenless package record lacks managed RTK".into())
         })?;
         value["spec"]["providers"]["tokenless"]["transport"]["argv"]
             .as_array_mut()
@@ -185,6 +182,7 @@ pub(crate) fn configure_using(
     aw_config::Validator::new()
         .and_then(|validator| validator.parse(yaml.as_bytes()))
         .map_err(|error| crate::Error::Invalid(error.to_string()))?;
+    selection.verify(prefix)?;
     publish(config, yaml.as_bytes())
 }
 

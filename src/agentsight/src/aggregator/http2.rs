@@ -1308,7 +1308,16 @@ impl Http2StreamAggregator {
                     pair.request.get_or_insert(hdrs);
                 }
                 StreamDirection::Response => {
-                    pair.response.get_or_insert(hdrs);
+                    // A response-direction block carrying `:status` is an
+                    // initial header block; trailers must not carry
+                    // pseudo-headers. Keep the last one: an interim 1xx
+                    // (103 Early Hints) precedes the real response, and
+                    // first-wins kept the 1xx status and dropped the final
+                    // content-type, so the stream reported status 103 and the
+                    // SSE/body decode paths never engaged.
+                    if hdrs.iter().any(|(name, _)| name == ":status") || pair.response.is_none() {
+                        pair.response = Some(hdrs);
+                    }
                 }
             }
         }
@@ -3260,6 +3269,73 @@ mod tests {
         assert_eq!(stream.path(), "/v1/chat/completions");
         assert_eq!(stream.method(), "POST");
         assert_eq!(stream.status_code(), 200);
+    }
+
+    /// A 103 Early Hints interim response precedes the real response on the
+    /// same stream. The decoded-header store kept the first block, so the
+    /// completed stream reported status 103 and lost the final content-type —
+    /// the SSE/body decode paths never engaged.
+    #[test]
+    fn test_interim_1xx_headers_do_not_shadow_the_final_response() {
+        let mut aggregator = Http2StreamAggregator::new();
+        let mut req_encoder = Encoder::new();
+        let mut resp_encoder = Encoder::new();
+
+        let req_headers = [
+            (b":method".to_vec(), b"POST".to_vec()),
+            (
+                b":path".to_vec(),
+                b"/v1beta/models/gemini-2.5-pro:generateContent".to_vec(),
+            ),
+            (b":scheme".to_vec(), b"https".to_vec()),
+        ];
+        let req_encoded = req_encoder.encode(req_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let req_event = create_test_event(600, 0x7000, 1, 1000);
+        let req_hdr_frame = create_test_frame(3, 1, 0x04, req_encoded, req_event.clone());
+        let req_data_frame =
+            create_test_frame(3, 0, 0x01, b"{\"contents\":[]}".to_vec(), req_event);
+        aggregator.process_frames(vec![req_hdr_frame, req_data_frame]);
+
+        let resp_event = create_test_event(600, 0x7000, 0, 2000);
+
+        // Interim 103 with an advisory Link header, then the real response.
+        let interim = [
+            (b":status".to_vec(), b"103".to_vec()),
+            (b"link".to_vec(), b"</style.css>; rel=preload".to_vec()),
+        ];
+        let interim_encoded = resp_encoder.encode(interim.iter().map(|(n, v)| (&n[..], &v[..])));
+        let interim_frame = create_test_frame(3, 1, 0x04, interim_encoded, resp_event.clone());
+        aggregator.process_frames(vec![interim_frame]);
+
+        let final_headers = [
+            (b":status".to_vec(), b"200".to_vec()),
+            (b"content-type".to_vec(), b"text/event-stream".to_vec()),
+        ];
+        let final_encoded =
+            resp_encoder.encode(final_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let final_frame = create_test_frame(3, 1, 0x04, final_encoded, resp_event.clone());
+        let data_frame = create_test_frame(
+            3,
+            0,
+            0x01,
+            b"data: {\"candidates\":[]}\n\n".to_vec(),
+            resp_event,
+        );
+
+        let completed = aggregator.process_frames(vec![final_frame, data_frame]);
+        assert_eq!(completed.len(), 1, "the response must complete");
+
+        let stream = &completed[0];
+        assert_eq!(
+            stream.status_code(),
+            200,
+            "the final response status must replace the interim 103"
+        );
+        assert!(
+            stream.is_response_sse(),
+            "the final content-type must replace the interim block, got {:?}",
+            stream.decoded_response_headers
+        );
     }
 
     #[test]

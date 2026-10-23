@@ -47,5 +47,5 @@ is not automatically bundled or installed; independent Providers supply their
 own installer. Bundling a new Provider also requires package manifest, build,
 installation, and lifecycle test support.
 
-See [Provider development and distribution](../docs/developer-guide/en/aw/providers.md)
+See [Provider development and distribution](../docs/developer-guide/en/aw/providers/index.md)
 for the protocol, sample implementation, and validation entrypoints.

@@ -1651,6 +1651,49 @@ mod tests {
         assert_eq!(hits[1].path, "old.md");
     }
 
+    #[test]
+    fn negative_lambda_inverts_recency_ranking() {
+        // The damage `AppConfig::validate` now refuses to load: `time_decay`
+        // computes `exp(-lambda * age_days)`, so a negative lambda makes the
+        // factor *grow* with age. Same corpus as `search_ranks_recent_higher`
+        // — identical bodies, so identical BM25 relevance, and the recency
+        // boost is the only thing that can separate the two rows — but the
+        // ordering comes out inverted: every auto-recall query starts
+        // preferring the stale memory. The store consumes the value verbatim
+        // (it has no way to tell a deliberate setting from a sign typo), so
+        // the guard belongs at the config boundary, asserted at the end.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(-0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 100 * 86_400_000,
+            20,
+            "rust ownership rules",
+            None,
+        )
+        .unwrap();
+        s.upsert("new.md", now_ms, 20, "rust ownership rules", None)
+            .unwrap();
+
+        let hits = s.search("rust", 5, true).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].path, "old.md",
+            "a negative lambda must invert the recency ordering; if this \
+             flips, the score no longer depends on the sign of the decay \
+             exponent and this test documents nothing"
+        );
+
+        // The config guard is what keeps that lambda out of a real store.
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.memory.index.time_decay_lambda = -0.01;
+        assert!(cfg.validate().is_err(), "negative lambda must be rejected");
+    }
+
     /// Corpus for the relevance-ordering tests below.
     ///
     /// Four unrelated documents keep `walrus` a discriminative term: with

@@ -1,0 +1,31 @@
+[package]
+name = "aw-cli"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Unified AW command-line entrypoint"
+publish = false
+
+[[bin]]
+name = "aw"
+path = "src/bin/aw.rs"
+
+[dependencies]
+clap = { workspace = true }
+clap_complete = { workspace = true }
+aw-adapter = { workspace = true }
+aw-config = { workspace = true }
+aw-exec = { workspace = true }
+aw-host = { workspace = true }
+aw-package = { workspace = true }
+aw-provider = { workspace = true }
+aw-service = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+aw-contracts = { workspace = true }
+serde_yaml_ng = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }

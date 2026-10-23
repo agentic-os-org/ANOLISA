@@ -663,11 +663,17 @@ async fn run(
             if managed {
                 // Managed mode: spawn a detached supervisor and return once
                 // the mount is ready. The supervisor re-invokes this binary
-                // as a foreground worker using the preserved raw arguments.
+                // as a foreground worker, freezing resolved config inputs.
                 // Log this public mount invocation too — the detached worker's
                 // own mount record is separate.
-                let result = utf8_args(&raw_args)
-                    .and_then(|args| managed::run_client(&args, &source, &mountpoint));
+                let mount_config = sources.map(|sources| managed::ManagedMountConfig {
+                    sources,
+                    allow_other,
+                    read_only,
+                });
+                let result = utf8_args(&raw_args).and_then(|args| {
+                    managed::run_client(&args, &source, &mountpoint, mount_config)
+                });
                 finish_sls(guard, err_reason(&result));
                 return result;
             }

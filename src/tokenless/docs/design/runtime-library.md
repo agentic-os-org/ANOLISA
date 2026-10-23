@@ -66,7 +66,7 @@ host result; the adapter catches them because the host treats thrown middleware 
 tool failures. Legacy middleware preprocessing can already have clipped text or metadata.
 Tokenless neither rejects such hosts above the API minimum nor reconstructs missing content.
 Only `applied` compression replaces text; tool-error diagnostics may still append context.
-See the [host compatibility boundary](../../../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#openclaw).
+See the [host compatibility boundary](../../../../docs/user-guide/en/tokenless/framework-integration.md#openclaw).
 
 After building the CLI and OpenClaw adapter, run the optional container regression from
 `src/tokenless` with a local host image:

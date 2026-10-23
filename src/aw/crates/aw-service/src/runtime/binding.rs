@@ -34,12 +34,12 @@ impl Runtime {
             instances.insert(instance_id.clone(), None);
         }
         let result = self.prepare(
+            &self.bytes,
             &instance_id,
             &target,
             capabilities,
-            context,
-            deadline,
-            cancelled,
+            context.clone(),
+            (deadline, cancelled),
         );
         let result = result.and_then(|host| {
             if cancelled.load(Ordering::Acquire)
@@ -61,6 +61,10 @@ impl Runtime {
                 instances.insert(
                     instance_id.clone(),
                     Some(Instance {
+                        bytes: self.bytes.clone(),
+                        context,
+                        reload: None,
+                        policy_update: Arc::new(Mutex::new(())),
                         host: Arc::new(host),
                         closing: false,
                         observation: None,

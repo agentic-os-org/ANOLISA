@@ -40,6 +40,7 @@ fn one_configuration_covers_declared_adapters_and_sixteen_event_names() {
     for adapter in [
         "qwenpaw",
         "qoder",
+        "qoder-sdk",
         "openclaw",
         "hermes",
         "pi",
@@ -475,4 +476,144 @@ fn native_qoder_scheduling_is_an_explicit_adapter_setting() {
     value["spec"]["agents"]["qoder"]["adapter"] = json!("qoder");
     value["spec"]["agents"]["qoder"]["qoder"]["unknown"] = json!(true);
     assert!(parse(&value).is_err());
+}
+
+#[test]
+fn json_documents_parse_equivalently_across_layouts_and_number_spellings() {
+    let yaml = VALIDATOR
+        .parse(include_bytes!("../examples/aw.minimal.yaml"))
+        .unwrap();
+    let fixture = include_str!("../examples/aw.minimal.json");
+    assert_eq!(
+        VALIDATOR.parse(fixture.as_bytes()).unwrap().as_value(),
+        yaml.as_value()
+    );
+    // Compact, pretty and tab-indented spellings are the same document; the
+    // fixture keeps no double spaces inside string values.
+    for layout in [
+        serde_json::to_string(yaml.as_value()).unwrap(),
+        serde_json::to_string_pretty(yaml.as_value()).unwrap(),
+        fixture.replace("  ", "\t"),
+    ] {
+        assert_eq!(
+            VALIDATOR.parse(layout.as_bytes()).unwrap().as_value(),
+            yaml.as_value(),
+            "{layout}"
+        );
+    }
+    // A JSON exponent resolves through YAML scalar rules: the budget arrives
+    // as float-typed 1000.0, which the schema's integer type accepts.
+    let exponent = fixture.replace(
+        "\"default_event_budget_ms\": 5000",
+        "\"default_event_budget_ms\": 1e3",
+    );
+    let parsed = VALIDATOR.parse(exponent.as_bytes()).unwrap();
+    let budget = &parsed.as_value()["spec"]["execution"]["default_event_budget_ms"];
+    assert_eq!(budget.as_f64(), Some(1000.0));
+    assert!(budget.as_i64().is_none());
+}
+
+#[test]
+fn unrepresentable_integer_scalars_cannot_become_rounded_floats() {
+    for literal in [
+        "340282366920938463463374607431768211456",
+        "10000000000000000000000000000000000000000",
+        "-170141183460469231731687303715884105729",
+        "+340282366920938463463374607431768211456",
+    ] {
+        for scalar in [
+            literal.to_owned(),
+            format!("&wide {literal}"),
+            format!("[&wide {literal}, *wide]"),
+            format!("{{source: &wide {literal}, copy: *wide}}"),
+            format!("!!float {literal}"),
+        ] {
+            let input = EXAMPLE.replace("project: platform", &format!("project: {scalar}"));
+            let error = VALIDATOR
+                .parse(input.as_bytes())
+                .err()
+                .expect("wide integer accepted");
+            assert!(
+                matches!(
+                    error,
+                    Error::Document {
+                        reason: "integer is outside the supported range",
+                        line: Some(_),
+                        column: Some(_),
+                    }
+                ),
+                "{scalar}: {error}"
+            );
+            if scalar == literal {
+                let (line, source) = input
+                    .lines()
+                    .enumerate()
+                    .find(|(_, line)| line.contains(literal))
+                    .unwrap();
+                assert!(
+                    matches!(error, Error::Document { line: Some(actual_line), column: Some(column), .. }
+                    if actual_line == line + 1 && column == source.find(literal).unwrap() + 1)
+                );
+            }
+        }
+        let input = EXAMPLE.replace(
+            "project: platform",
+            &format!("note: can't\n        project: {literal}"),
+        );
+        assert!(matches!(
+            VALIDATOR.parse(input.as_bytes()),
+            Err(Error::Document { .. })
+        ));
+        let mut value = example();
+        value["spec"]["providers"]["business"]["config"]["project"] = json!("WIDE_INTEGER");
+        let input = serde_json::to_string(&value)
+            .unwrap()
+            .replace("\"WIDE_INTEGER\"", literal);
+        assert!(matches!(
+            VALIDATOR.parse(input.as_bytes()),
+            Err(Error::Document { .. })
+        ));
+    }
+}
+
+#[test]
+fn yaml_scalar_context_preserves_strings_and_explicit_float_spellings() {
+    const WIDE: &str = "10000000000000000000000000000000000000000";
+    for scalar in [
+        format!("'{WIDE}'"),
+        format!("\"{WIDE}\""),
+        format!("id{WIDE}"),
+        format!("|\n          {WIDE}"),
+        format!(">-\n          {WIDE}"),
+        format!("[&text '{WIDE}', *text]"),
+        format!("{{nested: '{WIDE}', value: 1e40}}"),
+        "18446744073709551615".into(),
+        "-9223372036854775808".into(),
+        "1e300".into(),
+        "1.7976931348623157e308".into(),
+        "1.5e30".into(),
+        "10000000000000000000000000000000000000000.0".into(),
+        "[&value 1e40, *value]".into(),
+        "!!float 5".into(),
+        "!!float 340282366920938463463374607431768211455".into(),
+        "!!float -170141183460469231731687303715884105728".into(),
+    ] {
+        let input = EXAMPLE.replace(
+            "project: platform",
+            &format!("# note: {WIDE}\n        project: {scalar}\n        float: 1e40"),
+        );
+        VALIDATOR
+            .parse(input.as_bytes())
+            .unwrap_or_else(|e| panic!("{scalar}: {e}"));
+    }
+    // Alias resolution must keep the original string type, even alongside floats.
+    let input = EXAMPLE.replace(
+        "project: platform",
+        &format!("project: &text '{WIDE}'\n        copy: *text\n        float: 1e40"),
+    );
+    let value = VALIDATOR.parse(input.as_bytes()).unwrap();
+    assert_eq!(
+        value.as_value()["spec"]["providers"]["business"]["config"]["copy"],
+        WIDE
+    );
 }

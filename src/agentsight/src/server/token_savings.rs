@@ -524,11 +524,14 @@ pub async fn get_token_savings(
         .unwrap_or_default();
 
     // Refresh and read statistics using the source tool IDs, not local session IDs.
+    // The records are bounded to the request window so the savings numerator
+    // shrinks with the denominator when the window narrows.
     let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
-    let (stats_available, rows) = match savings_rows(&data, client, &tool_use_ids).await {
-        Ok(result) => result,
-        Err(response) => return response,
-    };
+    let (stats_available, rows) =
+        match savings_rows(&data, client, &tool_use_ids, start_ns, end_ns).await {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
     let stats_by_session = {
         // Group by session: use turn_indices to determine session, fallback to row.session_id
         let mut map: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
@@ -800,10 +803,13 @@ pub async fn get_session_savings(
         .unwrap_or_default();
 
     let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
-    let (stats_available, rows) = match savings_rows(&data, client, &tool_use_ids).await {
-        Ok(result) => result,
-        Err(response) => return response,
-    };
+    // The per-session endpoint's denominator spans the session's whole
+    // history, so its numerator stays unbounded to match.
+    let (stats_available, rows) =
+        match savings_rows(&data, client, &tool_use_ids, 0, i64::MAX).await {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
     let mut items = Vec::new();
     let mut total_compounded_saved: i64 = 0;
     {
@@ -1289,6 +1295,138 @@ mod tests {
         assert!(
             compounded_rate <= 1.0,
             "the compounded rate is documented as a fraction in [0, 1], got {compounded_rate}"
+        );
+
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The window bounds the denominator (`list_sessions_for_savings`) but the
+    /// numerator read every stats record for the session's tool calls, of any
+    /// age: narrowing the dashboard window kept yesterday's optimizations in
+    /// `session_saved`, and the rate could inflate past 100% built entirely
+    /// from older records.
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn savings_window_excludes_out_of_window_stats_records() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_savings_windowed_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // One session, two calls: an old one outside the window whose tool
+        // output was heavily compressed, and one inside the window.
+        let base_ns: i64 = 1_700_000_000_000_000_000;
+        let db_path = tmp.join("genai_events.db");
+        {
+            let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+                &db_path,
+                crate::config::PeriodicStoragePolicy::default(),
+            )
+            .unwrap();
+            drop(store);
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            for (call, tool, input, output, at) in [
+                ("call-old", "tc-old", 500, 250, base_ns - 86_400_000_000_000),
+                ("call-in", "tc-in", 800, 400, base_ns + 500_000_000_000),
+            ] {
+                conn.execute(
+                    "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+                     VALUES ('llm_call', 'sess-1', ?1, 'test-agent', 'gpt-4', ?2, ?3, ?4, '{}', ?5)",
+                    rusqlite::params![call, input, output, at, format!("[\"{tool}\"]")],
+                )
+                .unwrap();
+            }
+        }
+
+        // stats.db carrying the RFC3339 `timestamp` column: the old record
+        // saves 8_000 tokens, the in-window one 600.
+        let rfc3339 = |secs: i64| {
+            chrono::DateTime::from_timestamp(secs, 0)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let stats_dir = tmp.join(".tokenless");
+        std::fs::create_dir_all(&stats_dir).unwrap();
+        {
+            let stats = rusqlite::Connection::open(stats_dir.join("stats.db")).unwrap();
+            stats
+                .execute_batch(
+                    "CREATE TABLE stats (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT,
+                        tool_use_id TEXT,
+                        before_tokens INTEGER,
+                        after_tokens INTEGER,
+                        before_text TEXT,
+                        after_text TEXT,
+                        operation TEXT,
+                        timestamp TEXT
+                    );",
+                )
+                .unwrap();
+            for (tool, before, after, secs) in [
+                (
+                    "tc-old",
+                    9_000,
+                    1_000,
+                    (base_ns - 86_400_000_000_000) / 1_000_000_000,
+                ),
+                (
+                    "tc-in",
+                    1_000,
+                    400,
+                    (base_ns + 500_000_000_000) / 1_000_000_000,
+                ),
+            ] {
+                stats
+                    .execute(
+                        "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation, timestamp)
+                         VALUES ('sess-1', ?1, ?2, ?3, 'long text', 'short', 'compress-response', ?4)",
+                        rusqlite::params![tool, before, after, rfc3339(secs)],
+                    )
+                    .unwrap();
+            }
+        }
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        // The window covers only the in-window call.
+        let req = actix_test::TestRequest::get()
+            .uri(&format!(
+                "/token-savings?start_ns={}&end_ns={}",
+                base_ns,
+                base_ns + 1_000_000_000_000
+            ))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], true);
+
+        let total_saved = body["summary"]["total_saved_tokens"].as_i64().unwrap();
+        assert_eq!(
+            total_saved, 600,
+            "the out-of-window record must not land in the numerator: {body}"
+        );
+        let rate = body["summary"]["savings_rate"].as_f64().unwrap();
+        assert!(
+            (rate - 600.0 / 1200.0).abs() < 1e-9,
+            "600 saved of the 1200 tokens billed inside the window, got {rate}"
         );
 
         match orig_home {

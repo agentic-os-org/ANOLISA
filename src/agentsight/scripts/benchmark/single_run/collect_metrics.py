@@ -107,14 +107,15 @@ def read_status(pid: int) -> dict[str, int]:
     return values
 
 
-def read_cpu_ticks(pid: int) -> int:
-    """Return user plus system CPU ticks for a process."""
+def read_cpu_ticks(pid: int) -> int | None:
+    """Return user plus system CPU ticks, or no measurement after a failed read."""
     try:
         text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         fields = text[text.rfind(")") + 2 :].split()
-        return int(fields[11]) + int(fields[12])
+        user, system = int(fields[11]), int(fields[12])
+        return user + system if user >= 0 and system >= 0 else None
     except (OSError, IndexError, ValueError):
-        return 0
+        return None
 
 
 def fd_count(pid: int) -> int:
@@ -269,23 +270,20 @@ def write_json(path: Path, value: dict[str, object]) -> None:
 
 def sample(
     pid: int,
-    previous_ticks: int,
+    previous_ticks: int | None,
     previous_time: float,
     input_qps: float,
     metrics: Path | None,
-) -> tuple[dict[str, object], int, float]:
+) -> tuple[dict[str, object], int | None, float]:
     """Collect one row and the state needed for the next CPU calculation."""
     now = time.monotonic()
     status = read_status(pid)
     alive = bool(status)
-    ticks = read_cpu_ticks(pid) if alive else previous_ticks
+    ticks = read_cpu_ticks(pid) if alive else None
     elapsed = max(now - previous_time, 1e-9)
     cpu = (
-        max(
-            0.0,
-            (ticks - previous_ticks) / os.sysconf(os.sysconf_names["SC_CLK_TCK"]) / elapsed * 100,
-        )
-        if alive
+        (ticks - previous_ticks) / os.sysconf(os.sysconf_names["SC_CLK_TCK"]) / elapsed * 100
+        if ticks is not None and previous_ticks is not None and ticks >= previous_ticks
         else None
     )
     row: dict[str, object] = {

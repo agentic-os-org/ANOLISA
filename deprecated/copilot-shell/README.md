@@ -106,7 +106,8 @@ Copilot Shell uses a layered configuration system (highest priority first):
 
 ## Documentation
 
-- [Quick Start](../../docs/user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md)
+- [Archived user and developer guides](docs/README.md)
+- [Quick Start](docs/user-guide/en/QUICKSTART.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License

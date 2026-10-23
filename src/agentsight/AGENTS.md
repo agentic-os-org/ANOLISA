@@ -36,7 +36,7 @@
 - 纯新增可选字段且旧配置完全兼容时，不需要 bump `schema_version`
 
 ### 用户文档
-用户指南位于 `docs/user-guide/{en,zh}/agent-observability/agentsight/`，中英双语必须同步改，只改一侧视为未完成。
+用户指南位于 `docs/user-guide/{en,zh}/agentsight/`，中英双语必须同步改，只改一侧视为未完成。
 
 改动落在下面这些面上时，必须在同一个 PR 里更新对应页面：
 
@@ -125,7 +125,7 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
 | **SQLiteLifecycle** | `crates/agentsight-sqlite-lifecycle/` | 无业务模型依赖的 leaf crate：连接、容量计量、checkpoint、跨进程锁与单线程维护调度 | `ConnectionOptions`, `SizeSnapshot`, `SizePolicy`, `MaintenanceWorker` |
 | **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate，唯一的 ATIF 数据模型（采集链路 + 主 crate 导出链路共用） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
-| **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
+| **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描本地 JSONL 会话与 Hermes SQLite `state.db`，转换为 ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
 ## 5. Critical Code Paths
 
@@ -347,7 +347,7 @@ credential 状态；外部 tokenless 库只读且由 tokenless 管理。
 | 审计 | `features.audit` | `true` | LLM 调用审计持久化 |
 | Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
 | SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
-| 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描 Qoder/QoderWork 会话目录，JSONL 转 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描目录） |
+| 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描本地 JSONL 会话与 Hermes `state.db`，转换为 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描位置） |
 | 轨迹 LLM 判定 | `features.reuse_llm_judge` | `false` | 允许 `POST /api/reuse/judge` 调用已配置 LLM 判定规则无法归类的轨迹；每次调用会产生费用 |
 
 ### 运行时资源上限（`runtime_limits`）

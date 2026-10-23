@@ -8,15 +8,15 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha3";
+pub const VERSION: &str = "aw-service/v1alpha4";
 
-/// Configuration snapshot and daemon lifetime to which every mutable request binds.
+/// Bootstrap configuration and daemon lifetime to which mutable requests bind.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Identity {
     /// Fresh Linux UUID for each service start, preventing stale handle reuse.
     pub generation: String,
-    /// SHA-256 of the exact configuration document.
+    /// SHA-256 of the exact bootstrap document; instance policy revisions are separate.
     pub config_revision: String,
 }
 
@@ -104,6 +104,22 @@ pub enum RunOutcome {
     Failed,
 }
 
+/// Native bridge lifecycle; only Adapters interpret framework event names.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePhase {
+    /// Stable bridge has registered and can accept requests.
+    Ready,
+    /// A whole Agent request is entering the shared admission gate.
+    RequestStart,
+    /// The native runtime confirms the whole request has finished.
+    RequestEnd,
+    /// Tool execution is entering, before its policy callbacks.
+    ToolStart,
+    /// Tool execution and its policy callbacks have terminated.
+    ToolEnd,
+}
+
 /// One bounded local RPC. The client never retries it automatically.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -116,6 +132,20 @@ pub struct Request {
     pub deadline_ns: u64,
     /// Requested operation.
     pub operation: Operation,
+}
+
+impl Request {
+    pub(crate) fn admit(&self, identity: &Identity) -> crate::Result<std::time::Instant> {
+        if self.api_version != VERSION {
+            return Err(crate::rejected("protocol_version"));
+        }
+        if self.identity.as_ref() != Some(identity)
+            && !(self.identity.is_none() && matches!(self.operation, Operation::Status))
+        {
+            return Err(crate::rejected("stale_service"));
+        }
+        crate::deadline::decode(self.deadline_ns)
+    }
 }
 
 /// No operation grants native permission or certifies effect adoption.
@@ -137,6 +167,45 @@ pub enum Operation {
         /// Complete explicit environment; no implicit daemon inheritance.
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
+    },
+    /// Opt an AW-launched instance into stable bridge policy updates before spawning.
+    EnableReload {
+        /// Prepared instance whose Adapter supports the stable bridge.
+        instance_id: String,
+    },
+    /// Corroborate the foreground process independently of optional observation.
+    AssociateProcess {
+        /// Instance owned by the launcher.
+        instance_id: String,
+        /// Foreground child PID; start time, UID and namespace are read locally.
+        pid: u32,
+    },
+    /// Record an Adapter-confirmed native lifecycle boundary.
+    BridgeLifecycle {
+        /// Owning reloadable instance.
+        instance_id: String,
+        /// Native process invoking the bridge, corroborated against the root process.
+        pid: u32,
+        /// Adapter-normalized lifecycle phase.
+        phase: LifecyclePhase,
+        /// Request or tool identity; ready uses an empty identity.
+        key: String,
+    },
+    /// Read the active Adapter callback plan; never activates a pending update.
+    HookPlan {
+        /// Owning instance with a ready stable bridge.
+        instance_id: String,
+        /// Native event name.
+        event: String,
+    },
+    /// Prepare a candidate and activate only at an idle native request boundary.
+    UpdatePolicy {
+        /// Existing instance, located independently of the candidate digest.
+        instance_id: String,
+        /// Compare-and-swap guard for the current instance policy.
+        expected_revision: String,
+        /// Complete candidate document, bounded by aw-config before preparation.
+        config: String,
     },
     /// Start optional instance observation once, probing the configured source within bounds.
     StartObservation {

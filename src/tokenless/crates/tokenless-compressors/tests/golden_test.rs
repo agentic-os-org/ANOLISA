@@ -323,12 +323,12 @@ fn input(name: &str) -> String {
 #[test]
 fn json_goldens() {
     for (name, operation) in [
-        ("json_cleanup", JsonOperation::Cleanup),
-        ("json_records", JsonOperation::RecordReduction),
-        ("json_toon", JsonOperation::Toon),
-        ("json_nested", JsonOperation::Cleanup),
-        ("json_records_anomaly", JsonOperation::RecordReduction),
-        ("json_toon_unicode", JsonOperation::Toon),
+        ("json_cleanup", Some(JsonOperation::Cleanup)),
+        ("json_records", Some(JsonOperation::RecordReduction)),
+        ("json_toon", Some(JsonOperation::Toon)),
+        ("json_already_compact_passthrough", None),
+        ("json_records_anomaly", Some(JsonOperation::RecordReduction)),
+        ("json_toon_unicode", Some(JsonOperation::Toon)),
     ] {
         let source = input(&format!("{name}.json"));
         let run = || {
@@ -339,17 +339,24 @@ fn json_goldens() {
                     &JsonCompressionContext {
                         recovery: &RecoveryMethod::Shell,
                         stash: Some(&store),
-                        allow_toon: operation == JsonOperation::Toon,
-                        preserve_top_level_shape: false,
+                        allow_toon: operation == Some(JsonOperation::Toon),
                         min_toon_chars: 0,
                         allow_unrecoverable: false,
                     },
                 )
                 .unwrap();
-            assert!(result.operations.contains(&operation), "{name}");
-            if operation == JsonOperation::Toon {
-                let decoded: serde_json::Value =
-                    toon_format::decode_default(&result.output).unwrap();
+            if let Some(operation) = operation {
+                assert!(result.operations.contains(&operation), "{name}");
+            } else {
+                assert!(result.operations.is_empty(), "{name}");
+                assert_eq!(result.output, source, "{name}");
+            }
+            if operation != Some(JsonOperation::RecordReduction) {
+                let decoded: serde_json::Value = if operation == Some(JsonOperation::Toon) {
+                    toon_format::decode_default(&result.output).unwrap()
+                } else {
+                    serde_json::from_str(&result.output).unwrap()
+                };
                 assert_eq!(
                     decoded,
                     serde_json::from_str::<serde_json::Value>(&source).unwrap()
@@ -360,7 +367,7 @@ fn json_goldens() {
             }
             assert_eq!(
                 result.stash_writes.len(),
-                usize::from(operation == JsonOperation::RecordReduction),
+                usize::from(operation == Some(JsonOperation::RecordReduction)),
                 "{name}: unexpected stash writes"
             );
             for write in &result.stash_writes {
@@ -382,7 +389,11 @@ fn json_goldens() {
         };
         let output = run();
         assert_eq!(output, run(), "{name}: non-deterministic output");
-        check(name, &source, &output);
+        if operation.is_some() {
+            check(name, &source, &output);
+        } else {
+            check_snapshot(name, &source, &output);
+        }
     }
 }
 

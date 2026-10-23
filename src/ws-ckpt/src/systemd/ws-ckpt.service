@@ -7,13 +7,16 @@
 [Unit]
 Description=ws-ckpt workspace snapshot daemon
 After=local-fs.target
+# Count the initial start plus three retries within five minutes.
+StartLimitIntervalSec=300
+StartLimitBurst=4
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/ws-ckpt daemon
 ExecReload=/usr/local/bin/ws-ckpt reload
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 Environment=RUST_LOG=info
 StateDirectory=ws-ckpt
 StateDirectoryMode=0755

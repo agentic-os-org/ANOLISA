@@ -314,7 +314,17 @@ impl DaemonState {
             if let Some(ws_arc) = state.get_by_wsid(&ws_id) {
                 let mut ws = ws_arc.write().await;
                 let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
-                if index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await? {
+                let mut changed =
+                    index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await?;
+                let live_path = state.backend.data_root().join(&ws_id);
+                tracing::warn_span!("reconcile_live_head", ws_id = %ws_id).in_scope(|| {
+                    match index_store::reconcile_live_head(&live_path, &snapshot_dir, &mut ws.index)
+                    {
+                        Ok(moved) => changed |= moved,
+                        Err(e) => warn!("Skipping index head check for {ws_id}: {e:#}"),
+                    }
+                });
+                if changed {
                     index_store::save(&state.index_dir(&ws_id), &ws.index)
                         .await
                         .with_context(|| format!("save reconciled index for {ws_id}"))?;

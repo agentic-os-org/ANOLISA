@@ -30,7 +30,6 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 
 | 组件 | 路径 | 平台 | 构建名称 | Scope | 开发入口和最低本地门禁 |
 | --- | --- | --- | --- | --- | --- |
-| copilot-shell | `deprecated/copilot-shell/` | 所有平台 | `cosh` | `cosh` | `cd deprecated/copilot-shell`；`make deps`、`make build`、`make lint`、`make test` |
 | cosh-ng | `src/cosh-ng/` | Linux 完整功能；macOS 功能受限 | `cosh-ng` | `cosh-ng` | `cd src/cosh-ng`; `cargo build --workspace`、`cargo fmt --all -- --check`，随后按 `src/cosh-ng/CONTRIBUTING_zh.md` 选择最接近改动的测试 |
 | agent-sec-core | `src/agent-sec-core/` | 仅 Linux | `sec-core` | `sec-core` | Python 3.11.6 和 `uv`; `make build-all`、`make test` |
 | agentsight | `src/agentsight/` | Linux 完整 eBPF；macOS 仅 `trace`/`serve` | `sight` | `sight` | Linux 使用 `make build-all`；macOS 使用 `make build-mac`；Linux 运行 `make lint`、`make test` |
@@ -46,7 +45,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 
 ### 工具链前置条件
 
-- `copilot-shell` 和 TypeScript adapter 需要 Node.js 20 或更高版本。
+- TypeScript 插件、adapter 和网站需要 Node.js 与 npm，版本要求以各包的 `package.json` 和构建说明为准。
 - Rust 组件需要 stable Rust 工具链。若组件固定了工具链版本或增加了原生库，请遵循对应的 `AGENTS.md`。
 - `agent-sec-core` 使用 Python **3.11.6** 和 [uv](https://docs.astral.sh/uv/)。`os-skills` 主要由静态 Markdown 和 shell 资源组成，不负责仓库的 Python 环境。
 - 修改 `agentsight` eBPF probe 时需要 `clang` 和 `libbpf` 头文件。
@@ -90,22 +89,20 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 
 ### 统一构建
 
-`build-all.sh` 目前只支持八个组件。
-
-- 默认集合为 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`。
-- 可选集合为 `cosh-ng` 和 `sight`。使用 `--all` 或通过 `--component` 指定它们。
+`scripts/build-all.sh` 是 Linux 便捷构建入口。重复使用 `--component`，选择需要的
+维护中组件：`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`、`cosh-ng` 和 `sight`。
 
 脚本不会构建 `anolisa`、`skillfs` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
 
-不指定安装模式时，组件文件会安装到用户目录 `$HOME/.local`，这一步不需要提权。
+不指定安装模式时，各组件按自己的安装规则选择用户主目录内的路径，这一步不需要提权。
 依赖引导仍可能为了安装系统包请求 `sudo`。使用 `--system` 或 `--usr` 会采用系统
 安装模式，通常需要 `sudo`。开发时建议指定组件并关闭安装。
 
 ```bash
 ./scripts/build-all.sh --help
-./scripts/build-all.sh --no-install --component cosh
+./scripts/build-all.sh --no-install --component cosh-ng
 ./scripts/build-all.sh --no-install --component sec-core
-./scripts/build-all.sh --no-install --all
+./scripts/build-all.sh --no-install --component sec-core --component tokenless
 ```
 
 主要选项如下。
@@ -115,27 +112,25 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 | `--no-install` | 安装依赖并构建，随后跳过安装。 |
 | `--install-mode <mode>` | 选择 `user` 或 `system`，默认是 `user`。 |
 | `--usr`、`--system` | 选择系统安装模式。 |
-| `--ignore-deps` | 跳过依赖安装。 |
+| `--ignore-deps` | 跳过依赖准备和运行时校验；仅用于已配好依赖的主机。 |
 | `--deps-only` | 只安装依赖，不构建。 |
 | `--uninstall` | 删除已安装文件；与 `--component` 一起使用可限定组件。 |
 | `--dry-run` | 只打印动作，不修改文件或 systemd 状态。 |
 | `--interactive`、`--non-interactive` | 打开引导流程，或明确选择自动化模式。 |
-| `--all` | 纳入可选组件 `cosh-ng` 和 `sight`。 |
 | `--component <name>` | 构建或卸载一个受支持的组件，可以重复指定。 |
 
-不要把 `build-all.sh --all` 理解成构建每个 `src/<component>/` 目录。它的范围只包括 `./scripts/build-all.sh --help` 打印的八个名称。
+开发时请明确选择组件，完整脚本接口见 `./scripts/build-all.sh --help`。
 
 `sight` 选项使用 Linux eBPF 构建。macOS 应在组件目录运行 `make build-mac`。
 
-更完整的依赖和打包说明请阅读 [`docs/BUILDING.md`](docs/BUILDING.md) 与 [`docs/BUILDING_zh.md`](docs/BUILDING_zh.md)。
+更完整的依赖和打包说明请阅读[从源码构建](docs/user-guide/zh/getting-started/building.md)
+（[English](docs/user-guide/en/getting-started/building.md)）。
 
 ### 便捷测试脚本
 
-`tests/run-all-tests.sh` 是五个组件的便捷聚合入口，覆盖 `copilot-shell`、`agent-sec-core`、`agentsight`、`tokenless` 和 `agent-memory`。它支持以下过滤器。
+`tests/run-all-tests.sh` 提供部分便捷测试套件。使用以下过滤器之一，明确选择受影响的维护中组件。
 
 ```bash
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
 ./tests/run-all-tests.sh --filter tokenless
@@ -168,37 +163,12 @@ adapter 时请查看 [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)。
 
 ## Commit 规范
 
-使用 [Conventional Commits](https://www.conventionalcommits.org/)，subject 使用英文祈使句，格式如下。
+Commit 规则正文见 [`specs/commit-message-standard.md`](specs/commit-message-standard.md)：
+subject 格式、body 要求、`Assisted-by` 与 `Signed-off-by` trailer、scope 清单与
+按路径推断、原子性、修复指涉（`Fixes:` / `Supplements:` / `--fixup`）以及版本升级
+收尾规则。提交前请读该文件，本节只保留人类需要的返工流程。
 
-```text
-type(scope): imperative description
-```
-
-scope 必填。Commitlint 会拒绝空 scope。下表列出仓库推荐使用的 scope。使用表外
-scope 会产生警告，发起 review 前应说明理由或改用推荐值。
-
-| Scope | 路径或用途 |
-| --- | --- |
-| `cosh` | `deprecated/copilot-shell/` |
-| `cosh-ng` | `src/cosh-ng/` |
-| `sec-core` | `src/agent-sec-core/` |
-| `skill` | `src/os-skills/` |
-| `sight` | `src/agentsight/` |
-| `tokenless` | `src/tokenless/` |
-| `ckpt` | `src/ws-ckpt/` |
-| `memory` | `src/agent-memory/` |
-| `anolisa` | `distribution/anolisa/` |
-| `skillfs` | `src/skillfs/` |
-| `ktuner` | `src/ktuner/` |
-| `deps` | 依赖变更，包括 lockfile。 |
-| `ci` | `.github/workflows/` 和 CI 配置。 |
-| `docs` | 纯文档变更。 |
-| `chore` | 根目录脚本、工具和其他维护工作。 |
-
-仓库规范要求完整 subject 不超过 50 个字符，commitlint 当前的硬限制是 120 个字符。
-description 以小写开头，不要以句号结尾。测试和格式修正应尽量合并到对应的逻辑
-commit。每个 commit 都必须使用贡献者自己的 Git identity 添加 `Signed-off-by`
-trailer。
+每个 commit 都必须使用贡献者自己的 Git identity 添加 `Signed-off-by` trailer。
 
 ```bash
 git commit -s -m 'docs(docs): refresh contribution guide'
@@ -222,11 +192,8 @@ git push --force-with-lease
 不要使用普通的 `git push --force`。lease 会防止覆盖本地 checkout 中不存在的
 远端改动。
 
-若缺陷由同一 PR 中较早的 commit 引入，请使用 `git commit --fixup=<commit>`，随后
-执行 autosquash rebase。修复已经进入 `main` 的代码时，应创建独立 commit，并用
-`Fixes:` 指向引入缺陷的 commit。补充已经进入 `main` 的功能时使用 `Supplements:`。
-组件版本升级应放在功能分支的最后一个 commit，并在同一 commit 中原子更新所有带
-版本号的文件。
+修复同一 PR 内较早 commit 引入的缺陷、`Fixes:` 与 `Supplements:` 的用法，以及版本
+升级收尾规则，见规范 §6–§7。
 
 ## Pull Request 和 CI
 
@@ -252,7 +219,7 @@ PR title 使用 `type(scope): description`。prelint workflow 会把标题、分
 | --- | --- |
 | CLI 命令或 flag | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
 | 配置选项 | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
-| 安装方式 | `docs/QUICKSTART*.md` 和组件 README。 |
+| 安装方式 | 涉及的共享安装/快速开始页面、组件手册和组件 README。 |
 | 架构或协议 | `src/<component>/docs/design/`。 |
 | 新增组件 | 根 README，必要时更新 `NOTICE`。 |
 

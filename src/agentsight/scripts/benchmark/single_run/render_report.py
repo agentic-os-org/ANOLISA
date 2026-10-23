@@ -118,23 +118,33 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
 
 
 def summarize_resources(path: Path | None) -> dict[str, dict[str, float | None]]:
-    """Summarize numeric columns from the process metrics CSV."""
-    samples: dict[str, list[tuple[float, float]]] = {
-        name: [] for name in RESOURCE_METRICS
-    }
-    for row in metric_rows(path):
-        timestamp = numeric(row.get("timestamp"))
-        if timestamp is None:
-            continue
+    """Keep point statistics, deriving trends only from a valid elapsed timeline."""
+    return _summarize_resource_rows(metric_rows(path))
+
+
+def _summarize_resource_rows(
+    rows: list[dict[str, str]],
+) -> dict[str, dict[str, float | None]]:
+    clock = (
+        "monotonic_timestamp" if any("monotonic_timestamp" in row for row in rows) else "timestamp"
+    )
+    timestamps = [numeric(row.get(clock)) for row in rows]
+    valid_timeline = all(value is not None for value in timestamps) and all(
+        current > previous for previous, current in pairwise(timestamps)
+    )
+    samples: dict[str, list[tuple[float, float]]] = {name: [] for name in RESOURCE_METRICS}
+    for row, timestamp in zip(rows, timestamps):
         for name in RESOURCE_METRICS:
             value = numeric(row.get(name))
             if value is not None:
-                samples[name].append((timestamp, value))
+                samples[name].append((timestamp if timestamp is not None else 0, value))
     result: dict[str, dict[str, float | None]] = {}
     for name, metric_samples in samples.items():
         summary = stats([value for _, value in metric_samples])
-        summary["slope_per_hour"] = linear_slope(metric_samples)
-        summary["rolling_5m_max_increase"] = rolling_max_increase(metric_samples)
+        summary["slope_per_hour"] = linear_slope(metric_samples) if valid_timeline else None
+        summary["rolling_5m_max_increase"] = (
+            rolling_max_increase(metric_samples) if valid_timeline else None
+        )
         result[name] = summary
     return result
 
@@ -164,8 +174,12 @@ def qps_sort_key(value: str) -> tuple[bool, float, str]:
 
 def summarize_qps_resources(path: Path | None) -> dict[str, Any]:
     """Group CPU and RSS samples by the input QPS recorded in the CSV."""
+    return _summarize_qps_resource_rows(metric_rows(path))
+
+
+def _summarize_qps_resource_rows(rows: list[dict[str, str]]) -> dict[str, Any]:
     grouped: dict[str, dict[str, Any]] = {}
-    for row in metric_rows(path):
+    for row in rows:
         key = qps_key(row.get("input_qps"))
         group = grouped.setdefault(key, {"samples": 0, "cpu_pct": [], "rss_mb": []})
         group["samples"] += 1
@@ -202,8 +216,14 @@ def summarize_drops(
     path: Path | None, load_requests: int
 ) -> dict[str, int | float | None]:
     """Summarize dropped events and derive a measurable drop rate."""
+    return _summarize_drop_rows(metric_rows(path), load_requests)
+
+
+def _summarize_drop_rows(
+    rows: list[dict[str, str]], load_requests: int
+) -> dict[str, int | float | None]:
     values = {name: [] for name in DROP_METRICS}
-    for row in metric_rows(path):
+    for row in rows:
         for name in DROP_METRICS:
             value = numeric(row.get(name))
             if value is not None:
@@ -557,15 +577,16 @@ def main() -> int:
         else summarize_load(args.load_results)
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    resources = summarize_resources(args.metrics)
-    drops = summarize_drops(args.metrics, load["requests"])
+    rows = metric_rows(args.metrics)
+    resources = _summarize_resource_rows(rows)
+    drops = _summarize_drop_rows(rows, load["requests"])
     report = render_markdown(
         protocol=args.protocol,
         qps=args.qps,
         duration=args.duration,
         load=load,
         resources=resources,
-        qps_resources=summarize_qps_resources(args.metrics),
+        qps_resources=_summarize_qps_resource_rows(rows),
         drops=drops,
         validation=validation,
         load_artifact=args.load_results,

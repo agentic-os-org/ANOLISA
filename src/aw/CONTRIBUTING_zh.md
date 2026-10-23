@@ -19,6 +19,10 @@ Python/JavaScript 摘要向量和 rustdoc。缺少工具，配置、Provider 协
 ignored、向量错误及命令失败均返回非零。每条命令都有超时限制，失败或中断时
 回收其子进程组。日志标明失败命令，可在 `src/aw` 单独运行对应命令定位问题。
 
+数据库、安装清单、事务、运行锁和包管理 CLI 测试还分别以子进程 umask
+`0022`、`0002` 运行。测试样本及复制的可执行文件应显式设置权限，
+不要修改并行测试进程的全局 umask。
+
 这些检查可由普通用户运行，无需启动 Agent 或登录服务。Cargo 会下载尚未缓存的
 依赖，Schema 校验只读取随包资源。检查入口、本地服务、Provider Host 执行、命令执行及 FileJournal 要求 Linux；
 本门禁不认证其他操作系统或最低支持版本。
@@ -81,7 +85,7 @@ Preview 包，验证真实 sec-core health、Tokenless/RTK 契约、安装、服
 原生任务复用该次构建的二进制，并校验提交 SHA 和文件摘要。
 
 [tests/native-matrix.json](tests/native-matrix.json) 为每个已注册 Agent 记录固定
-版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。七种 Agent
+版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。八种 Agent
 均有自动验收。OpenClaw 覆盖官方 Hook runner，完整 Gateway 模型流程仍需单独验收。
 
 Qoder CLI 1.1.64 和 QwenPaw 2.2.2b4 / AgentScope 2.0.9 各自必须完成四项真实
@@ -90,6 +94,11 @@ sec-core 用例：`allow`、`scan-deny`、`backend-error` 和 `timeout-block`。
 每个用例在独立 Ubuntu 24.04 容器中启动真实 daemon，清单通过多平台 manifest digest
 固定镜像。容器禁用网络，宿主仅挂载一个可写的 socket 目录，并记录实际平台镜像 ID。定时任务只选择一次 `github.sha`；
 容器不会另行拉取不断变化的分支或独立构建的 nightly 镜像。
+
+另一个必需的 Qoder 1.1.73 TUI 用例验证原生 SessionStart 就绪，以及请求派发前的
+空策略 → 增加 Hook → 移除 Hook 更新，保留相同 PID/启动 ticks。它下载独立校验和固定
+的版本，并保留 1.1.64 print 用例。原生清单要求其具名元数据报告及清理结果。
+该用例不证明托管 TUI 工具轮次或结果替换已经通过。
 
 正常用例必须写出标记文件；风险用例必须命中内置 `shell-recursive-delete` 规则
 （`warn` 转为阻断），保留待删除的临时夹具，且不生成标记。停止真实容器模拟后端
@@ -143,7 +152,7 @@ python3 -B scripts/native_acceptance.py --agent agentscope \
 ```bash
 npm install --prefix target/openclaw-native --ignore-scripts --no-audit --no-fund openclaw@2026.9.6
 OPENCLAW_PACKAGE_DIR="$PWD/target/openclaw-native/node_modules/openclaw" \
-  node --test --test-reporter=tap crates/aw-service/tests/openclaw-native.mjs
+  node --test --test-reporter=tap crates/aw-cli/tests/openclaw-native.mjs
 ```
 
 八项 TAP 测试必须全部通过且不得跳过。套件通过 OpenClaw 官方 loader 加载实际 AW
@@ -162,29 +171,44 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 
 ## Crate 边界
 
+本地软件包变更从 `aw-package::plan` 进入，先生成只读计划，再由 `plan::execute`
+调用同一持久事务实现。查询和预览不能创建记录或锁。在 Linux 上检查这些路径：
+
+```bash
+cargo test --locked -p aw-package --test management --test database
+cargo test --locked -p aw-package transaction::tests
+cargo test --locked -p aw-exec --test packages
+```
+
+包测试覆盖独立工具、同目录精确依赖、旧记录存档、冲突和恢复。CLI、服务与 Host
+共用 `aw-exec` 的包读锁，不让运行时依赖包数据库。修改包和发布配置时都保持先锁
+数据库、再锁安装目录的顺序。system scope 是显式 raw 管理，不是原生包后端。
+提交、恢复规则及运行引用发现范围见[本地包管理](docs/design/zh/packaging/package-management.md)。
+这些局部命令不能代替 AW 完整检查或原生验收。
+
 通用框架位于 `crates/<name>/`，具体 Provider 位于仓库根 `providers/<provider>/`，各自构建；
 根清单只组织 workspace。[Provider 协作约定](../../providers/README_zh.md)说明如何收录和分发。
-包的职责和依赖见[架构总览](../../docs/developer-guide/zh/aw/architecture.md)，
-协议阅读顺序见[设计索引](docs/design/README_zh.md)。
+包的职责和依赖见[架构总览](docs/design/zh/architecture.md)，
+协议阅读顺序见[设计索引](docs/design/zh/README.md)。
 
-原生方言和桥接资产归 `aw-adapter`；CLI 负责参数、RPC、信号和资源，服务负责
+原生方言和桥接资产归 `aw-adapter`；`aw-cli` 负责参数、RPC、信号和资源，服务负责
 状态、预算和审计。两者共用 Adapter，不向它传递服务内部类型。
 `aw-provider` 负责离线协议校验，进程执行统一使用 `aw-exec`。
 修改 crate 边界时，同时更新 [check_layout.py](scripts/check_layout.py)
-和[回归检查](tests/test_ci_checks.py)，并同步[架构表格](../../docs/developer-guide/zh/aw/architecture.md)。
+和[回归检查](tests/test_ci_checks.py)，并同步[架构表格](docs/design/zh/architecture.md)。
 
 ## 构建服务
 
 在 Linux 的 `src/aw` 中构建 CLI 和样例 Provider：
 
 ```bash
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 cargo build --locked -p aw-provider --example policy
 ```
 
 [使用指南](../../docs/developer-guide/zh/aw/native-agents.md#运行本地服务演示)提供前台
 服务与独立客户端的完整演示，以及状态目录和审计历史的清理说明。服务使用
-`aw-service/v1alpha3` 本地协议，Provider 继续使用 `aw-provider/v1alpha1`；二者
+`aw-service/v1alpha4` 本地协议，Provider 继续使用 `aw-provider/v1alpha1`；二者
 分别版本化。
 
 ## 运行时验收
@@ -192,13 +216,13 @@ cargo build --locked -p aw-provider --example policy
 本地服务定向检查：
 
 ```bash
-cargo test --locked -p aw-service
+cargo test --locked -p aw-service -p aw-cli
 ```
 
-服务测试使用真实 Unix socket、样例 Provider 子进程和私有临时状态目录，不需要
+服务单元测试和 CLI 集成测试使用真实 Unix socket、样例 Provider 子进程和私有临时状态目录，不需要
 模型、Agent 安装或云端密钥。检查共享事件预算、调用关联与单次执行、取消和关闭、
 持久审计、陈旧句柄及端点所有权。fixture 负责等待所属进程并删除临时目录；构建
-产物保留在 `target/`。验收边界见[本地服务合同](docs/design/local-service_zh.md)。
+产物保留在 `target/`。验收边界见[本地服务合同](docs/design/zh/runtime/local-service.md)。
 
 在 Linux 的 `src/aw` 目录中运行 Provider Host 定向检查：
 
@@ -208,9 +232,18 @@ cargo test --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 ```
 
 这些测试使用本地 fixture 进程检查准备、请求绑定、失败报告、共享截止时间、取消和
-事件步骤的单次调用。[本地示例](docs/design/provider-host_zh.md#本地示例)使用合成
+事件步骤的单次调用。[本地示例](docs/design/zh/runtime/provider-host.md#本地示例)使用合成
 Adapter 证据和工具事件运行样例 Provider，不代表原生 Agent 验收或效果已被采用。
 
 协议与 Core 测试使用合成输入和 Host。原生接入需要单独取证，确认回调已安装、
 工具按预期执行或被阻断，以及返回效果已被 Agent 采用。验证命令和结果写入 PR，
 实验日志不放入 README。
+
+Qoder SDK 1.0.54 原生验收使用随包的 Worker 1.1.74 和托管 `auto` 模型，
+复用 `QODER_PERSONAL_ACCESS_TOKEN` Secret。依赖安装不接收凭据，SDK 运行阶段
+验证首请求拒绝、session Hook 隔离、成功/失败观察、原生权限拒绝和 daemon 不重启。
+
+Qoder SDK 原生清单分别运行普通 `aw run` 和 `--reloadable` 两条路径。后者增加已有
+Query 的策略新增/移除、另一 session 活跃时 busy，以及保留原生回调直到清理结束的真实
+`aw update` RPC 检查。两条路径都由调用方管理 `startDaemon()`，仅运行阶段注入 PAT，
+并断言 daemon 身份不变、清理后 bindings/events 为零。

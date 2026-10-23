@@ -4,7 +4,7 @@
 
 This reference describes the fields accepted by the current configuration
 validator. For a starter file, current availability and the intended Agent
-workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw/README.md).
+workflow, begin with the [user guide](../../../user-guide/en/aw/index.md).
 
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships
@@ -31,7 +31,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `execution.guarantee` | Only `native_hook`; no OS, final or protected guarantee |
 | `execution.default_event_budget_ms` | Required positive shared event budget, not a fresh budget for each step |
 | `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; the service persists execution metadata |
-| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw`, `hermes`, `pi`, `claude-sdk` or `agentscope`; recognition is not runtime certification |
+| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `qoder-sdk`, `openclaw`, `hermes`, `pi`, `claude-sdk` or `agentscope`; recognition is not runtime certification |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |
 | `agents.<id>.qoder.sequential` | Optional boolean for `adapter: qoder`; marks generated native groups as sequential; false does not override other matching groups |
 | `providers.<id>.protocol` | Defaults to invoke-only `aw-hook/v1alpha1`; explicit `aw-provider/v1alpha1` retains structured messages, `native-hook/v1alpha1` retains native callback bytes |
@@ -164,7 +164,17 @@ reported explicitly. Parsing alone does not perform that admission.
 The parser accepts one UTF-8 YAML or JSON document, bounded to 4 MiB before and
 after expansion and nesting depth 32. Duplicate keys, non-string mapping keys,
 custom YAML tags, merge keys, non-finite numbers and multiple documents fail.
-Ordinary aliases are expanded within those limits. Diagnostics include field
+Ordinary aliases are expanded within those limits. JSON input follows the same
+YAML scalar resolution: an exponent spelling such as `1e3` arrives as
+float-typed `1000.0`, which the schema's integer type accepts. A JSON starter
+document mirrors the YAML starter at
+[aw.minimal.json](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.minimal.json).
+Decimal integer scalars outside both the signed and unsigned 128-bit ranges are
+rejected rather than rounded into floats, including scalars tagged `!!float`.
+Use exponent/decimal notation for floating-point values and quoted strings for
+exact large identifiers. This does not expand the existing integer value range.
+
+Diagnostics include field
 paths or source locations and constraints without echoing field values.
 
 This alpha configuration is separate from existing capability wire records and

@@ -54,6 +54,7 @@ expected_preview_bindings = (
     "path: tokenless-source",
     "tokenless-source-root: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}",
     "python3 .github/actions/prebuilt-rust-common/plan_matrix.py",
+    '--tokenless-source-root "$TOKENLESS_SOURCE_ROOT"',
 )
 for binding in expected_preview_bindings:
     if binding not in preview:
@@ -369,9 +370,9 @@ if PATH="$FAKE_BIN:$PATH" \
         --output-dir "$TEMPORARY/source-output" \
         --wheel-output-dir "$TEMPORARY/source-wheels" \
         --version 1.2.3 \
-        --target-os linux \
+        --target-os macos \
         --target-arch x86_64 \
-        --profile gnu2.17-x86_64 \
+        --profile darwin11-x86_64 \
         --tag tokenless/v1.2.3 >"$TEMPORARY/source.log" 2>&1; then
     printf 'ERROR: source selection fixture unexpectedly completed\n' >&2
     exit 1
@@ -443,6 +444,18 @@ grep -Fq \
     "\"filenames\":[\"$SHIM_COMPONENT/target/x86_64-unknown-linux-gnu/python-release/libanolisa_tokenless.so\"]" \
     "$SHIM_OUTPUT"
 grep -Fq "\"manifest_path\":\"$SHIM_COMPONENT/Cargo.toml\"" "$SHIM_OUTPUT"
+(
+    cd "$SHIM_COMPONENT"
+    env "${SHIM_ENV[@]}" \
+        TOKENLESS_CROSS_PROFILE=darwin11-x86_64 \
+        TOKENLESS_RUST_TARGET=x86_64-apple-darwin \
+        "$SHIM_BIN/cargo" rustc --target x86_64-apple-darwin \
+        --manifest-path "$SHIM_COMPONENT/Cargo.toml" \
+        --profile python-release > "$SHIM_OUTPUT"
+)
+grep -Fxq \
+    'cross <darwin11-x86_64> <rustc> <--manifest-path> <Cargo.toml> <--profile> <python-release>' \
+    "$SHIM_LOG"
 if env "${SHIM_ENV[@]}" "$SHIM_BIN/cargo" rustc \
     --target "x86_64-unknown-linux-gnu;\$(touch ${MARKER})" \
     >"$TEMPORARY/shim-target.log" 2>&1; then
@@ -484,7 +497,8 @@ ARTIFACT_ROOT="$TEMPORARY/artifacts"
 for target in \
     'linux x86_64 x86_64-unknown-linux-gnu' \
     'linux aarch64 aarch64-unknown-linux-gnu' \
-    'macos aarch64 aarch64-apple-darwin'; do
+    'macos aarch64 aarch64-apple-darwin' \
+    'macos x86_64 x86_64-apple-darwin'; do
     read -r target_os target_arch target_triple <<<"$target"
     artifact_dir="$ARTIFACT_ROOT/tokenless-prebuilt-1.0.0-$target_os-$target_arch"
     archive="$artifact_dir/tokenless-1.0.0-$target_os-$target_arch.tar.gz"

@@ -16,6 +16,9 @@ Root is always authorized. --policy-admin-uid adds an administrator at startup.\
 Repeat this option for multiple UIDs; omitted means root only.\n\
 --skillsec-config selects a root-owned JSON configuration file.\n\
 PAP state is persisted in policy-state.db under $AGENT_SEC_DATA_DIR (default /var/log/agent-sec).\n\
+Owned data-directory permissions are repaired to 0700 after ancestor validation.\n\
+Without AGENT_SEC_DATA_DIR, unsafe default ancestors select /var/lib/agent-sec/policy.\n\
+Conflicting databases or a directory selection that bypasses existing Policy state refuse startup.\n\
 Scopes start discovery jobs which create and reconcile their Bindings automatically.\n\
 PII rules: --pii-rules <ABSOLUTE_PATH>, default /etc/agent-sec/pii-checker/rules.yaml.\n\
 Rules are compiled at startup; restart to apply updates.\n";

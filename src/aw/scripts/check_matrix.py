@@ -10,11 +10,11 @@ SHARED_CASES = {
         "adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema",
     ),
     "security-retry": (
-        "aw-service/test/pretool",
+        "aw-cli/test/pretool",
         "retry_neutrality_cannot_undo_security_denials_or_fail_closed_errors",
     ),
     "final-replacement": (
-        "aw-service/test/posttool",
+        "aw-cli/test/posttool",
         "adapters_keep_observers_and_user_hooks_before_one_final_replacement",
     ),
 }

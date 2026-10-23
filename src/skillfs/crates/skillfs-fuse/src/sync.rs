@@ -75,22 +75,34 @@ pub(crate) fn spawn_sync_worker(
         };
         while let Ok(first) = rx.recv() {
             // Collect more events within a 50 ms window (debounce).
-            let mut pending: HashMap<String, SyncEvent> = HashMap::new();
+            // The batch keys every event by its manifest source path:
+            // nested candidates share their leaf name across categories,
+            // and coalescing by the leaf alone overwrote one candidate's
+            // event with another's before either reached the collision
+            // check - the live store then selected the wrong candidate,
+            // or an existing winner's refresh was dropped and the entry
+            // kept serving its pre-write body, while a fresh scan of the
+            // same tree disagrees. The source path identifies the
+            // manifest, so every distinct candidate reaches the
+            // collision check; repeated events for the same manifest
+            // still coalesce (the re-parse reads the file from disk, so
+            // the last one suffices).
+            let mut pending: HashMap<PathBuf, SyncEvent> = HashMap::new();
             match &first {
-                SyncEvent::Reparse { skill_name, .. } => {
-                    pending.insert(skill_name.clone(), first);
+                SyncEvent::Reparse { source_path, .. } => {
+                    pending.insert(source_path.clone(), first);
                 }
             }
             while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 match &ev {
-                    SyncEvent::Reparse { skill_name, .. } => {
-                        pending.insert(skill_name.clone(), ev);
+                    SyncEvent::Reparse { source_path, .. } => {
+                        pending.insert(source_path.clone(), ev);
                     }
                 }
             }
 
             // Process the batch.
-            for (_skill_name, event) in pending {
+            for (_source_path, event) in pending {
                 match event {
                     SyncEvent::Reparse {
                         ref skill_name,
@@ -291,6 +303,123 @@ mod tests {
             winner_md,
             "a re-parse of a different directory with the same leaf must \
              not silently steal the store key"
+        );
+    }
+
+    #[test]
+    fn same_batch_same_leaf_events_both_reach_the_collision_check() {
+        // Two nested candidates share the leaf `newbie`. Their events land
+        // in one debounce window, and coalescing by the leaf name alone
+        // overwrote the alpha event with the beta one before either
+        // reached the collision check - the live store then kept
+        // beta/newbie while a fresh scan keeps alpha/newbie. The batch
+        // must key every event by its manifest source path instead.
+        let source = tempfile::tempdir().expect("source tempdir");
+        for (dir, desc) in [("alpha/newbie", "alpha"), ("beta/newbie", "beta")] {
+            std::fs::create_dir_all(source.path().join(dir)).expect("skill dir");
+            std::fs::write(
+                source.path().join(dir).join("SKILL.md"),
+                format!("---\nname: newbie\ndescription: {desc}\n---\n{desc} body\n"),
+            )
+            .expect("SKILL.md");
+        }
+
+        let shared = Arc::new(RwLock::new(SkillStore::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = spawn_sync_worker(rx, shared.clone(), None, None);
+        tx.send(SyncEvent::Reparse {
+            skill_name: "newbie".to_string(),
+            source_path: source.path().join("alpha/newbie/SKILL.md"),
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
+        })
+        .expect("send the alpha reparse");
+        tx.send(SyncEvent::Reparse {
+            skill_name: "newbie".to_string(),
+            source_path: source.path().join("beta/newbie/SKILL.md"),
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
+        })
+        .expect("send the beta reparse");
+        drop(tx);
+        worker.join().expect("sync worker");
+
+        let guard = shared.read();
+        let entry = guard.get("newbie").expect("leaf entry");
+        assert_eq!(
+            entry.source_path,
+            source.path().join("alpha/newbie/SKILL.md"),
+            "both same-batch candidates must reach the collision check, \
+             which keeps the fresh-scan winner"
+        );
+        assert!(entry.body.contains("alpha body"));
+    }
+
+    #[test]
+    fn same_batch_winner_and_loser_edits_refresh_the_winner() {
+        // The discovered winner alpha/newbie sits in the store with its
+        // old body; one batch carries the winner's refresh and the
+        // loser's edit. Coalescing by leaf dropped the winner's refresh,
+        // leaving the live entry serving its pre-write body while the
+        // manifest on disk had moved on. Keying by source path keeps
+        // both: the winner refreshes, the loser still loses the
+        // collision check.
+        let source = tempfile::tempdir().expect("source tempdir");
+        let winner_md = source.path().join("alpha/newbie/SKILL.md");
+        std::fs::create_dir_all(winner_md.parent().expect("winner dir")).expect("winner dir");
+        std::fs::write(
+            &winner_md,
+            "---\nname: newbie\ndescription: alpha\n---\noriginal body\n",
+        )
+        .expect("winner SKILL.md");
+        let loser_md = source.path().join("beta/newbie/SKILL.md");
+        std::fs::create_dir_all(loser_md.parent().expect("loser dir")).expect("loser dir");
+        std::fs::write(
+            &loser_md,
+            "---\nname: newbie\ndescription: beta\n---\nbeta body\n",
+        )
+        .expect("loser SKILL.md");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &skillfs_core::ParseConfig::default());
+        assert_eq!(
+            store.get("newbie").expect("discovered").source_path,
+            winner_md
+        );
+
+        let shared = Arc::new(RwLock::new(store));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = spawn_sync_worker(rx, shared.clone(), None, None);
+        // The winner's manifest gained a line on disk...
+        std::fs::write(
+            &winner_md,
+            "---\nname: newbie\ndescription: alpha\n---\nrefreshed body\n",
+        )
+        .expect("refresh the winner SKILL.md");
+        tx.send(SyncEvent::Reparse {
+            skill_name: "newbie".to_string(),
+            source_path: winner_md.clone(),
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
+        })
+        .expect("send the winner reparse");
+        tx.send(SyncEvent::Reparse {
+            skill_name: "newbie".to_string(),
+            source_path: loser_md,
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
+        })
+        .expect("send the loser reparse");
+        drop(tx);
+        worker.join().expect("sync worker");
+
+        let guard = shared.read();
+        let entry = guard.get("newbie").expect("winner entry");
+        assert_eq!(
+            entry.source_path, winner_md,
+            "the winner keeps the key through the same-batch edits"
+        );
+        assert!(
+            entry.body.contains("refreshed body"),
+            "the winner's same-batch refresh must not be coalesced away, \
+             body is {:?}",
+            entry.body
         );
     }
 

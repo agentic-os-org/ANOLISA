@@ -227,7 +227,7 @@ fn parse_frontmatter(
 }
 
 pub(crate) fn validate_name(name: &str, issues: &mut Vec<String>) {
-    if name.len() > 64 {
+    if name.chars().count() > 64 {
         issues.push("name too long (max 64 chars)".to_string());
     }
     if !is_kebab_case(name) {
@@ -573,6 +573,28 @@ Say hello to the world.
         assert!(entry.parameters.is_empty());
         assert!(entry.returns.is_empty());
         assert!(entry.parse_status.is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_counts_characters_not_utf8_bytes() {
+        let mut issues = Vec::new();
+        validate_name(&"技".repeat(64), &mut issues);
+
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue == "name too long (max 64 chars)")
+        );
+        assert!(issues.iter().any(|issue| issue == "name not kebab-case"));
+
+        let mut over_limit_issues = Vec::new();
+        validate_name(&"技".repeat(65), &mut over_limit_issues);
+
+        assert!(
+            over_limit_issues
+                .iter()
+                .any(|issue| issue == "name too long (max 64 chars)")
+        );
     }
 
     // -----------------------------------------------------------------------

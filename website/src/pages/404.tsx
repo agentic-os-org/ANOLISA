@@ -15,7 +15,7 @@ export default function NotFound() {
         <p>{locale === 'zh' ? '返回首页，或从文档索引继续。' : 'Return home or continue from the documentation index.'}</p>
         <div className="buttonRow">
           <SiteLink locale={locale} to="/" className="primaryButton">{locale === 'zh' ? '返回首页' : 'Go home'}</SiteLink>
-          <SiteLink locale={locale} to="/docs/quickstart" className="secondaryButton">{locale === 'zh' ? '打开文档' : 'Open docs'}</SiteLink>
+          <SiteLink locale={locale} to="/docs/user-guide/getting-started/quickstart/" className="secondaryButton">{locale === 'zh' ? '打开文档' : 'Open docs'}</SiteLink>
         </div>
       </main>
     </Layout>

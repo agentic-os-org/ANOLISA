@@ -183,6 +183,13 @@ impl PreparedLaunch for Prepared {
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if self.input.options.reloadable {
+            crate::reload::validate(
+                &self.input.document,
+                &self.input.target,
+                &self.capabilities(),
+            )?;
+        }
         event_routes(
             &self.input.document,
             steps,
@@ -192,11 +199,15 @@ impl PreparedLaunch for Prepared {
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (events, hooks) = event_routes(
-            &self.input.document,
-            context.steps,
-            adapter::observation_enabled(&self.input.document, &self.input.target),
-        )?;
+        let (events, hooks) = if self.input.options.reloadable {
+            (crate::reload::routes(), Vec::new())
+        } else {
+            event_routes(
+                &self.input.document,
+                context.steps,
+                adapter::observation_enabled(&self.input.document, &self.input.target),
+            )?
+        };
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
@@ -206,6 +217,7 @@ impl PreparedLaunch for Prepared {
             &serde_json::to_vec(&json!({
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
+                "reloadable":self.input.options.reloadable,
             }))?,
         )?;
         self.plugin = Some(OwnedPlugin::create(&self.working)?);

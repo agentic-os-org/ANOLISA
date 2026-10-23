@@ -1,6 +1,6 @@
-//! Trajectory collector — periodically scans Qoder/QoderWork session
-//! directories, converts JSONL trajectories to ATIF v1.7 and persists them
-//! into a dedicated SQLite database.
+//! Trajectory collector — periodically scans supported local Agent sessions,
+//! converts JSONL or Hermes SQLite state to ATIF v1.7, and persists them into a
+//! dedicated SQLite database.
 //!
 //! Pure user-space (no eBPF, no inotify): the main crate spawns
 //! [`run_collector_loop`] on a named thread when
@@ -10,6 +10,11 @@
 pub mod atif;
 pub mod codex;
 pub mod discovery;
+pub mod gemini;
+mod hermes;
+mod hermes_convert;
+#[cfg(test)]
+mod hermes_tests;
 pub mod qoder;
 pub mod store;
 
@@ -33,8 +38,8 @@ use discovery::DiscoveredSession;
 pub struct CollectorConfig {
     /// Seconds between two scan rounds.
     pub scan_interval_secs: u64,
-    /// Optional override of the projects directories to scan; `None` probes
-    /// `/root` + `/home/*` for the default Qoder/QoderWork layout.
+    /// 可选的会话根目录、Claude 工作区父目录或 Hermes 数据库位置。
+    /// 未设置时扫描标准目录及 `CLAUDE_CONFIG_DIR`、`HERMES_HOME`。
     pub scan_dirs: Option<Vec<PathBuf>>,
     /// Retention used to skip already-expired source files during scans.
     pub maintenance: TrajectoryMaintenancePolicy,
@@ -71,6 +76,8 @@ pub fn run_collector_loop(
 /// the rest of the round.
 pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
     let sessions = discovery::discover_sessions(config.scan_dirs.as_deref());
+    let hermes_databases = hermes::discover_state_databases(config.scan_dirs.as_deref());
+    let mut discovered = sessions.len();
     let mut collected = 0usize;
     for session in &sessions {
         match process_session(store, session, config.maintenance.retention_days) {
@@ -84,16 +91,22 @@ pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
             }
         }
     }
+    for database in &hermes_databases {
+        match hermes::collect_database(store, database, config.maintenance.retention_days) {
+            Ok(outcome) => {
+                discovered += outcome.sessions;
+                collected += outcome.ingested;
+            }
+            Err(error) => log::warn!(
+                "Hermes trajectory collect failed for {}: {error}",
+                database.display()
+            ),
+        }
+    }
     if collected > 0 {
-        log::info!(
-            "Trajectory scan: {collected}/{} session(s) ingested",
-            sessions.len()
-        );
+        log::info!("Trajectory scan: {collected}/{discovered} session(s) ingested");
     } else {
-        log::debug!(
-            "Trajectory scan: {} session(s), none changed",
-            sessions.len()
-        );
+        log::debug!("Trajectory scan: {discovered} session(s), none changed");
     }
 }
 
@@ -144,7 +157,14 @@ fn process_session(
     let content =
         std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
-    let events = qoder::load_jsonl_events(&content);
+    let mut events = qoder::load_jsonl_events(&content);
+    // Legacy Gemini (<= 0.38) conversations are one pretty-printed JSON
+    // document: no line parses, so the whole content is the only unit.
+    if events.is_empty() {
+        if let Some(doc) = gemini::legacy_document(&content) {
+            events.push(doc);
+        }
+    }
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
         // every scan round (they will be retried only when size/mtime change).
@@ -153,11 +173,15 @@ fn process_session(
     }
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
-    // that needs a dedicated converter; everything else shares the
-    // Claude-style converter.
+    // that needs a dedicated converter; Gemini CLI chats use an append-only
+    // record stream with `$`-prefixed correction records; everything else
+    // shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
+    let is_gemini = !is_codex && gemini::is_gemini_chat(&events);
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
+    } else if is_gemini {
+        gemini::convert_gemini_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
@@ -175,6 +199,8 @@ fn process_session(
     // Agent-private info (cwd, message counts, project) rides in `extra`.
     let private = if is_codex {
         codex::extract_private_metadata(&events, &session.project)
+    } else if is_gemini {
+        gemini::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };

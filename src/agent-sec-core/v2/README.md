@@ -1,7 +1,7 @@
 # AgentSecCore V2 Policy, SkillSec and daemon
 
 SkillSec supplies scanning, system-key integrity, versions and activation through the Rust
-`skill-ledger` CLI and a root daemon. See the [core guide](../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
+`skill-ledger` CLI and a root daemon. See the [core guide](../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
 and [migration/acceptance boundaries](../docs/design/SKILL_SEC_PHASE_ONE.md).
 Agent Hook migration is separate; the core never calls Python Ledger.
 
@@ -51,7 +51,7 @@ Ready Bindings and terminal failures are not automatically reapplied.
 
 The Rust `agent-sec-cli` exposes 12 Policy, Scope and Binding administration commands through
 an explicit daemon socket. Its Cargo package and source directory remain `asc-cli`;
-the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
+the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [lifecycle acceptance criteria](../docs/design/POLICY_SCOPE_BINDING_CONTRACT_zh.md#6-可执行验收).
 
 The current crates are:
@@ -149,7 +149,7 @@ correlation from Context, while kernel peer identity is passed as `CallerIdentit
 Opaque labels are not OpenTelemetry IDs. Business requests retain 4 MiB capacity
 with a separate 32 KiB propagation allowance; responses remain limited to 4 MiB.
 
-See the [PII user guide](../../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md)
+See the [PII user guide](../../../docs/user-guide/en/agent-sec-core/pii-checker.md)
 for limits, rule migration, compatibility differences and rollback. Hook/RPM tests
 exercise real Rust subprocesses without switching Agent hosts.
 
@@ -196,8 +196,14 @@ The current `asc-daemon` executable composes and registers the PAP dispatcher an
 protocol rejection encoder from `asc-daemon-handler`. It composes `PapService`
 with a root-managed Principal policy and the SQLite Repository. Policy state lives
 in `policy-state.db` under `AGENT_SEC_DATA_DIR`
-(default `/var/log/agent-sec`). The data directory must be private (0700), with
-database and lock files restricted to 0600. Unsafe existing permissions, incompatible
+(default `/var/log/agent-sec`). Owned leaf permissions are repaired to 0700 after
+ancestor validation. Without an explicit data root, unsafe default ancestors
+select `/var/lib/agent-sec/policy` for Policy storage only. Startup
+checks both locations before creating anything and rejects two existing databases
+or a directory selection that would bypass the other location's database.
+An explicit `AGENT_SEC_DATA_DIR` stays fixed without default discovery or fallback.
+The data directory must be private (0700), with
+database and lock files restricted to 0600. Unrepairable permissions, incompatible
 schema and corruption fail startup; the daemon never deletes or rebuilds this state.
 An independent database lease prevents two socket namespaces from sharing it.
 See [persistence, upgrade and recovery](../docs/design/POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md).

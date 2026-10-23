@@ -22,6 +22,7 @@ use std::{
 mod binding;
 mod evidence;
 mod hooks;
+mod policy;
 
 const MAX_BINDINGS: usize = 16;
 const MAX_EVENTS: usize = 32;
@@ -29,6 +30,10 @@ const MAX_STEPS: usize = 64;
 const MAX_CALLS: usize = 64;
 
 struct Instance {
+    bytes: Vec<u8>,
+    context: ProcessContext,
+    reload: Option<policy::Reload>,
+    policy_update: Arc<Mutex<()>>,
     host: Arc<Host>,
     closing: bool,
     hooks: Arc<Mutex<BTreeMap<String, hooks::Lease>>>,
@@ -127,12 +132,25 @@ impl Runtime {
             Operation::RecentExecutions => self.audit.recent(),
             Operation::Status => {
                 let observations = self.observation_status()?;
+                let policies = self.policy_status()?;
                 Ok(
                     json!({"pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
                 "events": self.events.lock().map_err(|_| rejected("state_poisoned"))?.len(), "audit_healthy": self.audit.healthy(),
-                "observations": observations, "guarantee": "native_hook", "adoption": "unverified"}),
+                "observations": observations, "instances": policies, "guarantee": "native_hook", "adoption": "unverified"}),
                 )
             }
+            Operation::EnableReload { instance_id } => self.enable_reload(&instance_id),
+            Operation::AssociateProcess { instance_id, pid } => {
+                self.associate_process(&instance_id, pid)
+            }
+            Operation::BridgeLifecycle {
+                instance_id,
+                pid,
+                phase,
+                key,
+            } => self.lifecycle(&instance_id, pid, phase, &key),
+            Operation::HookPlan { instance_id, event } => self.hook_plan(&instance_id, &event),
+            Operation::UpdatePolicy { .. } => Err(rejected("policy_update_requires_peer")),
             Operation::StartObservation { instance_id } => {
                 self.start_observation(&instance_id, deadline)
             }
@@ -254,13 +272,14 @@ impl Runtime {
 
     fn prepare(
         &self,
+        bytes: &[u8],
         key: &str,
         target: &str,
         capabilities: Capabilities,
         context: ProcessContext,
-        deadline: Instant,
-        cancelled: &AtomicBool,
+        limit: (Instant, &AtomicBool),
     ) -> Result<Host> {
+        let (deadline, cancelled) = limit;
         // Reject excessive metadata and step counts before journaling or Provider discovery.
         if target.len() > 128
             || capabilities.version.len() > 128
@@ -268,7 +287,7 @@ impl Runtime {
         {
             return Err(rejected("binding_metadata_limit"));
         }
-        let config = aw_config::Validator::new()?.parse(&self.bytes)?;
+        let config = aw_config::Validator::new()?.parse(bytes)?;
         let capabilities = capabilities.into();
         let steps = aw_provider::admission::preflight(&config, target, &capabilities)
             .map_err(|_| rejected("binding_preflight"))?;
@@ -277,14 +296,7 @@ impl Runtime {
         }
         self.audit.claim(key, json!({"kind": "preparation", "identity": self.identity, "instance_id": key, "binding_id": target}))?;
         let result = (|| {
-            let host = Host::prepare(
-                &self.bytes,
-                target,
-                capabilities,
-                context,
-                deadline,
-                cancelled,
-            );
+            let host = Host::prepare(bytes, target, capabilities, context, deadline, cancelled);
             match host {
                 Ok(host) => {
                     self.audit.append(key, json!({"phase": "closed", "status": "ok", "calls": host.preparation().iter().map(audit::call).collect::<Vec<_>>()}))?;
@@ -326,6 +338,7 @@ impl Runtime {
         if value["agent"]["instance_id"] != instance_id {
             return Err(rejected("event_instance_mismatch"));
         }
+        let policy = host.configuration().as_value().clone();
         let metadata = event_metadata(&value)?;
         let key = self.identifier()?;
         let context = Arc::new(evidence::Cell::default());
@@ -367,10 +380,10 @@ impl Runtime {
             match event {
                 Ok(event) => {
                     let seed = runtime.contexts.seed(json!({
-                        "generation":runtime.identity.generation,"config_revision":runtime.identity.config_revision,
+                        "generation":runtime.identity.generation,"config_revision":host.revision(),
                         "binding_id":host.target(),"instance_id":instance_id,"event_id":thread_key,
                         "adapter":host.capabilities().adapter,
-                    }), &candidate, association, event.deadline()).and_then(|seed| context.initialize(seed));
+                    }), &candidate, association, event.deadline(), &policy).and_then(|seed| context.initialize(seed));
                     let candidate_revision = match seed {
                         Ok(revision) => revision,
                         Err(error) => {
@@ -382,7 +395,7 @@ impl Runtime {
                     };
                     let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect(), candidate_revision };
                     let claimed = runtime.audit.claim(&thread_key, json!({"kind": "event", "identity": runtime.identity,
-                        "instance_id": instance_id, "binding_id": host.target(), "host_event_id": event.id(), "event": metadata}));
+                        "instance_id": instance_id, "binding_id": host.target(), "policy_revision":host.revision(), "host_event_id": event.id(), "event": metadata}));
                     match claimed {
                         Ok(_) => {
                             if let Err(error) = context.seed().ok_or_else(|| rejected("context_not_ready")).and_then(|seed| runtime.observe_seed(&instance_id, seed)) {

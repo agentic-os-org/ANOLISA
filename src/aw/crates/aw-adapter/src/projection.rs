@@ -139,14 +139,25 @@ pub fn project(adapter: &str, native: &Value) -> Option<Value> {
     let value = decoded_result(adapter, native);
     let (_, text) = text_slot(adapter, &value)?;
     let (name, input) = tool(adapter, native);
-    let origin = match name.to_ascii_lowercase().as_str() {
-        "bash" | "exec" | "terminal" | "execute_shell_command" | "run_shell_command" => {
-            "command_output"
+    let qwen_input = if adapter == "qwenpaw" {
+        serde_json::from_str::<Value>(native["tool_call"]["input"].as_str()?).ok()
+    } else {
+        None
+    };
+    let command = qwen_input.as_ref().unwrap_or(input)["command"].as_str();
+    // Command evidence takes precedence; names are only a heuristic fallback.
+    let origin = if command.is_some() {
+        "command_output"
+    } else {
+        match name.to_ascii_lowercase().as_str() {
+            "bash" | "exec" | "terminal" | "execute_shell_command" | "run_shell_command" => {
+                "command_output"
+            }
+            "read" | "read_file" | "read_text_file" | "read_multiple_files" | "file_read" => {
+                "file_content"
+            }
+            _ => "api_response",
         }
-        "read" | "read_file" | "read_text_file" | "read_multiple_files" | "file_read" => {
-            "file_content"
-        }
-        _ => "api_response",
     };
     let status = match adapter {
         "qwenpaw" | "agentscope" => value["state"].as_str()?,
@@ -179,12 +190,7 @@ pub fn project(adapter: &str, native: &Value) -> Option<Value> {
         return None;
     }
     let mut projection = json!({"text":text, "status":status, "content_origin":origin});
-    let qwen_input = if adapter == "qwenpaw" {
-        serde_json::from_str::<Value>(native["tool_call"]["input"].as_str()?).ok()
-    } else {
-        None
-    };
-    if let Some(command) = qwen_input.as_ref().unwrap_or(input)["command"].as_str() {
+    if let Some(command) = command {
         projection["command"] = json!(command);
     }
     Some(projection)
@@ -224,6 +230,60 @@ pub fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_evidence_precedes_tool_names_and_names_remain_the_fallback() {
+        for (name, input, origin) in [
+            (
+                "mcp__local__shell",
+                json!({"command":"git status"}),
+                "command_output",
+            ),
+            (
+                "read_file",
+                json!({"command":"git status"}),
+                "command_output",
+            ),
+            ("read_file", json!({"path":"file.txt"}), "file_content"),
+            ("mcp__local__shell", json!({}), "api_response"),
+            ("Bash", json!({}), "command_output"),
+            ("read_file", json!({"command":42}), "file_content"),
+        ] {
+            let native = json!({"tool_name":name,"tool_input":input,"tool_response":"output"});
+            let projected = project("qoder", &native).unwrap();
+            assert_eq!(projected["content_origin"], origin, "{name}: {input}");
+            assert_eq!(
+                projected.get("command").and_then(Value::as_str),
+                input["command"].as_str()
+            );
+            let mut failed = native.clone();
+            failed["tool_response"] = json!({"stdout":"failure","isError":true});
+            assert_eq!(project("qoder", &failed).unwrap()["status"], "error");
+            failed["tool_response"] = json!({"content":[{"type":"image","data":"opaque"}]});
+            assert!(project("qoder", &failed).is_none());
+        }
+    }
+
+    #[test]
+    fn qwenpaw_origin_uses_the_same_decoded_command_as_the_projection() {
+        for (input, origin) in [
+            (r#"{"command":"git status"}"#, "command_output"),
+            (r#"{"path":"file.txt"}"#, "file_content"),
+            ("malformed JSON", "file_content"),
+        ] {
+            let native = json!({"tool_call":{"name":"read_file","input":input},
+                "tool_response":{"state":"success","content":[{"type":"text","text":"output"}]}});
+            let projected = project("qwenpaw", &native).unwrap();
+            assert_eq!(projected["content_origin"], origin);
+            assert_eq!(
+                projected.get("command").and_then(Value::as_str),
+                (origin == "command_output").then_some("git status")
+            );
+        }
+        let missing_input = json!({"tool_call":{"name":"read_file"},
+            "tool_response":{"state":"success","content":[{"type":"text","text":"output"}]}});
+        assert!(project("qwenpaw", &missing_input).is_none());
+    }
 
     #[test]
     fn claude_replaces_only_completed_bash_stdout_and_preserves_the_envelope() {
@@ -266,9 +326,13 @@ mod tests {
 
     #[test]
     fn agentscope_projection_uses_effective_command_instead_of_raw_json() {
-        let native = json!({"tool_call":{"name":"exec","input":"{\"command\":\"raw"},
+        let native = json!({"tool_call":{"name":"read_file","input":"{\"command\":\"raw"},
             "effective_input":{"command":"echo repaired"},
             "tool_response":{"state":"success","content":[{"type":"text","text":"output"}]}});
+        assert_eq!(
+            project("agentscope", &native).unwrap()["content_origin"],
+            "command_output"
+        );
         assert_eq!(
             project("agentscope", &native).unwrap()["command"],
             "echo repaired"

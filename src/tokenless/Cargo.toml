@@ -32,6 +32,10 @@ license = "Apache-2.0"
 actix-web = { version = "4", default-features = false, features = ["macros"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Same insertion-ordered map `serde_json` uses once `preserve_order` is unified
+# on (via toon-format). The exact JSON tree must iterate members in source order
+# or compaction would silently reorder every multi-key object.
+indexmap = "2"
 csv = "1.4"
 html5ever = "0.39"
 regex = "1.10"
@@ -43,6 +47,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 blake3 = "1.5"
 dirs = "5.0"
 libc = "0.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
 similar = "2"
 pyo3 = "0.24.2"
 tempfile = "3"

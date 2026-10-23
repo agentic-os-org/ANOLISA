@@ -620,12 +620,9 @@ EOF
     else
         pass "pipeline updatedToolResponse has no tag prefix"
     fi
-    # Verify the JSON cleanup drops empty-valued fields
-    if printf '%s' "$context" | grep -qE "null_field|empty_obj|empty_arr"; then
-        fail "response compression kept empty-valued fields"
-    else
-        pass "response compression removed empty-valued fields"
-    fi
+    assert_contains "$context" "null_field" "response preserves null field"
+    assert_contains "$context" "empty_obj" "response preserves empty object"
+    assert_contains "$context" "empty_arr" "response preserves empty array"
 fi
 
 # ========== Scenario 3: OpenClaw ==========
@@ -757,7 +754,7 @@ echo -e "  Scenarios covered: ${SCENARIOS}"
 echo "============================================"
 echo ""
 echo -e "  ${CYAN}Scenario 1: Tokenless CLI${NC} - encode/decode/round-trip/large JSON/gate and passthrough contract"
-echo -e "  ${CYAN}Scenario 2: COSH hooks${NC} - response -> TOON pipeline/tag prefix/empty-value cleanup"
+echo -e "  ${CYAN}Scenario 2: COSH hooks${NC} - response -> TOON pipeline/tag prefix/empty-value preservation"
 echo -e "  ${CYAN}Scenario 3: OpenClaw${NC} - plugin state/agent call/multi-tool chain (needs TOKENLESS_TOON_FULL_LIVE=1)"
 echo ""
 

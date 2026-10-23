@@ -361,12 +361,13 @@ fn parse_frontmatter_flat(content: &str) -> HashMap<String, String> {
 }
 
 fn extract_body(content: &str) -> String {
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            return rest[end + 5..].trim().to_string();
-        }
+    // Same fence rule as the canonical key reader, so a file that ends at its
+    // closing fence yields an empty body instead of the raw fence block
+    // (GH-3580).
+    match super::frontmatter::split(content) {
+        Some((_, body)) => body.trim().to_string(),
+        None => content.trim().to_string(),
     }
-    content.trim().to_string()
 }
 
 #[cfg(test)]
@@ -386,6 +387,15 @@ mod tests {
         let content = "---\nid: abc\n---\n\nThis is the body.";
         let body = extract_body(content);
         assert_eq!(body, "This is the body.");
+    }
+
+    #[test]
+    fn extract_body_closing_fence_without_trailing_newline() {
+        // GH-3580: the fence block is not body text just because the file
+        // ends at its closing fence.
+        let content = "---\nid: abc\n---";
+        assert_eq!(extract_body(content), "");
+        assert_eq!(extract_body("---\nid: abc\n---\nreal body"), "real body");
     }
 
     #[test]

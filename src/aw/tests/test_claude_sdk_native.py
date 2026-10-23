@@ -404,7 +404,7 @@ def run_case(
                     assert json.loads(result) == json.loads(original), result
             if mode in {"bash-pretool", "bash-pretool-deny"}:
                 retry = json.loads((case / "retry.json").read_text())
-                assert "TOKENLESS_AGENT_ID=claude-sdk" in retry["command"], retry
+                assert "TOKENLESS_AGENT_ID=claude " in retry["command"], retry
                 assert before[0]["tool_input"]["command"] == "git status"
                 assert before[1]["tool_input"] == retry
                 if mode == "bash-pretool":
@@ -478,7 +478,7 @@ def main() -> None:
     asyncio.run(check_preserved_callbacks())
     worker = (
         Path(__file__).resolve().parents[1]
-        / "crates/aw-service/tests/fixtures/claude-sdk/native_worker.py"
+        / "crates/aw-cli/tests/fixtures/claude-sdk/native_worker.py"
     )
     results = [
         run_case(args.aw.resolve(), worker, args.output.resolve(), mode)

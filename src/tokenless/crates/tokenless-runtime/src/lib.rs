@@ -853,7 +853,6 @@ pub fn compress_response_with_store(
             stash_enabled: options.stash_enabled,
             require_reversibility: options.require_reversible,
             force_json: true,
-            preserve_top_level_shape: false,
             allow_toon: false,
             min_toon_chars: MIN_TOON_CHARS,
             json: json_config(options),
@@ -1317,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_response_api_removes_top_level_nulls() {
+    fn explicit_response_api_preserves_top_level_nulls() {
         let mut value = serde_json::Map::new();
         value.insert(
             "keep".to_owned(),
@@ -1331,10 +1330,10 @@ mod tests {
         let result =
             compress_response_with_store(&input, &CompressOptions::default(), true, None).unwrap();
 
-        assert_eq!(result.disposition, Disposition::Applied);
+        assert_eq!(result.disposition, Disposition::NoSavings);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&result.output).unwrap(),
-            serde_json::json!({"keep": "value"})
+            serde_json::Value::Object(value)
         );
     }
 
@@ -1468,13 +1467,8 @@ mod tests {
     }
 
     #[test]
-    fn pure_cleanup_savings_are_lossless_and_pass_required_reversibility() {
-        // Dropped debug fields, nulls, and empties keep the pre-pipeline
-        // judgment that they are cleanup, not content loss: with no
-        // truncation the candidate is lossless and applies even where
-        // reversible output is required and no stash exists. (The
-        // pre-pipeline path rejected exactly this combination.)
-        let input = serde_json::to_string(&serde_json::json!({
+    fn compaction_is_lossless_and_passes_required_reversibility() {
+        let input = serde_json::to_string_pretty(&serde_json::json!({
             "value": 1,
             "noise": null,
             "debug": "x".repeat(200),
@@ -1491,7 +1485,11 @@ mod tests {
         )
         .unwrap();
         assert!(result.applied());
-        assert!(!result.output.contains("debug"));
+        assert_eq!(result.unrecoverable_truncations.unwrap_or(0), 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.output).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&input).unwrap()
+        );
     }
 
     #[test]

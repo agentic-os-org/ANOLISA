@@ -16,7 +16,8 @@ When creating a new component, the reading priority is:
 1. `AGENTS.md` — natural entry; contains redirect to this spec for component introduction work
 2. `specs/component-onboarding.md` — this file (normative onboarding rules)
 3. `specs/documentation-standard.md` — file naming, bilingual, CHANGELOG format
-4. `src/<component>/AGENTS.md` — scoped module rules (create if applicable)
+4. `specs/commit-message-standard.md` — commit message format, scope inference, fix attribution, version bump
+5. `src/<component>/AGENTS.md` — scoped module rules (create if applicable)
 
 ---
 
@@ -27,7 +28,7 @@ Before code enters `src/`, the following decisions MUST be finalized:
 | Decision | Example | Used in |
 |----------|---------|---------|
 | **Positioning statement** — one sentence + 2–4 expanding sentences | "Per-host sandbox daemon that manages sandbox instance lifecycles via HTTP API." | README §4.4 opening, root README table, AGENTS.md §1 |
-| **Scope name** — short identifier for commits, branches, and CI | `skillfs`, `ktuner` | commitlint, prelint, ci.yaml, AGENTS.md §6 |
+| **Scope name** — short identifier for commits, branches, and CI | `skillfs`, `ktuner` | commitlint, prelint, ci.yaml, `specs/commit-message-standard.md` §4 |
 | **Tech stack** | Rust / Python / TypeScript / Shell | AGENTS.md §1 platform column |
 | **Target platform** | Linux only / Linux + macOS / All | AGENTS.md §1, CI runner selection |
 | **Component form** | daemon / CLI tool / library / skill | Determines conditional deliverables (§3) |
@@ -55,6 +56,7 @@ The scaffold PR (first PR introducing the component) MUST include ALL of the fol
 | Deliverable | File | What to add |
 |-------------|------|-------------|
 | Commit scope | `.github/commitlint.config.json` | Add scope name to `scope-enum` array |
+| Commit scope table | `specs/commit-message-standard.md` | Add the scope to the §4 Scope Inference table |
 | PR title scope | `.github/workflows/prelint.yml` | Add scope to **both** `validScopes` arrays (title check + branch check) |
 | CI test job | `.github/workflows/ci.yaml` | Add `workflow_dispatch` input, `detect-changes` output + path filter, and a dedicated test job |
 
@@ -65,7 +67,7 @@ The scaffold PR (first PR introducing the component) MUST include ALL of the fol
 | Component table row | `README.md` | Component overview table |
 | Component table row | `AGENTS.md` | §1 Project Overview table |
 | Dev commands | `AGENTS.md` | §2 Development Commands — add per-component block |
-| Scope inference | `AGENTS.md` | §6 Scope Inference table — add `src/<name>/` → `<scope>` mapping |
+| Scope inference | `specs/commit-message-standard.md` | §4 Scope Inference table — add `src/<name>/` → `<scope>` mapping |
 
 ### 2.4 Atomicity Rule
 
@@ -99,7 +101,7 @@ Include these based on the component's form and characteristics:
 |-----------|-------------|------|---------|
 | Rust component | Add to §3 conventions scope list | `AGENTS.md` §3 opening line | Tech stack = Rust |
 | Complex architecture (multi-crate, non-trivial constraints) | Scoped AGENTS.md + register in §11 | `src/<name>/AGENTS.md` + `AGENTS.md` §11 table | More than 1 crate, or has design constraints that differ from global conventions |
-| User-facing CLI or interactive tool | User-guide documentation (en + zh) + link from index | `docs/user-guide/{en,zh}/user-entrypoint/<name>.md` | Component has CLI subcommands or user-visible behavior |
+| User-facing CLI or interactive tool | User-guide documentation (en + zh) + link from index | `docs/user-guide/{en,zh}/<name>/index.md` | Component has CLI subcommands or user-visible behavior |
 | Agent-callable (can be invoked by cosh/agent directly) | Skill registration | `src/os-skills/<domain>/<name>/SKILL.md` | Tool is designed for agent autonomous invocation |
 | Daemon / needs packaging | Component contract | `.anolisa/component.toml` | Has systemd service, RPM spec, or runtime directories. See `distribution/anolisa/docs/COMPONENT_CONTRACT.md` for schema |
 | Pinned toolchain | rust-toolchain.toml | `src/<name>/rust-toolchain.toml` | Requires a Rust version different from repo default |
@@ -149,7 +151,7 @@ Copy into your PR description when introducing a new component:
 - [ ] `README.md` — component table row added
 - [ ] `AGENTS.md` §1 — component table row added
 - [ ] `AGENTS.md` §2 — dev commands section added
-- [ ] `AGENTS.md` §6 — scope inference table row added
+- [ ] `specs/commit-message-standard.md` §4 — scope inference table row added
 - [ ] License field: `license = "Apache-2.0"` in Cargo.toml / package.json
 - [ ] Quality gates: fmt + lint + test pass locally
 - [ ] Version coherence: Cargo.toml / contract / CHANGELOG versions match (release PRs only)
@@ -188,7 +190,7 @@ Before approving a new-component PR, verify:
 Planned invariants for a `check-component-registry` CI job:
 
 - Every registered component root in `src/`, `distribution/`, or `deprecated/` (excluding `src/os-skills/`) has README.md + CHANGELOG.md
-- The set of scopes in `commitlint.config.json` is a superset of component scopes in `AGENTS.md` §6
+- The set of scopes in `commitlint.config.json` is a superset of component scopes in `specs/commit-message-standard.md` §4
 - The set of scopes in `prelint.yml` includes all scopes from `commitlint.config.json`
 - `ci.yaml` has a detect-changes path filter for every `src/<name>/` listed in AGENTS.md §1
 

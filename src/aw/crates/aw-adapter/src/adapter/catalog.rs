@@ -40,6 +40,15 @@ pub(crate) const QODER: Profile = Profile {
     events: TOOL_EVENTS,
 };
 
+pub(crate) const QODER_SDK: Profile = Profile {
+    name: "qoder-sdk",
+    adapter: &super::super::adapters::qoder_sdk::QoderSdk,
+    events: &[
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe"]),
+    ],
+};
+
 pub(crate) const OPENCLAW: Profile = Profile {
     name: "openclaw",
     adapter: &super::super::adapters::openclaw::OpenClaw,
@@ -76,8 +85,9 @@ pub(crate) const AGENTSCOPE: Profile = Profile {
     events: TOOL_EVENTS,
 };
 
-pub(crate) const PROFILES: &[Profile] =
-    &[QODER, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE];
+pub(crate) const PROFILES: &[Profile] = &[
+    QODER, QODER_SDK, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE,
+];
 
 #[cfg(test)]
 mod tests {

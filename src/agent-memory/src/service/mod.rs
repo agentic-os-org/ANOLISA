@@ -1,7 +1,7 @@
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag};
@@ -37,9 +37,11 @@ pub struct MemoryService {
     /// call; when it reaches `consolidation.incremental_interval`, an
     /// incremental consolidation is triggered and the counter resets.
     audit_counter: AtomicUsize,
-    /// Prevents recursive consolidation: set to true while consolidate() is
-    /// running, so audit_log calls from within consolidation don't re-enter.
-    consolidating: std::sync::atomic::AtomicBool,
+    /// Prevents overlapping consolidations: held while `consolidate()` runs, so
+    /// a concurrent `audit_log` trigger skips that window instead of writing
+    /// the same session log into duplicate facts. Claimed through
+    /// [`ConsolidationGuard`], which also releases it on unwind.
+    consolidating: AtomicBool,
     /// Cached consent configuration for memory sovereignty checks.
     pub consent_cache:
         std::sync::Arc<std::sync::Mutex<Option<crate::tools::memory_sovereignty::ConsentConfig>>>,
@@ -51,6 +53,12 @@ impl MemoryService {
     /// directory is writable. Failure to start the session is logged and
     /// degrades gracefully (mem_promote / mem_session_log will return errors).
     pub fn new(config: AppConfig) -> Result<Self> {
+        // Configs built in code skip `AppConfig::load`, and `IndexHandle::open`
+        // below hands the raw decay values to the BM25 scorer, so re-check the
+        // ranges here: a negative lambda would otherwise invert recency
+        // ranking for every query without a single log line.
+        config.validate()?;
+
         // `pick_strategy` below may unshare into a user namespace, after
         // which `geteuid()` reports the mapped uid (0 for the default
         // `0 <host uid> 1` mapping) instead of the one we were launched
@@ -133,7 +141,7 @@ impl MemoryService {
             entered_userns,
             mount_strategy_name: strategy_name,
             audit_counter: AtomicUsize::new(0),
-            consolidating: std::sync::atomic::AtomicBool::new(false),
+            consolidating: AtomicBool::new(false),
             consent_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
@@ -259,26 +267,13 @@ impl MemoryService {
             g.auto_commit_for(&entry);
         }
 
-        // Incremental consolidation: count tool calls, trigger when threshold
-        // is reached. Skip internal tools (consolidate, compact) to avoid
-        // feedback loops, and skip if consolidation is already running.
-        let interval = self.config.memory.consolidation.incremental_interval;
-        if interval > 0
-            && !self.consolidating.load(Ordering::Acquire)
-            && entry.tool != "consolidate"
-            && entry.tool != "compact"
-        {
-            let prev = self.audit_counter.fetch_add(1, Ordering::AcqRel);
-            if prev + 1 >= interval {
-                self.audit_counter.store(0, Ordering::Release);
-                self.consolidating.store(true, Ordering::Release);
-                let n = self.consolidate();
-                self.consolidating.store(false, Ordering::Release);
-                if n > 0 {
-                    tracing::info!("incremental consolidation: {n} facts written");
-                }
-            }
-        }
+        trigger_incremental_consolidation(
+            &self.audit_counter,
+            &self.consolidating,
+            self.config.memory.consolidation.incremental_interval,
+            entry.tool,
+            || self.consolidate(),
+        );
     }
 
     pub fn mem_log(
@@ -423,6 +418,73 @@ impl MemoryService {
         };
         let cold_after = self.config.memory.index.cold_after_days;
         index.compact(cold_after)
+    }
+}
+
+/// Claim on the `MemoryService::consolidating` flag, released on drop.
+///
+/// The release must survive unwinding: `consolidate` writes the fact store,
+/// calls the embedding provider and fires git hooks, and a panic in any of
+/// them would skip a plain `store(false)` placed after the call, latching the
+/// flag for the rest of the process lifetime and silently disabling every
+/// later incremental trigger.
+struct ConsolidationGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> ConsolidationGuard<'a> {
+    /// Claims `flag`, or returns `None` when another caller already holds it.
+    ///
+    /// The claim is a single `compare_exchange`: a `load` pre-check gates
+    /// nothing, because two concurrent callers can both read `false` and then
+    /// both consolidate the same session window into duplicate facts.
+    fn claim(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self { flag })
+    }
+}
+
+impl Drop for ConsolidationGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+/// Counts one audited tool call and runs `consolidate` once the count reaches
+/// `interval` (`0` disables the trigger).
+///
+/// The entries consolidation writes itself (`consolidate`, `compact`) are
+/// excluded so the trigger cannot feed on its own output, and nothing is
+/// counted while a consolidation is in flight.
+///
+/// Callers crossing the threshold together race for one [`ConsolidationGuard`];
+/// the loser skips this window and starts counting again, because the winner is
+/// consolidating that same session log.
+fn trigger_incremental_consolidation(
+    counter: &AtomicUsize,
+    consolidating: &AtomicBool,
+    interval: usize,
+    tool: &str,
+    consolidate: impl FnOnce() -> usize,
+) {
+    if interval == 0 || tool == "consolidate" || tool == "compact" {
+        return;
+    }
+    // Cheap skip, not a gate: `ConsolidationGuard::claim` below decides.
+    if consolidating.load(Ordering::Acquire) {
+        return;
+    }
+    if counter.fetch_add(1, Ordering::AcqRel) + 1 < interval {
+        return;
+    }
+    counter.store(0, Ordering::Release);
+    let Some(_guard) = ConsolidationGuard::claim(consolidating) else {
+        return;
+    };
+    let n = consolidate();
+    if n > 0 {
+        tracing::info!("incremental consolidation: {n} facts written");
     }
 }
 
@@ -1218,5 +1280,182 @@ mod session_base_tests {
             session_base_candidates(configured),
             candidates_for_host_uid(configured, crate::host::host_uid())
         );
+    }
+}
+
+#[cfg(test)]
+mod incremental_consolidation_tests {
+    use std::sync::Arc;
+    use std::sync::Barrier;
+
+    use super::*;
+
+    /// Runs `f`, swallowing the panic it is expected to raise, and reports
+    /// whether it did. The panic hook is muted for the duration so an
+    /// intentional panic does not read as a failure in the test output.
+    fn panicked(f: impl FnOnce()) -> bool {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::panic::set_hook(hook);
+        outcome.is_err()
+    }
+
+    #[test]
+    fn a_held_guard_admits_no_second_claim_until_it_drops() {
+        let flag = AtomicBool::new(false);
+        let guard = ConsolidationGuard::claim(&flag).expect("an unheld flag must be claimable");
+
+        assert!(
+            ConsolidationGuard::claim(&flag).is_none(),
+            "one session window, one consolidation"
+        );
+
+        drop(guard);
+        assert!(ConsolidationGuard::claim(&flag).is_some());
+    }
+
+    #[test]
+    fn an_unwind_inside_the_guard_releases_the_flag() {
+        let flag = AtomicBool::new(false);
+
+        assert!(panicked(|| {
+            let _guard = ConsolidationGuard::claim(&flag).expect("claim");
+            panic!("embedding call failed");
+        }));
+
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "a panic must not latch the consolidation flag"
+        );
+    }
+
+    #[test]
+    fn a_panicking_consolidation_leaves_later_triggers_armed() {
+        let counter = AtomicUsize::new(0);
+        let consolidating = AtomicBool::new(false);
+
+        assert!(panicked(|| {
+            trigger_incremental_consolidation(&counter, &consolidating, 1, "memory_observe", || {
+                panic!("index write failed");
+            })
+        }));
+
+        assert!(
+            !consolidating.load(Ordering::Acquire),
+            "a panic must not latch the consolidation flag"
+        );
+
+        let ran = AtomicBool::new(false);
+        trigger_incremental_consolidation(&counter, &consolidating, 1, "memory_observe", || {
+            ran.store(true, Ordering::Release);
+            0
+        });
+        assert!(
+            ran.load(Ordering::Acquire),
+            "incremental consolidation must survive a panic in an earlier run"
+        );
+    }
+
+    #[test]
+    fn racing_triggers_never_consolidate_at_the_same_time() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 50;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let consolidating = Arc::new(AtomicBool::new(false));
+        let inside = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let start = Arc::new(Barrier::new(THREADS));
+
+        let handles = (0..THREADS)
+            .map(|_| {
+                let (counter, consolidating, inside, overlapped, start) = (
+                    Arc::clone(&counter),
+                    Arc::clone(&consolidating),
+                    Arc::clone(&inside),
+                    Arc::clone(&overlapped),
+                    Arc::clone(&start),
+                );
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..ROUNDS {
+                        // interval 1: every call reaches the threshold, so all
+                        // threads contend for the guard on every round.
+                        trigger_incremental_consolidation(
+                            &counter,
+                            &consolidating,
+                            1,
+                            "memory_observe",
+                            || {
+                                if inside.fetch_add(1, Ordering::AcqRel) != 0 {
+                                    overlapped.store(true, Ordering::Release);
+                                }
+                                std::thread::yield_now();
+                                inside.fetch_sub(1, Ordering::AcqRel);
+                                0
+                            },
+                        );
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("a racing trigger thread panicked");
+        }
+
+        assert!(
+            !overlapped.load(Ordering::Acquire),
+            "two consolidations ran over the same session window at once"
+        );
+        assert!(
+            !consolidating.load(Ordering::Acquire),
+            "the guard must not outlive the consolidation"
+        );
+    }
+
+    #[test]
+    fn the_trigger_fires_on_the_interval_call_and_resets_the_counter() {
+        let counter = AtomicUsize::new(0);
+        let consolidating = AtomicBool::new(false);
+        let runs = AtomicUsize::new(0);
+
+        for _ in 0..7 {
+            trigger_incremental_consolidation(
+                &counter,
+                &consolidating,
+                3,
+                "memory_observe",
+                || {
+                    runs.fetch_add(1, Ordering::AcqRel);
+                    0
+                },
+            );
+        }
+
+        assert_eq!(runs.load(Ordering::Acquire), 2, "calls 3 and 6 trigger");
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn consolidation_own_entries_and_a_zero_interval_never_trigger() {
+        let counter = AtomicUsize::new(0);
+        let consolidating = AtomicBool::new(false);
+
+        for tool in ["consolidate", "compact"] {
+            trigger_incremental_consolidation(&counter, &consolidating, 1, tool, || {
+                panic!("consolidation must not retrigger on its own {tool} entry")
+            });
+        }
+        trigger_incremental_consolidation(&counter, &consolidating, 0, "memory_observe", || {
+            panic!("interval 0 disables the trigger")
+        });
+
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            0,
+            "skipped calls must not advance the counter"
+        );
+        assert!(!consolidating.load(Ordering::Acquire));
     }
 }

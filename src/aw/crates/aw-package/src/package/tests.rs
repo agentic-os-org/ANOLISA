@@ -81,7 +81,6 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
     let repo = repo.as_path();
     for (name, source) in [
         ("aw", "src/aw"),
-        ("aw-package", "src/aw"),
         ("aw-provider-sec-core", "providers/agent-sec-core"),
         ("aw-provider-tokenless", "providers/tokenless"),
         ("tokenless", "src/tokenless"),
@@ -112,8 +111,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
-        "docs/user-guide/en/user-entrypoint/aw/installation.md",
-        "docs/user-guide/zh/user-entrypoint/aw/installation.md",
+        "docs/user-guide/en/aw/installation.md",
+        "docs/user-guide/zh/aw/installation.md",
     ] {
         let path = repo.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -179,6 +178,9 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         "aw-all-in-one-0.1.0-preview.1-linux-{}",
         std::env::consts::ARCH
     ));
+    assert!(combined.join("aw").is_file());
+    assert!(!combined.join("aw-package").exists());
+    assert!(!combined.join("payload/bin/aw-package").exists());
     crate::inspect(&combined).unwrap();
     for component in crate::inspect(&combined).unwrap().components {
         for (name, payload) in component.files {
@@ -239,6 +241,22 @@ fn version_cannot_inject_paths_or_release_names() {
 }
 
 #[test]
+fn every_archive_builds_the_unified_cli() {
+    let repo = Path::new("/fixture/repo");
+    for selection in [
+        Selection::Core,
+        Selection::SecCore,
+        Selection::Tokenless,
+        Selection::All,
+    ] {
+        assert_eq!(
+            selection.builds(repo)[0],
+            (repo.join("src/aw"), vec!["aw-cli"])
+        );
+    }
+}
+
+#[test]
 fn core_selection_builds_and_stages_without_any_provider_tree() {
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
     fs::create_dir_all(&target).unwrap();
@@ -246,18 +264,16 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     let repo = directory.path().canonicalize().unwrap();
     assert_eq!(
         Selection::Core.builds(&repo),
-        vec![(repo.join("src/aw"), vec!["aw-package", "aw-service"])]
+        vec![(repo.join("src/aw"), vec!["aw-cli"])]
     );
-    for name in ["aw", "aw-package"] {
-        let path = repo.join("src/aw/target/release").join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::copy("/bin/true", path).unwrap();
-    }
+    let path = repo.join("src/aw/target/release/aw");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::copy("/bin/true", path).unwrap();
     for name in ["LICENSE", "NOTICE"] {
         fs::write(repo.join(name), "fixture").unwrap();
     }
     for language in ["en", "zh"] {
-        let name = format!("docs/user-guide/{language}/user-entrypoint/aw/installation.md");
+        let name = format!("docs/user-guide/{language}/aw/installation.md");
         let path = repo.join(&name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::copy(
@@ -298,13 +314,39 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     let manifest = crate::inspect(&unpacked).unwrap();
     assert_eq!(manifest.components.len(), 1);
     assert!(manifest.components[0].requires.is_empty());
+    assert!(unpacked.join("aw").is_file());
+    assert_eq!(
+        digest(&unpacked.join("aw")).unwrap(),
+        digest(&unpacked.join("payload/bin/aw")).unwrap()
+    );
+    assert!(!unpacked.join("aw-package").exists());
+    assert!(!unpacked.join("payload/bin/aw-package").exists());
     assert!(!unpacked.join("payload/libexec").exists());
     assert!(!repo.join("src/agent-sec-core").exists());
     assert!(!repo.join("src/tokenless").exists());
-    for (name, counterpart) in [("README.md", "README_zh.md"), ("README_zh.md", "README.md")] {
+    for (name, counterpart, locale) in [
+        ("README.md", "README_zh.md", ""),
+        ("README_zh.md", "README.md", "/zh"),
+    ] {
         let readme = fs::read_to_string(unpacked.join(name)).unwrap();
         assert!(readme.contains(&format!("]({counterpart})")));
-        assert!(readme.contains("aw-package configure"));
+        assert!(readme.contains("aw config init"));
+        assert!(readme.contains("./$AW_BUNDLE/aw\" install --bundle"));
+        assert!(!readme.contains("aw-package\" install"));
+        assert!(!readme.contains("/docs/user-guide/user-entrypoint/"));
+        for route in [
+            "aw/configuration",
+            "aw/tokenless",
+            "aw/security",
+            "aw/operations",
+        ] {
+            assert!(readme.contains(&format!(
+                "](https://agentic-os.sh{locale}/docs/user-guide/{route}/)"
+            )));
+        }
+        assert!(readme.contains(&format!(
+            "](https://agentic-os.sh{locale}/docs/contribute/aw/building/)"
+        )));
         for target in readme.split("](").skip(1) {
             let target = target.split(')').next().unwrap();
             assert!(
@@ -322,7 +364,7 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
     let directory = tempfile::tempdir_in(target).unwrap();
     let repo = directory.path().canonicalize().unwrap();
     for (name, source) in [
-        ("aw-package", "src/aw"),
+        ("aw", "src/aw"),
         ("aw-provider-sec-core", "providers/agent-sec-core"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
@@ -337,8 +379,8 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
         "src/agent-sec-core/packaging/systemd/skillsec.json",
         "LICENSE",
         "NOTICE",
-        "docs/user-guide/en/user-entrypoint/aw/installation.md",
-        "docs/user-guide/zh/user-entrypoint/aw/installation.md",
+        "docs/user-guide/en/aw/installation.md",
+        "docs/user-guide/zh/aw/installation.md",
     ] {
         let path = repo.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -373,7 +415,9 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
         BTreeMap::from([("aw-core".into(), "0.1.0-preview.1".into())])
     );
     assert!(!package.join("payload/bin/aw").exists());
-    assert!(!repo.join("src/aw/target/release/aw").exists());
+    assert!(package.join("aw").is_file());
+    assert!(!package.join("aw-package").exists());
+    assert!(!package.join("payload/bin/aw-package").exists());
     let component = &manifest.components[0];
     for name in [
         "libexec/aw/providers/sec-core/agent-sec-daemon-health",
@@ -405,7 +449,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     let directory = tempfile::tempdir_in(target).unwrap();
     let repo = directory.path().canonicalize().unwrap();
     for (name, source) in [
-        ("aw-package", "src/aw"),
+        ("aw", "src/aw"),
         ("aw-provider-tokenless", "providers/tokenless"),
         ("tokenless", "src/tokenless"),
         ("rtk", "src/aw"),
@@ -424,8 +468,8 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
-        "docs/user-guide/en/user-entrypoint/aw/installation.md",
-        "docs/user-guide/zh/user-entrypoint/aw/installation.md",
+        "docs/user-guide/en/aw/installation.md",
+        "docs/user-guide/zh/aw/installation.md",
     ] {
         let path = repo.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -483,6 +527,9 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     );
     assert!(!repo.join("src/agent-sec-core").exists());
     assert!(!package.join("payload/bin/aw").exists());
+    assert!(package.join("aw").is_file());
+    assert!(!package.join("aw-package").exists());
+    assert!(!package.join("payload/bin/aw-package").exists());
 }
 
 #[test]

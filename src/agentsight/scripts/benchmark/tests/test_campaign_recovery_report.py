@@ -60,10 +60,10 @@ def test_recovery_report_cli_preserves_incomplete_evidence(
                 json.dumps(
                     {
                         "outcomes": {
-                            name: {"handled": 1}
-                            for name in campaign_evidence.FAULT_CASES
+                            name: {"handled": 1} for name in campaign_evidence.FAULT_CASES
                         },
                         "server_healthy_after": True,
+                        "sse_truncation_verified": True,
                         "process_alive_before": True,
                         "process_alive_after": True,
                     }

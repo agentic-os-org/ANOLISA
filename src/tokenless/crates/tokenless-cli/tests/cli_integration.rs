@@ -77,19 +77,30 @@ struct TempDataDir {
 }
 
 impl TempDataDir {
-    fn new() -> Option<Self> {
-        let home = get_home_dir();
+    /// Use system-wide temporary storage so rejection tests also run when the
+    /// default temporary directory is inside the trusted user profile.
+    fn new_external() -> Option<Self> {
+        #[cfg(windows)]
+        let base = std::path::PathBuf::from(std::env::var_os("SystemRoot")?).join("Temp");
+        #[cfg(unix)]
+        let base = std::path::PathBuf::from("/tmp");
         let temp_dir = tempfile::Builder::new()
-            .prefix("tokenless-external-data-dir-integration-")
-            .tempdir()
+            .prefix("tokenless-external-data-dir-")
+            .tempdir_in(&base)
+            .inspect_err(|error| {
+                eprintln!(
+                    "external-root fixture unavailable at {}: {error}",
+                    base.display()
+                )
+            })
             .ok()?;
-        let root = temp_dir.path().to_path_buf();
-        if !home.is_empty()
-            && root
-                .canonicalize()
-                .ok()?
-                .starts_with(std::path::Path::new(&home).canonicalize().ok()?)
-        {
+        let root = temp_dir.path().canonicalize().ok()?;
+        let home = get_home_dir();
+        if !home.is_empty() && root.starts_with(std::path::Path::new(&home).canonicalize().ok()?) {
+            eprintln!(
+                "external-root fixture is inside the trusted home: {}",
+                root.display()
+            );
             return None;
         }
         let data_dir = root.join("databases");
@@ -100,13 +111,34 @@ impl TempDataDir {
         })
     }
 
+    fn new() -> Option<Self> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("tokenless-data-dir-integration-")
+            .tempdir()
+            .ok()?;
+        let root = temp_dir.path().to_path_buf();
+        let data_dir = root.join("databases");
+        Some(Self {
+            _temp_dir: temp_dir,
+            root,
+            data_dir,
+        })
+    }
+
     fn command(&self) -> Command {
         let mut command = tokenless_bin();
+        self.configure(&mut command);
+        command
+    }
+
+    /// Apply this fixture's database isolation to a `Command` the caller
+    /// builds itself — the unwritable-stderr tests need to set stdio and
+    /// cannot go through [`TempDataDir::command`].
+    fn configure<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
             .env("TOKENLESS_DATA_DIR", &self.data_dir)
             .env_remove("TOKENLESS_STATS_DB")
-            .env_remove("TOKENLESS_STASH_DB");
-        command
+            .env_remove("TOKENLESS_STASH_DB")
     }
 }
 
@@ -244,7 +276,7 @@ fn valid_stats_db_override_wins_over_invalid_data_dir() {
 
 #[test]
 fn stats_db_override_cannot_escape_selected_data_dir() {
-    let fixture = match TempDataDir::new() {
+    let fixture = match TempDataDir::new_external() {
         Some(fixture) => fixture,
         None => return,
     };
@@ -260,6 +292,26 @@ fn stats_db_override_cannot_escape_selected_data_dir() {
     assert!(!outside_db.exists());
     assert!(fixture.data_dir.join("stats.db").is_file());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
+}
+
+#[test]
+fn stats_db_override_allows_trusted_home_outside_selected_data_dir() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let data = tempfile::tempdir().unwrap();
+    let outside_db = fixture.dir.join("home-stats.db");
+    let output = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", data.path())
+        .env("TOKENLESS_STATS_DB", &outside_db)
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(outside_db.is_file());
+    assert!(!data.path().join("stats.db").exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
 }
 
 #[test]
@@ -299,6 +351,86 @@ fn compress_schema_from_file() {
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["function"]["name"], "f");
+}
+
+/// Run a tokenless subcommand with `input` on stdin and capture its output.
+/// Stats and SLS stay off so the assertions see only the emitted payload.
+fn run_stdin_command(
+    fixture: &TempDataDir,
+    compression_enabled: &str,
+    args: &[&str],
+    input: &str,
+) -> std::process::Output {
+    fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", compression_enabled)
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap()
+}
+
+/// `compress-schema` shares the byte-exact stdout contract of `compress-toon`
+/// and `retrieve`: the payload is emitted verbatim, so a passthrough run
+/// reproduces the input byte-for-byte (no LF appended, none doubled) and an
+/// encoded run emits exactly the candidate the stats recorder measures.
+#[test]
+fn compress_schema_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let schema = r#"{"function":{"name":"test","description":"A test function","parameters":{"type":"object","properties":{"x":{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}"#;
+
+    // Dry-run passthrough emits the input unchanged; the trailing-LF variant
+    // catches a doubled newline just as the bare variant catches an added one.
+    for payload in [schema.to_string(), format!("{schema}\n")] {
+        let output = run_stdin_command(&fixture, "0", &["compress-schema", "--no-stash"], &payload);
+        assert!(
+            output.status.success(),
+            "compress-schema failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-schema must reproduce the input byte-for-byte"
+        );
+    }
+
+    // With compression on, stdout is exactly the emitted candidate: compact
+    // JSON from the schema compressor, with no LF appended.
+    let long_desc = "Run a shell command in the workspace. ".repeat(20);
+    let schema = format!(
+        r#"{{"function":{{"name":"test","description":"{long_desc}","parameters":{{"type":"object","properties":{{"x":{{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}}}}}}"#
+    );
+    let output = run_stdin_command(&fixture, "1", &["compress-schema", "--no-stash"], &schema);
+    assert!(
+        output.status.success(),
+        "compress-schema failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(&schema).unwrap();
+    let expected =
+        serde_json::to_string(&tokenless_schema::SchemaCompressor::new().compress(&value)).unwrap();
+    assert_ne!(
+        expected, schema,
+        "fixture must compress, otherwise the run is a passthrough"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        expected,
+        "compress-schema stdout must equal the emitted candidate byte-for-byte"
+    );
 }
 
 #[test]
@@ -454,8 +586,10 @@ fn compress_response_from_stdin() {
         .unwrap();
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(result.get("data").is_some());
-    assert!(result.get("debug").is_none());
+    assert_eq!(
+        result,
+        serde_json::from_str::<serde_json::Value>(response).unwrap()
+    );
 }
 
 #[test]
@@ -500,10 +634,44 @@ fn compress_response_cli_matches_runtime_library() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        expected.output,
-    );
+    // Exact equality with the runtime library output: no `trim_end()`, so an
+    // appended trailing newline fails the comparison.
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected.output);
+}
+
+/// `compress-response` shares the byte-exact stdout contract of
+/// `compress-toon` and `retrieve`: a passthrough run must reproduce the input
+/// verbatim, so automation can detect the passthrough by comparing stdout with
+/// the input payload. The runs here are dry-run with statistics off, so they
+/// assert the emitted bytes only - equality with the recorded `after` text
+/// holds in active mode alone (see the CLI reference).
+#[test]
+fn compress_response_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let input = r#"{"data":"value","debug":"remove"}"#;
+    // The trailing-LF variant catches a doubled newline just as the bare
+    // variant catches an added one.
+    for payload in [input.to_string(), format!("{input}\n")] {
+        let output = run_stdin_command(
+            &fixture,
+            "0",
+            &["compress-response", "--no-stash"],
+            &payload,
+        );
+        assert!(
+            output.status.success(),
+            "compress-response failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-response must reproduce the input byte-for-byte"
+        );
+    }
 }
 
 #[test]
@@ -554,10 +722,10 @@ fn compress_response_stats_use_unicode_aware_estimates() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].before_tokens, estimate_tokens(&response));
-    assert_eq!(
-        records[0].after_tokens,
-        estimate_tokens(compressed.trim_end())
-    );
+    // The recorded `after` is measured on exactly the emitted bytes: no
+    // compensating trim, so an LF the CLI appended but the recorder did not
+    // measure fails here.
+    assert_eq!(records[0].after_tokens, estimate_tokens(&compressed));
 }
 
 #[test]
@@ -585,8 +753,9 @@ fn dry_run_no_savings_keeps_the_no_savings_warning() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        response
+        output.stdout,
+        response.as_bytes(),
+        "dry-run passthrough must reproduce the input byte-for-byte"
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("response compression did not reduce size"));
@@ -1951,7 +2120,7 @@ fn post_tool_request_json(content: &str, recovery_available: bool, session_id: &
 }
 
 fn debug_laden_content() -> String {
-    serde_json::to_string(&serde_json::json!({
+    serde_json::to_string_pretty(&serde_json::json!({
         "url": "https://registry.example.com/packages",
         "status": 200,
         "debug": "cache=miss upstream=registry-04 trace=9f2e11c0 backend_latency_ms=184 retries=0",
@@ -1997,6 +2166,11 @@ fn compress_post_tool_uses_the_v2_result_envelope() {
     );
     assert_eq!(response["result"]["recoverability"], "lossless");
     assert_eq!(response["result"]["content_type"], "json");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(response["result"]["output"].as_str().unwrap())
+            .unwrap(),
+        serde_json::from_str::<serde_json::Value>(&content).unwrap()
+    );
 }
 
 #[test]
@@ -2109,6 +2283,14 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
         .into_iter()
         .map(Into::into)
         .collect();
+        #[cfg(windows)]
+        paths.retain(|path| {
+            !path.to_string_lossy().ends_with(' ')
+                && !path
+                    .to_string_lossy()
+                    .chars()
+                    .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+        });
         // With quotePath=false these bytes are emitted raw, outside the
         // text input accepted by the compression API.
         #[cfg(unix)]
@@ -2405,6 +2587,7 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 }
 
 #[test]
+#[cfg(unix)]
 fn compress_pre_tool_resolves_the_independent_rtk_binary() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -2736,11 +2919,15 @@ fn stats_open_warning_survives_an_unwritable_stderr() {
     assert_eq!(output.stdout, baseline.stdout);
 }
 
-/// A compressible response: dropping the debug/trace fields yields token
+/// A compressible response: compacting indentation yields token
 /// savings, so the stats/SLS recording tail of the command runs.
 #[cfg(target_os = "linux")]
-const COMPRESSIBLE_RESPONSE: &str =
-    r#"{"data":"value","debug":"remove","trace":"remove","empty_field":""}"#;
+const COMPRESSIBLE_RESPONSE: &str = r#"{
+    "data": "value",
+    "debug": "diagnostic context",
+    "trace": "request trace",
+    "empty_field": ""
+}"#;
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -3092,8 +3279,8 @@ fn stats_list_maps_an_unwritable_stdout_to_an_operation_error() {
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
-/// The payload path: a healthy run keeps the bytes `println!` wrote (the
-/// compressed output plus one LF), and an unwritable stdout becomes an
+/// The payload path: a healthy run emits the compressed output byte-exact (the
+/// writer appends no LF any more), and an unwritable stdout becomes an
 /// operation error instead of a panic.
 #[test]
 #[cfg(target_os = "linux")]
@@ -3124,11 +3311,17 @@ fn compress_response_maps_an_unwritable_stdout_to_an_operation_error() {
             .unwrap()
     };
 
+    // Control: the healthy run wrote its payload through the same writer the
+    // unwritable run below exercises. `compress-response` is byte-exact, so the
+    // single trailing LF `println!` used to append is part of what this checks
+    // is gone - the assertion follows the emitted bytes, not the old newline.
     let healthy = run(std::process::Stdio::piped());
     assert!(healthy.status.success(), "{healthy:?}");
+    assert!(!healthy.stdout.is_empty(), "no payload was written");
     assert!(
-        healthy.stdout.ends_with(b"\n"),
-        "the payload still carries the single trailing LF println! added"
+        !healthy.stdout.ends_with(b"\n"),
+        "the payload is emitted byte-exact, so the writer appends no LF: {}",
+        String::from_utf8_lossy(&healthy.stdout)
     );
 
     let full = run(std::process::Stdio::from(dev_full()));
@@ -3223,6 +3416,7 @@ fn stats_clear_prompt_fails_without_clearing_when_the_consumer_stopped_reading()
 
 /// A response above the 500-character TOON minimum, so `compress-toon`
 /// actually encodes it instead of taking the passthrough branch.
+#[cfg(target_os = "linux")]
 fn toon_encodable_response() -> String {
     let rows: Vec<String> = (0..24)
         .map(|index| format!(r#"{{"id":{index},"name":"row-{index}","note":"padding-{index}"}}"#))
@@ -3384,4 +3578,490 @@ fn retrieve_ends_gracefully_when_the_consumer_stopped_reading() {
         "a broken pipe is a pipeline condition, not a failure: {stderr}"
     );
     assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// The CLI's own fail-soft notices must survive an unwritable stderr too
+// ─────────────────────────────────────────────────────────────────────
+// The tests above cover warnings raised inside the stats, SLS and stash
+// libraries. The CLI prints notices of its own on paths that still
+// succeed: a rejected database path falls back to the data directory, a
+// stash that cannot be opened only disables recovery, and the no-savings,
+// passthrough, dry-run and mode-mismatch notices describe a run whose
+// result is already on stdout. A bare `eprintln!` panics when stderr
+// cannot be written, so each of them replaced a successful exit 0 — and
+// the output the caller was waiting for — with exit 101. Every test below
+// first proves the notice really is on the exercised path (writable
+// stderr), then re-runs the identical command with fd 2 on /dev/full and
+// requires the status and the whole stdout to survive.
+
+/// Run one command shape twice: with a writable stderr, and with fd 2 on
+/// /dev/full. The writable run must succeed and print every notice in
+/// `expected_notices` — otherwise the fixture no longer exercises the site
+/// under test — and the /dev/full run must keep the exit status and the
+/// complete stdout. `candidates` are tried in order as stdin, so a fixture
+/// whose disposition sits on a token-estimate boundary can offer several
+/// inputs and still fail loudly when none of them hits the path.
+#[cfg(target_os = "linux")]
+fn assert_notices_survive_unwritable_stderr(
+    expected_notices: &[&str],
+    candidates: &[String],
+    configure: impl Fn(&mut Command),
+) {
+    let run = |stdin: &str, stderr: std::process::Stdio| -> std::process::Output {
+        let mut command = tokenless_bin();
+        configure(&mut command);
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                child.stdin.take().unwrap().write_all(stdin.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap()
+    };
+
+    let mut selected = None;
+    for candidate in candidates {
+        let baseline = run(candidate, std::process::Stdio::piped());
+        let stderr = String::from_utf8_lossy(&baseline.stderr);
+        assert!(
+            baseline.status.success(),
+            "the fixture must succeed with a writable stderr (exit {}): {stderr}",
+            baseline.status.code().unwrap_or(-1)
+        );
+        if expected_notices
+            .iter()
+            .all(|notice| stderr.contains(notice))
+        {
+            selected = Some((candidate.as_str(), baseline));
+            break;
+        }
+    }
+    let (stdin, baseline) = selected.unwrap_or_else(|| {
+        panic!("no candidate stdin printed all of {expected_notices:?}; the fixture needs updating")
+    });
+    assert!(
+        !baseline.stdout.is_empty(),
+        "the fixture must produce a result on stdout"
+    );
+
+    let unwritable = run(stdin, std::process::Stdio::from(dev_full()));
+    assert_eq!(
+        unwritable.status.code(),
+        Some(0),
+        "an unwritable stderr must not turn the {expected_notices:?} notice into a failure"
+    );
+    assert_eq!(
+        unwritable.stdout, baseline.stdout,
+        "the successful result must survive the unwritable stderr"
+    );
+}
+
+/// A tool schema whose over-cap `description` is truncated into the stash,
+/// so the run writes a stash key. With the shortest name the compact
+/// serialization lands on the same estimated token count as the input,
+/// which takes the no-savings path and rolls that key back; longer names
+/// save a token and keep it, hence the candidate list.
+#[cfg(target_os = "linux")]
+fn stashable_tool_schema(name: &str) -> String {
+    serde_json::json!({
+        "function": {
+            "description": "A".repeat(257),
+            "name": name,
+            "parameters": {"properties": {}, "type": "object"}
+        }
+    })
+    .to_string()
+}
+
+/// A clean, compact JSON object: `json_cleanup` has nothing to compact, so the
+/// hook re-emits it byte-for-byte and reports no savings.
+#[cfg(target_os = "linux")]
+fn clean_json_object(keys: usize) -> String {
+    const NAMES: [&str; 24] = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+        "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "phi",
+        "chi", "psi", "omega",
+    ];
+    let fields: Vec<String> = (0..keys.min(NAMES.len()))
+        .map(|index| format!("\"{}\":\"{}\"", NAMES[index], index + 1))
+        .collect();
+    format!("{{{}}}", fields.join(","))
+}
+
+/// A stash database whose rows cannot be inserted / cannot be deleted.
+/// `SqliteStore` opens it cleanly — none of its open-time statements touch
+/// the blocked event — so the failure lands on the fail-soft paths that the
+/// schema compressor and the CLI only warn about.
+#[cfg(target_os = "linux")]
+fn create_stash_db_blocking(path: &std::path::Path, event: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let trigger = format!("block_stash_{}", event.to_lowercase());
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE stash (
+             hash TEXT PRIMARY KEY,
+             payload TEXT NOT NULL,
+             expires_at INTEGER NOT NULL,
+             generation INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE stash_metadata(
+             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+             last_generation INTEGER NOT NULL CHECK(last_generation >= 0));
+         CREATE TRIGGER {trigger} BEFORE {event} ON stash
+         BEGIN SELECT RAISE(ABORT, 'stash {event} blocked'); END;"
+    ))
+    .unwrap();
+}
+
+/// `compress-schema` emits the original input on the no-savings path.
+#[test]
+#[cfg(target_os = "linux")]
+fn schema_no_savings_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    assert_notices_survive_unwritable_stderr(
+        &["schema compression did not reduce size"],
+        &["{\"type\":\"object\"}".to_string()],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-schema", "--no-stash"]);
+        },
+    );
+}
+
+/// `compress-response` emits the original payload on the no-savings path.
+#[test]
+#[cfg(target_os = "linux")]
+fn response_no_savings_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    assert_notices_survive_unwritable_stderr(
+        &["response compression did not reduce size"],
+        &["{\"a\":1}".to_string()],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-response"]);
+        },
+    );
+}
+
+/// With compression disabled every run prints the dry-run notice, and a
+/// payload with nothing to compact adds the no-savings one; both precede the
+/// original payload on stdout.
+#[test]
+#[cfg(target_os = "linux")]
+fn dry_run_notices_survive_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    assert_notices_survive_unwritable_stderr(
+        &[
+            "response compression did not reduce size",
+            "dry-run mode (compression disabled)",
+        ],
+        &["{\"a\":1}".to_string()],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "0")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-response"]);
+        },
+    );
+}
+
+/// `compress-toon` passes a payload under the TOON minimum through.
+#[test]
+#[cfg(target_os = "linux")]
+fn toon_minimum_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    assert_notices_survive_unwritable_stderr(
+        &["TOON minimum"],
+        &["{\"a\":1}".to_string()],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-toon"]);
+        },
+    );
+}
+
+/// The hook dispatch reports a PostTool run that saved nothing.
+#[test]
+#[cfg(target_os = "linux")]
+fn post_tool_no_savings_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let candidates: Vec<String> = [20, 22, 24]
+        .iter()
+        .map(|keys| post_tool_request_json(&clean_json_object(*keys), false, "unwritable-stderr"))
+        .collect();
+    assert_notices_survive_unwritable_stderr(
+        &["compression did not reduce size"],
+        &candidates,
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress"]);
+        },
+    );
+}
+
+/// A `TOKENLESS_STATS_DB` outside the trusted roots is rejected and the
+/// data directory is used instead — the recording still succeeds.
+#[test]
+#[cfg(target_os = "linux")]
+fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new_external() else {
+        return;
+    };
+    // The fixture root is never under the real home (`TempDataDir::new_external`
+    // refuses that case), so this path is outside both trusted roots.
+    let rejected = fixture.root.join("rejected-stats.db");
+    assert_notices_survive_unwritable_stderr(
+        &["ignoring TOKENLESS_STATS_DB"],
+        &[post_tool_request_json("ok", false, "rejected-stats-db")],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "1")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .env("TOKENLESS_STATS_DB", &rejected)
+                .args(["compress"]);
+        },
+    );
+}
+
+/// A rejected `--stash-db` override warns and falls back to the data
+/// directory, keeping the run recoverable.
+#[test]
+#[cfg(target_os = "linux")]
+fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new_external() else {
+        return;
+    };
+    let rejected = fixture.root.join("rejected-stash.db");
+    assert_notices_survive_unwritable_stderr(
+        &["rejecting --stash-db"],
+        &["{\"type\":\"object\"}".to_string()],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-schema", "--stash-db"])
+                .arg(&rejected);
+        },
+    );
+}
+
+/// The same rejection through `TOKENLESS_STASH_DB`.
+#[test]
+#[cfg(target_os = "linux")]
+fn rejected_stash_db_env_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new_external() else {
+        return;
+    };
+    let rejected = fixture.root.join("rejected-stash.db");
+    assert_notices_survive_unwritable_stderr(
+        &["ignoring TOKENLESS_STASH_DB"],
+        &["{\"type\":\"object\"}".to_string()],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .env("TOKENLESS_STASH_DB", &rejected)
+                .args(["compress-schema"]);
+        },
+    );
+}
+
+/// A stash database that cannot be opened only disables recovery; the
+/// compression itself still produces output.
+#[test]
+#[cfg(target_os = "linux")]
+fn stash_disabled_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let corrupt = fixture.data_dir.join("stash-corrupt.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    std::fs::write(&corrupt, "not a SQLite database").unwrap();
+    assert_notices_survive_unwritable_stderr(
+        &["stash disabled"],
+        &["x", "xx", "xxx", "xxxx"].map(stashable_tool_schema),
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-schema", "--stash-db"])
+                .arg(&corrupt);
+        },
+    );
+}
+
+/// Failed stash writes are counted and reported, but never fail the run.
+#[test]
+#[cfg(target_os = "linux")]
+fn schema_stash_health_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let blocked = fixture.data_dir.join("stash-blocked-insert.db");
+    create_stash_db_blocking(&blocked, "INSERT");
+    assert_notices_survive_unwritable_stderr(
+        &["stash operation(s) failed"],
+        &["x", "xx", "xxx", "xxxx"].map(stashable_tool_schema),
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-schema", "--stash-db"])
+                .arg(&blocked);
+        },
+    );
+}
+
+/// The same report on the response path, where a truncated string is the
+/// stash write that fails.
+#[test]
+#[cfg(target_os = "linux")]
+fn response_stash_health_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let blocked = fixture.data_dir.join("stash-blocked-insert.db");
+    create_stash_db_blocking(&blocked, "INSERT");
+    let log: Vec<String> = (0..60)
+        .map(|line| {
+            format!(
+                "2026-01-01T00:00:00Z INFO service.component line {line} \
+                 processed request id=abc{line} latency={line}ms"
+            )
+        })
+        .collect();
+    let payload = serde_json::json!({"summary": "ok", "log": log.join("\n")}).to_string();
+    assert_notices_survive_unwritable_stderr(
+        &["stash operation(s) failed"],
+        &[payload],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-response", "--stash-db"])
+                .arg(&blocked);
+        },
+    );
+}
+
+/// The no-savings rollback delete failure is a diagnostic from
+/// tokenless-schema: the failed delete is already counted in
+/// `stash_errors`, which the CLI reports separately on the same run.
+#[test]
+#[cfg(target_os = "linux")]
+fn stash_rollback_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let blocked = fixture.data_dir.join("stash-blocked-delete.db");
+    create_stash_db_blocking(&blocked, "DELETE");
+    assert_notices_survive_unwritable_stderr(
+        &["did not reduce size", "rollback delete failed"],
+        &["x", "xx", "xxx", "xxxx"].map(stashable_tool_schema),
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args(["compress-schema", "--stash-db"])
+                .arg(&blocked);
+        },
+    );
+}
+
+/// The stats-compare mode hint is a sanity warning: the comparison itself
+/// is still printed.
+#[test]
+#[cfg(target_os = "linux")]
+fn mode_mismatch_notice_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    // Both sides recorded as active, so the baseline side mismatches the
+    // dry-run mode the comparison expects.
+    let recorder = StatsRecorder::new(&stats_db).unwrap();
+    for session in ["baseline-run", "tokenless-run"] {
+        recorder
+            .record(
+                &StatsRecord::new(
+                    OperationType::CompressResponse,
+                    "integration-agent".to_string(),
+                    1600,
+                    400,
+                    800,
+                    200,
+                )
+                .with_session_id(session)
+                .with_mode(CompressionMode::Active),
+            )
+            .unwrap();
+    }
+    drop(recorder);
+    assert_notices_survive_unwritable_stderr(
+        &["not in dry-run mode"],
+        &["".to_string()],
+        |command| {
+            fixture
+                .configure(command)
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0")
+                .args([
+                    "stats",
+                    "summary",
+                    "--compare",
+                    "baseline-run",
+                    "tokenless-run",
+                ]);
+        },
+    );
 }

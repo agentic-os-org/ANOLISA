@@ -7,6 +7,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6] - 2026-10-16
+
+### Component Versions
+
+| Component | Version |
+|-----------|--------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 1.0.1 |
+| agentsight | 0.14.2 |
+| tokenless | 0.8.7 |
+| agent-memory | 0.2.10 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.18 |
+| skillfs | 0.5.2 |
+| ws-ckpt | 0.5.0 |
+| cosh-ng | 0.27.0 |
+
+> **Release composition:** These versions are pinned to the Agentic OS 1.6 stable release
+> and may differ from rolling or Nightly component manifests on `main`.
+
+> **Note:** copilot-shell, os-skills, and ws-ckpt are unchanged since v1.5;
+> they are listed to show the complete stack composition.
+
+### Highlights
+
+- **cosh-ng**: Updated to v0.27.0, adds managed-installation update notices and IMDSv2-aware regional telemetry while making login fallback safe, users can discover upgrades at an idle prompt and retain shell access when Enhanced startup fails (#3465, #3406, #3395)
+- **agent-sec-core**: Updated to v1.0.1, ships the root-owned V2 daemon as the default runtime in the Agentic OS 1.6 RPM and Raw packages for policy, scanning, observability, and Skill Ledger operations and hardens daemon, storage, and SkillFS integration, administrators get one system-wide security control plane with explicit migration boundaries (#3257, #6551, #7563, #3295, #6826, #6931, #7122, #7629)
+- **agentsight**: Updated to v0.14.2, unifies SQLite storage under a hot-reloadable total budget and improves provider parsing, token accounting, trajectory analysis, dashboards, and enforcement reliability, operators get more complete and accurate Agent observability across supported runtimes (#7478, #7329, #7193, #7398, #6562)
+- **tokenless**: Updated to v0.8.7, adds QwenWorkCN local-mode integration and same-turn OpenClaw compression, enables complete HTML rendering by default, and preserves numeric, schema, and archived-conversation fidelity, agents can reduce more live context without silently changing tool results (#7257, #7124, #3473, #7069, #7048, #7042)
+- **anolisa**: Updated to v0.3.18, adds Intel Mac delivery, the sec-core Raw backend, and QwenWorkCN Tokenless management while hardening installation, updates, logs, telemetry, and rollback records, administrators can deploy the 1.6 stack on more platforms with safer recovery (#3448, #6551, #7368, #7635, #6450, #7197)
+- **agent-memory**: Updated to v0.2.10, adds verified Linux x86_64 and ARM64 Raw packages, discoverable deferred tools, and clean MCP child shutdown, users can install without a source build and reload the OpenClaw plugin without leftover memory processes (#7648, #7649, #7645, #7482, #7661)
+- **skillfs**: Updated to v0.5.2, connects authenticated notifications and live-source resolution to the Rust sec-core daemon and hardens hidden-Skill writes, watchers, mount recovery, parsing, and large notification handling, operators get safer and more consistent Skill views under mutation and shutdown (#3295, #5382, #4530, #6202, #7297, #7189)
+
+### Updated
+
+- **cosh-ng**: Updated to v0.27.0, shows an available-update command only for managed installations at a safe idle prompt, discovers regional SLS endpoints on IMDSv2-only instances while preserving older metadata compatibility, and starts the native login shell only when Enhanced startup fails before side effects, users receive actionable upgrade guidance without duplicate login sessions or unmanaged-install noise (#3465, #3406, #3395)
+- **agent-sec-core**: Updated to v1.0.1, in the Agentic OS 1.6 RPM and Raw packages, moves PII, prompt and code scanning, Security Events, observability queries, Policy/Scope/Binding reconciliation, and Skill Ledger trust into a root-owned V2 daemon; adds owner-scoped queries, local-model scanning, system-wide signing and default Skill directories, reproducible V2 RPM builds and V2 Raw packages, root-daemon verification, connection limits, retention, SQLite path checks, and bounded SkillFS notification responses; removes legacy local execution from the V2 CLI, selected V1 commands, and SkillSec key rotation, administrators can operate a hardened shared security service while preserving clear ownership and revocation rules (#3257, #6551, #7563, #3286, #3384, #6596, #6679, #6745, #6826, #3295, #6931, #7099, #7419, #7188, #7122, #7103, #7295, #7296, #7629)
+- **agentsight**: Updated to v0.14.2, applies a configurable 2200 MB default budget across SQLite stores and trims the largest stores first; records body-less calls when an agent exits; strengthens Anthropic, Gemini, Codex, Responses, legacy completion, HTTP/2, SSE, tool-call, finish-reason, tokenizer, and token-usage handling; accepts `--db` in query commands and improves agent discovery, trajectory filters, batch analysis, reuse labels, semantic search, dashboard pagination and metrics, interruption aggregation, storage maintenance, audit validation, enforcement, OOM detection, and legacy-kernel compatibility, users can query and analyze longer-running Agent workloads with fewer missing or misattributed events (#7478, #7329, #7193, #7398, #6562, #7385, #7451, #7032, #7403, #7413, #6781, #7326, #7467)
+- **tokenless**: Updated to v0.8.7, reclaims expired Stash rows during writes, enables full-page HTML extraction by default, adds a packaged QwenWorkCN local-mode adapter, and moves supported OpenClaw tool-result compression before the same-turn model request; preserves quiet `sed` reads and inline code, passes malformed tool arguments back to AgentScope/QwenPaw hosts, deduplicates Selective-Claw recall, protects JSON numeric precision and OpenCode runtime validators, previews Qwen Code/OpenCode uninstall under `ANOLISA_DRY_RUN=1`, and keeps compression available when statistics storage is unavailable, agents gain broader lossless compression with safer framework integration (#3565, #3473, #7257, #7124, #4963, #6393, #5288, #5299, #4859, #7040, #7069, #7048, #7348, #7395)
+- **anolisa**: Updated to v0.3.18, ships Intel macOS x86_64 CLI artifacts and recognizes compatible cosh-ng releases, adds the sec-core Raw backend and an OpenClaw capability-consent opt-out, and manages the Tokenless QwenWorkCN local-mode plugin; validates RPM backends, repositories, kernel requirements, archive paths, Raw conflicts, registration schemas, adapter state, and post-uninstall hooks, repairs npm launchers, redacts repository errors, improves RFC3339 log queries and telemetry retry/shutdown behavior, and recognizes Linux ARM64 SkillFS/ws-ckpt packages, users get safer multi-platform lifecycle management and more recoverable failed operations (#3448, #3554, #6551, #7368, #7635, #6450, #7197, #7294)
+- **agent-memory**: Updated to v0.2.10, requires an executable OpenClaw adapter binary, publishes verified Linux x86_64 and ARM64 archives containing the memory server and bundled adapter, guides agents to discover deferred memory tools through Tool Search or direct calls, and waits for the MCP child process during plugin disposal, users receive earlier configuration errors, simpler installation, reliable tool invocation, and clean shutdown or reload behavior (#4855, #7648, #7649, #7645, #7482, #7661)
+- **skillfs**: Updated to v0.5.2, interoperates with the Rust sec-core SkillSec daemon for authenticated scanning and activation, blocks hidden-Skill mutation through open handles and nested filesystem operations, preserves listings and inode identity across flat and Hermes changes, bounds watcher and activation waits, preserves existing views and reports skipped or colliding Skills, hardens managed mount reuse and shutdown, accepts varied Skill text formats, and falls back to whole-Skill rescans for notifications near the 64 KiB frame limit, agents see stable Skill content while operators retain source data and actionable mount state (#3295, #5382, #4530, #6202, #7297, #7189)
+
+### Compatibility
+
+- **agent-sec-core V2 RPM/Raw migration**: When upgrading through the Agentic OS 1.6 V2 RPM or Raw packages, security operations require the root-owned `agent-sec-core.service` and default `/run/agent-sec-core/daemon.sock`. Move `AGENT_SEC_DATA_DIR` and model-service settings into the daemon environment, move PII rules to `/etc/agent-sec/pii-checker/rules.yaml`, update scripts that use `harden`, `verify`, or `log-sandbox`, and preserve V1 Security Events and Observability data because it is not imported automatically. Source installations using `make build-all` and `make install` still provide the V1 Python CLI and user service (#3257, #6551, #7563, #3217, #7283, #3286, #6605).
+- **agent-sec-core Skill Ledger trust**: V2 uses one system signing key and does not import V1 keys or trust history. Rescan Skills after upgrading. Version 1.0.1 rejects `rotate-keys` and `init --force-keys`. To revoke a certified Skill, ensure its path is no longer covered by an enabled default directory, another exact or wildcard `managedSkillDirs` entry, or an authenticated SkillFS mount; remove or disable every applicable authorization source, restart the daemon, and use `check` or `show` to verify that the Skill is no longer trusted (#3295, #7629).
+- **Tokenless OpenClaw requirement**: The OpenClaw adapter requires OpenClaw 2026.6.6 or newer and compresses supported live tool results before the same-turn model request. Hosts that truncate text before middleware runs cannot be repaired by Tokenless; use a host build containing upstream fix `2f620b970a04` when applicable (#7124).
+- **Tokenless HTML default**: Complete HTML page extraction is enabled by default in the CLI, Runtime, and Python SDK. Set `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False` to retain the previous opt-in behavior; Git diff cropping remains opt-in (#3473).
+- **QwenWorkCN local mode**: Tokenless and ANOLISA support the macOS local desktop mode, not security-workspace or Linux VM execution. Existing script-based installations must be uninstalled before ANOLISA adopts the plugin; restart QwenWorkCN and verify activation in the application because CLI status cannot confirm runtime loading (#7257, #7368).
+- **SkillFS and sec-core pairing**: Upgrade SkillFS and agent-sec-core together to use authenticated Rust-daemon scanning and activation. Notifications are best-effort rather than exactly once; oversized path lists are converted to whole-Skill rescans within the daemon frame limit (#3295, #7188, #7189).
+
 ## [1.5] - 2026-09-24
 
 ### Component Versions

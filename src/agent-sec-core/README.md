@@ -4,8 +4,8 @@
 
 **OS-level security kernel for AI Agents.** Provides defense in depth for Agent
 workloads: prompt injection detection, code scanning, PII detection, skill
-integrity tracking, system baseline hardening, sandbox isolation, and a local
-security event store. Everything runs locally with no Token cost. Applicable to
+integrity tracking, sandbox isolation, and a local security event store.
+Everything runs locally with no Token cost. Applicable to
 Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
 listed below.
 
@@ -13,7 +13,7 @@ listed below.
 
 **AgentSecCore (ANOLISA)** is listed in the [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa) with **Aligned** status.
 
-AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-security/owasp-agentic-top10.md).
+AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md).
 
 ## Background
 
@@ -35,15 +35,13 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 | **Code Scanner** | Static analysis of bash / python code for dangerous operations | `agent-sec-cli scan-code` |
 | **PII Checker** | Personal data and credential detection with redaction | `agent-sec-cli scan-pii` |
 | **Skill Ledger** | Ed25519-signed skill integrity ledger with an append-only version chain | `agent-sec-cli skill-ledger` |
-| **Security Baseline** | System hardening scan and remediation (wraps `loongshield seharden`) | `agent-sec-cli harden` |
 | **Observability** | Agent lifecycle event recording, session debrief, and an interactive review TUI | `agent-sec-cli observability` |
 | **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
 | **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
 
-The V1 background daemon (`agent-sec-daemon`, shipped as the `agent-sec-core.service`
-systemd **user** unit) provides health, SkillFS notification, and security-query
-RPCs. Prompt scanning runs in-process through the Rust extension; the daemon does
-not preload Prompt Scanner models or serve scan RPCs.
+The V2 source build installs `agent-sec-daemon` as the host-level
+`agent-sec-core.service` systemd unit. The V2 migration retains the hook-facing
+CLI command and integration capability surface through Rust implementations.
 
 ## V2 SkillSec and Policy CLI
 
@@ -66,19 +64,24 @@ disablement; revoke them by removing the entries and restarting the daemon.
 The V2 systemd system unit is `agent-sec-core.service`; `agent-sec-daemon` is the executable name.
 Check the service with `sudo systemctl status agent-sec-core.service`.
 
-See the [V2 core guide](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
+See the [V2 core guide](../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
 for configuration, commands and the separate deployment/Agent Hook acceptance boundaries.
 V1 history and per-user keys are not imported. Hook adapters use daemon-owned initialization and
 validated `check`/`show` results while retaining host policies; see the
-[Hook integration boundary](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration).
+[Hook integration boundary](../../docs/user-guide/en/agent-sec-core/skillsec-v2.md#agent-hook-integration).
 
 Cosh-NG reserves 10 seconds for SkillSec initialization and querying in one Hook invocation.
 
 Rust V2 clients verify the connected daemon's kernel peer UID is 0 before sending requests.
 
 The source-built Rust `agent-sec-cli` provides 12 Policy, Scope and Binding administration
-commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
+commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [V2 workspace](v2/README.md). PAP state persists in SQLite; Binding acceptance does not imply enforcement.
+The default Policy database can fall back to `/var/lib/agent-sec/policy` when its
+`/var/log/agent-sec` ancestors are unsafe; owned leaf permissions are repaired to 0700.
+Conflicting or bypassed existing databases
+refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
+[Policy storage](../../docs/user-guide/en/agent-sec-core/policy-cli.md#policy-database-location).
 PolicyTemplates are reusable policies with general rules; the AgentSight Adapter
 currently executes only file-deletion block rules. Scopes save immutable Policy snapshots and
 own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
@@ -102,7 +105,6 @@ bounded correlation records on stderr. See [context examples and logging limits]
 │  agent-sec-cli           │  agent-sec-daemon            │
 │  scan-prompt / scan-code │  health + SkillFS notify     │
 │  scan-pii / skill-ledger │  security query RPC          │
-│  harden / verify         │                              │
 │  events / observability  │                              │
 ├──────────────────────────┴──────────────────────────────┤
 │  Security Events (JSONL + SQLite)                       │
@@ -200,9 +202,8 @@ variable to `true` does not re-enable a capability disabled in plugin configurat
 |-----------|-------------|
 | **OS** | Alibaba Cloud Linux / Anolis / RHEL family |
 | **Permissions** | root or sudo (system-mode install) |
-| **loongshield** | >= 1.2.0 (Security Baseline backend) |
 | **gpg / gnupg2** | >= 2.0 (asset signature verification) |
-| **Python** | 3.11.6 (pinned; the RPM requires `>= 3.11, < 3.12`) |
+| **Python** | host `python3` for Agent hooks; the V2 RPM requires `>= 3.11, < 3.12` |
 | **Rust** | >= 1.93 (for building `linux-sandbox` and the CLI native extension) |
 | **bubblewrap** | required by `linux-sandbox` |
 | **ANOLISA CLI** | >= 0.3.15 |
@@ -248,15 +249,16 @@ Developers building from source should use the repository-level entry point:
 ```
 
 Before installing files, the source-build entry point checks Node.js 20 or
-newer, bubblewrap, GnuPG, and `jq`. User mode reports all missing system
-runtime packages with one install command and exits; install them and rerun the
-same command. `--ignore-deps` bypasses this verification for pre-provisioned
-hosts.
+newer, Python 3, bubblewrap, GnuPG, and `jq`. It installs the Rust CLI, sandbox,
+and host-level daemon with `sudo`, while default-mode integration resources
+remain in user paths. Agent hooks use the host `python3`; the Qoder plugin
+installer currently requires Python >= 3.11, < 3.12. User mode reports all missing system runtime packages with one
+install command and exits; install them and rerun the same command.
+`--ignore-deps` bypasses this verification for pre-provisioned hosts.
 
-The source build installs runtime and integration resources in user paths but
-does not register the component in ANOLISA state. Use the installed integration
-scripts instead of `anolisa adapter enable`; see
-[Source-build Integration](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#source-build-integration).
+The source build does not register the component in ANOLISA state. Use the
+installed integration scripts instead of `anolisa adapter enable`; see
+[Source-build Integration](../../docs/user-guide/en/agent-sec-core/index.md#source-build-integration).
 
 An ANOLISA-managed raw package or adopted RPM places the framework adapters.
 Enable one as the user who owns the target framework configuration:
@@ -272,9 +274,6 @@ other packaged integrations.
 ### First Commands
 
 ```bash
-# Security Baseline scan
-agent-sec-cli harden --scan --config agentos_baseline
-
 # Code scanning
 agent-sec-cli scan-code --code 'rm -rf /' --language bash
 
@@ -284,9 +283,6 @@ agent-sec-cli scan-prompt --mode standard --text "ignore previous instructions"
 # PII detection
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
 
-# Verify release-signed skills in the default installation roots
-agent-sec-cli verify
-
 # Skill integrity check
 agent-sec-cli skill-ledger check /path/to/skill
 
@@ -295,31 +291,7 @@ agent-sec-cli events --summary
 ```
 
 Full CLI reference and per-host integration steps:
-[AgentSecCore User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md).
-
-### Asset Verification
-
-`agent-sec-cli verify` checks GPG-signed distribution manifests and SHA-256
-file coverage. It is separate from Skill Ledger: `verify` validates release or
-deployment signatures, while `skill-ledger` maintains the local Ed25519 runtime
-integrity history.
-
-Batch verification discovers immediate, non-hidden Skill directories from two
-optional system roots: `/usr/share/anolisa/skills` for RPM installations and
-`/usr/local/share/anolisa/skills` for standard ANOLISA raw installations.
-Missing or empty roots are skipped, and canonical duplicate roots are scanned
-once. A completed scan reports `verified` when at least one candidate passes and
-none fail, `failed` when any candidate fails, or `no_candidates` when no
-candidate is found. `no_candidates` exits successfully but does not claim that
-an asset was verified.
-
-The two roots are fixed package defaults and are not derived from an arbitrary
-installation prefix. Use `agent-sec-cli verify --skill /path/to/skill` for a
-relocated or custom Skill. Configuration, trust-key, and root-enumeration errors
-remain operation failures; candidate signature, manifest, hash, unexpected-file,
-or access failures produce the `failed` outcome.
-
-Details: [Asset Verification User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/asset-verification.md).
+[AgentSecCore User Guide](../../docs/user-guide/en/agent-sec-core/index.md).
 
 ## Prompt Scanner
 
@@ -352,11 +324,11 @@ with `--model` or `PROMPT_SCANNER_L2_MODEL` (`--model` wins). Only one backend
 runs at a time and each needs its own `ollama pull`. `warmup` checks that Ollama
 can serve the selected model; it never downloads models automatically.
 
-Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/prompt-scanner.md).
+Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-sec-core/prompt-scanner.md).
 
 The V2 packages include `agent-sec-daemon-health`, a lightweight Rust probe that
 authenticates the daemon's UID before sending a health request. See the
-[probe reference](../../docs/user-guide/en/agent-security/agent-sec-core/internal-commands.md#agent-sec-daemon-health).
+[probe reference](../../docs/user-guide/en/agent-sec-core/internal-commands.md#agent-sec-daemon-health).
 
 ## Code Scanner
 
@@ -393,7 +365,7 @@ return a parseable `error` result; `DENY` returns a successful `warn` result.
 requiring them remain deferred.
 
 Full daemon endpoint, CLI, and host-hook status:
-[Code Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
+[Code Scanner User Guide](../../docs/user-guide/en/agent-sec-core/code-scanner.md).
 
 ## PII Checker
 
@@ -423,7 +395,7 @@ this input hook scans only the current `prompt`, excluding system prompts and hi
 Older supported hosts retain inbound scanning. Input blocking depends on policy,
 and tool-output hooks remain observation-only.
 
-Details: [PII Checker User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md).
+Details: [PII Checker User Guide](../../docs/user-guide/en/agent-sec-core/pii-checker.md).
 
 ## Skill Ledger
 
@@ -522,7 +494,7 @@ from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and applies 
 alias for `observe`, while `deny` is an alias for `block`. Each
 check carries Qoder trace identifiers into the security audit log.
 
-Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md)
+Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-sec-core/skill-ledger.md)
 
 ## Agent Capability View
 
@@ -552,25 +524,6 @@ Table output is limited to `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOU
 
 For `prompt-scan`, the `env` entries also report `PROMPT_SCANNER_L2_MODEL`: no hook reads it itself, but each one shells out to `scan-prompt`, which resolves the L2 backend, so all six integrations inherit it. It is reported case-preserved (escaped and length-capped) because a model name is only meaningful verbatim, and both the reported `default` and the unsupported-backend check come from the native scanner engine instead of a second copy of the backend list. An unsupported name is reported as configured plus a diagnostic, since the engine rejects it at construction and the scan fails. There is no table column for it; read it with `--capability prompt-scan --output json`.
 
-## Security Baseline
-
-`agent-sec-cli harden` wraps `loongshield seharden` and defaults to
-`--scan --config agentos_baseline` when no action or profile is given.
-
-```bash
-# Compliance scan
-agent-sec-cli harden --scan --config agentos_baseline
-
-# Preview remediation
-agent-sec-cli harden --reinforce --dry-run --config agentos_baseline
-
-# Execute remediation (requires root)
-sudo agent-sec-cli harden --reinforce --config agentos_baseline
-
-# Full downstream loongshield help
-agent-sec-cli harden --downstream-help
-```
-
 ## Observability
 
 Rust V2 report/review query the daemon exclusively. Ordinary users see their own records; root can query records across all UIDs. Query identity comes only from the UDS peer. Report keeps V1’s `--session-id`, `--last`, and `--format`; review takes no command-specific options. Report JSON adds no UID field. `observability schema` generates the V1-compatible record schema locally from the Rust contracts.
@@ -587,7 +540,7 @@ agent-sec-cli observability report --session-id <id> --format json
 agent-sec-cli observability schema
 ```
 
-Details: [Observability User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#observability).
+Details: [Observability User Guide](../../docs/user-guide/en/agent-sec-core/index.md#observability).
 
 ## Security Events
 
@@ -605,23 +558,23 @@ agent-sec-cli events --count-by category --last-hours 24
 agent-sec-cli events --summary
 ```
 
-Details: [Security Events User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#security-events).
+Details: [Security Events User Guide](../../docs/user-guide/en/agent-sec-core/index.md#security-events).
 
 ## Agent Hook Environment Variables
 
 The host hook matrix is maintained in the user guide to keep one authoritative
 source for environment variables and host-specific mode semantics:
-[Agent Hook Environment Variables](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#agent-hook-environment-variables).
+[Agent Hook Environment Variables](../../docs/user-guide/en/agent-sec-core/index.md#agent-hook-environment-variables).
 
 ## Development
 
 ```bash
-# Build everything (sandbox, CLI wheel, all adapters, skills, component manifest)
+# Build everything (sandbox, V2 Rust CLI/daemon, all adapters, skills, component manifest)
 make build-all
 
 # Individual targets
 make build-sandbox
-make build-cli
+make build-cli-v2
 
 # Tests
 make test               # Python + Rust sandbox + OpenClaw plugin

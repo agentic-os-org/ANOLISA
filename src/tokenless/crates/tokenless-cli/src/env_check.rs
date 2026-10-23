@@ -138,8 +138,10 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_trusted_path(_path: &std::path::Path) -> bool {
-    true
+fn is_trusted_path(path: &std::path::Path) -> bool {
+    // Windows has no ACL/owner/reparse-point trust check here. The caller's
+    // configured paths are trusted; binary lookup excludes relative PATH entries.
+    path.exists()
 }
 
 /// A single dependency entry — normalized from either string or object format.
@@ -518,6 +520,7 @@ fn version_ge(installed: &str, required: &str) -> bool {
 // fallback constants, and the Codex standalone scripts. Makefile and the
 // Anolisa component manifest define the supported layouts; the canonical
 // order is user, /usr/local, /usr, then legacy.
+#[cfg(unix)]
 fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     let mut components = std::path::Path::new(binary).components();
     if !matches!(
@@ -566,23 +569,57 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     paths
 }
 
+#[cfg(windows)]
+fn windows_binary_paths(binary: &str, extensions: &str) -> Vec<PathBuf> {
+    let names: Vec<_> = extensions
+        .split(';')
+        // Command can launch native programs and cmd shims, not PowerShell scripts.
+        .filter(|extension| {
+            [".exe", ".com", ".cmd", ".bat"]
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+        .map(|extension| format!("{binary}{}", extension.to_ascii_lowercase()))
+        .collect();
+    let mut paths = Vec::new();
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        paths.extend(names.iter().map(|name| directory.join(name)));
+    }
+    paths.extend(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|directory| directory.is_absolute())
+            .flat_map(|directory| names.iter().map(move |name| directory.join(name))),
+    );
+    paths
+}
+
 fn is_executable_file(path: &std::path::Path) -> bool {
     if !path.is_file() || !is_trusted_path(path) {
         return false;
     }
-    std::fs::metadata(path)
-        .map(|metadata| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode() & 0o111 != 0
-            }
-            #[cfg(not(unix))]
-            true
-        })
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    true
 }
 
+#[cfg(windows)]
+pub(crate) fn resolve_binary_path(binary: &str) -> Option<String> {
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    windows_binary_paths(binary, &extensions)
+        .into_iter()
+        .find(|path| is_executable_file(path))
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[cfg(unix)]
 pub(crate) fn resolve_binary_path(binary: &str) -> Option<String> {
     let which_result = Command::new("sh")
         .args(["-c", "command -v \"$1\"", "--", binary])
@@ -607,6 +644,9 @@ pub(crate) fn resolve_binary_path(binary: &str) -> Option<String> {
 }
 
 pub(crate) fn resolve_rtk_path() -> Option<String> {
+    #[cfg(windows)]
+    let candidates = windows_binary_paths("rtk", ".exe");
+    #[cfg(unix)]
     let path_candidate = if let Ok(output) = Command::new("sh")
         .args(["-c", "command -v \"$1\"", "--", "rtk"])
         .output()
@@ -617,12 +657,15 @@ pub(crate) fn resolve_rtk_path() -> Option<String> {
     } else {
         None
     };
-    select_rtk_path(path_candidate, &crate::get_home_dir())
+    #[cfg(unix)]
+    let candidates = path_candidate
+        .into_iter()
+        .chain(binary_fallback_paths("rtk", &crate::get_home_dir()))
+        .collect::<Vec<_>>();
+    select_rtk_candidates(candidates)
 }
 
-fn select_rtk_path(path_candidate: Option<PathBuf>, home: &str) -> Option<String> {
-    let mut candidates = path_candidate.into_iter().collect::<Vec<_>>();
-    candidates.extend(binary_fallback_paths("rtk", home));
+fn select_rtk_candidates(candidates: Vec<PathBuf>) -> Option<String> {
     candidates.into_iter().find_map(|path| {
         if !is_executable_file(&path) {
             return None;

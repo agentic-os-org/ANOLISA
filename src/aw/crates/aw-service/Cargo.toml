@@ -6,10 +6,6 @@ license = "Apache-2.0"
 description = "Local AW Provider service and versioned Unix socket client"
 publish = false
 
-[[bin]]
-name = "aw"
-path = "src/main.rs"
-
 [dependencies]
 aw-adapter = { workspace = true }
 aw-contracts = { workspace = true }

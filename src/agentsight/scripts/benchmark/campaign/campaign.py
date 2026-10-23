@@ -15,7 +15,7 @@ from typing import Any
 
 from campaign_config import safety_settings, validate_campaign
 from campaign_evaluation import evaluate
-from campaign_manifest import ensure_manifest
+from campaign_manifest import ensure_manifest, write_json
 from campaign_runtime import capture_runtime_log, log_position, process_metadata
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -54,6 +54,25 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def completed_run(path: Path, identity: dict[str, Any]) -> dict[str, Any] | None:
+    """Reuse only a matching terminal checkpoint, never an interrupted write."""
+    try:
+        result = read_json(path)
+    except (OSError, ValueError, TypeError):
+        return None
+    if any(
+        type(result.get(key)) is not type(value) or result[key] != value
+        for key, value in identity.items()
+    ):
+        return None
+    evaluation = result.get("evaluation")
+    if not isinstance(result.get("summary"), dict) or not isinstance(evaluation, dict):
+        return None
+    if evaluation.get("verdict") not in ("PASS", "FAIL", "INCONCLUSIVE"):
+        return None
+    return result
+
+
 def run_once(
     campaign: dict[str, Any],
     results_root: Path,
@@ -73,14 +92,24 @@ def run_once(
     pid = pid_override or version.get("pid")
     if not pid or not Path(f"/proc/{pid}").exists():
         raise ValueError(f"{version_name} AgentSight pid is missing or not alive")
-    output = (
-        results_root / "runs" / scenario / version_name / label / f"rep-{repetition}"
-    )
+    output = results_root / "runs" / scenario / version_name / label / f"rep-{repetition}"
+    identity = {
+        "schema_version": 1,
+        "scenario": scenario,
+        "label": label,
+        "version": version_name,
+        "qps": qps,
+        "duration_seconds": duration,
+        "warmup_seconds": warmup,
+        "repetition": repetition,
+    }
     if output.exists():
         result_path = output / "run-result.json"
         if resume and result_path.is_file():
-            print(f"[SKIP] completed run: {result_path}", flush=True)
-            return read_json(result_path)
+            previous = completed_run(result_path, identity)
+            if previous is not None:
+                print(f"[SKIP] completed run: {result_path}", flush=True)
+                return previous
         if not resume:
             raise FileExistsError(
                 f"run output already exists; use --resume or a new campaign ID: {output}"
@@ -203,15 +232,8 @@ def run_once(
         if "harness_exit_code" not in evaluation["failed"]:
             evaluation["failed"].append("harness_exit_code")
     result = {
-        "schema_version": 1,
-        "scenario": scenario,
-        "label": label,
-        "version": version_name,
+        **identity,
         "metrics_enabled": bool(version.get("metrics_file")),
-        "qps": qps,
-        "duration_seconds": duration,
-        "warmup_seconds": warmup,
-        "repetition": repetition,
         "started_at_unix": started,
         "ended_at_unix": time.time(),
         "harness_exit_code": status,
@@ -219,9 +241,7 @@ def run_once(
         "summary": summary,
         "evaluation": evaluation,
     }
-    (output / "run-result.json").write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json(output / "run-result.json", result)
     if status == SAFETY_EXIT_CODE:
         reason = safety_stop.get("reason") if safety_stop else "unknown"
         raise RuntimeError(

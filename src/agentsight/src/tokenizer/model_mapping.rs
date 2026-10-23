@@ -45,6 +45,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gpt-4o-realtime-preview", "Xenova/gpt-4o");
     m.insert("gpt-4o-mini-realtime-preview", "Xenova/gpt-4o");
     m.insert("gpt-4o-mini-realtime", "Xenova/gpt-4o");
+    // The speech models. tiktoken routes the whole `gpt-4o-` prefix to
+    // `o200k_base`, which these names fall under, so they carry the same
+    // encoding as the chat model; without the entries the transcription and
+    // TTS traffic took the unrelated Qwen fallback.
+    m.insert("gpt-4o-transcribe", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-transcribe", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-tts", "Xenova/gpt-4o");
     m.insert("gpt-4-32k", "Xenova/gpt-4");
     m.insert("gpt-4-vision-preview", "Xenova/gpt-4");
 
@@ -361,6 +368,14 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-2.5-flash", "unsloth/gemma-2-9b-it");
     m.insert("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it");
     m.insert("gemini-flash-latest", "unsloth/gemma-2-9b-it");
+    // The rest of Google's moving aliases and the preview channel. Each
+    // `-latest` alias names the model its family resolves above, and a
+    // preview ID is the same generation behind the preview name; leaving them
+    // out sent all of them to the unrelated Qwen fallback.
+    m.insert("gemini-pro-latest", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-flash-lite-latest", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-pro-preview", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-flash-preview", "unsloth/gemma-2-9b-it");
 
     // ============== Gemma Models (Google) ==============
     // `google/gemma-2b-it` and `google/gemma-7b-it` keep their gated repos:
@@ -533,11 +548,11 @@ fn lookup_exact(model_name: &str) -> Option<&'static str> {
 
 /// The model name without a trailing snapshot date: `-YYYYMMDD` (Anthropic,
 /// `claude-3-7-sonnet-20250219`), `-YYYY-MM-DD` (OpenAI,
-/// `gpt-4o-2024-08-06`) or Google's 3-digit generation suffix
-/// (`gemini-2.0-flash-001`, `gemini-2.5-pro-002`). The APIs accept and echo
-/// these pinned IDs, so a client that pins a snapshot sends the dated name
-/// while the table keys the model by its alias. `None` when the name carries
-/// no such suffix.
+/// `gpt-4o-2024-08-06`), Google's 3-digit generation suffix
+/// (`gemini-2.0-flash-001`, `gemini-2.5-pro-002`) or Google's preview date
+/// (`gemini-2.5-pro-preview-06-05`). The APIs accept and echo these pinned
+/// IDs, so a client that pins a snapshot sends the dated name while the table
+/// keys the model by its alias. `None` when the name carries no such suffix.
 fn without_snapshot_date(model_name: &str) -> Option<&str> {
     let digits = |s: &str, len: usize| s.len() == len && s.bytes().all(|b| b.is_ascii_digit());
     let (stem, last) = model_name.rsplit_once('-')?;
@@ -550,9 +565,18 @@ fn without_snapshot_date(model_name: &str) -> Option<&str> {
     if digits(last, 3) {
         return Some(stem);
     }
-    let (stem, month) = stem.rsplit_once('-')?;
-    let (stem, year) = stem.rsplit_once('-')?;
-    (digits(year, 4) && digits(month, 2) && digits(last, 2)).then_some(stem)
+    let (without_day, month) = stem.rsplit_once('-')?;
+    let (without_month, year) = without_day.rsplit_once('-')?;
+    if digits(year, 4) && digits(month, 2) && digits(last, 2) {
+        return Some(without_month);
+    }
+    // generativelanguage's preview channel pins the day the preview was cut
+    // (`gemini-2.5-pro-preview-06-05`), a date shape the branches above do not
+    // match: the last two groups are a 2-digit month and day, not a 4-digit
+    // year. Strip the date and the `preview` label so the name resolves
+    // through the generation it previews.
+    (digits(month, 2) && digits(last, 2) && without_day.ends_with("-preview"))
+        .then(|| &without_day[..without_day.len() - "-preview".len()])
 }
 
 /// Check if a model name has a known mapping to HuggingFace.
@@ -610,6 +634,24 @@ mod tests {
             ("o1-preview", "Xenova/gpt-4o"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
+    }
+
+    /// The gpt-4o speech models. tiktoken maps the whole `gpt-4o-` prefix to
+    /// `o200k_base`, which `Xenova/gpt-4o` carries, but the table keyed only
+    /// the chat and realtime names, so transcription and TTS traffic took the
+    /// unrelated Qwen fallback and its tokens were counted with the wrong
+    /// vocabulary.
+    #[test]
+    fn test_gpt_4o_speech_models_take_the_o200k_tokenizer() {
+        for name in [
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-mini-tts",
+            "gpt-4o-transcribe-2025-03-20",
+            "openai/gpt-4o-mini-tts",
+        ] {
+            assert_eq!(map_to_hf_model_id(name), "Xenova/gpt-4o", "{name}");
         }
     }
 
@@ -1094,6 +1136,10 @@ mod tests {
             ("gemini-2.5-flash", "unsloth/gemma-2-9b-it"),
             ("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it"),
             ("gemini-flash-latest", "unsloth/gemma-2-9b-it"),
+            ("gemini-pro-latest", "unsloth/gemma-2-9b-it"),
+            ("gemini-flash-lite-latest", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-pro-preview", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-flash-preview", "unsloth/gemma-2-9b-it"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
@@ -1183,6 +1229,12 @@ mod tests {
             // The gateway spellings of the 2.5 generation.
             ("google/gemini-2.5-pro", "unsloth/gemma-2-9b-it"),
             ("gemini/gemini-2.5-flash", "unsloth/gemma-2-9b-it"),
+            // Google's preview channel pins the cut date after `preview`.
+            ("gemini-2.5-pro-preview-06-05", "unsloth/gemma-2-9b-it"),
+            (
+                "google/gemini-2.5-flash-preview-2025-04-01",
+                "unsloth/gemma-2-9b-it",
+            ),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
@@ -1192,6 +1244,15 @@ mod tests {
             without_snapshot_date("gemini-2.0-flash-001"),
             Some("gemini-2.0-flash")
         );
+        assert_eq!(
+            without_snapshot_date("gemini-2.5-pro-preview-06-05"),
+            Some("gemini-2.5-pro")
+        );
+        // Only a full day after the `preview` label is a date; a preview name
+        // with no date, or a day that is not two digits, is left alone.
+        assert_eq!(without_snapshot_date("gemini-2.5-pro-preview"), None);
+        assert_eq!(without_snapshot_date("gemini-2.5-pro-preview-6-5"), None);
+        assert_eq!(without_snapshot_date("gemini-2.5-pro-06-05"), None);
         assert_eq!(without_snapshot_date("gpt-4o-0806"), None);
         assert_eq!(without_snapshot_date("model-2024-8-06"), None);
         assert_eq!(without_snapshot_date("gpt-4o"), None);

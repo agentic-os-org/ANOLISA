@@ -1348,11 +1348,10 @@ fn kernel_error_with_cleanup(
 ///    caller handle the stale-process / not-found case.
 fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
     // Fast path: pid exists in host /proc and start_time matches.
-    if let Ok(start_time) = proc_start_time(input_pid) {
-        if start_time == input_start_time {
-            return first_nspid(input_pid).unwrap_or(input_pid);
-        }
-        // pid exists but belongs to a different process (namespace collision).
+    if let Ok(start_time) = proc_start_time(input_pid)
+        && start_time == input_start_time
+    {
+        return first_nspid(input_pid).unwrap_or(input_pid);
     }
 
     // Slow path: scan /proc for a process whose innermost NSpid == input_pid
@@ -1376,10 +1375,10 @@ fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
         if *nspid.last().unwrap() != input_pid {
             continue; // innermost ns PID doesn't match
         }
-        if let Ok(pst) = proc_start_time(host_pid) {
-            if pst == input_start_time {
-                return nspid[0]; // host PID
-            }
+        if let Ok(pst) = proc_start_time(host_pid)
+            && pst == input_start_time
+        {
+            return nspid[0]; // host PID
         }
     }
 
@@ -1604,6 +1603,22 @@ mod tests {
             compile_credential_exfiltration_policy(&policy).is_err(),
             "enforce mode must fail closed without a trusted endpoint as well"
         );
+    }
+
+    #[test]
+    fn non_enforcing_policies_compile_without_a_trusted_endpoint() {
+        for mode in [PolicyMode::Observe, PolicyMode::Audit] {
+            let mut policy = credential_policy();
+            policy.mode = mode;
+            policy.trusted_endpoints.clear();
+
+            let dsl = compile_credential_exfiltration_policy(&policy)
+                .expect("non-enforcing policies do not require a trusted endpoint");
+
+            assert!(dsl.contains("notify connect endpoint \"*\" if CREDENTIAL"));
+            assert!(!dsl.contains("unless target"));
+            assert!(compile_str(&dsl).is_ok());
+        }
     }
 
     #[test]

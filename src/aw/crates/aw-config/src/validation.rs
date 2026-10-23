@@ -76,6 +76,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                                 | "openclaw"
                                 | "hermes"
                                 | "claude-sdk"
+                                | "qoder-sdk"
                                 | "agentscope"
                         )
                     )

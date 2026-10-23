@@ -9,7 +9,10 @@ use skillfs_core::{parser, store::adopt_directory_name};
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
-use crate::path::{PathType, is_hermes_management_path, is_skill_discover_path};
+use crate::path::{
+    PathType, hermes_nested_marker_is_regular, hermes_nested_sync_eligible,
+    is_hermes_management_path, is_skill_discover_path,
+};
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{
@@ -468,6 +471,26 @@ impl SkillFs {
                         info!(
                             name = %skill_name,
                             "sync: deleted manifest does not back the store entry — \
+                             kept the retained owner"
+                        );
+                    }
+                }
+                // Hermes nested manifests share the leaf-keyed store, so
+                // deleting the marker that backs the entry removes it from
+                // the live store — the deletion-side twin of the create-side
+                // registration. The removal stays ownership-gated like the
+                // flat arm above: the store keys skills by leaf, so a losing
+                // same-leaf candidate's unlink must not drop the retained
+                // owner (its manifest is untouched and a fresh scan
+                // re-discovers it).
+                if let PathType::NestedSkillMd { skill_name, .. } = &path_type {
+                    if self.store_entry_backs_manifest(skill_name, &physical) {
+                        self.store.write().remove(skill_name);
+                        info!(name = %skill_name, "sync: removed nested skill (SKILL.md deleted)");
+                    } else {
+                        info!(
+                            name = %skill_name,
+                            "sync: deleted nested manifest does not back the store entry — \
                              kept the retained owner"
                         );
                     }
@@ -1437,6 +1460,66 @@ impl SkillFs {
                             // candidate's rename must leave the retained
                             // owner in place.
                             if self.store_entry_backs_manifest(skill_name, &old_physical) {
+                                self.store.write().remove(skill_name);
+                            }
+                        }
+                        // Hermes nested manifests: a rename onto a nested
+                        // SKILL.md path re-parses it; a rename away drops
+                        // the leaf entry. The drop stays identity-gated —
+                        // the store keys nested skills by leaf, so another
+                        // category (or a categorized flat source) may own
+                        // the same key (the directory-rename arm's
+                        // discipline above).
+                        if let PathType::NestedSkillMd {
+                            category,
+                            skill_name,
+                            ..
+                        } = &new_type
+                        {
+                            if hermes_nested_sync_eligible(
+                                self.staging_matcher.as_deref(),
+                                category,
+                                skill_name,
+                                &new_physical,
+                            ) {
+                                self.send_sync(SyncEvent::Reparse {
+                                    skill_name: skill_name.clone(),
+                                    source_path: new_physical.clone(),
+                                    max_skill_size: self.max_skill_size,
+                                });
+                            } else if !hermes_nested_marker_is_regular(&new_physical)
+                                && self.store_entry_backs_manifest(skill_name, &new_physical)
+                            {
+                                // A non-regular marker replaced this
+                                // destination's manifest, so the path no
+                                // longer carries a loadable one: a fresh
+                                // scan excludes the skill, and the live
+                                // store must agree — withdraw the entry
+                                // the destination identity backs. The
+                                // ownership gate keeps a losing same-leaf
+                                // candidate's replacement from dropping
+                                // the retained owner, and dot/staging
+                                // destinations (separate semantics, never
+                                // synchronized from) back no entry. The
+                                // physical rename itself is untouched.
+                                self.store.write().remove(skill_name);
+                                info!(
+                                    name = %skill_name,
+                                    "sync: non-regular marker replaced the nested manifest — \
+                                     withdrew the store entry"
+                                );
+                            }
+                        }
+                        if let PathType::NestedSkillMd {
+                            category,
+                            skill_name,
+                        } = &old_type
+                        {
+                            let chain = vec![category.clone(), skill_name.clone()];
+                            if self.rename_source_backs_store_entry(
+                                skill_name,
+                                RenameSourceIdentity::ExactChain(&chain),
+                            ) {
                                 self.store.write().remove(skill_name);
                             }
                         }

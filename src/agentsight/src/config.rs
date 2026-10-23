@@ -682,7 +682,7 @@ pub struct JsonTrajectoryCollectionFeature {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub scan_interval_secs: Option<u64>,
-    /// Optional override of the projects directories to scan.
+    /// 可选的会话根目录、Claude 工作区父目录或 Hermes 数据库位置。
     #[serde(default)]
     pub scan_dirs: Option<Vec<String>>,
 }
@@ -1003,11 +1003,11 @@ pub struct FeatureFlags {
     pub token_consumption_enabled: bool,
     /// SLS Logtail export.
     pub sls_logtail_enabled: bool,
-    /// Qoder/QoderWork trajectory collection (scan + ATIF convert + persist).
+    /// Local JSONL and Hermes trajectory collection (scan + ATIF + persist).
     pub trajectory_collection_enabled: bool,
     /// Seconds between two trajectory scan rounds.
     pub trajectory_scan_interval_secs: u64,
-    /// Optional override of the trajectory projects directories to scan.
+    /// 可选的会话根目录、Claude 工作区父目录或 Hermes 数据库位置。
     pub trajectory_scan_dirs: Option<Vec<String>>,
     /// Whether a model may be asked to label collected trajectories.
     ///

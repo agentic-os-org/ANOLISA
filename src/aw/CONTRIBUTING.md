@@ -22,6 +22,10 @@ invalid vectors and command failures return nonzero. Each command has a timeout 
 failure or interruption. Logs identify the failing command; individual commands
 can be run from `src/aw` for diagnosis.
 
+The database, inventory, transaction, runtime-lease and package CLI tests also
+run under child umasks `0022` and `0002`. Give fixtures and copied executables
+explicit permissions; do not change a parallel test process's umask.
+
 These checks run as a regular user without an Agent or service login. Cargo
 downloads uncached dependencies; schema validation reads only bundled resources.
 The runner, local service, Provider Host execution, command execution and FileJournal require Linux;
@@ -97,7 +101,7 @@ migration. Native jobs reuse checksummed binaries from that exact build.
 
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered
-Agent. The nightly job matrix is generated from this inventory. All seven Agents
+Agent. The nightly job matrix is generated from this inventory. All eight Agents
 have automated suites. OpenClaw covers official Hook runners; full OpenClaw
 Gateway model flows still require explicit acceptance.
 
@@ -110,6 +114,12 @@ The container has no network and only its socket directory is writable on the
 host. The resolved platform image ID is also recorded. The scheduled run selects
 `github.sha` once; containers never fetch a moving branch or a separately built
 nightly image.
+
+A separate required Qoder 1.1.73 TUI case verifies native SessionStart readiness
+and empty → added-hook → removed-hook policy activation before dispatch, retaining
+the same PID/start ticks. It downloads a separately checksummed release and keeps
+the 1.1.64 print lane. Its named metadata report and cleanup are required by the
+native inventory. It does not certify hosted TUI tool turns or result replacement.
 
 The normal case must write its marker. The risk case must match the builtin
 `shell-recursive-delete` rule (`warn`, mapped to block), preserve its disposable
@@ -125,7 +135,8 @@ adopted descendants across sessions and removes containers carrying that command
 unique ownership label. It retains a cleanup report and fails the interrupted run.
 
 QwenPaw drives its stock App/API with a deterministic loopback OpenAI-compatible
-model, requiring no cloud key. Qoder uses its real hosted Performance model and
+model, requiring no cloud key. Qoder CLI uses its real hosted Performance model; Qoder SDK 1.0.54 uses its
+bundled Worker 1.1.74 and hosted `auto` model. Both require
 the repository `QODER_PERSONAL_ACCESS_TOKEN` Secret, as documented in
 [Qoder authentication](https://docs.qoder.com/cli/authentication). Dependency
 installation does not receive the Secret. The Qoder launcher and its native
@@ -175,7 +186,7 @@ inventory's isolated npm installation shape:
 ```bash
 npm install --prefix target/openclaw-native --ignore-scripts --no-audit --no-fund openclaw@2026.9.6
 OPENCLAW_PACKAGE_DIR="$PWD/target/openclaw-native/node_modules/openclaw" \
-  node --test --test-reporter=tap crates/aw-service/tests/openclaw-native.mjs
+  node --test --test-reporter=tap crates/aw-cli/tests/openclaw-native.mjs
 ```
 
 All eight TAP tests must pass without skips. The suite loads the actual AW
@@ -197,32 +208,51 @@ success by retrying or omitting a framework.
 
 ## Crate boundaries
 
+Local package changes enter `aw-package::plan`, which derives a read-only plan,
+then `plan::execute` uses the shared durable transaction backend. Queries and
+dry runs must not create records or locks. Exercise these paths on Linux:
+
+```bash
+cargo test --locked -p aw-package --test management --test database
+cargo test --locked -p aw-package transaction::tests
+cargo test --locked -p aw-exec --test packages
+```
+
+The package tests cover independent tools, exact same-prefix dependencies,
+legacy record archival, conflicts and replay. Package leases in `aw-exec` are
+reused by the CLI, service and Host without adding a runtime dependency on the
+package database. Keep database-before-prefix lock ordering in mutation and
+configuration publication. System scope is explicit raw management, not a native
+package backend. See [local package management](docs/design/en/packaging/package-management.md)
+for commit/recovery rules and remaining runtime discovery limits. The focused
+commands do not replace the full AW gate or native acceptance.
+
 Framework crates live in `src/aw/crates/<name>/`, concrete Providers in
 the repository-root `providers/<provider>/` with independent workspaces; the root manifest only organizes the workspace. See
 [Provider collaboration](../../providers/README.md) for contribution and distribution,
-[Architecture](../../docs/developer-guide/en/aw/architecture.md) for ownership and
-dependencies, and the [design index](docs/design/README.md) for protocol reading order.
+[Architecture](docs/design/en/architecture.md) for ownership and
+dependencies, and the [design index](docs/design/en/README.md) for protocol reading order.
 
-Keep native dialects and bridge assets in `aw-adapter`; the CLI owns argument
+Keep native dialects and bridge assets in `aw-adapter`; `aw-cli` owns argument
 parsing, RPCs, signals and resources. The service owns state, budgets and audit.
 Both reuse the Adapter without exposing service internals to it.
 `aw-provider` owns offline protocol validation; process execution uses `aw-exec`.
 Changes to crate boundaries must update [check_layout.py](scripts/check_layout.py),
 its [regression tests](tests/test_ci_checks.py), and the
-[architecture tables](../../docs/developer-guide/en/aw/architecture.md).
+[architecture tables](docs/design/en/architecture.md).
 
 ## Build the service
 
 Build the CLI and sample Provider from `src/aw` on Linux:
 
 ```bash
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 cargo build --locked -p aw-provider --example policy
 ```
 
 The [user guide](../../docs/developer-guide/en/aw/native-agents.md#run-the-local-service-demo)
 walks through a foreground service and separate client, including state-directory
-and audit-history cleanup. The service uses the local `aw-service/v1alpha3`
+and audit-history cleanup. The service uses the local `aw-service/v1alpha4`
 protocol; Providers retain `aw-provider/v1alpha1`. They are versioned separately.
 
 ## Runtime validation
@@ -230,15 +260,15 @@ protocol; Providers retain `aw-provider/v1alpha1`. They are versioned separately
 For focused local service checks:
 
 ```bash
-cargo test --locked -p aw-service
+cargo test --locked -p aw-service -p aw-cli
 ```
 
-Service tests use real Unix sockets, fixture Provider processes and private
+Service unit tests and CLI integration tests use real Unix sockets, fixture Provider processes and private
 temporary state directories. They need no model, Agent installation or cloud key.
 They check shared event budgets, binding and once-only invocation, cancellation
 and shutdown, durable audit, stale handles and endpoint ownership. Fixtures wait
 for owned processes and remove temporary directories; build artifacts stay in
-`target/`. See the [local service contract](docs/design/local-service.md) for the
+`target/`. See the [local service contract](docs/design/en/runtime/local-service.md) for the
 validation boundary.
 
 For focused Provider Host checks, run from `src/aw` on Linux:
@@ -250,7 +280,7 @@ cargo test --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 
 These tests use local fixture processes to check preparation, request binding,
 failure reporting, shared deadlines, cancellation and once-only event steps.
-The [local example](docs/design/provider-host.md#local-example) exercises the
+The [local example](docs/design/en/runtime/provider-host.md#local-example) exercises the
 sample Provider using synthetic Adapter evidence and tool events. It is not
 native Agent acceptance or proof of effect adoption.
 
@@ -258,3 +288,9 @@ Protocol and Core tests use synthetic inputs and Hosts. Native integration needs
 separate evidence that callbacks were installed, tools ran or were blocked as
 intended, and returned effects were adopted by the Agent. Record validation
 commands and results in the pull request; keep experiment logs out of the README.
+
+The Qoder SDK native inventory runs both ordinary `aw run` and `--reloadable`
+lanes. The latter adds existing-Query policy addition/removal, another session's
+busy gate and held native callback cleanup through real `aw update` RPCs. Both
+lanes use caller-owned `startDaemon()`, require the runtime-only PAT and assert
+unchanged daemon identity and zero bindings/events after cleanup.

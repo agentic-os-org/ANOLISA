@@ -295,7 +295,7 @@ impl Registry {
                 }
             }
             if entry["outcome"] == "cancelled" {
-                decision = "cancelled";
+                decision = if rejected { "deny" } else { "cancelled" };
                 continue;
             }
             let selected = array(&step["providers"])?;

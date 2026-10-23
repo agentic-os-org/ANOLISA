@@ -99,7 +99,7 @@ bash scripts/benchmark/single_run/run.sh \
 
 ## 6. 采集 AgentSight 资源
 
-先按 [CLI 参考](../../../../docs/user-guide/zh/agent-observability/agentsight/cli-reference.md) 启动采集程序。eBPF tracing 需要 root 或所需 capabilities。在生产配置的隔离副本中，将下面条目加入 `cmdline.allow` 以匹配客户端，并排除发现 mock 服务端的规则：
+先按 [CLI 参考](../../../../docs/user-guide/zh/agentsight/cli-reference.md) 启动采集程序。eBPF tracing 需要 root 或所需 capabilities。在生产配置的隔离副本中，将下面条目加入 `cmdline.allow` 以匹配客户端，并排除发现 mock 服务端的规则：
 
 ```json
 {

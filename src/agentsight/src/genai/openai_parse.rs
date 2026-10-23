@@ -139,7 +139,12 @@ impl GenAIBuilder {
                         // the tool-failure readers are built from. The mapping
                         // mirrors `anthropic_content_block_to_part`.
                         match item.get("type").and_then(|t| t.as_str()) {
-                            Some("tool_use") => {
+                            // `server_tool_use` / `mcp_tool_use` are the
+                            // provider-side spellings of the same call; the
+                            // typed parser already reads them as `tool_use`,
+                            // so a replayed server-tool turn extracted to an
+                            // empty assistant message here.
+                            Some("tool_use" | "server_tool_use" | "mcp_tool_use") => {
                                 if let (Some(id), Some(name)) = (
                                     item.get("id").and_then(|v| v.as_str()),
                                     item.get("name").and_then(|v| v.as_str()),
@@ -151,7 +156,21 @@ impl GenAIBuilder {
                                     });
                                 }
                             }
-                            Some("tool_result") => {
+                            // The server-tool results carry `tool_use_id` plus
+                            // a caller-defined `content`, exactly like
+                            // `tool_result`; the typed parser aliases every
+                            // spelling, so a replayed search/fetch turn kept
+                            // the result here but lost it through this reader.
+                            Some(
+                                "tool_result"
+                                | "web_search_tool_result"
+                                | "web_fetch_tool_result"
+                                | "code_execution_tool_result"
+                                | "bash_code_execution_tool_result"
+                                | "text_editor_code_execution_tool_result"
+                                | "tool_search_tool_result"
+                                | "mcp_tool_result",
+                            ) => {
                                 if let Some(tool_use_id) =
                                     item.get("tool_use_id").and_then(|v| v.as_str())
                                 {
@@ -529,12 +548,12 @@ impl GenAIBuilder {
         fallback_finish_reason: Option<&str>,
     ) -> Option<Vec<OutputMessage>> {
         let (parts, sse_finish_reason) = Self::extract_parts_from_sse_body(body)?;
-        if parts.is_empty() {
-            return None;
-        }
         // Prefer finish_reason from SSE, fall back to caller-supplied value
         let finish_reason =
             sse_finish_reason.or_else(|| fallback_finish_reason.map(|s| s.to_string()));
+        if parts.is_empty() && finish_reason.is_none() {
+            return None;
+        }
         Some(vec![OutputMessage {
             role: "assistant".to_string(),
             parts,
@@ -568,7 +587,8 @@ impl GenAIBuilder {
 
         let (parts, finish_reason) = Self::merge_sse_chunks(&chunks);
         if parts.is_empty() {
-            return Self::extract_dashscope_native_parts(&chunks);
+            return Self::extract_dashscope_native_parts(&chunks)
+                .or_else(|| finish_reason.map(|reason| (parts, Some(reason))));
         }
         Some((parts, finish_reason))
     }
@@ -874,8 +894,10 @@ impl GenAIBuilder {
     /// while the same stream captured live kept it.
     ///
     /// Mirrors the analyzer's aggregation: text deltas → one Text part per
-    /// block, thinking deltas → Reasoning, tool_use blocks → ToolCall with the
-    /// concatenated `input_json_delta` fragments, all in block-index order.
+    /// block, thinking deltas → Reasoning, tool_use blocks (including the
+    /// provider-side `server_tool_use` / `mcp_tool_use` spellings) → ToolCall
+    /// with the concatenated `input_json_delta` fragments, all in block-index
+    /// order.
     /// Block indices are capped like `MAX_TOOL_CALL_SLOTS` so a hostile index
     /// cannot turn one JSON field into an unbounded map. Returns `None` when
     /// no Anthropic event shape is present (caller falls back).
@@ -911,7 +933,16 @@ impl GenAIBuilder {
                         continue;
                     };
                     let block = match content_block.get("type").and_then(|v| v.as_str()) {
-                        Some("tool_use") => Block::ToolUse {
+                        // `server_tool_use` and `mcp_tool_use` are the same
+                        // call made by a tool the provider runs on its side
+                        // (web search, code execution, the MCP connector). The
+                        // typed parser reads all three spellings as one block
+                        // type, so the drain merger must not fold them into
+                        // the text accumulator: a text block has no argument
+                        // buffer, so the call vanished and every
+                        // `input_json_delta` fragment after it was dropped
+                        // silently.
+                        Some("tool_use" | "server_tool_use" | "mcp_tool_use") => Block::ToolUse {
                             id: content_block
                                 .get("id")
                                 .and_then(|v| v.as_str())
@@ -1160,6 +1191,51 @@ impl GenAIBuilder {
         (!text.is_empty()).then_some(text)
     }
 
+    /// Refusal text of a finished `message` output item, or `None`.
+    ///
+    /// The answer a model declines to give is its own content part, typed
+    /// `refusal` and carrying the text in `refusal` rather than `text` — the
+    /// shape the non-streaming normalizer and the token extractor's
+    /// `read_output_item` read. A capture that attached after the refusal
+    /// deltas has this part as its only copy of the answer, so it is read
+    /// here as well; the deltas win over it, as they do for text.
+    fn closing_message_item_refusal(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+            return None;
+        }
+        let parts = item.get("content")?.as_array()?;
+        let refusal: String = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(|t| t.as_str()) == Some("refusal"))
+            .filter_map(|part| part.get("refusal").and_then(|r| r.as_str()))
+            .collect();
+        (!refusal.is_empty()).then_some(refusal)
+    }
+
+    /// Thinking text of a finished `reasoning` output item, or `None`.
+    ///
+    /// The closing item carries its thinking in `content[]` parts (dashscope
+    /// `reasoning_text`) and/or `summary[]` (the o-series default), the same
+    /// two fields the token extractor's `read_output_item` routes to its
+    /// thinking half. Unlike the answer, reasoning items do not repeat one
+    /// another: an agentic response interleaves one before each call it makes
+    /// and every item carries different thinking, so callers accumulate the
+    /// results in arrival order instead of replacing.
+    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
+            return None;
+        }
+        let text: String = ["content", "summary"]
+            .iter()
+            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
     /// Aggregate OpenAI **Responses** API SSE chunks into parts.
     ///
     /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
@@ -1193,7 +1269,17 @@ impl GenAIBuilder {
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
+        // Whether a non-empty reasoning delta arrived, and the thinking a
+        // finished `reasoning` item carries. Same delta-wins rule as the text
+        // above, but the items accumulate rather than replace: each one holds
+        // different thinking.
+        let mut saw_reasoning_delta = false;
+        let mut closing_reasoning_text = String::new();
         let mut reasoning_buf = String::new();
+        // Whether a non-empty refusal delta arrived, and the refusal a closing
+        // message item carries, on the same delta-wins rule as the text above.
+        let mut saw_refusal_delta = false;
+        let mut closing_refusal: Option<String> = None;
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut saw_responses_event = false;
@@ -1252,6 +1338,9 @@ impl GenAIBuilder {
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_reasoning_delta = true;
+                        }
                         reasoning_buf.push_str(delta);
                     }
                 }
@@ -1289,6 +1378,9 @@ impl GenAIBuilder {
                 "response.refusal.delta" => {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_refusal_delta = true;
+                        }
                         refusal_buf.push_str(delta);
                     }
                 }
@@ -1323,6 +1415,25 @@ impl GenAIBuilder {
                         closing_text = Some(text);
                         saw_responses_event = true;
                     }
+                    // A `reasoning` item carries the thinking the deltas
+                    // streamed; a capture that attached after them has the
+                    // item as its only copy. Every item is kept, in order.
+                    if !saw_reasoning_delta
+                        && let Some(text) = Self::closing_reasoning_item_text(chunk)
+                    {
+                        closing_reasoning_text.push_str(&text);
+                        saw_responses_event = true;
+                    }
+                    // The answer a model declines to give rides a `refusal`
+                    // part of the same item instead of a `text` part, so it is
+                    // read separately; a capture that attached after the
+                    // refusal deltas has it as the only copy.
+                    if !saw_refusal_delta
+                        && let Some(refusal) = Self::closing_message_item_refusal(chunk)
+                    {
+                        closing_refusal = Some(refusal);
+                        saw_responses_event = true;
+                    }
                 }
                 "response.function_call_arguments.done" => {
                     if let Some(arguments) = chunk.get("arguments").and_then(|a| a.as_str()) {
@@ -1347,8 +1458,15 @@ impl GenAIBuilder {
                 // chat-completions "length" finish rather than a clean "stop",
                 // and a safety-filter cut as "content_filter" — the same
                 // reason mapping the live parser's aggregator applies.
+                //
+                // Every incomplete reason is a terminal event, including
+                // `max_messages` and `steered`: leaving `completed` false made
+                // the finish fall through to None, which the detector reports
+                // as `sse_truncated` — a transport failure — for a turn the
+                // provider ended itself.
                 "response.incomplete" => {
                     saw_responses_event = true;
+                    completed = true;
                     if let Some(resp) = chunk.get("response") {
                         if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete") {
                             match resp
@@ -1374,6 +1492,12 @@ impl GenAIBuilder {
         // non-empty delta was captured.
         if !saw_text_delta && let Some(text) = closing_text {
             text_buf = text;
+        }
+        if !saw_reasoning_delta && !closing_reasoning_text.is_empty() {
+            reasoning_buf = closing_reasoning_text;
+        }
+        if !saw_refusal_delta && let Some(refusal) = closing_refusal {
+            refusal_buf = refusal;
         }
 
         let mut tool_parts: Vec<_> = calls
@@ -2273,6 +2397,189 @@ mod tests {
         );
     }
 
+    /// A provider-side call is the same `content_block_start` shape as a
+    /// classic `tool_use` under the spellings `server_tool_use` and
+    /// `mcp_tool_use`. The typed parser aliases all three; this merger matched
+    /// only the literal `tool_use`, so the block fell into the text
+    /// accumulator and every `input_json_delta` fragment aimed at its index was
+    /// discarded — a drained search-only turn persisted no output at all, while
+    /// the same stream captured live kept the call.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_keeps_a_server_tool_call() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_srv","model":"claude-sonnet-4-5","usage":{"input_tokens":10}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Searching."}},
+            {"type":"content_block_stop","index":0},
+            {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"rust 2026\"}"}},
+            {"type":"content_block_stop","index":1},
+            {"type":"content_block_start","index":2,"content_block":{"type":"mcp_tool_use","id":"mcptoolu_1","name":"github_search","input":{}}},
+            {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"drain\"}"}},
+            {"type":"content_block_stop","index":2},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a stream carrying provider-side calls must yield output");
+        assert_eq!(finish.as_deref(), Some("end_turn"));
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "Searching."),
+            "the text block must keep its own buffer: {parts:?}"
+        );
+        assert!(
+            parts.iter().any(|p| matches!(
+                p,
+                MessagePart::ToolCall { id, name, arguments }
+                    if id.as_deref() == Some("srvtoolu_1")
+                        && name == "web_search"
+                        && arguments == &Some(serde_json::json!({"query": "rust 2026"}))
+            )),
+            "the server-side call and its streamed input must survive: {parts:?}"
+        );
+        assert!(
+            parts.iter().any(|p| matches!(
+                p,
+                MessagePart::ToolCall { id, name, arguments }
+                    if id.as_deref() == Some("mcptoolu_1")
+                        && name == "github_search"
+                        && arguments == &Some(serde_json::json!({"q": "drain"}))
+            )),
+            "the MCP call and its streamed input must survive: {parts:?}"
+        );
+    }
+
+    /// The drain merger and the typed parser must agree on the same stream:
+    /// a provider-side call is a `ToolCall` part here and a `ToolUse` block
+    /// there, and neither may report it as text.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_matches_the_typed_parser_on_a_server_tool_call() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_parity","model":"claude-sonnet-4-5","usage":{"input_tokens":7}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_9","name":"web_fetch","input":{}}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"url\":\"https://example.com\"}"}},
+            {"type":"content_block_stop","index":0},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+        ]"#;
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        let live = crate::analyzer::message::AnthropicParser::parse_response(&value)
+            .expect("the typed parser reads the same stream");
+        let live_calls: Vec<(&str, &str, &serde_json::Value)> = live
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                crate::analyzer::message::AnthropicContentBlock::ToolUse { id, name, input } => {
+                    Some((id.as_str(), name.as_str(), input))
+                }
+                _ => None,
+            })
+            .collect();
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the drain merger reads the same stream");
+        let drain_calls: Vec<(&str, &str, &serde_json::Value)> = parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => Some((
+                    id.as_deref().unwrap_or_default(),
+                    name.as_str(),
+                    arguments.as_ref().expect("the streamed input must parse"),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live_calls, drain_calls,
+            "the drain merger and the typed parser must report the same call"
+        );
+        assert_eq!(drain_calls.len(), 1, "the call must not be duplicated");
+    }
+
+    /// A replayed conversation keeps the assistant's provider-side calls and
+    /// the results they produced. The typed parser aliases those spellings;
+    /// this reader matched only `tool_use` / `tool_result`, so the replayed
+    /// turn extracted to an empty message and the tool interaction vanished
+    /// from the request event.
+    #[test]
+    fn test_parse_request_body_keeps_replayed_server_tool_blocks() {
+        let body = r#"{
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "search rust"},
+                {"role": "assistant", "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                     "input": {"query": "rust"}},
+                    {"type": "mcp_tool_use", "id": "mcptoolu_1", "name": "github_search",
+                     "input": {"q": "drain"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+                     "content": [{"type": "web_search_result", "url": "https://example.com"}]},
+                    {"type": "mcp_tool_result", "tool_use_id": "mcptoolu_1",
+                     "content": [{"type": "text", "text": "no hits"}]}
+                ]}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
+
+        let calls: Vec<(&str, &str, &serde_json::Value)> = req.messages[1]
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => Some((
+                    id.as_deref().unwrap_or_default(),
+                    name.as_str(),
+                    arguments.as_ref().expect("the replayed input must survive"),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "srvtoolu_1",
+                    "web_search",
+                    &serde_json::json!({"query": "rust"})
+                ),
+                (
+                    "mcptoolu_1",
+                    "github_search",
+                    &serde_json::json!({"q": "drain"})
+                ),
+            ],
+            "both provider-side calls must survive the replay: {:?}",
+            req.messages[1].parts
+        );
+
+        let results: Vec<(&str, &serde_json::Value)> = req.messages[2]
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCallResponse { id, response } => {
+                    Some((id.as_deref().unwrap_or_default(), response))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            results.len(),
+            2,
+            "both results must survive: {:?}",
+            req.messages[2].parts
+        );
+        assert_eq!(results[0].0, "srvtoolu_1");
+        assert_eq!(results[1].0, "mcptoolu_1");
+    }
+
     /// A Gemini `streamGenerateContent` body carries no `choices` and no
     /// sentinel frame: each chunk is a standalone generation payload. The
     /// merger must merge text parts across chunks, map whole `functionCall`
@@ -2436,6 +2743,98 @@ mod tests {
         assert_eq!(finish.as_deref(), Some("stop"));
     }
 
+    /// A refusal is the model's answer too, but it rides a `refusal` content
+    /// part instead of a `text` part. A capture that attached after the
+    /// refusal deltas has only the finished item, so the drain merger must
+    /// read that part the way the live parser's `closing_message_item_refusal`
+    /// and the token extractor's `read_output_item` do.
+    #[test]
+    fn test_responses_sse_closing_message_item_keeps_refusal() {
+        let body = r#"[
+            {"type":"response.output_item.done","item":{"type":"message","content":[
+                {"type":"refusal","refusal":"I can't help with that."}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a closing refusal part must yield an answer");
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "I can't help with that."),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("stop"));
+    }
+
+    /// The refusal deltas repeat the closing part, so a capture that saw them
+    /// must not append the copy on top.
+    #[test]
+    fn test_responses_sse_refusal_delta_wins_over_the_closing_copy() {
+        let body = r#"[
+            {"type":"response.refusal.delta","delta":"I can't help"},
+            {"type":"response.refusal.delta","delta":" with that."},
+            {"type":"response.output_item.done","item":{"type":"message","content":[
+                {"type":"refusal","refusal":"I can't help with that."}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "I can't help with that."),
+            "deltas must win over their closing copies, got {parts:?}"
+        );
+    }
+
+    /// A capture that attached after the reasoning deltas has only the
+    /// finished `reasoning` items. Both the live parser
+    /// (`closing_reasoning_item_text`) and the token extractor's
+    /// `read_output_item` read them; the drain merger read only the deltas and
+    /// dropped the thinking entirely.
+    ///
+    /// An agentic turn interleaves one reasoning item per call, and each item
+    /// holds different thinking, so every item must be kept in arrival order —
+    /// not replaced by the last one.
+    #[test]
+    fn test_responses_sse_closing_reasoning_items_keep_thinking() {
+        let body = r#"[
+            {"type":"response.output_item.done","item":{"type":"reasoning","content":[
+                {"type":"reasoning_text","text":"first thought"}
+            ]}},
+            {"type":"response.output_item.done","item":{"type":"reasoning","summary":[
+                {"type":"summary_text","text":"second thought"}
+            ]}},
+            {"type":"response.output_text.done","text":"answer"},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("closing reasoning items must yield output");
+        assert!(
+            matches!(&parts[0], MessagePart::Reasoning { content }
+                if content == "first thoughtsecond thought"),
+            "got {parts:?}"
+        );
+        assert!(matches!(&parts[1], MessagePart::Text { content } if content == "answer"));
+    }
+
+    /// The reasoning deltas repeat the closing items, so a capture that saw
+    /// them must not append the copies on top.
+    #[test]
+    fn test_responses_sse_reasoning_delta_wins_over_the_closing_item() {
+        let body = r#"[
+            {"type":"response.reasoning_summary_text.delta","delta":"think"},
+            {"type":"response.output_item.done","item":{"type":"reasoning","summary":[
+                {"type":"summary_text","text":"think"}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert!(
+            matches!(&parts[0], MessagePart::Reasoning { content } if content == "think"),
+            "deltas must win over their closing copies, got {parts:?}"
+        );
+    }
+
     /// Closing events repeat the deltas. When the capture saw a non-empty
     /// delta, appending the closing copy would double the answer.
     #[test]
@@ -2526,6 +2925,30 @@ mod tests {
             MessagePart::Text { content } if content == "partial"
         ));
         assert_eq!(finish.as_deref(), Some("content_filter"));
+    }
+
+    /// OpenAI documents `max_messages` and `steered` as `response.incomplete`
+    /// reasons too. They are terminal like the cap/filter reasons, but they
+    /// set neither flag; because the arm never set `completed`, the finish
+    /// fell through to None and the detector reported a transport truncation
+    /// for a turn the provider had ended.
+    #[test]
+    fn test_responses_sse_incomplete_other_reasons_keep_a_finish() {
+        for reason in ["max_messages", "steered"] {
+            let body = format!(
+                r#"[
+                    {{"type":"response.output_text.delta","delta":"partial"}},
+                    {{"type":"response.incomplete","response":{{"id":"resp_o","status":"incomplete","incomplete_details":{{"reason":"{reason}"}}}}}}
+                ]"#
+            );
+            let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(&body).unwrap();
+            assert_eq!(parts.len(), 1, "{reason}: the answer must survive");
+            assert_eq!(
+                finish.as_deref(),
+                Some("stop"),
+                "{reason}: a provider-terminated turn must not look truncated"
+            );
+        }
     }
 
     /// The cap reason keeps its "length" mapping, and a stream that ends

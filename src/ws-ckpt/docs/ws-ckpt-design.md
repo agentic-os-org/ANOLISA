@@ -583,7 +583,8 @@ pub struct DaemonState {
 3. 创建 `/var/lib/ws-ckpt/indexes/`
 4. `lockfile::acquire` 单实例守卫
 5. `startup::resolve_state`：加载 `state.json` → 创建 backend → bootstrap；bootstrap 在 backend
-   mount/data root 就绪后同步恢复可证明的 interrupted rollback，再重建 in-memory state 和 watcher
+   mount/data root 就绪后同步恢复可证明的 interrupted rollback，再重建 in-memory state 和 watcher，
+   并按 Btrfs lineage 校正过期的 `index.head`
 6. `save_manifest`：持久化初始状态（bootstrap 可能改了 backend 选择）
 7. `util::ensure_symlinks`：重启后修复工作区 symlink
 8. `seccomp::apply_seccomp_filter`
@@ -614,18 +615,23 @@ config reload（`notify_waiters()`）会立即打断 sleep，让 loop 重读配�
 
 - tmp 是已验证的 Btrfs subvolume、live 不存在：使用 `RENAME_NOREPLACE` 恢复旧 live。
 - tmp 不存在：幂等 no-op。
-- live 与 tmp 同时存在，或任一路径是 symlink、普通目录、文件或无法验证：保留所有路径并
-  阻止 backend bootstrap。没有 durable rollback commit evidence 时，daemon 不能证明应该
-  保留哪一个 subvolume。
+- live 与 tmp 都是已验证的 Btrfs subvolume：说明 rollback 已从目标快照创建新 live，只差
+  最后的删除旧子卷。启动时保留 live、删除 tmp 以完成 rollback；与 rollback 自身的清理一致，
+  删除失败只告警（non-fatal），下次启动重试。
+- 任一路径是 symlink、普通目录、文件或无法验证：保留所有路径并阻止 backend bootstrap。
 - recovery 只接管在 `snapshots/<workspace-id>/` 中有对应 ownership marker 的
   `.rollback-tmp`。该证据同时覆盖当前 ID 和 migration 保留的 legacy ID；没有 marker 的
   foreign path 只告警并保留。
 
-当前 fail-closed 粒度是整个 daemon：一个 workspace 的 ambiguous rollback 会阻止其他
-workspace 一同启动。这是缺少 per-workspace quarantine 时的安全取舍。该恢复也不能关闭
-“新 live 已创建或旧 tmp 已删除，但 `index.head` 尚未持久化”的逻辑提交窗口；完整自动恢复
-需要 durable rollback journal/commit record。真实 Btrfs crash injection 与断电持久性仍需
-在隔离的特权环境验证。
+当前 fail-closed 粒度是整个 daemon：一个 workspace 的无法验证路径会阻止其他
+workspace 一同启动。这是缺少 per-workspace quarantine 时的安全取舍。
+
+“新 live 已创建或旧 tmp 已删除，但 `index.head` 尚未持久化”时，`index.head` 仍指向
+rollback 前的快照。state rebuild 用 Btrfs lineage 校正：writable snapshot 的 Parent UUID
+就是源快照的 UUID。head 是 live 的源快照，或存在从当前 live 拍出的 checkpoint 时保持
+不变；否则把 head 和 `LIVE_CHILD` 移到 UUID 唯一匹配的快照上。缺少 head 或 Parent UUID
+时不修改；源快照已被清理或 lineage 无法确认时只告警，不修改索引，也不改变 guarded
+rollback 的结果记录。进程中断恢复通过真实 daemon 验证，断电持久性仍需独立验证。
 
 ---
 
