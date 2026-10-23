@@ -182,6 +182,10 @@ fn remove_empty_dir_without_recursive() {
     // remove non-empty directories").
     svc.mkdir("empty").unwrap();
     svc.remove("empty", false).unwrap();
+    // recursive=true on an empty dir stays valid — it takes the normal
+    // recursive path, which removes the (empty) directory as well.
+    svc.mkdir("empty2").unwrap();
+    svc.remove("empty2", true).unwrap();
     let err = svc.remove("empty", false).unwrap_err();
     assert!(matches!(err, MemoryError::NotFound(_)));
 
