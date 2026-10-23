@@ -149,7 +149,13 @@ def load_grading_result(trace_path: str) -> tuple:
     trace_end = None
     with open(trace_path) as f:
         for line in f:
-            obj = json.loads(line)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if obj.get("type") == "grading_result":
                 grading = obj
             if obj.get("type") == "trace_end":
