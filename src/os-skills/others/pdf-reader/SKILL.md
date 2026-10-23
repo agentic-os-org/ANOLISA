@@ -19,4 +19,9 @@ Options: `-p "1-5,7"` page range, `--format json` structured output, `--metadata
 
 Tables: `--tables --format json` adds a `tables` array to each selected page: `{"bbox": [x0,y0,x1,y1], "rows": [[cell, ...], ...]}` from PyMuPDF table detection; pages without ruled tables report `"tables": []`. Plain page text and the default schemas are unchanged; the flag is rejected for text output.
 
+Use `--links` with `--format json` for selected-page navigation records. Rectangles
+and points become JSON arrays; nonnegative destination pages are one-based. URI,
+file and symbolic target data is retained without following targets. Empty pages
+use `links: []`; default output and PDF bytes stay unchanged.
+
 Setup: `pip install PyMuPDF`

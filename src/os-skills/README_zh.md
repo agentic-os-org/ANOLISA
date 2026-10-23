@@ -46,6 +46,8 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+使用 `read_pdf.py --format json --links` 读取页面导航目标，详见[链接参考](../../docs/user-guide/zh/user-entrypoint/os-skills.md#pdf-导航链接)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
