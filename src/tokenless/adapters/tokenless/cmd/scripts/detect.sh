@@ -27,12 +27,21 @@ if [ -z "$VERSION" ]; then
     exit 2
 fi
 
-# Command Code resolves ~/.commandcode through HOME/USERPROFILE; there is no
-# dedicated config-home variable, so the override is ours.
+# Command Code resolves ~/.commandcode through HOME/USERPROFILE and reads no
+# dedicated config-home variable, so TOKENLESS_CMD_MODS_DIR and COMMANDCODE_HOME
+# are installer-side overrides the host never sees: a link outside the scanned
+# directory is installed, but only "mods.paths" (or `cmd --mod`) makes it load.
+HOST_MODS_DIR="$HOME/.commandcode/mods"
 MODS_DIR="${TOKENLESS_CMD_MODS_DIR:-${COMMANDCODE_HOME:-$HOME/.commandcode}/mods}"
 MOD_LINK="$MODS_DIR/tokenless.ts"
 if [ -L "$MOD_LINK" ] && [ "$MOD_LINK" -ef "$MOD_SOURCE" ]; then
-    echo "[${COMPONENT}] ${AGENT}: ready (${VERSION})"
+    NOTE=""
+    if [ "$MODS_DIR" != "$HOST_MODS_DIR" ]; then
+        echo "[${COMPONENT}] WARNING: Command Code scans ${HOST_MODS_DIR}, not ${MODS_DIR}." >&2
+        echo "[${COMPONENT}] WARNING: the ${AGENT} mod stays inactive until that directory is listed under \"mods.paths\" in $HOME/.commandcode/settings.json." >&2
+        NOTE=", outside the directory Command Code scans"
+    fi
+    echo "[${COMPONENT}] ${AGENT}: ready (${VERSION}${NOTE})"
     exit 0
 fi
 

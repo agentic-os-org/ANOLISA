@@ -345,9 +345,18 @@ if [ $1 -eq 0 ]; then
     fi
 
     # --- Command Code mod cleanup ---
+    # Note: %preun runs as root, while the mod is registered as a symlink in
+    # each invoking user's own ~/.commandcode/mods. This only removes root's
+    # link, so a non-root user's link survives and dangles once RPM deletes the
+    # packaged tokenless.ts it points at. Such users have to run
+    # cmd/scripts/uninstall.sh before the package is erased (it also removes an
+    # already dangling link) or delete ~/.commandcode/mods/tokenless.ts by hand
+    # afterwards.
     CMD_SCRIPT="%{_adapterdir_tokenless}/cmd/scripts/uninstall.sh"
     if [ -x "$CMD_SCRIPT" ]; then
         bash "$CMD_SCRIPT" || true
+        echo "WARN: per-user Command Code mod links are not removed by RPM %preun." >&2
+        echo "WARN: each user running cmd must remove their own ~/.commandcode/mods/tokenless.ts link: run cmd/scripts/uninstall.sh before erasing this package, or delete the link once it dangles." >&2
     fi
 
     # --- Qwen Code plugin cleanup ---
