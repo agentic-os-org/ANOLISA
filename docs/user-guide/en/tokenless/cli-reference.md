@@ -120,7 +120,12 @@ Operations:
 
 `post_tool` is the only operation that enters `PostToolPipeline`. Current production routing is:
 
-- Retrieve results, interrupted or denied calls, and RTK-optimized output bypass compression.
+- Retrieve results and interrupted or denied calls bypass compression.
+- RTK output bypasses compression unless complete execution receipts confirm unchanged bytes and
+  the call succeeded. PostTool must supply the exact registered execution command in `command`;
+  a missing or modified command retains the bypass. Core restores the original command before routing. Changed or unconfirmed
+  output retains the bypass; a tied token estimate does not authorize fallback. Receipt-state
+  failures warn and retain the bypass without failing the PostTool operation.
 - Tool errors pass through unchanged and may include bounded `additional_context` diagnostics.
 - Successful JSON uses `JsonCompressor`; compact JSON or TOON may be selected.
 - Recognized successful build/test command output uses `BuildLogCompressor`; terminal cleanup and

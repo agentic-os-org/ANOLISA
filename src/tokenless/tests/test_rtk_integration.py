@@ -12,6 +12,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from test_hermes_lifecycle import _load_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
 RTK = Path(
@@ -62,6 +65,238 @@ class RtkIntegrationTest(unittest.TestCase):
             f"exit {exit_code}\n"
         )
         executable.chmod(0o755)
+
+    def protocol(self, operation: str, value: dict) -> dict:
+        result = subprocess.run(
+            [str(TOKENLESS), "compress"],
+            input=json.dumps({
+                "protocol_version": 2, "operation": operation,
+                "attribution": {"agent_id": "rtk-integration", "session_id": "session-49", "tool_use_id": "tool-49"},
+                "input": value,
+            }),
+            cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)["result"]
+
+    def rewrite_command(self, command: str, tracked: bool = True) -> str:
+        if not (self.bin_dir / "rtk").exists():
+            (self.bin_dir / "rtk").symlink_to(RTK)
+        rewritten = self.protocol("pre_tool", {
+            "tool_name": "Bash", "arguments": {"command": command}, "command_field": "command",
+            "capabilities": {"replace_arguments": True, "block_and_suggest": False},
+        })
+        self.assertEqual(rewritten["action"], "replace_arguments")
+        result = rewritten["arguments"]["command"]
+        self.assertEqual("TOKENLESS_RTK_RUN_ID=" in result, tracked)
+        return result
+
+    def execute(self, command: str) -> str:
+        executed = subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(executed.returncode, 0, executed.stderr)
+        return executed.stdout
+
+    def execute_rewrite(self, command: str) -> str:
+        return self.execute(self.rewrite_command(command))
+
+    def post_rtk(self, content: str, command: str | None = None, recovery: str = "none") -> dict:
+        return self.protocol("post_tool", {
+            "result_kind": "tool", "tool_name": "Bash", "content": content,
+            "command": command,
+            "status": "success", "content_origin": "command_output", "output_optimization": "rtk",
+            "capabilities": {"replace_output": True, "replace_with_text": True, "recovery": {"kind": recovery}},
+        })
+
+    def test_unchanged_local_html_keeps_file_origin_after_rewrite(self) -> None:
+        content = "<html><body><main>" + "<p>Editable source markup.</p>" * 100 + "</main></body></html>"
+        (self.root / "page.html").write_text(content)
+        self.env["TOKENLESS_HTML_EXTRACTION_ENABLED"] = "1"
+        command = self.rewrite_command("cat page.html")
+        output = self.execute(command)
+        self.assertEqual(output, content)
+        result = self.post_rtk(output, command, recovery="shell")
+        self.assertEqual(result["output"], content)
+        self.assertEqual(result["applied_operations"], [])
+
+    def test_untracked_retry_invalidates_prior_receipts_and_late_reports(self) -> None:
+        (self.root / "clean.txt").write_text("original unchanged output")
+        content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
+        (self.root / "filtered.js").write_text("// stripped by RTK\n" + content)
+        (self.root / "empty.txt").write_text("")
+        old_command = self.rewrite_command("cat clean.txt")
+        self.execute(old_command)
+        command = self.rewrite_command("rtk read -l minimal filtered.js && cat empty.txt", tracked=False)
+        # A delayed producer from the previous attempt cannot recreate its receipt.
+        self.execute(old_command)
+        output = self.execute(command)
+        self.assertEqual(output, content)
+        result = self.post_rtk(output, command)
+        self.assertEqual(result["disposition"], "passthrough")
+        self.assertEqual(result["output"], output)
+
+    def test_locked_retry_cannot_consume_an_older_receipt(self) -> None:
+        (self.root / "clean.txt").write_text("original unchanged output")
+        content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
+        (self.root / "filtered.js").write_text("// stripped by RTK\n" + content)
+        (self.root / "empty.txt").write_text("")
+        for retry in ["cat filtered.js", "rtk read -l minimal filtered.js && cat empty.txt"]:
+            with self.subTest(retry=retry):
+                self.execute_rewrite("cat clean.txt")
+                database = sqlite3.connect(self.root / "tokenless/rtk-outcomes.db")
+                try:
+                    database.execute("BEGIN EXCLUSIVE")
+                    command = self.rewrite_command(retry, tracked=False)
+                finally:
+                    database.rollback()
+                    database.close()
+                if retry.startswith("cat"):
+                    command += " -l minimal"
+                output = self.execute(command)
+                self.assertEqual(output, content)
+                for executed_command in [None, command]:
+                    result = self.post_rtk(output, executed_command)
+                    self.assertEqual(result["disposition"], "passthrough")
+                    self.assertEqual(result["output"], output)
+
+    def test_fallback_requires_the_exact_executed_command(self) -> None:
+        content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
+        (self.root / "clean.txt").write_text(content)
+        command = self.rewrite_command("cat clean.txt")
+        output = self.execute(command)
+        for supplied in [None, "cat clean.txt", command + " && printf extra"]:
+            with self.subTest(command=supplied):
+                result = self.post_rtk(output, supplied)
+                self.assertEqual(result["disposition"], "passthrough")
+        self.assertEqual(self.post_rtk(output, command)["disposition"], "applied")
+
+    def test_hermes_recognizes_real_tracked_wrappers(self) -> None:
+        plugin = _load_plugin(str(ROOT / "adapters/tokenless/hermes/__init__.py"), "hermes_real_rtk")
+        (self.bin_dir / "rtk").symlink_to(RTK)
+        self.env["TOKENLESS_HTML_EXTRACTION_ENABLED"] = "1"
+        html = "<html><body><main>" + "<p>Editable source markup.</p>" * 100 + "</main></body></html>"
+        data = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
+        requests = []
+
+        def run_core(tokenless_bin, request, timeout, operation):
+            requests.append(request)
+            result = subprocess.run([tokenless_bin, "compress"], input=json.dumps(request),
+                                    cwd=self.root, env=self.env, text=True, capture_output=True, timeout=timeout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)["result"]
+
+        with patch.object(plugin, "_resolve_binary", return_value=str(TOKENLESS)), \
+             patch.object(plugin, "run_compress", side_effect=run_core), \
+             patch.object(plugin, "tokenless_retrieve_command_available", return_value=True):
+            for filename, source, expected, suffix in [
+                ("page.html", html, html, ""),
+                ("filtered.js", "// stripped by RTK\n" + data, data, " -l minimal"),
+                ("clean.json", data, data, ""),
+            ]:
+                with self.subTest(filename=filename):
+                    (self.root / filename).write_text(source)
+                    rewritten = plugin.on_pre_tool_call(tool_name="terminal", args={"command": f"cat {filename}"},
+                                                        session_id="hermes-session", tool_call_id="hermes-call")
+                    self.assertEqual(rewritten["action"], "block")
+                    command = rewritten["message"].removeprefix("[tokenless:rewrite] Re-execute as: ") + suffix
+                    self.assertIn("TOKENLESS_RTK_RUN_ID=", command)
+                    output = self.execute(command)
+                    self.assertEqual(output, expected)
+                    result = plugin.on_transform_tool_result(tool_name="terminal", args={"command": command},
+                                                             result=json.dumps({"output": output, "exit_code": 0}),
+                                                             session_id="hermes-session", tool_call_id="hermes-call", status="ok")
+                    if filename == "clean.json":
+                        self.assertIsNotNone(result)
+                        self.assertLess(len(json.loads(result)["output"]), len(output))
+                    else:
+                        self.assertIsNone(result)
+                    self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
+                    self.assertEqual(requests[-1]["input"]["capabilities"]["recovery"]["kind"], "none")
+
+    def test_rtk_post_tool_ignores_unusable_state_directory(self) -> None:
+        content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
+        invalid = self.root / "not-a-directory"
+        invalid.write_text("file")
+        for directory in ["relative/data", str(invalid)]:
+            for stats in ["0", "1"]:
+                with self.subTest(directory=directory, stats=stats):
+                    self.env["TOKENLESS_DATA_DIR"] = directory
+                    self.env["TOKENLESS_STATS_ENABLED"] = stats
+                    result = self.post_rtk(content)
+                    self.assertEqual(result["disposition"], "passthrough")
+                    self.assertEqual(result["output"], content)
+
+    def test_rtk_receipt_failure_does_not_pollute_tool_output(self) -> None:
+        content = "unchanged tool output"
+        (self.root / "clean.txt").write_text(content)
+        command = self.rewrite_command("cat clean.txt")
+        database = self.root / "tokenless/rtk-outcomes.db"
+        database.unlink()
+        database.mkdir()
+        result = subprocess.run(["/bin/sh", "-c", command], cwd=self.root, env=self.env,
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, content)
+        self.assertEqual(result.stderr, "")
+
+    def test_changed_bytes_with_equal_token_estimate_keep_rtk_ownership(self) -> None:
+        records = [{"name": f"item-{index}", "value": index} for index in range(30)]
+        filtered = json.dumps(records, indent=2)
+        # Three removed bytes must remain in the same ceil(bytes / 4) bucket.
+        records[0]["name"] += "x" * ((1 - len(filtered)) % 4)
+        filtered = json.dumps(records, indent=2)
+        content = "//\n" + filtered
+        (self.root / "tied.js").write_text(content)
+        command = self.rewrite_command("cat tied.js")
+        # Exercise the producer's explicit filtering mode with a tracked generation.
+        output = self.execute(command + " -l minimal")
+        self.assertEqual(output, filtered)
+        self.assertNotEqual(output, content)
+        self.assertEqual((len(output) + 3) // 4, (len(content) + 3) // 4)
+        result = self.post_rtk(output, command + " -l minimal")
+        self.assertEqual(result["disposition"], "passthrough")
+        self.assertEqual(result["output"], output)
+
+    def test_receipt_fallback_is_independent_of_statistics(self) -> None:
+        content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
+        git = self.bin_dir / "git"
+        git.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(content) + "\n")
+        git.chmod(0o755)
+        self.env["TOKENLESS_STATS_ENABLED"] = "0"
+        for command, unchanged in [
+            ("git show --format=%B --stat", True),
+            ("git log -20 --numstat", True),
+            # Oneline tracking trims the trailing newline even without token savings.
+            ("git log -20 --oneline", False),
+        ]:
+            with self.subTest(command=command):
+                executed_command = self.rewrite_command(command)
+                output = self.execute(executed_command)
+                self.assertEqual(output.strip(), content)
+                fallback = self.post_rtk(output, executed_command)
+                self.assertEqual(fallback["disposition"], "applied" if unchanged else "passthrough")
+                if unchanged:
+                    self.assertEqual(fallback["recoverability"], "lossless")
+                    self.assertLess(fallback["after_tokens"], fallback["before_tokens"])
+                else:
+                    self.assertEqual(fallback["output"], output)
+                repeated = self.post_rtk(output, executed_command)
+                self.assertEqual(repeated["disposition"], "passthrough")
+                self.assertEqual(repeated["output"], output)
+        self.assertFalse((self.root / "tokenless/stats.db").exists())
+
+    def test_rtk_savings_still_skip_post_processing(self) -> None:
+        content = "abc1234 subject (1 day ago) <author>\n" + "commit body detail\n" * 100 + "---END---\n"
+        git = self.bin_dir / "git"
+        git.write_text("#!/bin/sh\nprintf '%s' " + shlex.quote(content) + "\n")
+        git.chmod(0o755)
+        output = self.execute_rewrite("git log -20")
+        self.assertLess(len(output), len(content))
+        result = self.post_rtk(output)
+        self.assertEqual(result["disposition"], "passthrough")
+        self.assertEqual(result["output"], output)
 
     def test_rewrite_returns_command_without_executing_it(self) -> None:
         result = self.run_rtk("rewrite", "git status")

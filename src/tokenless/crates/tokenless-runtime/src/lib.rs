@@ -28,7 +28,7 @@ mod taxonomy;
 
 pub use entry::{EntryOptions, EntryOutcome, dispatch_with_store, response_operation};
 use entry::{
-    before_model_with_store, post_tool_with_store, pre_tool_with_rtk,
+    before_model_with_store, post_tool_with_outcomes, pre_tool_with_rtk,
     retrieve_authorized_with_store,
 };
 use post_tool::{PostToolPipeline, PostToolPipelineConfig};
@@ -469,9 +469,10 @@ impl TokenlessRuntime {
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
             rtk_path: None,
-            rtk_data_dir: None,
+            rtk_data_dir: Some(self.data_dir.clone()),
         };
-        let outcome = post_tool_with_store(request, &options, self.stash_store.as_ref())?;
+        let outcome =
+            post_tool_with_outcomes(request, &options, self.stash_store.as_ref(), attribution)?;
         record_entry_stats(
             attribution,
             &outcome.stats,
@@ -601,7 +602,7 @@ impl TokenlessRuntime {
         if let Some(recorder) = &self.stats_recorder
             && let Err(e) = recorder.record(&record)
         {
-            warn_stats(&format!(
+            warn_soft(&format!(
                 "[tokenless-stats] WARNING: failed to record stats entry: {e}",
             ));
         }
@@ -786,12 +787,12 @@ fn validate_input_size(input: &str) -> Result<(), RuntimeError> {
 /// Best-effort stderr warning whose own write failure cannot fail the
 /// command. `eprintln!` panics when writing to stderr fails (a full
 /// filesystem behind redirected logs, a closed descriptor), which would
-/// turn a fail-soft stats-recording warning into a process failure —
-/// the stats layer must stay invisible to the compression and
+/// turn an optional-state warning into a process failure —
+/// optional state must stay invisible to the compression and
 /// retrieval results. The write errors are discarded: there is no
 /// fallback channel to report a failed warning on, and failing the
 /// command here is exactly the regression to avoid.
-pub(crate) fn warn_stats(message: &str) {
+pub(crate) fn warn_soft(message: &str) {
     use std::io::Write;
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(message.as_bytes());
@@ -967,7 +968,7 @@ pub fn retrieve_recorded(
             None,
             None,
         ) {
-            warn_stats(&format!(
+            warn_soft(&format!(
                 "[tokenless-stats] WARNING: failed to record retrieve event: {e}",
             ));
         }
@@ -1083,14 +1084,14 @@ fn record_entry_stats(
                         "json_truncation"
                     };
                     if let Err(e) = recorder.record_artifacts(stats_id, artifact_kind, stash_keys) {
-                        warn_stats(&format!(
+                        warn_soft(&format!(
                             "[tokenless-stats] WARNING: failed to record stash artifacts: {e}"
                         ));
                     }
                 }
             }
             Err(e) => {
-                warn_stats(&format!(
+                warn_soft(&format!(
                     "[tokenless-stats] WARNING: failed to record stats entry: {e}",
                 ));
             }
@@ -1120,12 +1121,12 @@ mod tests {
     /// able to fail the command when stderr itself cannot be written
     /// (a full filesystem behind redirected logs). `eprintln!` panics
     /// on that shape, turning the fail-soft warning into exit 101 while
-    /// the compression output is fine; `warn_stats` must survive it.
+    /// the compression output is fine; `warn_soft` must survive it.
     /// Redirect fd 2 to /dev/full, call the helper, restore, and assert
     /// the call returned — a panicking write makes this test fail.
     #[test]
     #[cfg(target_os = "linux")]
-    fn warn_stats_survives_an_unwritable_stderr() {
+    fn warn_soft_survives_an_unwritable_stderr() {
         use std::os::unix::io::AsRawFd;
 
         let dev_full = std::fs::OpenOptions::new()
@@ -1138,7 +1139,7 @@ mod tests {
             libc::dup2(dev_full.as_raw_fd(), 2);
         }
         // The helper's whole contract: no panic, error discarded.
-        warn_stats("[tokenless-stats] WARNING: simulated stderr failure");
+        warn_soft("[tokenless-stats] WARNING: simulated stderr failure");
         // Restore before any assert can print.
         let restored = unsafe { libc::dup2(saved, 2) };
         let _ = std::io::Write::flush(&mut std::io::stderr());

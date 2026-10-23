@@ -82,8 +82,10 @@ Stash 和支持的恢复方式。保留全部增删行、元信息，以及修�
 
 采用后的操作名为 `diff_reduction`，恢复等级是 `retrievable`，而非 `lossless`：
 可见输出省略了部分未修改上下文。原文仍在 Stash 时，可按输出中的 shell 或工具
-指令取回收到的原始内容；恢复需要额外工具调用。文件读取和已标记由 RTK 优化的
-结果直接透传；启用此功能不改变 RTK 命令重写。不支持或不完整的 Diff 透传。
+指令取回收到的原始内容；恢复需要额外工具调用。文件内容结果和仍由 RTK 持有的输出
+直接透传。只有完整回执确认字节未变，Core 才解除 RTK 所有权；回退仍要求宿主声明恢复能力。
+Common Hook、Hermes 和 OpenClaw 为 RTK 结果声明无恢复能力，其回退不能使用 Diff 缩减。
+启用此功能不改变 RTK 命令重写。不支持或不完整的 Diff 透传。
 重命名、二进制摘要等特殊文件段保留收到的字节；编码二进制补丁整份透传。
 Tokenless 不读取宿主持久化输出文件以补全被截断的 Diff，也不改变宿主截断上限。
 
@@ -141,7 +143,7 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 | `TOKENLESS_STATS_ENABLED` | 覆盖本地统计开关 | 不影响 SLS 或 Stash |
 | `TOKENLESS_SLS_ENABLED` | 覆盖 SLS 度量开关 | 不影响本地统计 |
 | `TOKENLESS_COMPRESSION_ENABLED` | 覆盖真实压缩开关 | false 是 dry-run，不是完全停用 |
-| `TOKENLESS_DATA_DIR` | 存放 `stats.db` 和 `stash.db` 的目录 | 可访问的任意绝对目录，但不能是文件系统根目录或包含父目录遍历 |
+| `TOKENLESS_DATA_DIR` | 存放 `stats.db`、`stash.db` 和 `rtk-outcomes.db` 的目录 | 可访问的任意绝对目录，但不能是文件系统根目录或包含父目录遍历 |
 | `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
@@ -169,6 +171,11 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 
 - 统计库：`TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
 - stash 库：`--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
+- RTK 回执：`TOKENLESS_DATA_DIR/rtk-outcomes.db` > `~/.tokenless/rtk-outcomes.db`
+
+RTK 回执独立于统计开关，保存原命令和实际执行的完整命令、Agent/会话/工具调用标识、执行批次及输出改变标记，
+不保存工具输出正文。PostTool 命令与注册的执行命令完全匹配时消费一次后删除；未消费回执一天后过期，在后续改写时
+清理。回执目录不可用时仅停用这项回退，PostTool 保留 RTK 所有权并返回原输出。
 
 `TOKENLESS_DATA_DIR` 是显式的目录级迁移配置，可以指向真实用户 home 之外，包括 `/var/lib` 下由服务管理的目录。CLI 和随包 RTK 写入器都会拒绝文件系统根目录、相对路径、父目录遍历以及已存在的非目录目标。若没有有效的更高优先级文件覆盖项，显式数据目录无效时会停用本次操作的 SQLite 状态，不会静默回退到 home。
 
