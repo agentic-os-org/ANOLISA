@@ -376,7 +376,7 @@ ModApi 只提供两个可变更的工具 Hook，没有工具 Schema 接缝，因
 |---|---|---|---|
 | Tool Ready | `beforeToolCall` | 注册为静默透传；不检查、不修复、不注入、不阻断 | ⛔ 已硬关闭 |
 | 命令重写 | `beforeToolCall`（`shell_command`、`powershell`） | 通过 RTK 重写 Shell 命令，并原样保留其余输入字段 | ✅ 生效 |
-| 响应 + TOON 压缩 | `afterToolCall` | 替换结果中模型可见的文本，非文本块保持原位 | ✅ 生效 |
+| 响应 + TOON 压缩 | `afterToolCall` | 替换结果中模型可见的文本，非文本块保持原位；文本块被非文本块分隔的结果整体不改写 | ✅ 生效 |
 | Schema 压缩 | — | ModApi 没有工具定义 Hook | ⛔ 宿主不支持 |
 
 当前尚未提供 `cmd` 的内置 ANOLISA Driver，因此 `anolisa adapter scan` 不会列出它，
@@ -390,6 +390,12 @@ make cmd-install
 把 `mods/tokenless.ts` 建成指向随包 Mod 的软链接，并拒绝替换不属于它管理的文件或链接。
 `make cmd-uninstall` 只移除该链接。当 `PATH` 上没有 `cmd` 时，安装脚本只打印提示并以 0 退出，
 因此在没有安装 Command Code 的机器上 `make setup` 仍能正常完成。
+
+这两个覆盖变量都只作用于安装脚本自身：Command Code 只扫描 `~/.commandcode/mods` 以及它自己
+`mods.paths` 设置中列出的目录，并不读取这两个变量，因此当解析出的目录不是
+`~/.commandcode/mods` 时，安装脚本与 `detect.sh` 都会打印告警。请把该目录加入
+`~/.commandcode/settings.json` 的 `mods.paths`，或用 `cmd --mod <mods 目录>/tokenless.ts`
+按会话加载。
 
 Mod 在每个进程中只加载一次，因此安装或移除后需要开启新会话或执行 `/reload`。完整生命周期
 参阅[框架集成](../../docs/user-guide/zh/tokenless/framework-integration.md#command-code-cmd)。

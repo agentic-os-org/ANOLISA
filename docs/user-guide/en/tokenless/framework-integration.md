@@ -665,12 +665,23 @@ to replace a file or link it does not own. `scripts/detect.sh` reports `ready` f
 `scripts/uninstall.sh` removes only it. Without a `cmd` binary on `PATH` the installer prints a hint
 and exits 0, so `make setup` still completes on hosts without Command Code.
 
+Both override variables are installer-side only. Command Code discovers user mods in
+`~/.commandcode/mods` plus the directories its own `mods.paths` setting lists, and it reads neither
+variable, so an override moves the link without activating the mod. `install.sh` and
+`scripts/detect.sh` therefore warn whenever the resolved directory is not `~/.commandcode/mods`. To
+use an override, also list that directory under `mods.paths` in `~/.commandcode/settings.json`, or
+load the mod for a single session with `cmd --mod <mods-dir>/tokenless.ts`.
+
 The mod maps `beforeToolCall` and `afterToolCall` onto the shared Tokenless hooks. `beforeToolCall`
 replaces the `command` of the `shell_command` and `powershell` tools and carries every other input
 field over unchanged, because Command Code replaces the input wholesale and chains it into the next
 mod. `afterToolCall` replaces the model-visible text of a tool result and keeps non-text blocks,
-such as images, in their original position. Every hook call fails open: a missing runner, a hook
-timeout, or an undecodable reply leaves the tool call exactly as Command Code would have run it.
+such as images, in their original position; when a non-text block separates two text blocks of the
+same result, the whole result is left unchanged instead, because folding those blocks into one
+string would detach each caption from the image it describes. Such a result never reaches the hook,
+so no saving is recorded for text the model still reads in full. Every hook call fails open: a
+missing runner, a hook timeout, or an undecodable reply leaves the tool call exactly as Command Code
+would have run it.
 
 Mods load once per process, so start a new session or run `/reload` after installing or removing
 the mod. Then run a tool call and inspect `tokenless stats list`, which attributes the records to

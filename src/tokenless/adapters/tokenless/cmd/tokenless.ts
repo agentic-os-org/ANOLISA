@@ -257,6 +257,32 @@ function isTextBlock(block) {
 }
 
 /**
+ * Whether a non-text block separates two text blocks of a result.
+ *
+ * Compression folds every text block into one string, which only reads back
+ * correctly while those blocks are contiguous. `[text, image, text]` — a
+ * caption, the image it describes, then the next caption — loses that pairing
+ * when folded, so such a result is reported here and left alone.
+ *
+ * @param {unknown} result cmd's `afterToolCall` result
+ * @returns {boolean} true when text and non-text blocks interleave
+ */
+function hasInterleavedText(result) {
+  if (!Array.isArray(result)) return false;
+  let sawText = false;
+  let sawGap = false;
+  for (const block of result) {
+    if (isTextBlock(block)) {
+      if (sawGap) return true;
+      sawText = true;
+    } else if (sawText) {
+      sawGap = true;
+    }
+  }
+  return false;
+}
+
+/**
  * The model-visible text of a cmd tool result.
  *
  * cmd normalizes a result through its own `normalizeToolResultContent`, so a
@@ -280,15 +306,17 @@ export function resultText(result) {
  *
  * Non-text blocks (images, custom entries) keep their position; the first text
  * block carries the compressed text and the remaining ones are dropped, since
- * their content was folded into it.
+ * their content was folded into it. That fold is only sound while the text
+ * blocks are contiguous, so an interleaved result is refused instead of being
+ * rebuilt into something the model would misread.
  *
  * @param {unknown} result cmd's `afterToolCall` result
  * @param {string} text compressed replacement
- * @returns {unknown} the rewritten result, or null when there is no text slot
+ * @returns {unknown} the rewritten result, or null when it must stay as it is
  */
 export function withReplacedText(result, text) {
   if (typeof result === "string") return text;
-  if (!Array.isArray(result)) return null;
+  if (!Array.isArray(result) || hasInterleavedText(result)) return null;
   let placed = false;
   const rebuilt = [];
   for (const block of result) {
@@ -369,7 +397,17 @@ export function createTokenlessHooks(options = {}) {
      * @returns {Promise<object | undefined>} cmd's afterToolCall output
      */
     async afterToolCall(call) {
-      const text = resultText(call?.result);
+      const incoming = call?.result;
+
+      // Folded text only reads back correctly while the text blocks are
+      // contiguous: `[text "Image A:", image A, text "Image B:", image B]`
+      // would collapse into one combined caption followed by both images and
+      // the model would lose the text-to-image pairing. Leave such a result
+      // exactly as cmd produced it, and skip the hook so Core records no
+      // saving that never reached the model.
+      if (hasInterleavedText(incoming)) return undefined;
+
+      const text = resultText(incoming);
       if (text === null) return undefined;
 
       // Send the extracted text, not the block envelope: Core measures and
@@ -384,7 +422,7 @@ export function createTokenlessHooks(options = {}) {
 
       const compressed = hookOutput?.updatedToolOutput;
       if (typeof compressed === "string" && compressed) {
-        const content = withReplacedText(call.result, compressed);
+        const content = withReplacedText(incoming, compressed);
         if (content !== null) {
           output.content = content;
           opinion = true;

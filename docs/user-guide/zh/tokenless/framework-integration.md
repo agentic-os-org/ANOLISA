@@ -597,11 +597,20 @@ bash ~/.local/share/anolisa/adapters/tokenless/cmd/scripts/install.sh
 当 `PATH` 上没有 `cmd` 时，安装脚本只打印提示并以 0 退出，因此在没有安装 Command Code
 的机器上 `make setup` 仍能正常完成。
 
+这两个覆盖变量都只作用于安装脚本自身。Command Code 只扫描 `~/.commandcode/mods` 以及它自己的
+`mods.paths` 设置中列出的目录，并不读取这两个变量，因此覆盖变量只会改变链接的落点，不会让 Mod
+生效。当解析出的目录不是 `~/.commandcode/mods` 时，`install.sh` 与 `scripts/detect.sh` 都会打印
+告警。若确实需要使用覆盖变量，请同时把该目录加入 `~/.commandcode/settings.json` 的 `mods.paths`，
+或用 `cmd --mod <mods 目录>/tokenless.ts` 按会话加载。
+
 该 Mod 把 `beforeToolCall` 与 `afterToolCall` 映射到共享 Tokenless Hook。`beforeToolCall`
 替换 `shell_command` 和 `powershell` 工具的 `command`，并原样保留其余输入字段——因为
 Command Code 会整体替换输入，再把它串联给下一个 Mod。`afterToolCall` 替换工具结果中
-模型可见的文本，并保持图片等非文本块在原位置。每次 Hook 调用都失败即放行：运行器缺失、
-Hook 超时或返回内容无法解析时，工具调用都会保持 Command Code 原本的行为。
+模型可见的文本，并保持图片等非文本块在原位置；当同一结果中的两个文本块被非文本块分隔时，
+整个结果保持原样不改写——把这些文本块折叠成一个字符串会让每段说明与它所描述的图片脱钩。
+这类结果根本不会进入 Hook，因此也不会为模型仍然完整读到的文本记录任何节省。每次 Hook 调用
+都失败即放行：运行器缺失、Hook 超时或返回内容无法解析时，工具调用都会保持 Command Code
+原本的行为。
 
 Mod 在每个进程中只加载一次，因此安装或移除后需要开启新会话或执行 `/reload`。随后执行一次
 工具调用并运行 `tokenless stats list`，统计记录会归属到 `agent=cmd`。两个 Hook 使用相同的

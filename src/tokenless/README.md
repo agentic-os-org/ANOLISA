@@ -866,7 +866,7 @@ unchanged.
 |---|---|---|---|
 | Tool Ready | `beforeToolCall` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `beforeToolCall` (`shell_command`, `powershell`) | Rewrites shell commands via RTK, carrying every other input field over | ✅ Active |
-| Response + TOON compression | `afterToolCall` | Replaces the model-visible text of the result, keeping non-text blocks in place | ✅ Active |
+| Response + TOON compression | `afterToolCall` | Replaces the model-visible text of the result, keeping non-text blocks in place; a result whose text blocks are separated by a non-text block is left untouched | ✅ Active |
 | Schema compression | — | The ModApi has no tool-definition hook | ⛔ Unavailable |
 
 No built-in ANOLISA driver ships for `cmd` yet, so `anolisa adapter scan` does not
@@ -883,6 +883,13 @@ link to the bundled mod; and refuses to replace a file or link it does not own.
 `make cmd-uninstall` removes only that link. Without a `cmd` binary on `PATH` the
 installer prints a hint and exits 0, so `make setup` still completes on hosts
 without Command Code.
+
+Both overrides are installer-side only: Command Code scans
+`~/.commandcode/mods` plus the directories listed in its own `mods.paths`
+setting, and reads neither variable, so the installer and `detect.sh` warn when
+the resolved directory is not `~/.commandcode/mods`. List such a directory under
+`mods.paths` in `~/.commandcode/settings.json`, or load the mod for a single
+session with `cmd --mod <mods-dir>/tokenless.ts`.
 
 Mods load once per process, so start a new session or run `/reload` after
 installing or removing the mod. See
