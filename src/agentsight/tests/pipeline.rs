@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Pipeline integration tests: feed synthetic SslEvents through the full
 //! parser → aggregator → analyzer → genai builder → SQLite chain.
 //!

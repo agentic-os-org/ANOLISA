@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! BPF verifier load tests — verify every eBPF program passes the kernel
 //! verifier on the running kernel.
 //!
