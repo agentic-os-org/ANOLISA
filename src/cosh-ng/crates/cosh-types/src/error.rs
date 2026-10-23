@@ -37,6 +37,13 @@ pub enum ErrorCode {
     AuditCorrupt = 405,
     AuditCursorInvalid = 406,
     AuditExportError = 407,
+    // Generic additions are appended to preserve existing binary enum indices.
+    UnsupportedPlatform = 8,
+    // Login shell (5xx)
+    LoginShellConflict = 500,
+    LoginShellBackendError = 501,
+    LoginShellIoError = 502,
+    LoginShellAccessDenied = 503,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
