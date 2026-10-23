@@ -5,6 +5,7 @@ pub mod config;
 pub mod contract;
 pub mod deadline;
 pub mod evaluation;
+pub mod evidence;
 pub mod judgment;
 pub mod model;
 pub mod outcome;
