@@ -4,7 +4,7 @@
 mod default_name_tests;
 
 use super::{
-    apply_aliyun_prepare, auth_validation_body, begin_sysom_shortcut,
+    apply_aliyun_prepare, auth_validation_body, begin_sysom_shortcut, cancel_auth_panel,
     clear_ecs_auth_source_for_manual_aliyun_edit, clear_observed_model_after_provider_change,
     clear_observed_model_after_provider_delete, ecs_ram_role_prepare, handle_auth_answer,
     management_entry, render_auth_card_actions, restore_after_configure_failure,
@@ -121,6 +121,202 @@ fn manual_prepare_mode_is_not_an_ecs_challenge() {
     let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_manual());
     assert!(!apply_aliyun_prepare(&mut auth));
     assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+}
+
+#[test]
+fn auth_capture_outranks_a_pending_question_during_secret_entry() {
+    use crate::raw_input::RawInputCapture;
+    use crate::runtime::controller::pending_card_capture;
+    use crate::types::{
+        AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent,
+        QuestionSelectionMode,
+    };
+
+    let mut state = InlineState::default();
+
+    // A pending agent question with free text — before the fix this took
+    // the capture ahead of the auth panel.
+    let events = vec![GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
+        event: AgentEvent::UserQuestion {
+            run_id: "run-test".to_string(),
+            provider_request_id: Some("provider-question".to_string()),
+            question: "Choose".to_string(),
+            options: Vec::new(),
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+        },
+        reason: "display".to_string(),
+        display_text: String::new(),
+        auto_execute: false,
+    }];
+    crate::question::runtime::record_user_questions(
+        &mut state,
+        &events,
+        crate::agent::run::AgentRunOrigin::Standard,
+        Some("owner"),
+    );
+    assert!(crate::question::runtime::has_pending_question(&state));
+
+    // Auth is filling a secret field (partially typed).
+    let mut auth = slash_auth_state(&["dashscope"], SysomMenu::on_manual());
+    auth.phase = AuthPhase::FillingField;
+    auth.providers[0].fields = vec![AuthFieldInfo {
+        name: "api_key".to_string(),
+        label: "API Key".to_string(),
+        hint: None,
+        secret: true,
+        required: true,
+        placeholder: None,
+    }];
+    auth.field_input = "sk-typed-so-far".to_string();
+    state.auth.state = Some(auth);
+
+    // The auth panel owns the capture: the masked secret field must not be
+    // preempted by the question card, whose free-text input renders what
+    // the user types in plain text.
+    assert!(matches!(
+        pending_card_capture(&state),
+        Some(RawInputCapture::TextQuestion { secret, .. }) if secret
+    ));
+
+    // Once auth completes, the queued question takes the capture.
+    state.auth.state = None;
+    assert!(matches!(
+        pending_card_capture(&state),
+        Some(RawInputCapture::Question {
+            allow_free_text, ..
+        }) if allow_free_text
+    ));
+}
+
+/// Builds the shared fixture for the renderer/capture synchronization tests:
+/// a pending free-text question that queued behind an auth flow filling a
+/// secret field, with the auth panel painted (panel bookkeeping set as
+/// render_current_auth_panel leaves it).
+fn question_queued_behind_secret_auth() -> InlineState {
+    use crate::types::{
+        AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent,
+        QuestionSelectionMode,
+    };
+
+    let mut state = InlineState::default();
+    let events = vec![GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
+        event: AgentEvent::UserQuestion {
+            run_id: "run-test".to_string(),
+            provider_request_id: Some("provider-question".to_string()),
+            question: "Choose".to_string(),
+            options: Vec::new(),
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+        },
+        reason: "display".to_string(),
+        display_text: String::new(),
+        auto_execute: false,
+    }];
+    crate::question::runtime::record_user_questions(
+        &mut state,
+        &events,
+        crate::agent::run::AgentRunOrigin::Standard,
+        Some("owner"),
+    );
+
+    let mut auth = slash_auth_state(&["dashscope"], SysomMenu::on_manual());
+    auth.phase = AuthPhase::FillingField;
+    auth.providers[0].fields = vec![AuthFieldInfo {
+        name: "api_key".to_string(),
+        label: "API Key".to_string(),
+        hint: None,
+        secret: true,
+        required: true,
+        placeholder: None,
+    }];
+    auth.field_input = "sk-typed-so-far".to_string();
+    state.auth.state = Some(auth);
+    // The auth panel is on screen: the bookkeeping render_current_auth_panel
+    // maintains, so clearing must erase exactly those rows.
+    state.questions.active_panel_id = Some(crate::auth::capture::auth_capture_id(
+        state.auth.state.as_ref().expect("auth"),
+    ));
+    state.questions.active_panel_height = 4;
+    state
+}
+
+#[test]
+fn clearing_a_finished_auth_panel_renders_the_queued_question() {
+    use crate::auth::prompt::clear_active_auth_panel;
+    use crate::raw_input::RawInputCapture;
+    use crate::runtime::controller::pending_card_capture;
+
+    let mut state = question_queued_behind_secret_auth();
+    let mut out = Vec::new();
+
+    // The real completion paths drop the auth state before clearing the
+    // panel (cancel_auth_panel now does the same).
+    state.auth.state = None;
+    clear_active_auth_panel(&mut state, &mut out).expect("clear");
+
+    // The queued question is painted where the auth panel was, and the
+    // panel bookkeeping points at it, so what the user sees matches where
+    // input goes.
+    let rendered = String::from_utf8_lossy(&out);
+    assert!(rendered.contains("Choose"), "question must be painted: {rendered:?}");
+    let question_id = state
+        .questions
+        .pending_id
+        .clone()
+        .expect("pending question id");
+    assert_eq!(state.questions.active_panel_id.as_deref(), Some(question_id.as_str()));
+    assert!(matches!(
+        pending_card_capture(&state),
+        Some(RawInputCapture::Question {
+            allow_free_text, ..
+        }) if allow_free_text
+    ));
+}
+
+#[test]
+fn auth_phase_changes_keep_the_queued_question_off_screen() {
+    use crate::auth::prompt::clear_active_auth_panel;
+
+    let mut state = question_queued_behind_secret_auth();
+    let mut out = Vec::new();
+
+    // A phase change repaints the auth panel itself: the auth state is
+    // still present, so clearing must not paint the queued question
+    // underneath.
+    clear_active_auth_panel(&mut state, &mut out).expect("clear");
+    let rendered = String::from_utf8_lossy(&out);
+    assert!(
+        !rendered.contains("Choose"),
+        "phase changes must not paint the queued question: {rendered:?}"
+    );
+    assert_eq!(state.questions.active_panel_id, None);
+}
+
+#[test]
+fn cancelling_the_auth_panel_renders_the_queued_question() {
+    use crate::raw_input::RawInputCapture;
+    use crate::runtime::controller::pending_card_capture;
+
+    let mut state = question_queued_behind_secret_auth();
+    let mut out = Vec::new();
+
+    cancel_auth_panel(&mut state, &mut out).expect("cancel");
+
+    // After the cancellation notice the queued question owns the panel and
+    // the capture, painted in the same clear pass.
+    let rendered = String::from_utf8_lossy(&out);
+    assert!(rendered.contains("Choose"), "question must be painted: {rendered:?}");
+    assert!(matches!(
+        pending_card_capture(&state),
+        Some(RawInputCapture::Question {
+            allow_free_text, ..
+        }) if allow_free_text
+    ));
 }
 
 #[test]
