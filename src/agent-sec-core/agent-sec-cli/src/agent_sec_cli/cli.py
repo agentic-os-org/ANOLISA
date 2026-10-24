@@ -610,6 +610,10 @@ def events(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
 
+        # Aggregates have no rows to skip: --offset used to drop the N
+        # newest events before counting, silently understating the total
+        # (and hiding whole categories in count_by). The daemon's
+        # sec.events.count handler rejects limit/offset for the same reason.
         result = reader.count(
             event_type=event_type,
             category=category,
@@ -618,7 +622,6 @@ def events(
             run_id=run_id,
             since=resolved_since,
             until=resolved_until,
-            offset=offset,
         )
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         raise typer.Exit(code=0)
@@ -642,7 +645,6 @@ def events(
             run_id=run_id,
             since=resolved_since,
             until=resolved_until,
-            offset=offset,
         )
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         raise typer.Exit(code=0)
