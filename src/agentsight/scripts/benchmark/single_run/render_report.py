@@ -7,13 +7,13 @@ import argparse
 import csv
 import gzip
 import json
-from collections.abc import Iterable
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 from benchmark_stats import linear_slope, numeric, rolling_max_increase, stats
 from h2load_stats import summarize_h2load
+from validate_results import json_lines
 
 LOAD_METRICS = {
     "benchmark_latency": "custom latency (ms)",
@@ -61,19 +61,6 @@ REGRESSION_CHECKS = (
         ),
     ),
 )
-
-
-def json_lines(path: Path) -> Iterable[dict[str, Any]]:
-    """Yield valid JSON objects from a line-oriented k6 output file."""
-    opener = gzip.open if path.suffix == ".gz" else Path.open
-    with opener(path, mode="rt", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(item, dict):
-                yield item
 
 
 def summarize_load(path: Path | None) -> dict[str, Any]:

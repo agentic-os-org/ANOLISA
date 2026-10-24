@@ -18,6 +18,7 @@ from campaign_evaluation import numeric_measurement
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "single_run"))
 from benchmark_stats import numeric, percentile
 from fault_injector import delivery_failures
+from validate_results import json_lines
 
 VERSIONS = ("baseline", "optimized")
 RECOVERY_PHASES = ("stable", "overload", "recover")
@@ -167,27 +168,19 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
     latencies: dict[int, list[float]] = defaultdict(list)
     if not path.exists():
         return {"effective_qps": [], "latency_p99_ms": []}
-    opener = gzip.open if path.suffix == ".gz" else Path.open
-    with opener(path, mode="rt", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(item, dict):
-                continue
-            data = item.get("data", {})
-            if not isinstance(data, dict):
-                continue
-            sample_time = timestamp(data.get("time"))
-            value = finite_float(data.get("value"))
-            if sample_time is None or value is None:
-                continue
-            second = int(sample_time)
-            if item.get("metric") == "benchmark_requests":
-                requests[second] += value
-            elif item.get("metric") == "benchmark_latency":
-                latencies[second].append(value)
+    for item in json_lines(path):
+        data = item.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        sample_time = timestamp(data.get("time"))
+        value = finite_float(data.get("value"))
+        if sample_time is None or value is None:
+            continue
+        second = int(sample_time)
+        if item.get("metric") == "benchmark_requests":
+            requests[second] += value
+        elif item.get("metric") == "benchmark_latency":
+            latencies[second].append(value)
     throughput = []
     previous_second: int | None = None
     for second in sorted(requests):

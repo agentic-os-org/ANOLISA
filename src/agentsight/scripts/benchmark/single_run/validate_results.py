@@ -65,16 +65,22 @@ def load_ffi_captured(
 
 
 def json_lines(path: Path) -> Iterable[dict[str, Any]]:
-    """Yield valid JSON objects from a k6 JSON output file."""
+    """Yield UTF-8 JSON objects, isolating malformed records in plain/gzip logs."""
     opener = gzip.open if path.suffix == ".gz" else Path.open
-    with opener(path, mode="rt", encoding="utf-8") as handle:
+    skipped = 0
+    # Decode each record separately: TextIOWrapper can reject an entire read
+    # buffer when a later line contains a torn multibyte character.
+    with opener(path, mode="rb") as handle:
         for line in handle:
             try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
+                item = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                skipped += 1
                 continue
             if isinstance(item, dict):
                 yield item
+    if skipped:
+        logging.warning("Skipped %d malformed JSONL records in %s", skipped, path)
 
 
 def _coerce_optional_status(status: Any) -> int | None:
