@@ -574,6 +574,20 @@ pub struct DaemonState {
 - 所有写盘走 `atomic_write`（tmp + fsync + rename），保证崩溃安全
 - `collect_workspace_entries` 通过 `path_to_wsid` 无锁遍历，避免 write-locked 的 ws 被跳过丢条目
 
+### 快照分页索引
+
+`WorkspaceState` 在内存中维护按 `(created_at, workspace_id, snapshot_id)` 排序的
+`snapshot_order`，供 `ListPage` 从游标之后直接做范围查询。它不写入 `index.json`，
+也不改变 IPC 或游标格式；注册工作区及启动恢复后从 `SnapshotIndex` 重建。
+运行时新增、删除、同名替换快照必须通过 `insert_snapshot`、`remove_snapshot`、
+`replace_index` 同步该顺序；只改 pin、missing、DAG 或回滚回执不改变排序键。
+完整索引替换仅增删有变化的键，普通新增和删除不遍历其他快照。
+
+分页仍保留第一页观察到的最大键作为上界，并在构造响应时重新检查候选是否被删除或
+替换。每个工作区按顺序提供候选，全局只保留页大小加一条；达到已有候选上界后停止
+读取该工作区。`--orphans` 仍需在范围内跳过非 orphan 键，不保证固定页延迟。
+该索引增加与快照数量成正比的常驻内存，换取连续翻页时不再重复遍历全部快照。
+
 ### Daemon 启动顺序
 
 [`crates/daemon/src/lib.rs`](../src/crates/daemon/src/lib.rs) 中 `run_daemon` 的关键步骤：

@@ -605,7 +605,7 @@ pub async fn delete_snapshot(
 
     // 5. Unlink from DAG, then remove from index + save
     ws.index.unlink_node(&resolved_id);
-    ws.index.snapshots.remove(&resolved_id);
+    ws.remove_snapshot(&resolved_id);
     ws.index.governed_evidence.remove(&resolved_id);
     ws.index.recovered_orphans.remove(&resolved_id);
     let snap_dir = state.index_dir(&ws.ws_id);
@@ -1850,6 +1850,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(index.snapshots.is_empty());
+            assert!(matches!(
+                crate::snapshot_mgr::list_snapshot_page(&state, Some("ws-del-absent"), 10, None, false).await.unwrap(),
+                Response::ListPageOk { snapshots, next_cursor: None } if snapshots.is_empty()
+            ));
         }
     }
 

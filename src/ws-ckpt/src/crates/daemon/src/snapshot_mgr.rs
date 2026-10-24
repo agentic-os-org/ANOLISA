@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -148,7 +149,7 @@ pub(crate) async fn delete_snapshots_locked(
         let removed_set = removed.iter().cloned().collect();
         ws.index.prune_chain(&removed_set);
         for id in &removed {
-            ws.index.snapshots.remove(id);
+            ws.remove_snapshot(id);
             ws.index.governed_evidence.remove(id);
             ws.index.recovered_orphans.remove(id);
         }
@@ -327,7 +328,7 @@ pub async fn checkpoint(
             hm.child_ids.push(snapshot_id.clone());
         }
     }
-    ws.index.snapshots.insert(snapshot_id.clone(), meta);
+    ws.insert_snapshot(snapshot_id.clone(), meta);
     ws.index.head = Some(snapshot_id.clone());
 
     // 11. Persist index
@@ -600,17 +601,15 @@ const LIST_CURSOR_VERSION: u8 = 1;
 const MAX_CURSOR_LEN: usize = 16 * 1024;
 const TARGET_LIST_PAGE_SIZE: u64 = 1024 * 1024;
 
+/// Stable list order shared by runtime keys and serialized cursor bounds.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct ListKey {
-    created_at: DateTime<Utc>,
-    workspace_id: String,
-    snapshot_id: String,
-}
-
-impl ListKey {
-    fn sort_key(&self) -> (DateTime<Utc>, &str, &str) {
-        (self.created_at, &self.workspace_id, &self.snapshot_id)
-    }
+pub(crate) struct ListKey {
+    /// Creation time is the primary chronological ordering field.
+    pub(crate) created_at: DateTime<Utc>,
+    /// Workspace identity breaks creation-time ties across workspaces.
+    pub(crate) workspace_id: String,
+    /// Snapshot identity makes the order total within a workspace.
+    pub(crate) snapshot_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -709,58 +708,46 @@ pub async fn list_snapshot_page(
     };
     let after = decoded.as_ref().map(|cursor| &cursor.after);
     let cursor_upper = decoded.as_ref().map(|cursor| &cursor.upper);
-    // Keep at most limit + 1 identity keys. Compare borrowed fields before
-    // allocating candidate keys; the index is still scanned once per page.
+    // Seek directly past the cursor in each workspace's runtime order. Keep
+    // only limit + 1 identities globally; metadata is cloned during assembly.
     let candidate_cap = limit.saturating_add(1);
     let mut candidates: BTreeMap<ListKey, Arc<RwLock<WorkspaceState>>> = BTreeMap::new();
     let mut observed_upper: Option<ListKey> = None;
     for arc in arcs {
         let ws = arc.read().await;
-        let mut workspace_upper = None;
-        for (id, meta) in &ws.index.snapshots {
-            if orphans_only && !ws.index.recovered_orphans.contains(id) {
-                continue;
+        if orphans_only && ws.index.recovered_orphans.is_empty() {
+            continue;
+        }
+        let eligible =
+            |key: &&ListKey| !orphans_only || ws.index.recovered_orphans.contains(&key.snapshot_id);
+        // Existing timestamps may lie ahead of the wall clock after a clock
+        // correction. Preserve the first page's maximum observed key.
+        if cursor_upper.is_none() {
+            if let Some(key) = ws.snapshot_keys().iter().rev().find(eligible) {
+                if observed_upper.as_ref().is_none_or(|current| key > current) {
+                    observed_upper = Some(key.clone());
+                }
             }
-            let key = (meta.created_at, ws.ws_id.as_str(), id.as_str());
-            // Existing timestamps may lie ahead of the wall clock after a clock
-            // correction. Capture the maximum observed key, not Utc::now().
-            if cursor_upper.is_none() && workspace_upper.is_none_or(|current| key > current) {
-                workspace_upper = Some(key);
-            }
-            if cursor_upper.is_some_and(|upper| key > upper.sort_key())
-                || after.is_some_and(|after| key <= after.sort_key())
-            {
-                continue;
-            }
+        }
+        let bounds = (
+            after.map_or(Unbounded, Excluded),
+            cursor_upper.map_or(Unbounded, Included),
+        );
+        for key in ws.snapshot_keys().range(bounds) {
             if candidates.len() == candidate_cap
                 && candidates
                     .last_key_value()
-                    .is_some_and(|(last, _)| key >= last.sort_key())
+                    .is_some_and(|(last, _)| key >= last)
             {
+                // The remaining keys from this workspace are later still.
+                break;
+            }
+            if orphans_only && !ws.index.recovered_orphans.contains(&key.snapshot_id) {
                 continue;
             }
-            candidates.insert(
-                ListKey {
-                    created_at: meta.created_at,
-                    workspace_id: ws.ws_id.clone(),
-                    snapshot_id: id.clone(),
-                },
-                Arc::clone(&arc),
-            );
+            candidates.insert(key.clone(), Arc::clone(&arc));
             if candidates.len() > candidate_cap {
                 candidates.pop_last();
-            }
-        }
-        if let Some(key) = workspace_upper {
-            if observed_upper
-                .as_ref()
-                .is_none_or(|current| key > current.sort_key())
-            {
-                observed_upper = Some(ListKey {
-                    created_at: key.0,
-                    workspace_id: key.1.to_string(),
-                    snapshot_id: key.2.to_string(),
-                });
             }
         }
     }
@@ -1037,6 +1024,9 @@ pub async fn cleanup_snapshots(
 }
 
 #[cfg(test)]
+mod pagination_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
@@ -1078,9 +1068,7 @@ mod tests {
                 let mut ws = arc.write().await;
                 let created_at = Utc::now();
                 for id in ["a", "b", "c"] {
-                    ws.index
-                        .snapshots
-                        .insert(id.into(), make_snapshot_meta_at(false, created_at));
+                    ws.insert_snapshot(id.into(), make_snapshot_meta_at(false, created_at));
                 }
                 ws.index.recovered_orphans.extend(["a".into(), "c".into()]);
             }
@@ -1137,7 +1125,7 @@ mod tests {
             {
                 let mut ws = arc.write().await;
                 for (id, seconds) in [("a", 0), ("b", 1)] {
-                    ws.index.snapshots.insert(
+                    ws.insert_snapshot(
                         id.into(),
                         make_snapshot_meta_at(false, future + Duration::seconds(seconds)),
                     );
@@ -1166,7 +1154,7 @@ mod tests {
                     .snapshot_id,
                 "b"
             );
-            arc.write().await.index.snapshots.insert(
+            arc.write().await.insert_snapshot(
                 "c".into(),
                 make_snapshot_meta_at(false, future + Duration::seconds(2)),
             );
@@ -1211,16 +1199,14 @@ mod tests {
                 Some("x".repeat((u64::from(MAX_FRAME_SIZE) - overhead - 100) as usize));
             {
                 let mut ws = arc.write().await;
-                ws.index
-                    .snapshots
-                    .insert(first.snapshot_id.clone(), entry.meta);
-                ws.index.snapshots.insert(
+                ws.insert_snapshot(first.snapshot_id.clone(), entry.meta);
+                ws.insert_snapshot(
                     upper.snapshot_id.clone(),
                     make_snapshot_meta_at(false, created_at),
                 );
                 // Simulate deletion/recreation between candidate selection and page assembly.
                 if replaced {
-                    ws.index.snapshots.insert(
+                    ws.insert_snapshot(
                         skipped.snapshot_id.clone(),
                         make_snapshot_meta_at(false, created_at + Duration::seconds(1)),
                     );
@@ -1391,9 +1377,7 @@ mod tests {
             let arc = self.state.get_by_wsid(&self.ws_id).unwrap();
             arc.write()
                 .await
-                .index
-                .snapshots
-                .insert(snapshot_id.to_string(), make_snapshot_meta(false));
+                .insert_snapshot(snapshot_id.to_string(), make_snapshot_meta(false));
         }
     }
 
@@ -1866,6 +1850,11 @@ mod tests {
             1,
             "the corrected retry must reach the backend exactly once"
         );
+        assert!(matches!(
+            list_snapshot_page(&state, Some(ws_id), 10, None, false).await.unwrap(),
+            Response::ListPageOk { snapshots, next_cursor: None }
+                if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "snap-1")
+        ));
     }
 
     // ── SnapshotMeta pinned logic test ──
@@ -2756,6 +2745,12 @@ mod tests {
         assert_eq!(on_disk.snapshots["snap-3"].parent_id, None);
         assert_eq!(on_disk.governed_evidence.len(), 1);
         assert!(on_disk.governed_evidence.contains_key("snap-3"));
+        drop(ws);
+        assert!(matches!(
+            list_snapshot_page(&state, Some("ws-partial"), 10, None, false).await.unwrap(),
+            Response::ListPageOk { snapshots, next_cursor: None }
+                if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "snap-3")
+        ));
     }
 
     /// Chain fixture: snap-1 <- ... <- snap-`n`, head at snap-n carrying the
@@ -2878,7 +2873,7 @@ mod tests {
         }
         index.snapshots.get_mut("snap-5").unwrap().pinned = true;
         index.snapshots.get_mut("snap-1").unwrap().missing = true;
-        arc.write().await.index = index.clone();
+        arc.write().await.replace_index(index.clone());
         index_store::save(&fx.state.index_dir(&fx.ws_id), &index)
             .await
             .unwrap();
@@ -2933,6 +2928,13 @@ mod tests {
                 panic!("expected list response");
             };
             assert_eq!(listed.len(), 6);
+            for orphans_only in [false, true] {
+                let expected_count = if orphans_only { 3 } else { 6 };
+                assert!(matches!(
+                    list_snapshot_page(&restarted, Some(&fx.ws_id), 10, None, orphans_only).await.unwrap(),
+                    Response::ListPageOk { snapshots, next_cursor: None } if snapshots.len() == expected_count
+                ));
+            }
             for (from, to) in [("snap-4", None), ("snap-1", Some("snap-4"))] {
                 assert!(matches!(
                     diff_snapshots(&restarted, &fx.ws_id, from, to)

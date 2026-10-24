@@ -214,7 +214,7 @@ impl Fixture {
     async fn add_target_snapshot(&self) {
         let workspace = self.state.get_by_wsid(WS_ID).expect("registered workspace");
         let mut workspace = workspace.write().await;
-        workspace.index.snapshots.insert(
+        workspace.insert_snapshot(
             TARGET_ID.to_string(),
             SnapshotMeta {
                 message: Some("target".to_string()),
@@ -288,6 +288,30 @@ async fn create_checkpoint(fixture: &Fixture, caller_uid: u32) -> Response {
         false,
     )
     .await
+}
+
+async fn assert_snapshot_page(state: &Arc<DaemonState>, expected: &[&str]) {
+    for scope in [None, Some(WS_ID)] {
+        let response = crate::snapshot_mgr::list_snapshot_page(state, scope, 10, None, false)
+            .await
+            .expect("snapshot page");
+        let Response::ListPageOk {
+            snapshots,
+            next_cursor,
+        } = response
+        else {
+            panic!("expected a snapshot page: {response:?}");
+        };
+        let ids = snapshots
+            .iter()
+            .map(|item| match item {
+                ws_ckpt_common::SnapshotListItem::Full(entry) => entry.id.as_str(),
+                ws_ckpt_common::SnapshotListItem::Summary(entry) => entry.id.as_str(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected);
+        assert!(next_cursor.is_none());
+    }
 }
 
 #[tokio::test]
@@ -521,6 +545,8 @@ async fn empty_workspace_checkpoint_is_created_and_published_after_durable_save(
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
+    drop(workspace);
+    assert_snapshot_page(&fixture.state, &[CHECKPOINT_ID]).await;
 }
 
 #[tokio::test]
@@ -549,6 +575,8 @@ async fn empty_workspace_save_failure_does_not_publish_evidence_in_memory() {
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
+    drop(workspace);
+    assert_snapshot_page(&fixture.state, &[]).await;
 }
 
 #[tokio::test]
@@ -580,6 +608,7 @@ async fn exact_duplicate_is_idempotent_and_conflicting_digest_is_rejected() {
         GuardedCheckpointRejectionCodeV2::OperationConflict,
     );
     assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 1);
+    assert_snapshot_page(&fixture.state, &[CHECKPOINT_ID]).await;
 }
 
 /// #7234: a refused space admission is a known-no-effect rejection and the
@@ -650,6 +679,8 @@ async fn refused_create_admission_rejects_rollback_and_allows_retry() {
         .await,
         Response::GuardedRollbackEvidenceV2Ok { evidence: None }
     ));
+    // Reserving and aborting a rollback replaces receipts, not snapshot identities.
+    assert_snapshot_page(&fixture.state, &[TARGET_ID]).await;
 
     fixture
         .backend
@@ -660,6 +691,7 @@ async fn refused_create_admission_rejects_rollback_and_allows_retry() {
         Response::GuardedRollbackV2Ok { .. }
     ));
     assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 2);
+    assert_snapshot_page(&fixture.state, &[TARGET_ID]).await;
 }
 
 #[test]
@@ -795,6 +827,7 @@ async fn evidence_survives_a_legacy_save_and_fresh_state_load() {
         .await,
         Response::CheckpointEvidenceV2Ok { evidence: Some(_) }
     ));
+    assert_snapshot_page(&restarted, &[CHECKPOINT_ID]).await;
 }
 
 #[tokio::test]
@@ -922,6 +955,8 @@ async fn post_backend_save_failure_does_not_publish_created_evidence_in_memory()
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
+    drop(workspace);
+    assert_snapshot_page(&fixture.state, &[]).await;
 }
 
 #[tokio::test]
@@ -972,6 +1007,7 @@ async fn guarded_rollback_succeeds_with_exact_preview_and_durable_bindings() {
         .await,
         Response::GuardedRollbackEvidenceV2Ok { evidence: Some(_) }
     ));
+    assert_snapshot_page(&fixture.state, &[TARGET_ID]).await;
 }
 
 #[tokio::test]

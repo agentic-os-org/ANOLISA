@@ -108,16 +108,18 @@ snapshots. Keep this filter unchanged when continuing a cursor.
 Explicit-page JSON is an object with `snapshots` and `next_cursor`. Pages sort
 oldest first by `(created_at, workspace_id, snapshot_id)`. A cursor is opaque,
 versioned, scoped to the original workspace query, and carries the first page's
-upper bound, the maximum key observed in its index scan (not the current time).
+upper bound, the maximum key observed on the first page (not the current time).
 Inserts newer than that bound do not appear; inserts within the
 bound and deletions can still affect later pages. For a mutation-free,
 point-in-time listing, pause checkpoint and cleanup operations during the scan.
 
-The daemon reads each page from its in-memory snapshot index and does not scan
-snapshot file contents. Each page scans the query scope again: N snapshots over
-P pages require O(N * P) index visits, plus candidate maintenance and rendering.
-Only selected candidate keys are copied, but the repeated scan remains; no
-fixed latency is guaranteed. Pages target about 1 MiB and never exceed the 16 MiB IPC frame limit.
+The daemon seeks past the cursor in an in-memory ordered index for each queried
+workspace instead of rescanning every snapshot on each page. The order is rebuilt
+at startup and maintained as snapshots change; it uses additional memory
+proportional to the number of snapshots. Orphan-only queries may still inspect
+non-orphan keys within the remaining range. Listing does not read snapshot file
+contents, and no fixed latency is guaranteed. Pages target about 1 MiB and never
+exceed the 16 MiB IPC frame limit.
 If one entry's optional `message` or `metadata` would exceed that limit, the
 entry is returned as `detail: "summary"` with `omitted_fields`. Its retained
 `created_at`, `pinned`, and `missing` fields stay under `meta`, as in full entries;

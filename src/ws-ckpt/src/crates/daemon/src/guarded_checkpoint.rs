@@ -270,7 +270,7 @@ pub(crate) async fn checkpoint(
             "snapshot was created but durable evidence save failed; reconcile before retrying: {error:#}"
         ));
     }
-    workspace.index = next_index;
+    workspace.replace_index(next_index);
     Response::GuardedCheckpointV2Ok { evidence }
 }
 
@@ -545,6 +545,7 @@ pub(crate) async fn rollback(
             format!("failed to durably reserve guarded rollback operation: {error:#}"),
         );
     }
+    // Only guarded_rollbacks changed; snapshot membership and ordering are unchanged.
     workspace.index = started_index;
 
     // Revalidate all mutable provider state after the durable intent write. The
@@ -866,6 +867,7 @@ async fn abort_reserved_rollback(
     aborted.guarded_rollbacks.remove(operation_id);
     match crate::index_store::save_durable(&state.index_dir(&workspace.ws_id), &aborted).await {
         Ok(()) => {
+            // Only guarded_rollbacks changed; snapshot membership and ordering are unchanged.
             workspace.index = aborted;
             rejection
         }
