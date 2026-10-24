@@ -9,6 +9,7 @@ Validates the PostToolUse hook output contract:
 - Legacy path for non-replacement adapters.
 - Hardened permissions on the cached `claude --version` probe.
 - A `claude --version` probe that cannot answer fails open.
+- A corrupt or incomplete cached probe reads as a miss and is rebuilt.
 
 Uses subprocess to invoke the hook with a mock tokenless binary,
 avoiding Python version issues with the hook_utils module.
@@ -211,6 +212,33 @@ def _create_broken_mock_claude(tmpdir: str, mode: str) -> str:
         raise ValueError(f"Unknown mode: {mode}")
     os.chmod(mock_script, os.stat(mock_script).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return mock_script
+
+
+def _claude_cache_key(claude_bin: str) -> str:
+    """The key `_cached_claude_version` derives from the claude binary."""
+    st = os.stat(claude_bin)
+    return f"{claude_bin}:{int(st.st_mtime)}:{st.st_size}"
+
+
+def _write_version_cache(isolated_home: str, data: bytes) -> str:
+    """Stage ~/.tokenless/.claude-version with exact bytes, bypassing the hook.
+
+    Lets a test reproduce the state an interrupted `secure_write_text` leaves
+    behind: half a record, or bytes that are not UTF-8 at all.
+    """
+    cache_dir = os.path.join(isolated_home, ".tokenless")
+    os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    cache = os.path.join(cache_dir, ".claude-version")
+    with open(cache, "wb") as f:
+        f.write(data)
+    os.chmod(cache, 0o600)
+    return cache
+
+
+def _read_version_cache(cache: str) -> bytes:
+    """The cache file's exact bytes."""
+    with open(cache, "rb") as f:
+        return f.read()
 
 
 def _run_hook(
@@ -1039,6 +1067,146 @@ class TestClaudeVersionProbeFailure(unittest.TestCase):
                             "a failed probe must not write the version cache")
                     finally:
                         shutil.rmtree(isolated_home, ignore_errors=True)
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestClaudeVersionCacheCorruption(unittest.TestCase):
+    """A corrupt or incomplete cached probe must read as a cache miss.
+
+    `~/.tokenless/.claude-version` is written by a hook process that the host
+    can kill mid-write, so a half record — the cache key with no version after
+    it — is an ordinary deployment state, not an exotic one. Treating that as
+    an answer pins "version unknown" for the lifetime of the claude binary:
+    every later tool call declares no replacement capability and compression
+    stays off until the CLI changes or the user removes the cache by hand.
+    Undecodable bytes are worse still — they raised `UnicodeDecodeError` out of
+    the hook, failing the tool call itself.
+
+    Both shapes must instead fall through to the bounded live probe, and a
+    probe that parses must rebuild the cache. A valid hit stays a hit (no
+    probe), and a probe that cannot answer still fails open without pinning a
+    verdict, exactly as `TestClaudeVersionProbeFailure` requires.
+    """
+
+    # One entry per way a cache write can end up unusable.
+    CORRUPT_CACHE_MODES = ("undecodable", "key-only", "non-version")
+
+    @classmethod
+    def _corrupt_bytes(cls, mode: str, cache_key: str) -> bytes:
+        if mode == "undecodable":
+            return b"\xff"
+        if mode == "key-only":
+            return f"{cache_key}\n".encode()
+        if mode == "non-version":
+            return f"{cache_key}\nClaude Code (no version)\n".encode()
+        raise ValueError(f"Unknown mode: {mode}")
+
+    @staticmethod
+    def _bash_payload() -> dict:
+        return {
+            "tool_name": "Bash",
+            "tool_response": _make_large_json_payload(),
+            "session_id": "test-session",
+            "tool_use_id": "toolu_test",
+        }
+
+    def test_corrupt_cache_is_a_miss_and_a_good_probe_rebuilds_it(self) -> None:
+        for mode in self.CORRUPT_CACHE_MODES:
+            with self.subTest(mode=mode):
+                with tempfile.TemporaryDirectory() as directory:
+                    isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+                    try:
+                        binary = _create_mock_tokenless(directory, "compress")
+                        claude = _create_mock_claude(directory, "2.1.210")
+                        key = _claude_cache_key(claude)
+                        cache = _write_version_cache(
+                            isolated_home, self._corrupt_bytes(mode, key))
+                        result = _run_hook(
+                            self._bash_payload(), "claude-code", binary, isolated_home)
+                        self.assertNotIn(
+                            "_subprocess_error", result,
+                            f"a corrupt cache must not fail the tool call: {result}")
+                        self.assertIn(
+                            "updatedToolOutput", result.get("hookSpecificOutput", {}),
+                            "the re-probed version must still replace the output")
+                        with open(os.path.join(directory, "request.json")) as captured:
+                            request = json.load(captured)
+                        self.assertTrue(
+                            request["capabilities"]["replace_output"],
+                            "the live probe must have run and answered")
+                        self.assertEqual(_spawn_log_lines(binary), ["compress"])
+                        self.assertEqual(
+                            _read_version_cache(cache), f"{key}\n2.1.210".encode(),
+                            "a probe that parses must rebuild the cache")
+                        self.assertEqual(
+                            stat.S_IMODE(os.stat(cache).st_mode), 0o600,
+                            "the rebuilt cache keeps the hardened mode")
+                    finally:
+                        shutil.rmtree(isolated_home, ignore_errors=True)
+
+    def test_valid_cache_hit_still_answers_without_a_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+            try:
+                binary = _create_mock_tokenless(directory, "compress")
+                # Unspawnable on purpose: only the cached answer can enable
+                # replacement here, so a regression that drops cache hits
+                # (or re-probes unconditionally) fails instead of passing.
+                claude = _create_broken_mock_claude(directory, "unspawnable")
+                staged = f"{_claude_cache_key(claude)}\n2.1.210".encode()
+                cache = _write_version_cache(isolated_home, staged)
+                result = _run_hook(
+                    self._bash_payload(), "claude-code", binary, isolated_home)
+                self.assertNotIn("_subprocess_error", result,
+                                 f"Hook subprocess failed: {result}")
+                self.assertIn(
+                    "updatedToolOutput", result.get("hookSpecificOutput", {}),
+                    "a valid cached version must keep replacement enabled")
+                self.assertEqual(_read_version_cache(cache), staged,
+                                 "a cache hit must not rewrite the cache")
+            finally:
+                shutil.rmtree(isolated_home, ignore_errors=True)
+
+    def test_corrupt_cache_with_a_failing_probe_fails_open(self) -> None:
+        for probe_mode in TestClaudeVersionProbeFailure.BROKEN_PROBE_MODES:
+            for cache_mode in self.CORRUPT_CACHE_MODES:
+                with self.subTest(probe=probe_mode, cache=cache_mode):
+                    with tempfile.TemporaryDirectory() as directory:
+                        isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+                        try:
+                            binary = _create_mock_tokenless(directory, "compress-text")
+                            claude = _create_broken_mock_claude(directory, probe_mode)
+                            staged = self._corrupt_bytes(
+                                cache_mode, _claude_cache_key(claude))
+                            cache = _write_version_cache(isolated_home, staged)
+                            stderr: list = []
+                            result = _run_hook(
+                                {"tool_name": "Grep", "tool_response": {
+                                    "mode": "content",
+                                    "content": "file.rs:1:match\n" * 20,
+                                }},
+                                "claude-code", binary, isolated_home,
+                                stderr_sink=stderr,
+                            )
+                            self.assertNotIn(
+                                "_subprocess_error", result,
+                                f"a corrupt cache must not fail the tool call: {result}")
+                            self.assertEqual(
+                                result, {},
+                                "an undetectable claude version must fail open")
+                            with open(os.path.join(directory, "request.json")) as captured:
+                                request = json.load(captured)
+                            self.assertFalse(
+                                request["capabilities"]["replace_output"],
+                                "the re-probe answered nothing: capability stays off")
+                            self.assertIn(
+                                "version unknown", "".join(stderr),
+                                f"hook did not report the disabled gate: {stderr}")
+                            self.assertEqual(
+                                _read_version_cache(cache), staged,
+                                "a failed probe must not pin a verdict in the cache")
+                        finally:
+                            shutil.rmtree(isolated_home, ignore_errors=True)
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
