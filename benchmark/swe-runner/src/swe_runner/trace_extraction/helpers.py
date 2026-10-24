@@ -132,8 +132,21 @@ def _safe_int(value: object) -> int:
         return value
     if isinstance(value, float):
         return int(value)
-    if isinstance(value, str) and value.strip():
-        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        # Other agents record a counter as a float ("12.5"), and a hand-edited
+        # trace can hold prose ("n/a"). The helper defaults, so an unreadable
+        # counter must not abort the analysis of every trace file.
+        try:
+            return int(float(text))
+        except (ValueError, OverflowError):
+            return 0
     return 0
 
 
