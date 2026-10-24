@@ -63,6 +63,8 @@ pub mod analyzer;
 #[cfg(target_os = "linux")]
 pub(crate) mod background;
 #[cfg(target_os = "linux")]
+pub mod capture;
+#[cfg(target_os = "linux")]
 pub mod container;
 #[cfg(target_os = "linux")]
 pub mod discovery;
@@ -82,6 +84,8 @@ pub mod health;
 pub mod interruption;
 #[cfg(target_os = "linux")]
 pub mod parser;
+#[cfg(target_os = "linux")]
+pub mod pipeline_core;
 #[cfg(target_os = "linux")]
 pub mod probes;
 #[cfg(target_os = "linux")]

@@ -55,7 +55,7 @@ use crate::genai::{GenAIBuilder, GenAIExporter, LogtailExporter};
 use crate::interruption::{
     DetectorConfig, InterruptionDetector, ProcessExitStatus, recover_oom_events,
 };
-use crate::parser::Parser;
+use crate::pipeline_core::PipelineCore;
 use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent};
 #[cfg(not(test))]
 use crate::probes::{Probes, ProbesPoller};
@@ -79,12 +79,8 @@ use capture_runtime_tests::{TestPoller as ProbesPoller, TestProbes as Probes};
 pub struct AgentSight {
     /// BPF probes manager
     probes: Probes,
-    /// Message parser (unified)
-    parser: Parser,
-    /// Event aggregator (unified)
-    aggregator: Aggregator,
-    /// Unified analyzer
-    analyzer: Analyzer,
+    /// Probe-independent parsing, correlation, and analysis.
+    core: PipelineCore,
     /// GenAI semantic builder
     genai_builder: GenAIBuilder,
     /// Pluggable GenAI event exporters (JSONL, SLS, etc.)
@@ -1035,15 +1031,7 @@ impl AgentSight {
 
         Ok(AgentSight {
             probes,
-            // The configured header cap governs which HTTP/1 messages the
-            // parser accepts; messages beyond the cap fall to the raw-data
-            // path instead of being parsed. The aggregator gets the same cap
-            // so its re-parse sites (1xx chains, byte assembly) never hold
-            // assembled messages to a limit the parser already accepted.
-            parser: Parser::with_max_headers(config.max_headers),
-            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits)
-                .with_http_max_headers(config.max_headers),
-            analyzer,
+            core: PipelineCore::new(&config, analyzer),
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
             genai_sqlite_store,
@@ -1431,18 +1419,7 @@ impl AgentSight {
             return Some(self.event_count);
         }
 
-        if let Event::Ssl(ref ssl) = event {
-            if let Some(results) = self.aggregator.process_sse_capture(ssl) {
-                self.process_aggregated_results(results);
-                return Some(self.event_count);
-            }
-        }
-        // Parse the event
-        let result = self.parser.parse_event(event);
-
-        // Process messages through aggregator
-        let aggregated_results = self.aggregator.process_result(result);
-
+        let aggregated_results = self.core.process_event(event);
         self.process_aggregated_results(aggregated_results);
 
         Some(self.event_count)
@@ -1482,10 +1459,10 @@ impl AgentSight {
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
                 } else {
                     self.flush_deferred_genai_for_pid(*pid);
-                    let removed = self.aggregator.drain_connections_for_pid(*pid);
-                    self.aggregator.queue_removed(removed);
+                    let removed = self.core.aggregator_mut().drain_connections_for_pid(*pid);
+                    self.core.aggregator_mut().queue_removed(removed);
                 }
-                let results = self.aggregator.tick(std::time::Instant::now());
+                let results = self.core.tick(std::time::Instant::now());
                 self.process_aggregated_results(results);
             }
         }
@@ -1543,7 +1520,7 @@ impl AgentSight {
 
         self.flush_completions();
         // On shutdown, flush all remaining pending events with fallback session_id
-        let abandoned = self.aggregator.drain_pending();
+        let abandoned = self.core.drain_pending();
         self.process_aggregated_results(abandoned);
         self.flush_completions();
         self.flush_all_pending_genai();
@@ -1565,7 +1542,7 @@ impl AgentSight {
         }
         // Flush all pending GenAI events before exit
         self.flush_completions();
-        let abandoned = self.aggregator.drain_pending();
+        let abandoned = self.core.drain_pending();
         self.process_aggregated_results(abandoned);
         self.flush_completions();
         self.flush_all_pending_genai();
@@ -1608,7 +1585,8 @@ impl AgentSight {
     /// `pub(crate)` because `FfiEventSender` is a crate-internal type and the
     /// only caller lives in this crate's FFI layer.
     pub(crate) fn set_ffi_sender(&mut self, sender: FfiEventSender) {
-        self.aggregator
+        self.core
+            .aggregator_mut()
             .set_compact_sse(!sender.raw_https_enabled() && !self.runtime_limits.retain_raw_sse);
         self.ffi_sender = Some(sender);
     }
@@ -1849,12 +1827,16 @@ impl AgentSight {
         // path lands usable `complete` rows; a crashed process skips this and
         // keeps the interrupted-evidence drain below untouched.
         if ProcessExitStatus::decode(raw_exit_code).is_clean() {
-            for pair in self.aggregator.complete_pid_partial_responses(pid) {
+            for pair in self
+                .core
+                .aggregator_mut()
+                .complete_pid_partial_responses(pid)
+            {
                 self.complete_drained_pair(&pair);
             }
         }
 
-        let drained = self.aggregator.drain_connections_for_pid(pid);
+        let drained = self.core.aggregator_mut().drain_connections_for_pid(pid);
 
         // 2. Persist drained connections as pending calls
         if let Some(ref store) = self.genai_sqlite_store {
@@ -1878,7 +1860,7 @@ impl AgentSight {
             }
         }
 
-        self.aggregator.queue_removed(drained);
+        self.core.aggregator_mut().queue_removed(drained);
 
         // 3. Query all pending calls for this PID (including any persisted earlier)
         let Some(pending_calls) =
@@ -1925,15 +1907,17 @@ impl AgentSight {
         let builder = &self.genai_builder;
         let mapper = &self.response_mapper;
         let cache = &self.pid_agent_name_cache;
-        self.aggregator.snapshot_idle_connections(|id, request| {
-            let mut pending = builder.build_pending_from_request(request, id, mapper, cache)?;
-            pending.pending_origin = crate::storage::sqlite::PendingOrigin::IdleDrain;
-            if let Err(error) = store.insert_pending(&pending) {
-                log::warn!("[IdleDrain] Failed to persist pending call: {error}");
-                return None;
-            }
-            Some(())
-        });
+        self.core
+            .aggregator_mut()
+            .snapshot_idle_connections(|id, request| {
+                let mut pending = builder.build_pending_from_request(request, id, mapper, cache)?;
+                pending.pending_origin = crate::storage::sqlite::PendingOrigin::IdleDrain;
+                if let Err(error) = store.insert_pending(&pending) {
+                    log::warn!("[IdleDrain] Failed to persist pending call: {error}");
+                    return None;
+                }
+                Some(())
+            });
     }
 
     /// Drain aggregator connections whose PID is no longer alive and persist
@@ -1945,12 +1929,12 @@ impl AgentSight {
         }
         self.last_drain_check = std::time::Instant::now();
 
-        let drained = self.aggregator.drain_dead_pid_connections();
+        let drained = self.core.aggregator_mut().drain_dead_pid_connections();
         if drained.is_empty() {
             return;
         }
         if self.genai_sqlite_store.is_none() {
-            self.aggregator.queue_removed(drained);
+            self.core.aggregator_mut().queue_removed(drained);
             return;
         }
 
@@ -2131,7 +2115,7 @@ impl AgentSight {
             }
         }
 
-        self.aggregator.queue_removed(drained);
+        self.core.aggregator_mut().queue_removed(drained);
 
         // ── OOM detection for dead PIDs ──────────────────────────────────────
         // After persisting pending calls for dead PIDs, check if any were OOM-killed.
@@ -2297,7 +2281,7 @@ impl AgentSight {
     /// session_id falls back to the response_id-derived id, exactly like the
     /// deferred-timeout flush.
     fn complete_drained_pair(&mut self, agg_result: &AggregatedResult) {
-        let analysis_results = self.analyzer.analyze_aggregated(agg_result);
+        let analysis_results = self.core.analyze_aggregated(agg_result);
         let (output, mut pending_info) = self.genai_builder.build_with_pending(
             &analysis_results,
             &self.response_mapper,
@@ -2337,17 +2321,17 @@ impl AgentSight {
 
     /// Get reference to aggregator
     pub fn aggregator(&self) -> &Aggregator {
-        &self.aggregator
+        self.core.aggregator()
     }
 
     /// Get mutable reference to aggregator
     pub fn aggregator_mut(&mut self) -> &mut Aggregator {
-        &mut self.aggregator
+        self.core.aggregator_mut()
     }
 
     /// Get reference to analyzer
     pub fn analyzer(&self) -> &Analyzer {
-        &self.analyzer
+        self.core.analyzer()
     }
 
     /// Get reference to storage
@@ -2461,7 +2445,7 @@ impl AgentSight {
 
     fn runtime_metrics(&self) -> Result<RuntimeMetrics> {
         let channel = self.probes.channel_watermarks();
-        let connections = self.aggregator.connection_metrics();
+        let connections = self.core.aggregator().connection_metrics();
         Ok(RuntimeMetrics {
             event_channel_bytes: channel.in_flight_bytes as u64,
             event_channel_budget_bytes: channel.budget_bytes as u64,

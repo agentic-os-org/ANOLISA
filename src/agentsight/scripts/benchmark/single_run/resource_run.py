@@ -492,7 +492,7 @@ def main() -> int:
                 # Match the mock server's TIME_WAIT reuse across sequential runs.
                 check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 check.bind(("127.0.0.1", args.port))
-            if privileged:
+            if privileged and sys.stdin.isatty():
                 subprocess.run(["sudo", "-v"], check=True)
             directory = output / label
             job = {

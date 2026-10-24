@@ -11,7 +11,7 @@ impl AgentSight {
         self.drain_and_persist_dead_connections();
         self.drain_and_persist_idle_connections();
         self.flush_expired_pending_genai();
-        let results = self.aggregator.tick(std::time::Instant::now());
+        let results = self.core.tick(std::time::Instant::now());
         self.process_aggregated_results(results);
         self.maybe_export_runtime_metrics();
     }
