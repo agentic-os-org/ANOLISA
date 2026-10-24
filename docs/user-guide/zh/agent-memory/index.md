@@ -272,6 +272,17 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `memory_session_context` | — | `limit` | 会话启动上下文注入 |
 | `mem_dream` | — | — | 用户画像合成 JSON |
 
+`memory_summary` 将 frontmatter 的 `concepts` 和 `files` 列表统计到
+`top_concepts` 和 `top_files`。它接受 JSON 字符串数组以及 `mem_import` 写出的块列表（block list），
+因此这些排名在 AMA 导出、导入往返后仍会保留。
+例如，`concepts: ["parser, writer", "rust"]` 包含两个概念，
+`files: ["src/a,b.rs"]` 包含一个文件引用。每个单行 JSON 字符串中的逗号、引号和反斜线
+仍属于该条目。
+
+块列表将各条目分行书写；条目本身含有换行是另一种情况。含换行条目的导入往返仍受
+[#4626](https://github.com/agentic-os-org/ANOLISA/pull/4626) 限制，
+该问题还可能影响导入后的其他标量摘要字段。
+
 ### 错误码语义
 
 | MCP 错误码 | 含义 |

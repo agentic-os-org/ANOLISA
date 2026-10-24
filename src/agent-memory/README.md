@@ -105,6 +105,10 @@ all four plugin tools in OpenClaw 2026.9.2's `coding` conversation profile. Cust
 allowlists, sandbox policies, and hosts that ignore this metadata need explicit
 new-name entries; the guide shows how to add them without replacing your policy.
 
+For single-line list entries, `memory_summary` concept and file rankings remain
+available after a `mem_export` / `mem_import` round trip, including literal commas.
+Multi-line import entries remain subject to the serializer limitation in #4626.
+
 ## Architecture
 
 Single-process Tokio async runtime exposing 37 MCP tools over stdio JSON-RPC 2.0:
