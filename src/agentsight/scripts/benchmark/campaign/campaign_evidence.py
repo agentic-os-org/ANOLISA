@@ -99,7 +99,7 @@ def timestamp(value: Any) -> float | None:
 
 
 def continuous_recovery(
-    samples: list[tuple[float, float]],
+    samples: list[tuple[float, float | None]],
     reference: float | None,
     tolerance: float,
     window_seconds: int,
@@ -111,12 +111,16 @@ def continuous_recovery(
     """Return time to the first uninterrupted recovered window."""
     if reference is None or not samples:
         return None
-    ordered = sorted(samples)
+    ordered = sorted(samples, key=lambda sample: sample[0])
     origin = ordered[0][0] if started_at is None else started_at
     threshold = reference * (1 - tolerance if higher_is_better else 1 + tolerance)
     recovered_at: float | None = None
     previous: float | None = None
     for sample_time, value in ordered:
+        if value is None:
+            recovered_at = None
+            previous = sample_time
+            continue
         passes = value >= threshold if higher_is_better else value <= threshold
         if not passes or (
             previous is not None and sample_time - previous > max_gap_seconds
@@ -133,27 +137,40 @@ def continuous_recovery(
 
 def resource_samples(run_path: Path, field: str) -> list[tuple[float, float]]:
     """Read one process or internal metric from the recovery CSV."""
-    return _resource_series(run_path, (field,))[field]
+    return [
+        (sample_time, value)
+        for sample_time, value in _resource_series(run_path, (field,))[field]
+        if value is not None
+    ]
 
 
 def _resource_series(
-    run_path: Path, fields: tuple[str, ...]
-) -> dict[str, list[tuple[float, float]]]:
-    samples: dict[str, list[tuple[float, float]]] = {field: [] for field in fields}
+    run_path: Path, fields: tuple[str, ...], *, preserve_gaps: bool = False
+) -> dict[str, list[tuple[float, float | None]]]:
+    samples: dict[str, list[tuple[float, float | None]]] = {
+        field: [] for field in fields
+    }
     path = run_path.parent / "measurement" / "metrics.csv"
     if not path.exists():
         path = path.with_suffix(path.suffix + ".gz")
     if not path.exists():
         return samples
     opener = gzip.open if path.suffix == ".gz" else Path.open
+    previous_time: float | None = None
     with opener(path, mode="rt", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             sample_time = timestamp(row.get("timestamp"))
             if sample_time is None:
+                if preserve_gaps:
+                    # An unplaced sample cannot be excluded from any recovery window.
+                    return {field: [] for field in fields}
                 continue
+            if preserve_gaps and previous_time is not None and sample_time <= previous_time:
+                return {field: [] for field in fields}
+            previous_time = sample_time
             for field in fields:
                 value = finite_float(row.get(field))
-                if value is not None:
+                if value is not None or (preserve_gaps and field in row):
                     samples[field].append((sample_time, value))
     return samples
 
@@ -249,7 +266,9 @@ def recovery_outcome(
     window = settings["recovery_window_seconds"]
     load = load_samples(recover_path)
     resources = _resource_series(
-        recover_path, ("rss_mb", "channel_length", "connection_cache_bytes")
+        recover_path,
+        ("rss_mb", "channel_length", "connection_cache_bytes"),
+        preserve_gaps=True,
     )
     specifications = {
         "effective_qps": (

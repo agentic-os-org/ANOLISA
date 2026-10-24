@@ -241,16 +241,17 @@ def test_report_snapshot_matches_standalone_summaries(
 
 
 @pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
+@pytest.mark.parametrize("invalid_time", [False, True])
 def test_recovery_snapshot_skips_unusable_samples_per_field(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compressed: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compressed: bool, invalid_time: bool
 ) -> None:
     phases = recovery_phases(tmp_path)
     metrics = write_recovery_inputs(phases["recover"][0], compressed)
     write_metrics(
         metrics,
         "timestamp,rss_mb,channel_length,connection_cache_bytes\n"
-        "invalid,100,2,20\n"
-        "0,nan,2,50\n"
+        + ("invalid,100,2,20\n" if invalid_time else "")
+        + "0,nan,2,50\n"
         "1,105,2,inf\n"
         "2,104,2,20\n"
         "3,103,2,20\n"
@@ -265,6 +266,11 @@ def test_recovery_snapshot_skips_unusable_samples_per_field(
     )
 
     assert open_count() == 1
+    if invalid_time:
+        assert outcome["verdict"] == "INCONCLUSIVE"
+        assert outcome["missing"] == ["rss_mb"]
+        assert outcome["seconds"]["rss_mb"] is None
+        return
     assert outcome["verdict"] == "PASS"
     assert outcome["seconds"] == {
         "effective_qps": 0.0,

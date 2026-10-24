@@ -390,6 +390,7 @@ def write_recovery(
         "| --- | ---: | ---: | ---: | ---: | --- |",
     ]
     outcomes: dict[tuple[str, int], dict[str, Any]] = {}
+    diagnostics = []
     for (version, repetition), phases in sorted(grouped.items()):
         overload = (
             campaign_evidence.summary_of_phase(phases, "overload")
@@ -403,6 +404,11 @@ def write_recovery(
         )
         outcome = campaign_evidence.recovery_outcome(phases, settings, thresholds)
         outcomes[(version, repetition)] = outcome
+        if outcome["missing"]:
+            diagnostics.append(
+                f"- {version}/{repetition}: unproven recovery gates: "
+                + ", ".join(outcome["missing"])
+            )
         seconds = outcome["seconds"]
         lines.append(
             f"| {version}/{repetition} | "
@@ -417,6 +423,8 @@ def write_recovery(
         )
     if not grouped:
         lines.append("| — | — | — | — | — | NOT EXECUTED |")
+    if diagnostics:
+        lines.extend(["", *diagnostics])
     (results / "recovery-report.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )
