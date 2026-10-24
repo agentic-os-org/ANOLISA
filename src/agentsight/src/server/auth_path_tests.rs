@@ -119,6 +119,68 @@ async fn storage_config_mutation_fails_closed_without_credentials() {
 }
 
 #[actix_web::test]
+async fn llm_preferences_get_fails_closed_without_credentials() {
+    let fixture = AuthFixture::new();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/preferences",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+    let token = fixture.auth.read_token_from_file().unwrap();
+
+    // `llm=true` runs a completion with the stored credential, so loopback is
+    // not enough. The path is canonicalised before the check, and both the
+    // query key and value are percent-decoded by the query reader, so every
+    // spelling must fail closed.
+    for uri in [
+        "/api/preferences?llm=true",
+        "/%61pi/preferences?llm=true",
+        "/api/preferences?llm=%74rue",
+        "/api/preferences?%6clm=true",
+        "/api/preferences?l%6cm=true",
+        "/api/preferences?%6C%6Cm=true",
+    ] {
+        let request = awtest::TestRequest::get()
+            .uri(uri)
+            .peer_addr(loopback)
+            .to_request();
+        assert_eq!(
+            awtest::call_service(&app, request).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri}"
+        );
+        let request = awtest::TestRequest::get()
+            .uri(uri)
+            .peer_addr(loopback)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        assert_eq!(
+            awtest::call_service(&app, request).await.status(),
+            StatusCode::OK,
+            "{uri}"
+        );
+    }
+
+    // Rule-only reads do not spend the credential and keep the loopback path.
+    for uri in ["/api/preferences", "/api/preferences?llm=false"] {
+        let request = awtest::TestRequest::get()
+            .uri(uri)
+            .peer_addr(loopback)
+            .to_request();
+        assert_eq!(
+            awtest::call_service(&app, request).await.status(),
+            StatusCode::OK,
+            "{uri}"
+        );
+    }
+}
+
+#[actix_web::test]
 async fn authenticated_encoded_mutations_only_reach_matching_routes() {
     let fixture = AuthFixture::new();
     let token = fixture.auth.token().unwrap_or_default().to_string();

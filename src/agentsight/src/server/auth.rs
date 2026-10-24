@@ -556,7 +556,16 @@ where
                         .strip_prefix("/api/token-savings/session/")
                         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
             });
-        if tokenless_query || path.matches(|value| is_credential_required_path(req.method(), value))
+        // The preferences GET spends the same LLM credential as the POST
+        // endpoints above when `llm=true`: it runs a completion over the
+        // window's user turns. Gate the query-value variant explicitly, like
+        // the configured tokenless query below.
+        let llm_preferences = *req.method() == actix_web::http::Method::GET
+            && path.matches(|value| value == "/api/preferences")
+            && extract_query_param(req.query_string(), "llm").is_some_and(|value| value == "true");
+        if tokenless_query
+            || llm_preferences
+            || path.matches(|value| is_credential_required_path(req.method(), value))
         {
             let authenticated = self.auth.enabled && is_authenticated(&self.auth, &req);
             if authenticated {
@@ -669,11 +678,18 @@ fn is_authenticated(auth: &DashboardAuth, req: &ServiceRequest) -> bool {
 }
 
 /// Extract a query parameter value from a query string without full parsing.
+///
+/// Both halves are percent-decoded. The handler's `web::Query` extractor
+/// (serde_urlencoded) decodes the key as well as the value, so a gate that
+/// compared the raw key would let `?%6clm=true` reach the LLM-spending
+/// handler while seeing no `llm` parameter itself.
 fn extract_query_param(query: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
     for part in query.split('&') {
-        if let Some(value) = part.strip_prefix(&prefix) {
-            return Some(percent_decode(value));
+        let Some((raw_key, raw_value)) = part.split_once('=') else {
+            continue;
+        };
+        if percent_decode(raw_key) == key {
+            return Some(percent_decode(raw_value));
         }
     }
     None
@@ -809,6 +825,16 @@ mod tests {
             Some("hello".to_string())
         );
         assert_eq!(extract_query_param("foo=bar", "token"), None);
+        // The handler's form decoder percent-decodes the key too, so the gate
+        // must match an encoded spelling of the key.
+        assert_eq!(
+            extract_query_param("%6clm=true", "llm"),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            extract_query_param("%6C%6Cm=true", "llm"),
+            Some("true".to_string())
+        );
     }
 
     #[test]
