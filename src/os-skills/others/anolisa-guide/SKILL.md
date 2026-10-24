@@ -37,6 +37,9 @@ python3 <skill-dir>/scripts/check_docs.py
 
 ### 用户缓存目录结构
 
+爬取后的 Markdown 会将文章中的相对链接和图片地址转换为原网页对应的绝对 URL，
+包括指向原网页的查询参数和页内锚点，以便从本地缓存访问原站内容。
+
 ```
 ~/.cache/anolisa/
 ├── .venv/                              # Python 虚拟环境（自动创建，可复用）
