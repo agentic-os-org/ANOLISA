@@ -32,8 +32,14 @@ export function apply(ctx: Context) {
         },
         required: ['plugin', 'version', 'active', 'capabilities'],
       },
-      render: (result: Record<string, unknown>) =>
-        `AgentSight v${result.version} — ${result.active ? 'active' : 'inactive'}`,
+      render: (_args, value) => {
+        // The host validates this value against output.schema before rendering.
+        const result = value as { version: string; active: boolean }
+        return [{
+          type: 'text',
+          text: `AgentSight v${result.version} — ${result.active ? 'active' : 'inactive'}`,
+        }]
+      },
     },
     async execute() {
       return {
