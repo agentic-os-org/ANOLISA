@@ -94,7 +94,8 @@ def _parse_findings_array(
 
         # Collect extra keys into metadata
         extra = {k: v for k, v in item.items() if k not in known_keys}
-        metadata = item.get("metadata", {})
+        metadata_value = item.get("metadata", {})
+        metadata = metadata_value if isinstance(metadata_value, dict) else {}
         if extra:
             metadata = {**metadata, **extra}
 

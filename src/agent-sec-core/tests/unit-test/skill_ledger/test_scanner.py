@@ -128,6 +128,21 @@ class TestFindingsArrayParser(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].rule, "valid")
 
+    def test_non_dict_metadata_is_discarded_without_crashing(self):
+        """Malformed metadata must not abort normalization of a valid finding."""
+        raw = [
+            {
+                "rule": "r1",
+                "level": "warn",
+                "message": "bad metadata shape",
+                "metadata": ["unexpected"],
+                "extra": "preserved",
+            }
+        ]
+        result = parse_findings(raw, None)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].metadata, {"extra": "preserved"})
+
     def test_empty_list_returns_empty(self):
         result = parse_findings([], None)
         self.assertEqual(result, [])
