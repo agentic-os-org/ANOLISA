@@ -46,6 +46,7 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -310,6 +311,12 @@ class ToolInjector:
         with open(self.config_path) as f:
             config = json.load(f)
 
+        # Snapshot the user's global tools config so cleanup_parallel can
+        # restore it verbatim: ce-runner no longer writes the global
+        # "tools" section (tool policy lives in per-agent entries), so an
+        # unconditional overwrite at cleanup would destroy user config.
+        original_tools = copy.deepcopy(config.get("tools"))
+
         config.setdefault("mcp", {}).setdefault("servers", {})
 
         task_slots = {}
@@ -440,6 +447,7 @@ class ToolInjector:
             "parallel": parallel,
             "contexts": contexts,
             "mode": "mcp_server",
+            "original_tools": original_tools,
         }
 
     def cleanup_parallel(self, setup_info: dict, skip_dirs: bool = False):
@@ -492,8 +500,17 @@ class ToolInjector:
                 a for a in agents_list if not a.get("id", "").lower().startswith("claweval-")
             ]
 
-            # Restore tools profile
-            config["tools"] = {"profile": "coding"}
+            # Restore the user's pre-existing global tools config (snapshotted
+            # by setup_parallel_workers). Legacy setup dicts without the
+            # snapshot keep the previous default for compatibility.
+            if "original_tools" in setup_info:
+                original_tools = setup_info["original_tools"]
+                if original_tools is None:
+                    config.pop("tools", None)
+                else:
+                    config["tools"] = original_tools
+            else:
+                config["tools"] = {"profile": "coding"}
 
             atomic_write_config(self.config_path, config)
         except Exception as exc:
