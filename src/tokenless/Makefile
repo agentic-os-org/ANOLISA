@@ -343,11 +343,23 @@ test-claude-code-detect:
 # Keep the worker protocol suite as a prerequisite so test-integration and
 # its aggregate callers cannot omit it. It is stdlib-only: the subprocess
 # fixture supplies Headroom stubs on PYTHONPATH, without a Headroom venv.
+# tests/test_codex_detect_json.py pins the JSON contract of the codex
+# adapter's detect.sh. jq is optional at runtime, so the script carries a
+# no-jq fallback that builds the JSON itself, and interpolating the selected
+# binary path into it verbatim produced output json.loads rejects for a path
+# holding a double quote or a control character -- and, worse, output that
+# parsed to a different path for one holding a backslash (a directory named
+# a\tb came back as a<TAB>b). The suite is stdlib-only: it runs the detector
+# in a mktemp sandbox whose PATH holds a stub tokenless plus grep/head/cat and
+# deliberately no jq, which is what selects the fallback, then asserts the
+# decoded path is byte-for-byte the one selected. The jq-backed branch is the
+# control, so a regression there cannot hide behind the fallback's fix.
 test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts \
                   test-qwenwork-hooks test-headroom-pipeline-worker
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_codex_response_diagnostics.py
 	python3 tests/test_codex_rewrite_hook.py
+	python3 tests/test_codex_detect_json.py
 	python3 tests/test_hermes_lifecycle.py
 	python3 tests/test_compress_schema_hook.py
 	python3 tests/test_hook_payload_shapes.py
