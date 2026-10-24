@@ -37,6 +37,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### DevOps
 - **github** — GitHub workflows and integration
 - **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream)
+- **mysql-admin** — MySQL/MariaDB instance administration (processlist and lock diagnostics, slow query and index audit, backup governance, replication health)
 - **sysom-agentsight** — System diagnostics tool
 - **sysom-diagnosis** — SysOM diagnostics and tuning
 
