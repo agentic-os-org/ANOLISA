@@ -192,9 +192,8 @@ export class SelectiveContextEngine implements ContextEngine {
         : 128_000;
 
     const turns = this.deriveTurns(messages);
-    this.cacheTurnMessages(params.sessionId, turns);
-
     const bindings = this.bindSummaryTurns(params.sessionId, turns, records);
+    this.cacheTurnMessages(params.sessionId, turns, bindings);
     const summaries = await this.generateMissingSummaries(params.sessionId, turns, bindings);
 
     const result = this.assembler.assemble({
@@ -233,10 +232,10 @@ export class SelectiveContextEngine implements ContextEngine {
 
     const messages = stored.map((message) => this.restoreMessage(message));
     const turns = this.deriveTurns(messages);
-    this.cacheTurnMessages(params.sessionId, turns);
+    const bindings = this.bindSummaryTurns(params.sessionId, turns, stored);
+    this.cacheTurnMessages(params.sessionId, turns, bindings);
 
     if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
-      const bindings = this.bindSummaryTurns(params.sessionId, turns, stored);
       await this.generateMissingSummaries(params.sessionId, turns, bindings);
     }
   }
@@ -272,11 +271,17 @@ export class SelectiveContextEngine implements ContextEngine {
     }
 
     const missingTurns = requestedTurns.filter((seq) => !turnMap.has(seq));
-    const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, missingTurns);
-    for (const m of storeMessages) {
-      const arr = turnMap.get(m.turnSeq) ?? [];
-      arr.push({ role: m.role, content: m.content });
-      turnMap.set(m.turnSeq, arr);
+    const aliases = this.store.getRecallAliases(sessionId);
+    const archiveIds = missingTurns.map((seq) => aliases.has(seq) ? aliases.get(seq)! : seq);
+    const storeMessages = this.store.getMessagesByTurnSeqs(
+      sessionId, [...new Set(archiveIds.filter((seq): seq is number => seq !== null))],
+    );
+    for (const seq of missingTurns) {
+      const archiveTurn = aliases.has(seq) ? aliases.get(seq) : seq;
+      const messages = storeMessages.filter((message) => message.turnSeq === archiveTurn);
+      if (messages.length > 0) {
+        turnMap.set(seq, messages.map((message) => ({ role: message.role, content: message.content })));
+      }
     }
 
     const result = requestedTurns
@@ -423,7 +428,10 @@ export class SelectiveContextEngine implements ContextEngine {
   private cacheTurnMessages(
     sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
+    bindings: Map<number, number>,
   ): void {
+    // A missing binding marks a partial/rewritten turn that cannot be restored safely.
+    this.store.setRecallAliases(sessionId, new Map(turns.map((turn) => [turn.turnSeq, bindings.get(turn.turnSeq) ?? null])));
     if (!this.turnMessagesCache.has(sessionId)) {
       this.turnMessagesCache.set(sessionId, new Map());
     }

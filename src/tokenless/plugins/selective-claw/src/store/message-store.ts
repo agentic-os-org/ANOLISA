@@ -189,6 +189,25 @@ export class MessageStore {
     return rows.map((r) => ({ turnSeq: r.turn_seq, summary: r.summary }));
   }
 
+  setRecallAliases(sessionId: string, aliases: Map<number, number | null>): void {
+    this.db.exec("SAVEPOINT recall_alias_update");
+    try {
+      this.prepare("DELETE FROM recall_aliases WHERE session_id = ?").run(sessionId);
+      const insert = this.prepare("INSERT INTO recall_aliases (session_id, live_turn_seq, archive_turn_seq) VALUES (?, ?, ?)");
+      for (const [liveTurn, archiveTurn] of aliases) insert.run(sessionId, liveTurn, archiveTurn);
+      this.db.exec("RELEASE recall_alias_update");
+    } catch (error) {
+      this.db.exec("ROLLBACK TO recall_alias_update; RELEASE recall_alias_update");
+      throw error;
+    }
+  }
+
+  getRecallAliases(sessionId: string): Map<number, number | null> {
+    const rows = this.prepare("SELECT live_turn_seq, archive_turn_seq FROM recall_aliases WHERE session_id = ?")
+      .all(sessionId) as Array<{ live_turn_seq: number; archive_turn_seq: number | null }>;
+    return new Map(rows.map((row) => [row.live_turn_seq, row.archive_turn_seq]));
+  }
+
   getDistinctTurnSeqs(sessionId: string): number[] {
     const rows = this.prepare(`
       SELECT DISTINCT turn_seq FROM messages

@@ -20,6 +20,13 @@ export function runMigrations(db: DatabaseSync): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
+
+    CREATE TABLE IF NOT EXISTS recall_aliases (
+      session_id TEXT NOT NULL,
+      live_turn_seq INTEGER NOT NULL,
+      archive_turn_seq INTEGER,
+      PRIMARY KEY (session_id, live_turn_seq)
+    );
   `);
 
   const ftsExists = db.prepare(
