@@ -98,7 +98,9 @@ def _on_session_start(session_id: str = "", model: str = "", **_: Any) -> None:
         metadata=metadata,
     )
 
-    if result.success:
+    if result.skipped:
+        print(f"[ws-ckpt] Initial snapshot skipped — {result.reason or result.message}", flush=True)
+    elif result.success:
         print(f"[ws-ckpt] Initial snapshot saved ✓ {result.snapshot}", flush=True)
     else:
         print(f"[ws-ckpt] Initial snapshot failed ✗ {result.message}", flush=True)
@@ -160,7 +162,9 @@ def _on_session_end(
         metadata=metadata,
     )
 
-    if result.success:
+    if result.skipped:
+        print(f"[ws-ckpt] Turn {turn} snapshot skipped — {result.reason or result.message}", flush=True)
+    elif result.success:
         print(f"[ws-ckpt] Turn {turn} snapshot saved ✓ {result.snapshot}", flush=True)
     else:
         print(f"[ws-ckpt] Turn {turn} snapshot failed ✗ {result.message}", flush=True)
