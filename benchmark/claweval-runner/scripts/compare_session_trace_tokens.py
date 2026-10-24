@@ -20,20 +20,29 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+
+def _iter_jsonl_records(path: Path) -> Iterator[Any]:
+    """Stream physical records without buffering the complete transcript."""
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            yield record
 
 
 def session_totals(path: Path) -> dict:
     n_assist = 0
     in_sum = out_sum = total_sum = cache_r = cache_w = 0
     last_total = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for rec in _iter_jsonl_records(path):
         msg = rec.get("message")
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
@@ -60,13 +69,7 @@ def trace_totals(path: Path) -> dict:
     n_assist = 0
     in_sum = out_sum = 0
     end = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for rec in _iter_jsonl_records(path):
         t = rec.get("type")
         if t == "message":
             msg = rec.get("message") or {}
