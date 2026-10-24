@@ -289,6 +289,11 @@ When enabled, runner:
 - Writes tokenless evidence into run results so the configuration and runtime
   hook state can be inspected.
 
+Only executable regular files (including executable symlink targets) are
+eligible host binaries. Non-executable candidates are skipped so later
+installed candidates remain available. Both helpers must resolve before any
+injected files are written; source permissions are preserved when copied.
+
 ### Run Options
 
 | Option | Default | Description |

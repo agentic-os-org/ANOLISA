@@ -196,8 +196,10 @@ def test_sandbox_manager_can_inject_tokenless_binaries(tmp_path: Path) -> None:
     tokenless_bin = tmp_path / "host-tokenless-bin"
     tokenless_bin.mkdir()
     (tokenless_bin / "real-rtk").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tokenless_bin / "real-rtk").chmod(0o755)
     (tokenless_bin / "rtk").symlink_to(tokenless_bin / "real-rtk")
     (tokenless_bin / "tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tokenless_bin / "tokenless").chmod(0o755)
     extensions_dir = _tokenless_extensions_dir(tmp_path)
     spec = _spec(tmp_path)
 
@@ -259,7 +261,9 @@ def test_sandbox_manager_adds_tokenless_to_existing_plugin_allowlist(tmp_path: P
     tokenless_bin = tmp_path / "host-tokenless-bin"
     tokenless_bin.mkdir()
     (tokenless_bin / "rtk").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tokenless_bin / "rtk").chmod(0o755)
     (tokenless_bin / "tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tokenless_bin / "tokenless").chmod(0o755)
     extensions_dir = _tokenless_extensions_dir(tmp_path)
     spec = _spec(tmp_path)
 
