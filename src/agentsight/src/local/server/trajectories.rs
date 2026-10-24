@@ -64,7 +64,9 @@ pub async fn list_trajectories(
         fetch_limit,
     ) {
         Ok(mut rows) => {
-            filter_rows_by_reuse_labels(state.as_ref(), &query, &mut rows);
+            if let Err(response) = filter_rows_by_reuse_labels(state.as_ref(), &query, &mut rows) {
+                return response;
+            }
             rows.truncate(limit as usize);
             HttpResponse::Ok().json(rows)
         }
@@ -116,15 +118,20 @@ fn reject_unknown_label_tokens(query: &TrajectoryQuery) -> Result<(), HttpRespon
     Ok(())
 }
 
+fn reuse_store_failure(error: impl std::fmt::Display) -> HttpResponse {
+    HttpResponse::InternalServerError().json(serde_json::json!({"error": error.to_string()}))
+}
+
 /// Applies the reuse-label query parameters; mirrors the Linux endpoint's
-/// filter so a skill gets the same answer on either platform.
+/// filter so a skill gets the same answer on either platform. An unreadable
+/// label store is an error, not an empty set of labels.
 fn filter_rows_by_reuse_labels(
     state: &LocalState,
     query: &TrajectoryQuery,
     rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
-) {
+) -> Result<(), HttpResponse> {
     if !reuse_label_filter_requested(query) {
-        return;
+        return Ok(());
     }
     let Some(labels) = state.reuse_store.as_deref() else {
         // No label store: nothing has been assessed, so a positive filter
@@ -133,7 +140,7 @@ fn filter_rows_by_reuse_labels(
         if query.label.is_some() || query.human_backed == Some(true) {
             rows.clear();
         }
-        return;
+        return Ok(());
     };
     // Tokens were validated when the request entered the handler, so every
     // one of them parses here.
@@ -144,35 +151,36 @@ fn filter_rows_by_reuse_labels(
             .filter_map(crate::reuse::TrajectoryLabel::parse)
             .collect()
     };
-    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
-        labels
-            .sessions_with_labels(&parse(raw))
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
-    });
-    let drop: Option<std::collections::HashSet<String>> =
-        query.exclude_label.as_deref().map(|raw| {
-            labels
-                .sessions_with_labels(&parse(raw))
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
-        });
+    let keep: Option<std::collections::HashSet<String>> = query
+        .label
+        .as_deref()
+        .map(|raw| labels.sessions_with_labels(&parse(raw)))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|ids| ids.into_iter().collect());
+    let drop: Option<std::collections::HashSet<String>> = query
+        .exclude_label
+        .as_deref()
+        .map(|raw| labels.sessions_with_labels(&parse(raw)))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|ids| ids.into_iter().collect());
     // `human_backed` is a tri-state filter: absent keeps every row, `true`
     // keeps only human-settled rows, and `false` keeps only rows no person has
     // settled — including never-triaged rows, which have no label row at all.
     // Mirror of the Linux endpoint's filter.
     let human_backed = query.human_backed;
-    let settled: Option<std::collections::HashSet<String>> = human_backed.map(|_| {
-        labels
-            .list_labels(&crate::reuse::LabelFilter::default())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|l| l.is_human_backed())
-            .map(|l| l.session_id)
-            .collect()
-    });
+    let settled: Option<std::collections::HashSet<String>> = human_backed
+        .map(|_| labels.list_labels(&crate::reuse::LabelFilter::default()))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|labels| {
+            labels
+                .into_iter()
+                .filter(|label| label.is_human_backed())
+                .map(|label| label.session_id)
+                .collect()
+        });
     rows.retain(|row| {
         let id = row.session_id.as_str();
         keep.as_ref().is_none_or(|set| set.contains(id))
@@ -181,6 +189,7 @@ fn filter_rows_by_reuse_labels(
                 .as_ref()
                 .is_none_or(|set| human_backed == Some(set.contains(id)))
     });
+    Ok(())
 }
 
 /// GET /api/trajectories/filters
@@ -416,6 +425,162 @@ mod tests {
             reuse_store: Some(reuse),
             reuse_llm_judge_enabled: false,
         })
+    }
+
+    #[actix_web::test]
+    async fn trajectory_label_store_failure_is_reported_and_recovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("trajectories.db");
+        let store = Arc::new(TrajectoryStore::new_with_path(&db_path).unwrap());
+        for session in ["labelled-good", "labelled-useless", "untriaged"] {
+            store
+                .upsert_trajectory(&agentsight_trajectory_collector::TrajectoryRecord {
+                    session_id: session.to_string(),
+                    schema_version: "ATIF-v1.7".to_string(),
+                    agent_name: "qoder".to_string(),
+                    model_name: None,
+                    num_steps: 1,
+                    total_prompt_tokens: None,
+                    total_completion_tokens: None,
+                    start_time: None,
+                    end_time: None,
+                    first_user_message: None,
+                    last_user_message: None,
+                    atif_json: "{\"schema_version\":\"ATIF-v1.7\",\"steps\":[]}".to_string(),
+                    project: "p".to_string(),
+                    source: "qoder".to_string(),
+                    is_subagent: false,
+                    file_path: format!("/tmp/{session}.jsonl"),
+                    file_size: 1,
+                    file_mtime_ns: 1,
+                })
+                .unwrap();
+        }
+        let reuse = crate::reuse::ReuseStore::open_private(tmp.path()).unwrap();
+        for (session, label) in [
+            ("labelled-good", crate::reuse::TrajectoryLabel::Good),
+            ("labelled-useless", crate::reuse::TrajectoryLabel::Useless),
+        ] {
+            reuse
+                .upsert_auto_label(
+                    session,
+                    crate::reuse::label::TrajectoryIdentity {
+                        title: None,
+                        project: "p".to_string(),
+                        source: "qoder".to_string(),
+                        agent_name: "qoder".to_string(),
+                        started_at: None,
+                        is_subagent: false,
+                    },
+                    crate::reuse::TriageOutcome {
+                        label,
+                        reason: "fixture".to_string(),
+                        metrics: crate::reuse::TriageMetrics {
+                            n_steps: 1,
+                            n_user_turns: 1,
+                            n_tool_calls: 0,
+                            max_agent_len: 1,
+                        },
+                        n_findings: 0,
+                        rules: Vec::new(),
+                    },
+                    "hash",
+                    "version",
+                )
+                .unwrap();
+        }
+        reuse
+            .apply_decision(
+                "labelled-good",
+                crate::reuse::LabelAction::Confirm,
+                "alice",
+                None,
+            )
+            .unwrap();
+        let state = make_state_with_reuse(store.clone(), Arc::new(reuse), db_path.clone());
+        let app = test::init_service(App::new().app_data(state).service(list_trajectories)).await;
+
+        // Rename only the owned fixture table after opening the store, so
+        // each production query encounters a real SQLite read failure.
+        let connection =
+            crate::private_sqlite::open_private_connection(tmp.path(), "reuse.db").unwrap();
+        connection
+            .execute_batch("ALTER TABLE session_labels RENAME TO unavailable_session_labels")
+            .unwrap();
+        let queries: &[(&str, &[&str])] = &[
+            ("label=good", &["labelled-good"]),
+            ("exclude_label=useless", &["labelled-good", "untriaged"]),
+            ("human_backed=true", &["labelled-good"]),
+            ("human_backed=false", &["labelled-useless", "untriaged"]),
+            (
+                "label=good&exclude_label=useless&human_backed=true",
+                &["labelled-good"],
+            ),
+        ];
+        for &(query, _) in queries {
+            let uri = format!("/api/trajectories?{query}");
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+            assert_eq!(response.status().as_u16(), 500, "{query}");
+            let body: serde_json::Value = test::read_body_json(response).await;
+            assert!(body["error"].as_str().unwrap().contains("session_labels"));
+        }
+
+        // Unfiltered reads do not depend on labels; invalid label tokens
+        // still receive their existing 400 before touching the broken DB.
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/trajectories")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 200);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body.as_array().unwrap().len(), 3);
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/trajectories?label=goodd")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 400);
+
+        connection
+            .execute_batch("ALTER TABLE unavailable_session_labels RENAME TO session_labels")
+            .unwrap();
+        for &(query, expected) in queries {
+            let uri = format!("/api/trajectories?{query}");
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+            assert_eq!(response.status().as_u16(), 200, "recovered: {query}");
+            let body: serde_json::Value = test::read_body_json(response).await;
+            let mut ids: Vec<&str> = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["session_id"].as_str().unwrap())
+                .collect();
+            ids.sort_unstable();
+            assert_eq!(ids, expected, "recovered: {query}");
+        }
+
+        let absent = make_state_with_store(store, db_path);
+        let app = test::init_service(App::new().app_data(absent).service(list_trajectories)).await;
+        for (query, count) in [
+            ("label=good", 0),
+            ("exclude_label=useless", 3),
+            ("human_backed=true", 0),
+            ("human_backed=false", 3),
+        ] {
+            let uri = format!("/api/trajectories?{query}");
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+            assert_eq!(response.status().as_u16(), 200, "no label store: {query}");
+            let body: serde_json::Value = test::read_body_json(response).await;
+            assert_eq!(body.as_array().unwrap().len(), count, "{query}");
+        }
     }
 
     /// Same contract as the Linux endpoint: a reuse-label filter must not be
