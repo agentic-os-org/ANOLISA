@@ -1201,6 +1201,9 @@ pub struct DaemonConfig {
     pub health_check_interval_secs: u64,
     /// Backend type string from config: "auto" | "btrfs-base" | "btrfs-loop"
     pub backend_type: String,
+    /// Optional BtrfsBase mount point; the backend appends `ws-ckpt-data`.
+    /// This is a startup setting, separate from the BtrfsLoop `mount_path`.
+    pub btrfs_mount: Option<PathBuf>,
     /// Target image size in GB. The on-disk image is grown/shrunk to match this at bootstrap.
     pub img_size: u64,
     /// Initial-creation cap as percentage of host partition capacity (0-100).
@@ -1251,6 +1254,13 @@ pub struct BtrfsLoopConfig {
     pub img_max_percent: Option<f64>,
 }
 
+/// BtrfsBase startup settings. Changes require a daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct BtrfsBaseConfig {
+    /// Absolute, writable btrfs mount point, not the `ws-ckpt-data` directory.
+    pub btrfs_mount: Option<PathBuf>,
+}
+
 /// Backend configuration section in config file.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BackendConfig {
@@ -1260,6 +1270,9 @@ pub struct BackendConfig {
     /// BtrfsLoop backend-specific settings
     #[serde(default, rename = "btrfs-loop")]
     pub btrfs_loop: Option<BtrfsLoopConfig>,
+    /// BtrfsBase backend-specific settings.
+    #[serde(default, rename = "btrfs-base")]
+    pub btrfs_base: Option<BtrfsBaseConfig>,
 }
 
 fn default_backend_type() -> String {
@@ -1271,6 +1284,7 @@ impl Default for BackendConfig {
         Self {
             r#type: default_backend_type(),
             btrfs_loop: None,
+            btrfs_base: None,
         }
     }
 }
@@ -1302,10 +1316,24 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, WsCkptError> {
     }
 }
 
-/// Validate numeric ranges in a loaded `FileConfig` so downstream consumers
+/// Validate absolute mount pins and numeric ranges so downstream consumers
 /// (e.g. bootstrap's `f64 -> u64` cast on `avail * img_max_percent / 100.0`)
 /// never see NaN/Infinity/out-of-range values.
 fn validate_file_config(fc: &FileConfig, path: &Path) -> Result<(), WsCkptError> {
+    if let Some(mount) = fc
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|b| b.btrfs_mount.as_ref())
+    {
+        if !mount.is_absolute() {
+            return Err(WsCkptError::Config(format!(
+                "backend.btrfs-base.btrfs_mount in {} must be an absolute mount point, got {:?}",
+                path.display(),
+                mount
+            )));
+        }
+    }
     if let Some(loop_cfg) = &fc.backend.btrfs_loop {
         if let Some(pct) = loop_cfg.img_max_percent {
             if !pct.is_finite() || !(0.0..=100.0).contains(&pct) {
@@ -1342,6 +1370,7 @@ impl Default for DaemonConfig {
             auto_cleanup_interval_secs: DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
             health_check_interval_secs: DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: DEFAULT_IMG_SIZE_GB,
             img_max_percent: DEFAULT_IMG_MAX_PERCENT * 100.0, // stored as 0-100
             min_free_bytes: 512 * 1024 * 1024,                // 512 MB

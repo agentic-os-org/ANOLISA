@@ -112,7 +112,7 @@ Pod 使用同一镜像运行两个容器。
    btrfs 镜像路径目前不可配置。这个目录如果留在容器可写层，Pod 重启后
    镜像会消失，宿主机上的 loop 设备或挂载却可能继续存在。
 
-4. `--mount-path` 需要指向两个容器以相同路径挂载的共享 volume。
+4. BtrfsLoop 的 `--mount-path` 需要指向两个容器以相同路径挂载的共享 volume。
    daemon 使用 `Bidirectional`，app 使用 `HostToContainer`。
    daemon rootfs 中的普通目录只属于它自己的 mount namespace，
    挂载无法传播给 app，`init` 后 app 会得到悬空 symlink。
@@ -125,10 +125,15 @@ Pod 使用同一镜像运行两个容器。
    image shrink 检查挂载是否繁忙时会调用 `fuser -m`，共享进程
    namespace 后才能看到 app 容器中的进程。
 
-7. 后端会自动选择。`/var/lib` 所在文件系统为 btrfs 时，
-   `auto_detect` 会选择 `BtrfsBase`，直接操作 subvolume，
-   不需要 loop 设备。ext4 和 XFS 等文件系统会使用 `BtrfsLoop`
-   overmount 路径。
+7. 自动选择后端用于首次安装：优先第一个可写物理 btrfs 挂载，否则使用 BtrfsLoop，
+   并非只取决于 `/var/lib` 所在文件系统。为固定 BtrfsBase 的位置，应在共享配置中
+   显式设置 `backend.type = "btrfs-base"` 和
+   `[backend.btrfs-base] btrfs_mount = "/shared-btrfs"`。
+   该路径必须是两个容器均以相同路径看到的、已挂载且可写的 btrfs 挂载点；
+   数据位于 `/shared-btrfs/ws-ckpt-data`。`--mount-path` 不配置 BtrfsBase。
+   未显式指定位置时，重启使用 `state.json` 中记录的挂载；路径缺失、未挂载、
+   不是 btrfs 或只读就报错，不改选另一个挂载。修改显式挂载点需重启，旧快照可能
+   不再可见、未 pinned 的索引记录可能被清除，切回也不会恢复。应先备份状态和数据。
 
 8. 两个容器需要共享 `/etc/ws-ckpt`。
    `ws-ckpt config --global` 会直接写入

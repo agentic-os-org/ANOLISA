@@ -2272,41 +2272,113 @@ pub struct MountInfo {
 /// Skips read-only mounts and subvolume mounts (prefers physical /dev/ devices).
 /// Returns an error if no writable physical btrfs partition is found.
 pub async fn find_available_btrfs_partition() -> Result<MountInfo> {
-    let file = File::open("/proc/mounts")
+    let content = tokio::fs::read_to_string("/proc/mounts")
         .await
-        .context("Failed to open /proc/mounts")?;
-    let mut lines = BufReader::new(file).lines();
+        .context("Failed to read /proc/mounts")?;
+    let candidates = writable_btrfs_mounts_in(&content);
+    let Some(chosen) = candidates.first() else {
+        bail!("No writable physical btrfs partition found in /proc/mounts")
+    };
+    if candidates.len() > 1 {
+        warn!(
+            candidates = ?candidates,
+            chosen_device = %chosen.device,
+            chosen_mount_point = %chosen.mount_point,
+            "Multiple writable btrfs mounts found; selecting the first. \
+             Pin [backend.btrfs-base] btrfs_mount to make first-install selection explicit."
+        );
+    }
+    Ok(chosen.clone())
+}
 
-    let mut found_ro = false;
-
-    while let Some(line) = lines.next_line().await? {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 && parts[2] == "btrfs" {
-            // Skip read-only mounts
-            if parts.len() >= 4 && parts[3].split(',').any(|opt| opt == "ro") {
-                found_ro = true;
-                continue;
+fn writable_btrfs_mounts_in(content: &str) -> Vec<MountInfo> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<_> = line.split_whitespace().collect();
+            if parts.len() < 4
+                || parts[2] != "btrfs"
+                || !parts[0].starts_with("/dev/")
+                || parts[0].starts_with("/dev/loop")
+                || !parts[3].split(',').any(|opt| opt == "rw")
+                || parts[3].split(',').any(|opt| opt == "ro")
+            {
+                return None;
             }
-            // Skip subvolume mounts: prefer physical device partitions (/dev/xxx)
-            if !parts[0].starts_with("/dev/") {
-                continue;
-            }
-            // Skip loop devices (created by BtrfsLoop backend)
-            if parts[0].starts_with("/dev/loop") {
-                continue;
-            }
-            return Ok(MountInfo {
+            Some(MountInfo {
                 device: unescape_proc_mount(parts[0]),
                 mount_point: unescape_proc_mount(parts[1]),
-            });
-        }
-    }
+            })
+        })
+        .collect()
+}
 
-    if found_ro {
-        bail!("Found btrfs partition(s), but all are read-only")
-    } else {
-        bail!("No available btrfs partition found in /proc/mounts")
+/// Validate a selected BtrfsBase mount without searching for a replacement.
+pub(crate) async fn validate_btrfs_mount(mount_point: &Path) -> Result<MountInfo> {
+    if !mount_point.is_absolute() {
+        bail!("BtrfsBase mount point {:?} must be absolute", mount_point);
     }
+    let metadata = tokio::fs::metadata(mount_point).await.with_context(|| {
+        format!(
+            "BtrfsBase mount point {:?} does not exist or cannot be accessed",
+            mount_point
+        )
+    })?;
+    if !metadata.is_dir() {
+        bail!("BtrfsBase mount point {:?} is not a directory", mount_point);
+    }
+    let content = tokio::fs::read_to_string("/proc/mounts")
+        .await
+        .context("Failed to read /proc/mounts while validating BtrfsBase")?;
+    let selected = validate_btrfs_mount_in(&content, mount_point)?;
+    if !is_on_btrfs(mount_point).await {
+        bail!(
+            "BtrfsBase mount point {:?} is not btrfs in the live filesystem",
+            mount_point
+        );
+    }
+    let stat = nix::sys::statvfs::statvfs(mount_point)
+        .with_context(|| format!("Failed to inspect live mount flags for {:?}", mount_point))?;
+    if stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY) {
+        bail!(
+            "BtrfsBase mount point {:?} is read-only in the live filesystem",
+            mount_point
+        );
+    }
+    Ok(selected)
+}
+
+fn validate_btrfs_mount_in(content: &str, mount_point: &Path) -> Result<MountInfo> {
+    // Prefer the last exact entry; live filesystem checks also guard against
+    // stale observations while an operator changes mounts during startup.
+    for line in content.lines().rev() {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.len() < 4 || Path::new(&unescape_proc_mount(parts[1])) != mount_point {
+            continue;
+        }
+        if parts[2] != "btrfs" {
+            bail!(
+                "BtrfsBase mount point {:?} is not btrfs (mounted as {})",
+                mount_point,
+                parts[2]
+            );
+        }
+        if parts[3].split(',').any(|opt| opt == "ro") || !parts[3].split(',').any(|opt| opt == "rw")
+        {
+            bail!(
+                "BtrfsBase mount point {:?} is read-only or not mounted read-write",
+                mount_point
+            );
+        }
+        return Ok(MountInfo {
+            device: unescape_proc_mount(parts[0]),
+            mount_point: unescape_proc_mount(parts[1]),
+        });
+    }
+    bail!(
+        "BtrfsBase mount point {:?} is not mounted (no exact /proc/mounts entry)",
+        mount_point
+    )
 }
 
 /// Warmup snapshot metadata cache to speed up subsequent btrfs operations.
@@ -2335,6 +2407,81 @@ pub async fn warmup_snapshot_metadata(snap_path: &Path) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn selected_mount_requires_an_existing_absolute_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(validate_btrfs_mount(&missing)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist"));
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(validate_btrfs_mount(&file)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not a directory"));
+        assert!(validate_btrfs_mount(Path::new("relative"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("absolute"));
+    }
+
+    #[test]
+    fn fresh_mount_candidates_are_writable_physical_btrfs_in_kernel_order() {
+        let mounts = "/dev/mapper/first /mnt/first btrfs rw,relatime 0 0\n/dev/sda /mnt/ro btrfs ro 0 0\n/dev/loop0 /mnt/loop btrfs rw 0 0\nnone /mnt/nondevice btrfs rw 0 0\n/dev/sdb /mnt/ext ext4 rw 0 0\n/dev/mapper/second /mnt/with\\040spaces btrfs rw 0 0\n";
+        let candidates = writable_btrfs_mounts_in(mounts);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].device, "/dev/mapper/first");
+        assert_eq!(candidates[1].mount_point, "/mnt/with spaces");
+    }
+
+    #[test]
+    fn selected_mount_errors_remain_distinct_and_do_not_select_an_alternative() {
+        let mounts =
+            "/dev/a /valid btrfs rw 0 0\n/dev/b /ext ext4 rw 0 0\n/dev/c /readonly btrfs ro 0 0\n";
+        for (path, message) in [
+            ("/missing", "not mounted"),
+            ("/ext", "not btrfs"),
+            ("/readonly", "read-only"),
+            ("/valid/subdir", "not mounted"),
+        ] {
+            assert!(validate_btrfs_mount_in(mounts, Path::new(path))
+                .unwrap_err()
+                .to_string()
+                .contains(message));
+        }
+        assert_eq!(
+            validate_btrfs_mount_in(mounts, Path::new("/valid"))
+                .unwrap()
+                .device,
+            "/dev/a"
+        );
+    }
+
+    #[test]
+    fn selected_mount_decodes_spaces_and_checks_last_exact_entry() {
+        assert_eq!(
+            validate_btrfs_mount_in(
+                "/dev/a /with\\040spaces btrfs rw 0 0\n",
+                Path::new("/with spaces")
+            )
+            .unwrap()
+            .mount_point,
+            "/with spaces"
+        );
+        assert!(validate_btrfs_mount_in(
+            "/dev/a /mount btrfs rw 0 0\n/dev/b /mount ext4 rw 0 0\n",
+            Path::new("/mount")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("not btrfs"));
+    }
 
     static REAL_BTRFS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

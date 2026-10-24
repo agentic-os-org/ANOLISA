@@ -177,6 +177,14 @@ ws-ckpt reload
 
 `config -g` writes the global file, then verifies the daemon reloaded the same settings — it exits non-zero and lists any field that differs. In a Kubernetes sidecar deployment the CLI and daemon run in separate containers, so `/etc/ws-ckpt` must be on a volume shared by both, or global settings will not reach the daemon.
 
+For BtrfsBase, set `[backend.btrfs-base] btrfs_mount = "/data"` to pin an
+existing writable btrfs mount; data lives at `/data/ws-ckpt-data`. Restart to apply
+backend settings. Without a pin, restarts reuse the persisted mount and fail if
+it is unavailable. Changing the pin deliberately switches roots: previous
+snapshots become invisible and startup can prune unpinned indexes. Back up state
+and data before changing it. `daemon --mount-path` applies only to BtrfsLoop.
+See [storage selection](../../docs/user-guide/en/ws-ckpt/index.md#storage-backend-selection).
+
 ## Command Reference
 
 | Command | Description |

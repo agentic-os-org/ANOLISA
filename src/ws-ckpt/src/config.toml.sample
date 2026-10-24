@@ -7,7 +7,8 @@
 # Any field left unset falls back to its built-in default; a missing
 # /etc/ws-ckpt/config.toml is equivalent to all defaults.
 #
-# Apply edits without restart: `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
+# Apply scheduling edits with `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
+# Backend type, btrfs_mount and image size settings require a daemon restart.
 # Most fields can also be updated via `ws-ckpt config --<flag>`, which writes
 # /etc/ws-ckpt/config.toml without comments — this sample stays as the
 # canonical reference for available options.
@@ -36,4 +37,11 @@
 
 # ── BtrfsBase backend ──
 [backend.btrfs-base]
-# btrfs_mount = "/data"               # (reserved) Target btrfs partition
+# btrfs_mount = "/data"               # Absolute, existing, read-write btrfs mount point
+# Data lives below <btrfs_mount>/ws-ckpt-data; do not specify that child here.
+# Selection: explicit btrfs_mount > persisted data_root's mount > fresh detection.
+# A persisted mount must remain mounted at the same path; no automatic relocation.
+# Changing this pin intentionally selects a different root. Previous snapshots
+# become invisible and startup can prune unpinned indexes in /var/lib/ws-ckpt.
+# Switching back does not recover pruned records. Back up state and data first.
+# `ws-ckpt daemon --mount-path` configures only the BtrfsLoop mount point.
