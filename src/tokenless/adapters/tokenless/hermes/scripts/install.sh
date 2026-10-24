@@ -5,15 +5,38 @@ set -euo pipefail
 AGENT="${ANOLISA_TARGET:-hermes}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this installer with exit 1 before it can say why, and unlike the detector this
+# script writes to the filesystem. Resolve HOME once and derive every user-scope
+# path from it, so an explicit HERMES_HOME override keeps working and a missing
+# home is reported before any mkdir or symlink is created.
+HOME_DIR="${HOME:-}"
+# A relative HOME would resolve every path below against whatever directory
+# the caller happened to be in. A home has to be an absolute path; anything
+# else is treated as no home at all, which is the case the guard below
+# already reports.
+case "$HOME_DIR" in
+    /*) ;;
+    [A-Za-z]:[\\/]*) ;;
+    *) HOME_DIR="" ;;
+esac
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+HERMES_HOME="${HERMES_HOME:-${HOME_DIR:+$HOME_DIR/.hermes}}"
 HERMES_BIN="${HERMES_BIN:-}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
-export PATH="$HOME/.local/bin:${HERMES_HOME%/}/bin:/usr/local/bin:$PATH"
+export PATH="${USER_LOCAL_BIN}${HERMES_HOME:+${HERMES_HOME%/}/bin:}/usr/local/bin:$PATH"
 
 PLUGIN_SRC="$ADAPTER_DIR/hermes"
-PLUGIN_DST="${HERMES_HOME%/}/plugins/tokenless"
+PLUGIN_DST="${HERMES_HOME:+${HERMES_HOME%/}/plugins/tokenless}"
 
 echo "[${COMPONENT}] Installing ${AGENT} plugin..."
+
+if [ -z "$HERMES_HOME" ]; then
+    echo "[${COMPONENT}] Cannot resolve the Hermes home: HOME is unset and HERMES_HOME is not set." >&2
+    echo "[${COMPONENT}] Set HOME or HERMES_HOME to the Hermes installation directory, then retry." >&2
+    exit 1
+fi
 
 if [ ! -d "$PLUGIN_SRC" ]; then
     echo "[${COMPONENT}] Plugin source not found: $PLUGIN_SRC" >&2

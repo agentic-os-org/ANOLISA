@@ -12,10 +12,51 @@ MARKETPLACE_NAME="anolisa-${COMPONENT}"
 PLUGIN_ID="${COMPONENT}@${MARKETPLACE_NAME}"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-SETTINGS="$HOME/.claude/settings.json"
-export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this uninstaller with exit 1 before it can say why, and unlike the detector
+# this script rewrites settings.json and removes the plugin cache. Resolve HOME
+# once and derive every user-scope path from it, so an explicit CLAUDE_HOME
+# override keeps working and a missing home is reported before anything is
+# removed.
+#
+# CLAUDE_HOME is the adapter's own configuration directory -- $HOME/.claude --
+# which is what every other *_HOME override in this component means (HERMES_HOME
+# is $HOME/.hermes, CODEX_HOME is $HOME/.codex). It is not the home root: a
+# caller who set it to "$HOME/.claude" would otherwise have the settings file
+# looked up at "$HOME/.claude/.claude/settings.json". That file does not exist,
+# so every verification block below would be skipped and the script would
+# report success while the real registration stayed in place.
+HOME_DIR="${HOME:-}"
+# A relative HOME would resolve every path below against whatever directory
+# the caller happened to be in. A home has to be an absolute path; anything
+# else is treated as no home at all, which is the case the guard below
+# already reports.
+case "$HOME_DIR" in
+    /*) ;;
+    [A-Za-z]:[\\/]*) ;;
+    *) HOME_DIR="" ;;
+esac
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+CLAUDE_HOME="${CLAUDE_HOME:-${HOME_DIR:+$HOME_DIR/.claude}}"
+CLAUDE_HOME="${CLAUDE_HOME%/}"
+SETTINGS="${CLAUDE_HOME:+$CLAUDE_HOME/settings.json}"
+export PATH="${USER_LOCAL_BIN}/usr/local/bin:$PATH"
 
 echo "[${COMPONENT}] Uninstalling ${AGENT} plugin..."
+
+if [ -z "$CLAUDE_HOME" ]; then
+    echo "[${COMPONENT}] Cannot resolve the Claude Code configuration directory: HOME is unset and CLAUDE_HOME is not set." >&2
+    echo "[${COMPONENT}] Set HOME or CLAUDE_HOME to the Claude Code configuration directory, then retry." >&2
+    exit 1
+fi
+
+# The CLI reads its own configuration directory from the environment, so an
+# explicit override has to reach it -- otherwise the CLI deregisters against a
+# different directory than the one this script verifies below, and the
+# verification is skipped instead of confirming the removal.
+CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME}"
+export CLAUDE_CONFIG_DIR
 
 if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
     # Preview before the first removal: a dry run must leave the CLI
@@ -30,7 +71,7 @@ if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
     else
         echo "DRY-RUN: no claude CLI in ${CLAUDE_BIN}: manual fallback only"
         echo "DRY-RUN: rewrite ${SETTINGS} to drop ${PLUGIN_ID} and ${MARKETPLACE_NAME} (needs jq)"
-        echo "DRY-RUN: rm -rf ${HOME}/.claude/plugins/cache/${MARKETPLACE_NAME}"
+        echo "DRY-RUN: rm -rf ${CLAUDE_HOME}/plugins/cache/${MARKETPLACE_NAME}"
         echo "DRY-RUN: entries that cannot be removed or verified keep settings.json and the cache, and the script exits 1"
     fi
     exit 0
@@ -178,5 +219,5 @@ if [ "$MANUAL_FAILED" = "1" ]; then
     echo "[${COMPONENT}] (or install jq, or the claude CLI) and run this script again." >&2
     exit 1
 fi
-rm -rf "$HOME/.claude/plugins/cache/${MARKETPLACE_NAME}" 2>/dev/null || true
+rm -rf "${CLAUDE_HOME}/plugins/cache/${MARKETPLACE_NAME}" 2>/dev/null || true
 echo "[${COMPONENT}] manual cleanup complete."

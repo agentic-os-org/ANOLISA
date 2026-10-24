@@ -445,7 +445,8 @@ test-hook-parity:
 # Under `make -j` the suite must not run beside the two plugin builds whose
 # directories it rewrites through its own recursive make; test-npm-package
 # declares them as prerequisites for exactly that reason.
-test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
+test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package \
+                test-lifecycle-scripts
 	@echo "==> Testing OpenClaw adapter installer..."
 	bash tests/test-openclaw-adapter-install.sh
 	@echo "==> Testing openclaw Protocol v2 lifecycle..."
@@ -467,6 +468,29 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	bash tests/test-qwenpaw-adapter-install.sh
 	# Run after npm packaging has restored its stale-version fixture.
 	$(MAKE) test-qwenwork-install
+
+# The Hermes and Claude Code lifecycle scripts derive their user-scope paths
+# from HOME while running under `set -u`, so a host that invokes them without
+# HOME aborted them on an unbound variable -- with exit 1, and, for the
+# installers and uninstallers, without saying whether anything had been
+# written or removed. This suite pins the contract: a missing home must be
+# reported before any write, an explicit HERMES_HOME or CLAUDE_HOME override
+# must keep working without HOME, and a host with a normal HOME must see
+# unchanged behavior. It is plain bash over a copy of the adapter tree with
+# every agent CLI pinned to a path that does not exist -- no cargo build
+# output, node, jq, rtk, python3 or network -- so it costs well under a
+# second.
+#
+# Declared separately from the .PHONY list at the top of this file on purpose:
+# that list is extended by other components' targets as well, and a shared
+# line is a merge conflict waiting to happen. It joins `test-adapters` through
+# a prerequisite-only rule rather than by editing that target's own recipe,
+# which the adapter installers above also extend.
+.PHONY: test-lifecycle-scripts
+
+test-lifecycle-scripts:
+	@echo "==> Testing tokenless lifecycle scripts without HOME (no external dependencies)..."
+	bash tests/test-lifecycle-unset-home.sh
 
 # Build the abi3 extension with unwind semantics so a Rust panic cannot abort
 # the embedding Python interpreter. The wheel remains platform-specific, but
