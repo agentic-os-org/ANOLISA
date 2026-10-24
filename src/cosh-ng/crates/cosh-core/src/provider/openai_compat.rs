@@ -17,12 +17,25 @@ pub struct OpenAICompatProvider {
     cancelled: Arc<AtomicBool>,
     profile: Box<dyn ProviderProfile>,
     explicit_cache: bool,
+    client: Result<reqwest::Client, String>,
 }
 
 /// Request fields `build_request_body` constructs below. `extra_params` may
 /// extend a request but must not replace these. Module scope so the drift test
 /// can name the list instead of restating it.
 const OWNED_REQUEST_FIELDS: [&str; 5] = ["model", "messages", "stream", "stream_options", "tools"];
+
+// Per-read deadlines allow a healthy completion to stream longer than the idle bound.
+fn build_streaming_client(
+    connect: std::time::Duration,
+    idle: std::time::Duration,
+) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(idle)
+        .build()
+        .map_err(|error| format!("failed to build OpenAI-compatible HTTP client: {error}"))
+}
 
 impl OpenAICompatProvider {
     pub fn new(
@@ -37,6 +50,10 @@ impl OpenAICompatProvider {
             cancelled: Arc::new(AtomicBool::new(false)),
             profile,
             explicit_cache,
+            client: build_streaming_client(
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(120),
+            ),
         }
     }
 
@@ -187,7 +204,7 @@ impl ContentGenerator for OpenAICompatProvider {
         let body = self.build_request_body(messages, tools, config)?;
         let url = format!("{}/chat/completions", self.base_url);
 
-        let client = reqwest::Client::new();
+        let client = self.client.as_ref().map_err(Clone::clone)?;
         let auth_value = self.profile.auth_header_value(&self.api_key);
         let mut request = client
             .post(&url)
@@ -2715,5 +2732,76 @@ mod tests {
             err.contains("API error 400 Bad Request: 中文错误"),
             "GBK error body must be decoded using the declared charset: {err}"
         );
+    }
+    #[tokio::test]
+    async fn streaming_client_bounds_silent_response_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut provider =
+            OpenAICompatProvider::new_generic(&format!("http://{address}/v1"), "test");
+        provider.client =
+            build_streaming_client(Duration::from_millis(50), Duration::from_millis(50));
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            provider.generate(&[], &[], &GenerateConfig::default()),
+        )
+        .await;
+        server.abort();
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "silent response did not time out"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_client_bounds_idle_body_but_allows_a_long_active_stream() {
+        for stall in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 8192];
+                let _ = socket.read(&mut request).await.unwrap();
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+                if stall {
+                    std::future::pending::<()>().await;
+                } else {
+                    for _ in 0..8 {
+                        socket
+                            .write_all(
+                                b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                            )
+                            .await
+                            .unwrap();
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    socket.write_all(b"data: [DONE]\n\n").await.unwrap();
+                }
+            });
+            let mut provider =
+                OpenAICompatProvider::new_generic(&format!("http://{address}/v1"), "test");
+            provider.client =
+                build_streaming_client(Duration::from_millis(100), Duration::from_millis(100));
+            let mut stream = provider
+                .generate(&[], &[], &GenerateConfig::default())
+                .await
+                .unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                let mut error = false;
+                let mut ended = false;
+                while let Some(event) = stream.next().await {
+                    error |= matches!(event, GenerateEvent::Error(_));
+                    ended |= matches!(event, GenerateEvent::MessageEnd);
+                }
+                (error, ended)
+            })
+            .await;
+            server.abort();
+            assert_eq!(result.unwrap(), (stall, !stall));
+        }
     }
 }
