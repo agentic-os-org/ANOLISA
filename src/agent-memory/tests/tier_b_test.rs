@@ -71,6 +71,85 @@ fn full_scan_indexes_existing_files() {
     assert!(hits[0].snippet.contains("rust") || hits[0].snippet.contains("Rust"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_search_tool_reports_row_decode_error() {
+    let (_tmp, mut svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    index
+        .reindex_file("notes/known.md", "deploymentmarker", 100, 16)
+        .unwrap();
+    assert_eq!(
+        svc.memory_search("deploymentmarker", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let conn = rusqlite::Connection::open(index.db_path()).unwrap();
+    conn.busy_timeout(Duration::from_secs(5)).unwrap();
+    // Fault injection in a private test database, not a normal write path.
+    let changed = conn
+        .execute(
+            "UPDATE files SET mtime_ms = 'invalid' WHERE path = ?1",
+            ["notes/known.md"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    let err = svc
+        .memory_search("deploymentmarker", 5, None, None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // With no embedding provider, vector mode falls back to the same scoped BM25 path.
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("vector"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // Exercise hybrid with a deterministic provider and no vector rows.
+    svc.embedding = Some(Arc::new(KeywordEmbedding { dim: 8 }));
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("hybrid"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    let log = std::fs::read_to_string(svc.mount.audit_log_path()).unwrap();
+    let failed: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|entry: &serde_json::Value| {
+            entry["tool"] == "memory_search" && entry["ok"] == false
+        })
+        .collect();
+    assert_eq!(failed.len(), 3, "one failed audit per search error");
+    for (entry, mode) in failed
+        .iter()
+        .zip(["bm25", "bm25(fallback from vector)", "hybrid"])
+    {
+        assert_eq!(
+            entry["path"],
+            format!("{mode}:len={}", "deploymentmarker".len())
+        );
+        assert!(
+            entry["error"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid column type")
+        );
+        assert!(!entry.to_string().contains("deploymentmarker"));
+    }
+}
+
 #[test]
 fn inotify_picks_up_new_file() {
     let (_tmp, svc) = setup();

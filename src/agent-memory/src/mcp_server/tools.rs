@@ -233,7 +233,20 @@ impl MemoryMcpServer {
                 category.as_deref().filter(|s| !s.is_empty()),
                 agent_scope.as_deref().filter(|s| !s.is_empty()),
             )
-            .map_err(|e| fmt_err("search failed", e))?;
+            .map_err(|e| {
+                let mut message = fmt_err(
+                    &format!(
+                        "search failed (requested_mode={})",
+                        mode.as_deref().unwrap_or("bm25")
+                    ),
+                    &e,
+                );
+                if crate::index::store::is_row_decode_error(&e) {
+                    message.push_str("; ");
+                    message.push_str(crate::index::store::ROW_DECODE_RECOVERY);
+                }
+                message
+            })?;
         serde_json::to_string_pretty(&hits).map_err(|e| fmt_err("search serialize failed", e))
     }
 

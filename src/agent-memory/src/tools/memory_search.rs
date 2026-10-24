@@ -5,6 +5,34 @@ use crate::service::MemoryService;
 
 const TOOL: &str = "memory_search";
 
+fn audit_index_error(
+    svc: &MemoryService,
+    mode: &str,
+    query_len: usize,
+    error: MemoryError,
+) -> MemoryError {
+    svc.audit_log(
+        AuditEntry::new(TOOL)
+            .path(format!("{mode}:len={query_len}"))
+            .error(error.to_string()),
+    );
+    if crate::index::store::is_row_decode_error(&error) && mode != "hybrid" {
+        let table = if mode == "vector" {
+            "files_vec"
+        } else {
+            "files/files_fts"
+        };
+        if let Some(index) = svc.index.as_ref() {
+            tracing::error!(
+                "memory search row decode failed (backend={mode}, table={table}, db={}): {error}; {}",
+                index.db_path().display(),
+                crate::index::store::ROW_DECODE_RECOVERY
+            );
+        }
+    }
+    error
+}
+
 /// Tier B: search the memory store.
 ///
 /// `mode` controls the search algorithm:
@@ -73,7 +101,9 @@ pub fn memory_search(
 
     match mode {
         "bm25" => {
-            let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
+            let hits = index
+                .search_scoped(query, top_k.max(1), scope_ref)
+                .map_err(|e| audit_index_error(svc, "bm25", query.len(), e))?;
             let hits = filter_by_category(hits, category);
             let tokens = hits
                 .iter()
@@ -116,7 +146,16 @@ pub fn memory_search(
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
-                    let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
+                    let hits = index
+                        .search_scoped(query, top_k.max(1), scope_ref)
+                        .map_err(|e| {
+                            audit_index_error(
+                                svc,
+                                &format!("bm25(fallback from {mode})"),
+                                query.len(),
+                                e,
+                            )
+                        })?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(format!("bm25(fallback from {mode}):len={}", query.len()))
@@ -153,11 +192,12 @@ pub fn memory_search(
                 MemoryError::Other(format!("embedding failed: {e}"))
             })?;
 
-            let hits = if mode == "vector" {
-                index.search_vec(&embedding.vector, top_k.max(1))?
+            let hits = (if mode == "vector" {
+                index.search_vec(&embedding.vector, top_k.max(1))
             } else {
-                index.search_hybrid(query, &embedding.vector, top_k.max(1))?
-            };
+                index.search_hybrid(query, &embedding.vector, top_k.max(1))
+            })
+            .map_err(|e| audit_index_error(svc, mode, query.len(), e))?;
             let hits = filter_by_category(hits, category);
             let tokens = hits
                 .iter()

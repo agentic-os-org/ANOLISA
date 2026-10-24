@@ -186,7 +186,7 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
     let mut facts = Vec::new();
 
     for e in entries {
-        if e.tool == "memory_search" || e.tool == "mem_grep" {
+        if e.ok && (e.tool == "memory_search" || e.tool == "mem_grep") {
             // Extract the query from the path field (format: "mode:query" or "bm25:query")
             let query = extract_search_query(&e.path);
             if query.len() > 3 {
@@ -491,6 +491,22 @@ mod tests {
         let facts = rule_interest(&entries, "sid");
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].category, FactCategory::Interest);
+        assert!(facts[0].title.contains("rust ownership"));
+    }
+
+    #[test]
+    fn rule2_ignores_failed_search() {
+        let entries = vec![
+            make_entry(
+                "memory_search",
+                "bm25:len=16",
+                false,
+                Some("sqlite: Invalid column type Text at index: 4, name: mtime_ms"),
+            ),
+            make_entry("memory_search", "bm25:rust ownership", true, None),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        assert_eq!(facts.len(), 1);
         assert!(facts[0].title.contains("rust ownership"));
     }
 
