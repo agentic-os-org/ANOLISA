@@ -403,9 +403,11 @@ marker 未推进、final pass 需要重跑完整 prune 的场景因此被预算�
 超时的 pass 由 `TimeoutStopSec=75` 截断，同样落入硬杀死恢复路径。
 
 SIGTERM/SIGINT 在启动 catch-up 期间到达时不再挂起等待：信号任务先于 catch-up 启动，
-catch-up 与 shutdown 信号 `select!` 竞争；信号先到则放弃 admission（daemon 不进入
-serve，直接进入停机流程，退出码 0），in-flight catch-up pass 由 retention 任务继续
-持有直至终局 join，不会与 final pass 争抢 store mutex。
+catch-up 与 shutdown 信号 `select!` 竞争；信号先到则立即放弃 admission——verdict 在 pass
+仍在途时送达（daemon 不进入 serve，直接进入共享 65s stop deadline 下的停机流程，退出码
+0；被放弃的补跑 pass 只占用该 deadline 内的 terminal join，join 超时按上述降级路径跳过
+final pass 并以 FAILURE 退出，仍不会被 SIGKILL），in-flight catch-up pass 由 retention
+任务继续持有直至终局 join，不会与 final pass 争抢 store mutex。
 SIGTERM/SIGINT 正常退出为 0，启动运行错误为 1，参数错误为 2；SIGHUP 消费但不 reload。
 `Restart=on-failure`、`RestartSec=2`、300s 内最多 5 次启动限制异常退出重启循环。
 Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 readiness 证据。
