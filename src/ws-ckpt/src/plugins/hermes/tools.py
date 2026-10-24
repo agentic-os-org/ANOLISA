@@ -25,6 +25,8 @@ from .checkpoint_manager import (
     cwd_inside_workspace,
     cwd_inside_workspace_reason,
     get_manager,
+    workspace_registration_path,
+    resolve_workspace_path,
     map_error_to_message,
 )
 
@@ -699,10 +701,16 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     workspace, ws_err = _resolve_workspace(args)
     if ws_err:
         return ws_err
+    registration = None
     if not preview:
-        rejection = _reject_if_cwd_inside_workspace(workspace)
+        try:
+            registration_path = resolve_workspace_path(workspace)
+        except ValueError as error:
+            return _err(str(error))
+        rejection = _reject_if_cwd_inside_workspace(registration_path)
         if rejection:
             return rejection
+        registration = workspace_registration_path(registration_path)
 
     if num_ancestors is not None:
         cmd = ["ws-ckpt", "rollback", "-w", workspace, "-n", str(num_ancestors)]
@@ -711,8 +719,8 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     if preview:
         cmd.append("--preview")
     success, output = _run_ws_ckpt_cmd(cmd)
-    if success and not preview:
-        get_manager().skip_next_auto_checkpoint = True
+    if success and registration is not None:
+        get_manager().skip_auto_checkpoint_workspaces.add(registration)
     return _ok(output) if success else _err(map_error_to_message(output))
 
 

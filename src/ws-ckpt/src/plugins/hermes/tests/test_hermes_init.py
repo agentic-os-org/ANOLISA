@@ -72,7 +72,7 @@ class TestOnSessionEnd:
         cfg = HermesPluginConfig(workspace="/ws", auto_checkpoint=False)
         mgr = MagicMock(spec=CheckpointManager)
         type(mgr).config = PropertyMock(return_value=cfg)
-        mgr.skip_next_auto_checkpoint = False
+        mgr.skip_auto_checkpoint_workspaces = set()
         mock_get_mgr.return_value = mgr
         import hermes as h
         h._on_session_end()
@@ -83,7 +83,7 @@ class TestOnSessionEnd:
         cfg = HermesPluginConfig(workspace="/ws", auto_checkpoint=True)
         mgr = MagicMock(spec=CheckpointManager)
         type(mgr).config = PropertyMock(return_value=cfg)
-        mgr.skip_next_auto_checkpoint = False
+        mgr.skip_auto_checkpoint_workspaces = set()
         mgr.advance_turn.return_value = 1
         mgr.create_checkpoint.return_value = CheckpointResult(
             success=True, message="ok", snapshot="s1"
@@ -104,7 +104,7 @@ class TestOnSessionEnd:
         cfg = HermesPluginConfig(workspace="/ws", auto_checkpoint=True)
         mgr = MagicMock(spec=CheckpointManager)
         type(mgr).config = PropertyMock(return_value=cfg)
-        mgr.skip_next_auto_checkpoint = False
+        mgr.skip_auto_checkpoint_workspaces = set()
         mgr.advance_turn.return_value = 1
         mgr.create_checkpoint.return_value = CheckpointResult(
             success=True, message="ok", snapshot="s1"
