@@ -303,6 +303,35 @@ test-hook-scripts:
 	bash tests/test-run-hook-install-scope.sh
 	bash tests/test-tool-ready-readable-fixer.sh
 
+# The OpenCode and QwenPaw detectors derive their user-scope paths from HOME
+# while running under `set -euo pipefail`. An unguarded expansion therefore
+# aborts a detector with exit 1 -- the very status these scripts document as
+# "not installed but installable" -- so a host that runs detection without
+# HOME is handed a crash dressed as a verdict. On top of that, a detector
+# without HOME has no real user-scope path to report, and must not present
+# the synthetic path it falls back to as an ordinary location.
+#
+# The suite pins that contract: a home-less run must land on the same status
+# as the empty-HOME control, must not print bash's unbound-variable
+# diagnostic, and must say that the path it reports is synthetic; an explicit
+# override must still name a real path, and a real HOME must still be probed.
+# It is plain bash over the checked-out adapter tree with the agent CLIs
+# pinned to a stub that only answers the version probe -- no cargo build
+# output, node, jq, rtk, python3 or network, and no host agent is ever
+# executed -- so it costs well under a second. It rides on `test-integration`
+# for the same reason test-hook-scripts does: that is the target the Test
+# tokenless job already calls, so the suite reaches CI with no workflow edit
+# and no new setup.
+#
+# Declared separately from the .PHONY list at the top of this file on purpose:
+# that list is extended by other components' targets as well, and a shared
+# line is a merge conflict waiting to happen.
+.PHONY: test-detect-synthetic-home
+
+test-detect-synthetic-home:
+	@echo "==> Testing tokenless detectors without HOME (no external dependencies)..."
+	bash tests/test-detect-synthetic-home.sh
+
 test-hooks: test-hook-scripts
 	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
@@ -360,6 +389,7 @@ test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup tes
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
 	python3 tests/test_stats_http.py
+	$(MAKE) test-detect-synthetic-home
 
 .PHONY: test-headroom-pipeline-worker
 test-headroom-pipeline-worker:
