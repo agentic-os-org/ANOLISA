@@ -208,6 +208,10 @@ fn sensitive_flag_pattern() -> &'static Regex {
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
+            // Key catalog mirrors cosh-platform/src/audit/redact.rs
+            // (SENSITIVE_KEY_NEEDLES, PR #1765) — the two must stay in sync.
+            // Long alternatives precede the short `token`/`secret` entries so
+            // `secret-key`/`auth-token` are fully consumed.
             r#"(?ix)
             (?P<prefix>
                 (?:^|\s)
@@ -237,6 +241,7 @@ fn sensitive_assignment_pattern() -> &'static Regex {
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
+            // Same extended catalog as the flag pattern (platform mirror).
             r#"(?ix)
             (?P<prefix>
                 ["']?
@@ -381,9 +386,10 @@ mod tests {
     fn redacts_assignments_flags_headers_and_urls() {
         let input = concat!(
             "ALIBABA_CLOUD_ACCESS_KEY_ID=LTAIexampleaccesskey ",
+            "ACCESS_KEY=AKIDLEAK123456 ",
             "OPENAI_API_KEY=sk-example-secret ",
             "curl --password 'hunter2' --access-token=token-value ",
-            "--access-key-id flag-id --cookie flag-cookie ",
+            "--access-key-id flag-id --access-key flag-bare --cookie flag-cookie ",
             "--set-cookie=flag-set-cookie authorization=assignment-auth ",
             "cookie=assignment-cookie set-cookie=assignment-set-cookie ",
             "'https://example.test/?client_secret=query-value&next=ok'\n",
@@ -400,6 +406,10 @@ mod tests {
         for secret in [
             "sk-example-secret",
             "LTAIexampleaccesskey",
+            // The bare ACCESS_KEY assignment and the bare --access-key flag
+            // must redact exactly like their _id/_secret forms.
+            "AKIDLEAK123456",
+            "flag-bare",
             "hunter2",
             "token-value",
             "flag-id",
@@ -549,5 +559,87 @@ mod tests {
     fn leaves_non_secret_text_unchanged() {
         let input = "cargo test --package cosh-shell\n";
         assert_eq!(redact_sensitive_text(input), (input.to_string(), false));
+    }
+
+    #[test]
+    fn redacts_platform_secret_key_names_in_flags_and_assignments() {
+        // The platform key catalog (issue #1618 / PR #1765) mirrored into
+        // the evidence redactor: all of these leaked verbatim before.
+        for (input, secret) in [
+            (
+                "export SECRET_KEY=django-insecure-1a2b3c",
+                "django-insecure-1a2b3c",
+            ),
+            ("curl -d private_key=rawbase64secret", "rawbase64secret"),
+            (
+                "tool --secret-key my-secret-key-value",
+                "my-secret-key-value",
+            ),
+            ("tool --auth-token authtokenvalue123", "authtokenvalue123"),
+            ("tool --credentials user:pass1234", "user:pass1234"),
+            ("svc start --session-token sess-leak-9", "sess-leak-9"),
+            ("tool --access-key AKIDLEAK123456", "AKIDLEAK123456"),
+        ] {
+            let (out, _) = redact_sensitive_text(input);
+            assert!(!out.contains(secret), "leaked {secret} from {input}: {out}");
+            assert!(out.contains("<redacted>"), "must mark the redaction: {out}");
+        }
+    }
+
+    #[test]
+    fn redacts_new_keys_inside_quoted_values() {
+        // The new key alternatives must compose with the value-span matcher:
+        // a quoted multi-word secret is consumed whole.
+        let (out, _) = redact_sensitive_text("tool --secret-key 'multi word secret'");
+        assert!(!out.contains("multi word"), "leaked: {out}");
+        assert!(!out.contains("word secret"), "leaked: {out}");
+        assert!(out.contains("<redacted>"), "must mark: {out}");
+    }
+
+    fn command_block_with_command(command: &str) -> crate::types::CommandBlock {
+        crate::types::CommandBlock {
+            id: "cmd-1".to_string(),
+            session_id: "s1".to_string(),
+            command: command.to_string(),
+            origin: Default::default(),
+            cwd: "/tmp".to_string(),
+            end_cwd: "/tmp".to_string(),
+            started_at_ms: 0,
+            ended_at_ms: 10,
+            duration_ms: 10,
+            exit_code: 0,
+            status: crate::types::CommandStatus::Completed,
+            output: crate::types::OutputRefs {
+                terminal_output_ref: None,
+                terminal_output_bytes: 0,
+            },
+            shell_environment_generation: None,
+            audit_identity: None,
+        }
+    }
+
+    #[test]
+    fn redacts_new_keys_in_provider_command_facts() {
+        // The exact production shape: a kubectl --from-literal with a
+        // SECRET_KEY leaks into provider-visible command facts today.
+        use super::provider_safe_command_facts;
+        use crate::types::CommandBlock;
+        // provider_safe_command_facts reads only command/cwd/end_cwd/status/
+        // exit_code/id/output, so a minimal block with the leaky command is
+        // enough — the struct has no Default impl.
+        let block = command_block_with_command(
+            "kubectl create secret generic db --from-literal=SECRET_KEY=django-insecure-1a2b3c",
+        );
+        let facts = provider_safe_command_facts(&block);
+        assert!(
+            !facts.command.contains("django-insecure-1a2b3c"),
+            "provider fact leaked the secret: {}",
+            facts.command
+        );
+        assert!(
+            facts.command.contains("<redacted>"),
+            "must mark the redaction: {}",
+            facts.command
+        );
     }
 }
