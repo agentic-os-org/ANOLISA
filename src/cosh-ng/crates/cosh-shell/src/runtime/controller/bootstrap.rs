@@ -331,9 +331,11 @@ pub(crate) fn run_raw(
         if let Some(notice) = read_cached_notice(env!("CARGO_PKG_VERSION")) {
             inline_state.startup_upgrade.resolved = Some(Some(notice));
         }
-        inline_state
-            .startup_upgrade
-            .start_probe(env!("CARGO_PKG_VERSION"));
+        if cosh_config.ai_enabled {
+            inline_state
+                .startup_upgrade
+                .start_probe(env!("CARGO_PKG_VERSION"));
+        }
     }
     let hook_feedback = load_hook_feedback_preferences();
     inline_state.hooks.feedback = hook_feedback.feedback;
