@@ -81,6 +81,8 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     worker = read_json(directory / "worker-result.json")
     load = read_json(directory / "agent-summary.json")
     capture = read_json(directory / "report.json")
+    if not isinstance(capture, dict):
+        capture = {"invalid": True}
     safety_stop = read_json(directory / "safety-stop.json")
     rows: list[dict[str, str]] = []
     evictions: list[float] = []
@@ -128,10 +130,15 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     load_status = "PASS" if load.get("passed") is True else "FAIL" if load else "UNVERIFIED"
     probe_drops = {key: max(values) if values else None for key, values in drop_samples.items()}
     events_dropped = any(value is not None and value > 0 for value in probe_drops.values())
+    sent = capture.get("sent")
+    quality = {}
+    for key in ("completeness_ratio", "token_accuracy"):
+        value = capture.get(key)
+        quality[key] = numeric(value) if type(value) in (int, float) else None
     capture_ok = (
-        capture.get("sent", 0) > 0
-        and capture.get("completeness_ratio", 0) >= 0.999
-        and (capture.get("token_accuracy") or 0) >= 0.999
+        type(sent) is int
+        and sent > 0
+        and all(value is not None and 0.999 <= value <= 1 for value in quality.values())
         and not events_dropped
         and not invalid_counters.intersection(drop_samples)
     )
@@ -143,7 +150,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     ffi = read_json(directory / "ffi-consumer.json") if source.get("mode") == "ffi" else None
     ffi_error = None
     if ffi is not None:
-        expected = capture.get("sent", 0) + len(
+        expected = (sent if type(sent) is int and sent > 0 else 0) + len(
             read_json(directory / "clients-ready.json").get("request_ids", [])
         )
         if not ffi.get("completed") or worker.get("trace_returncode") != 0:
@@ -165,10 +172,10 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and not safety_stop
         and ffi_error is None
     )
-    capture_counts = {
-        key: capture.get(key)
-        for key in ("sent", "matched", "complete", "missing_count", "token_correct")
-    }
+    capture_counts = {}
+    for key in ("sent", "matched", "complete", "missing_count", "token_correct"):
+        value = capture.get(key)
+        capture_counts[key] = value if type(value) is int and value >= 0 else None
     if capture_counts["missing_count"] is None and isinstance(capture.get("missing_ids"), list):
         capture_counts["missing_count"] = len(capture["missing_ids"])
     return {
@@ -187,8 +194,8 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "load": load_status,
         "capture": capture_status,
         "capture_source": capture.get("capture_source"),
-        "capture_completeness": capture.get("completeness_ratio"),
-        "capture_token_accuracy": capture.get("token_accuracy"),
+        "capture_completeness": quality["completeness_ratio"],
+        "capture_token_accuracy": quality["token_accuracy"],
         "capture_counts": capture_counts,
         "connection_evictions": max(evictions) if evictions else None,
         "probe_drops": probe_drops,
