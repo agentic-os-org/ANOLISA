@@ -171,6 +171,50 @@ case "$present_output" in
     *) pass "an existing plugin directory is not previewed as a creation" ;;
 esac
 
+# An executable living in a directory whose name contains spaces must still be
+# probed as a single shell word, both through an explicit OPENCODE_BIN override
+# and through PATH discovery. The plugin link is absent here, so a working probe
+# reports the stub version and exits 1 (detected, not installed) instead of
+# exiting 2 with "did not report a version".
+rm -f "$PLUGIN_LINK"
+SPACED_BIN_DIR="$SANDBOX/bin with spaces"
+mkdir -p "$SPACED_BIN_DIR"
+cp "$FAKE_BIN/opencode" "$SPACED_BIN_DIR/opencode"
+
+reports_stub_version() {
+    case "$1" in
+        *"(1.2.3-test)"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+spaced_override_output="$(OPENCODE_BIN="$SPACED_BIN_DIR/opencode" bash "$DETECT_SH" 2>&1)" && spaced_override_rc=0 || spaced_override_rc=$?
+if [ "$spaced_override_rc" -eq 1 ] && reports_stub_version "$spaced_override_output"; then
+    pass "detect probes an OPENCODE_BIN override in a directory with spaces"
+else
+    fail "detect returned $spaced_override_rc for a spaced OPENCODE_BIN override: $spaced_override_output"
+fi
+
+spaced_path_output="$(PATH="$SPACED_BIN_DIR:$PATH" bash "$DETECT_SH" 2>&1)" && spaced_path_rc=0 || spaced_path_rc=$?
+if [ "$spaced_path_rc" -eq 1 ] && reports_stub_version "$spaced_path_output"; then
+    pass "detect probes an opencode found in a PATH directory with spaces"
+else
+    fail "detect returned $spaced_path_rc for a spaced PATH directory: $spaced_path_output"
+fi
+
+bash "$INSTALL_SH" >/dev/null
+if OPENCODE_BIN="$SPACED_BIN_DIR/opencode" bash "$DETECT_SH" >/dev/null 2>&1; then
+    pass "detect reports a spaced OPENCODE_BIN override as ready once installed"
+else
+    fail "detect did not report ready for a spaced OPENCODE_BIN override"
+fi
+if PATH="$SPACED_BIN_DIR:$PATH" bash "$DETECT_SH" >/dev/null 2>&1; then
+    pass "detect reports a spaced PATH executable as ready once installed"
+else
+    fail "detect did not report ready for a spaced PATH executable"
+fi
+bash "$UNINSTALL_SH" >/dev/null
+
 echo ""
 echo "OpenCode adapter tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
