@@ -151,9 +151,10 @@ def read_internal_metrics(path: Path | None) -> dict[str, str]:
         fields = line.split()
         if len(fields) == 2 and fields[0].split("{", 1)[0] == "agentsight_ffi_dropped_total":
             try:
-                result["ffi_dropped"] = str(
-                    float(result.get("ffi_dropped", "0")) + float(fields[1])
-                )
+                value = float(fields[1])
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError("FFI drop counters must be finite and non-negative")
+                result["ffi_dropped"] = str(float(result.get("ffi_dropped", "0")) + value)
             except ValueError:
                 result["ffi_dropped"] = "nan"
             continue
