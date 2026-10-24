@@ -58,17 +58,23 @@ class CoshAdapter(AgentAdapter):
             pull_registry=settings.agent.docker_pull_registry,
         )
         work_dir = docker.start()
-        base_revision = get_git_revision(work_dir)
-        prompt = build_prompt(
-            instance,
-            work_dir,
-            docker.container_name,
-            agent_name=self.name,
-            use_skill=settings.agent.use_skill,
-            skills_dir=settings.agent.skills_dir,
-            use_per_case_prompt=settings.agent.per_case_prompt,
-            prompts_dir=settings.agent.prompts_dir,
-        )
+        try:
+            base_revision = get_git_revision(work_dir)
+            prompt = build_prompt(
+                instance,
+                work_dir,
+                docker.container_name,
+                agent_name=self.name,
+                use_skill=settings.agent.use_skill,
+                skills_dir=settings.agent.skills_dir,
+                use_per_case_prompt=settings.agent.per_case_prompt,
+                prompts_dir=settings.agent.prompts_dir,
+            )
+        except Exception:
+            # Nothing owns the container yet: the cleanup callback only
+            # exists on the PreparedAgentRun we never got to build.
+            docker.cleanup()
+            raise
         return PreparedAgentRun(
             instance=instance,
             settings=settings,
