@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use agentsight_sqlite_lifecycle::{
     LifecycleError, MaintenanceJob, MaintenanceWorker, MaintenanceWorkerState,
@@ -417,6 +419,7 @@ impl DatabaseManager {
     /// The action receives `true` when retention/capacity maintenance is due and
     /// `false` for a passive checkpoint. Returning false keeps cleanup due on
     /// the next worker tick; failed cleanup also remains due on retry.
+    #[cfg(target_os = "linux")]
     pub(crate) fn maintenance_job_with_checkpoints(
         &self,
         id: DatabaseId,
@@ -597,6 +600,7 @@ mod tests {
         ))
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn checkpoint_ticks_do_not_accelerate_cleanup_and_failed_cleanup_is_retried() {
         let manager =
@@ -627,6 +631,7 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), [true, true, false, false]);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn yielded_cleanup_resumes_without_waiting_for_the_policy_interval() {
         let manager =

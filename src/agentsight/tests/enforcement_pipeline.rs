@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use std::fs;
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
