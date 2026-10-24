@@ -26,7 +26,7 @@ PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 CONFIG_DIR ?= $(SYSCONFDIR)/ws-ckpt
 
-.PHONY: build install uninstall clean test test-openclaw-scripts test-openclaw-compat test-openclaw-install test-openclaw-uninstall package-raw test-package-raw help
+.PHONY: build install uninstall clean test test-health-advisory-load test-openclaw-scripts test-openclaw-compat test-openclaw-install test-openclaw-uninstall package-raw test-package-raw help
 
 package-raw:
 	packaging/raw/package.sh package
@@ -168,7 +168,11 @@ clean:
 
 test:
 	cd src && cargo test --workspace
+	$(MAKE) test-health-advisory-load
 	$(MAKE) test-openclaw-scripts
+
+test-health-advisory-load:
+	python3 -m unittest discover -s tests -p 'test_health_advisory_load.py'
 
 test-openclaw-scripts: test-openclaw-compat test-openclaw-install test-openclaw-uninstall
 
@@ -182,7 +186,7 @@ test-openclaw-uninstall:
 	bash tests/openclaw-uninstall.sh
 
 help:
-	@echo "Targets: build install uninstall clean test test-openclaw-scripts package-raw test-package-raw"
+	@echo "Targets: build install uninstall clean test test-health-advisory-load test-openclaw-scripts package-raw test-package-raw"
 	@echo "Variables:"
 	@echo "  INSTALL_PROFILE=user|system"
 	@echo "  DESTDIR= staging root for packages"

@@ -22,6 +22,8 @@ use ws_ckpt_common::{
 use crate::fs_watcher::WorkspaceWatcher;
 use crate::index_store;
 
+const HEALTH_ADVISORY_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Outcome of the workspace quiescence check.
 ///
 /// [`Quiescence::MonitoringUnavailable`] is the fail-closed verdict for a
@@ -123,6 +125,10 @@ pub struct DaemonState {
     pub socket_path: PathBuf,
     /// Storage backend (trait object for multi-backend support)
     pub backend: Arc<dyn StorageBackend>,
+    /// Last complete daemon-side sample used by the latency-sensitive advisory request.
+    advisory_cache: std::sync::RwLock<Option<HealthAdvisorySnapshot>>,
+    /// Prevents concurrent refresh paths from publishing out-of-order samples.
+    advisory_refresh_lock: Mutex<()>,
     /// Daemon start time for uptime calculation
     pub start_time: std::time::Instant,
     /// Lazy bootstrap guard for BtrfsLoop backend (runs at most once)
@@ -142,6 +148,14 @@ pub struct DaemonState {
     pub(crate) init_lock: Mutex<()>,
     /// Serializes manifest snapshots and writes across different workspaces.
     manifest_save_lock: Mutex<()>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HealthAdvisorySnapshot {
+    pub(crate) over_limit_workspace_count: u32,
+    pub(crate) fs_total_bytes: u64,
+    pub(crate) fs_used_bytes: u64,
+    refreshed_at: std::time::Instant,
 }
 
 pub struct WorkspaceState {
@@ -175,6 +189,8 @@ impl DaemonState {
             mount_path,
             socket_path,
             backend,
+            advisory_cache: std::sync::RwLock::new(None),
+            advisory_refresh_lock: Mutex::new(()),
             start_time: std::time::Instant::now(),
             bootstrapped: OnceCell::new(),
             watchers: std::sync::Mutex::new(HashMap::new()),
@@ -184,6 +200,110 @@ impl DaemonState {
             init_lock: Mutex::new(()),
             manifest_save_lock: Mutex::new(()),
         }
+    }
+
+    /// Returns a recent complete sample, or `None` while the cache is unavailable/stale.
+    pub(crate) fn health_advisory_snapshot(&self) -> Option<HealthAdvisorySnapshot> {
+        let max_age = self
+            .config_snapshot()
+            .health_check_interval_secs
+            .saturating_mul(2);
+        if max_age == 0 {
+            return None;
+        }
+        let cache = self
+            .advisory_cache
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        cache
+            .as_ref()
+            .filter(|sample| {
+                sample.refreshed_at.elapsed() <= std::time::Duration::from_secs(max_age)
+            })
+            .copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_health_advisory_snapshot(
+        &self,
+        over_limit_workspace_count: u32,
+        fs_total_bytes: u64,
+        fs_used_bytes: u64,
+        age: std::time::Duration,
+    ) {
+        *self
+            .advisory_cache
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = Some(HealthAdvisorySnapshot {
+            over_limit_workspace_count,
+            fs_total_bytes,
+            fs_used_bytes,
+            refreshed_at: std::time::Instant::now() - age,
+        });
+    }
+
+    /// Publishes a complete sample only after workspace and filesystem reads succeed.
+    ///
+    /// Failed, busy, or timed-out refreshes preserve the previous sample and its
+    /// original timestamp; readers still reject it after the freshness limit.
+    pub(crate) async fn refresh_health_advisory(&self) -> anyhow::Result<()> {
+        self.refresh_health_advisory_with_deadline(HEALTH_ADVISORY_REFRESH_TIMEOUT)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn refresh_health_advisory_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        self.refresh_health_advisory_with_deadline(timeout).await
+    }
+
+    async fn refresh_health_advisory_with_deadline(
+        &self,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let started_at = std::time::Instant::now();
+        let _refresh_guard = tokio::time::timeout(timeout, self.advisory_refresh_lock.lock())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for health advisory refresh slot"))?;
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        let result = tokio::time::timeout(
+            remaining,
+            crate::health_probe::scope(async {
+                let mut over_limit_workspace_count = 0_u32;
+                for workspace in self.all_workspaces() {
+                    let state = workspace.try_read().map_err(|_| {
+                        anyhow::anyhow!("workspace state is busy during advisory refresh")
+                    })?;
+                    if state.index.snapshots.len() as u32 > ws_ckpt_common::ADVISORY_SNAPSHOT_LIMIT
+                    {
+                        over_limit_workspace_count = over_limit_workspace_count.saturating_add(1);
+                    }
+                }
+                let (fs_total_bytes, fs_used_bytes) = self.backend.get_usage().await?;
+                Ok(HealthAdvisorySnapshot {
+                    over_limit_workspace_count,
+                    fs_total_bytes,
+                    fs_used_bytes,
+                    refreshed_at: std::time::Instant::now(),
+                })
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "health advisory refresh timed out after {}ms",
+                timeout.as_millis()
+            ))
+        });
+
+        let sample = result?;
+        *self
+            .advisory_cache
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = Some(sample);
+        Ok(())
     }
 
     /// Acquires the per-workspace mutation mutex.
@@ -1214,6 +1334,57 @@ mod tests {
 
     fn test_state_dir() -> PathBuf {
         PathBuf::from("/tmp/test-state")
+    }
+
+    #[tokio::test]
+    async fn health_advisory_failures_preserve_sample_without_extending_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        state
+            .register_workspace(
+                "ws-busy".into(),
+                temp.path().to_path_buf(),
+                SnapshotIndex::new(temp.path().to_path_buf()),
+            )
+            .unwrap();
+        let workspace = state.get_by_wsid("ws-busy").unwrap();
+        let write_guard = workspace.write().await;
+        assert!(state.refresh_health_advisory().await.is_err());
+        assert!(state.health_advisory_snapshot().is_none());
+
+        state.seed_health_advisory_snapshot(2, 100, 95, std::time::Duration::from_secs(20));
+        let original = state.advisory_cache.read().unwrap().unwrap();
+        for _ in 0..2 {
+            assert!(state.refresh_health_advisory().await.is_err());
+            let retained = state.advisory_cache.read().unwrap().unwrap();
+            assert_eq!(retained.refreshed_at, original.refreshed_at);
+            assert_eq!(retained.over_limit_workspace_count, 2);
+            assert_eq!((retained.fs_total_bytes, retained.fs_used_bytes), (100, 95));
+            assert!(state.health_advisory_snapshot().is_some());
+        }
+        drop(write_guard);
+
+        let _refresh_guard = state.advisory_refresh_lock.lock().await;
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(1))
+            .await
+            .is_err());
+        assert_eq!(
+            state.advisory_cache.read().unwrap().unwrap().refreshed_at,
+            original.refreshed_at
+        );
+
+        state.seed_health_advisory_snapshot(2, 100, 95, std::time::Duration::from_secs(601));
+        let expired_at = state.advisory_cache.read().unwrap().unwrap().refreshed_at;
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(1))
+            .await
+            .is_err());
+        assert_eq!(
+            state.advisory_cache.read().unwrap().unwrap().refreshed_at,
+            expired_at
+        );
+        assert!(state.health_advisory_snapshot().is_none());
     }
 
     #[test]

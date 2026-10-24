@@ -10,6 +10,8 @@ use crate::state::DaemonState;
 use ws_ckpt_common::backend::StorageBackend;
 use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Start background scheduler tasks: periodic auto-cleanup and health checks.
 ///
 /// Config hot-reload is **push-based**: the dispatcher calls
@@ -74,6 +76,7 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
 /// off `health_check_interval_secs`. See that function's comment for why
 /// `enable()` is called before the config read.
 async fn health_check_loop(state: Arc<DaemonState>) {
+    let mut initial_refresh = true;
     loop {
         let notified = state.config_notify.notified();
         tokio::pin!(notified);
@@ -84,11 +87,36 @@ async fn health_check_loop(state: Arc<DaemonState>) {
             notified.await;
             continue;
         }
+        if initial_refresh {
+            initial_refresh = false;
+            if let Err(e) = state.refresh_health_advisory().await {
+                warn!("Health advisory refresh failed: {:#}", e);
+            }
+            continue;
+        }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(interval)) => {
-                health_check(&state).await;
+                if let Err(e) = state.refresh_health_advisory().await {
+                    warn!("Health advisory refresh failed: {:#}", e);
+                }
+                // Optional diagnostics must not prevent future cache refreshes.
+                if tokio::time::timeout(
+                    HEALTH_CHECK_TIMEOUT,
+                    crate::health_probe::scope(health_check(&state)),
+                )
+                    .await
+                    .is_err()
+                {
+                    warn!("Health check diagnostics timed out after {} seconds", HEALTH_CHECK_TIMEOUT.as_secs());
+                }
             }
-            _ = notified.as_mut() => {}
+            _ = notified.as_mut() => {
+                if state.config_snapshot().health_check_interval_secs > 0 {
+                    if let Err(e) = state.refresh_health_advisory().await {
+                        warn!("Health advisory refresh failed: {:#}", e);
+                    }
+                }
+            }
         }
     }
 }
@@ -183,7 +211,17 @@ async fn health_check(state: &DaemonState) {
         debug!("Health check skipped: no workspace registered");
         return;
     }
-    for line in assess_usage_health(state.backend.as_ref()).await {
+    let lines = match state.health_advisory_snapshot() {
+        Some(sample) => {
+            assess_usage_health_with_usage(
+                state.backend.as_ref(),
+                Ok((sample.fs_total_bytes, sample.fs_used_bytes)),
+            )
+            .await
+        }
+        None => assess_usage_health(state.backend.as_ref()).await,
+    };
+    for line in lines {
         match line {
             UsageHealthLine::Info(msg) => info!("{}", msg),
             UsageHealthLine::Warn(msg) => warn!("{}", msg),
@@ -208,7 +246,14 @@ enum UsageHealthLine {
 /// silently die (permissions, missing btrfs binary, fs errors) exactly in
 /// the degraded regime where it matters most (#3053 review P2).
 async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLine> {
-    let (total, used) = match backend.get_usage().await {
+    assess_usage_health_with_usage(backend, backend.get_usage().await).await
+}
+
+async fn assess_usage_health_with_usage(
+    backend: &dyn StorageBackend,
+    usage: anyhow::Result<(u64, u64)>,
+) -> Vec<UsageHealthLine> {
+    let (total, used) = match usage {
         Ok(pair) => pair,
         Err(e) => {
             // `{:#}` prints the full anyhow cause chain (e.g. outer
@@ -276,6 +321,9 @@ async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLin
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
     // ── Per-workspace effective policy invariants ──
     // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
@@ -329,11 +377,26 @@ mod tests {
     // high-usage with/without zombies, FAILED dead-list query (must stay
     // visible, never collapse into "no zombies"), and failed usage probe.
 
+    struct ActiveUsageProbe<'a>(&'a std::sync::atomic::AtomicUsize);
+
+    impl Drop for ActiveUsageProbe<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     struct UsageProbeBackend {
         usage: Result<(u64, u64), String>,
         zombies: Result<Vec<u64>, String>,
         data_root: std::path::PathBuf,
         snapshots_root: std::path::PathBuf,
+        active_usage_probes: std::sync::atomic::AtomicUsize,
+        max_active_usage_probes: std::sync::atomic::AtomicUsize,
+        usage_probe_calls: std::sync::atomic::AtomicUsize,
+        usage_stalls_remaining: std::sync::atomic::AtomicUsize,
+        deleted_probe_calls: std::sync::atomic::AtomicUsize,
+        stall_deleted_probe: std::sync::atomic::AtomicBool,
+        require_health_scope: bool,
     }
 
     impl UsageProbeBackend {
@@ -343,6 +406,13 @@ mod tests {
                 zombies,
                 data_root: std::env::temp_dir(),
                 snapshots_root: std::env::temp_dir(),
+                active_usage_probes: std::sync::atomic::AtomicUsize::new(0),
+                max_active_usage_probes: std::sync::atomic::AtomicUsize::new(0),
+                usage_probe_calls: std::sync::atomic::AtomicUsize::new(0),
+                usage_stalls_remaining: std::sync::atomic::AtomicUsize::new(0),
+                deleted_probe_calls: std::sync::atomic::AtomicUsize::new(0),
+                stall_deleted_probe: std::sync::atomic::AtomicBool::new(false),
+                require_health_scope: false,
             }
         }
     }
@@ -359,11 +429,40 @@ mod tests {
             &self.snapshots_root
         }
         async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            use std::sync::atomic::Ordering;
+
+            if self.require_health_scope {
+                crate::health_probe::assert_scoped();
+            }
+            self.usage_probe_calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active_usage_probes.fetch_add(1, Ordering::SeqCst) + 1;
+            let _active_probe = ActiveUsageProbe(&self.active_usage_probes);
+            self.max_active_usage_probes
+                .fetch_max(active, Ordering::SeqCst);
+            if self
+                .usage_stalls_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             self.usage
                 .clone()
                 .map_err(|e| anyhow::anyhow!("injected usage failure: {}", e))
         }
         async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+            use std::sync::atomic::Ordering;
+
+            if self.require_health_scope {
+                crate::health_probe::assert_scoped();
+            }
+            self.deleted_probe_calls.fetch_add(1, Ordering::SeqCst);
+            if self.stall_deleted_probe.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
             self.zombies
                 .clone()
                 .map_err(|e| anyhow::anyhow!("injected query failure: {}", e))
@@ -431,6 +530,192 @@ mod tests {
         ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
             unimplemented!()
         }
+    }
+
+    fn health_scheduler_fixture(
+        usage: (u64, u64),
+    ) -> (
+        tempfile::TempDir,
+        Arc<UsageProbeBackend>,
+        Arc<crate::state::DaemonState>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = UsageProbeBackend::new(Ok(usage), Ok(vec![]));
+        backend.require_health_scope = true;
+        backend.data_root = temp.path().join("data");
+        backend.snapshots_root = temp.path().join("snapshots");
+        let backend = Arc::new(backend);
+        let state = Arc::new(crate::state::DaemonState::new(
+            DaemonConfig {
+                health_check_interval_secs: 1,
+                ..DaemonConfig::default()
+            },
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let workspace_path = temp.path().join("workspace");
+        state
+            .register_workspace(
+                "ws-health-loop".into(),
+                workspace_path.clone(),
+                ws_ckpt_common::SnapshotIndex::new(workspace_path),
+            )
+            .unwrap();
+        (temp, backend, state)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_recovers_after_usage_probe_timeouts() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        // Stall the startup refresh, periodic refresh, and diagnostic fallback.
+        backend.usage_stalls_remaining.store(3, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        let recovered = tokio::time::timeout(Duration::from_secs(20), async {
+            while state.health_advisory_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        scheduler.abort();
+        let _ = scheduler.await;
+
+        assert!(
+            recovered.is_ok(),
+            "stalled diagnostics must not stop refreshes"
+        );
+        assert!(backend.usage_probe_calls.load(Ordering::SeqCst) >= 4);
+        assert_eq!(backend.max_active_usage_probes.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.active_usage_probes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_refreshes_after_deleted_subvolume_probe_stalls() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 950));
+        backend.stall_deleted_probe.store(true, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state));
+        let diagnostic_started = tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.deleted_probe_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let usage_calls = backend.usage_probe_calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        let refreshed = backend.usage_probe_calls.load(Ordering::SeqCst) > usage_calls;
+        scheduler.abort();
+        let _ = scheduler.await;
+
+        assert!(diagnostic_started.is_ok());
+        assert!(
+            refreshed,
+            "a stalled dead-list query must not stop refreshes"
+        );
+        assert_eq!(backend.max_active_usage_probes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn health_advisory_refresh_serializes_probes_and_preserves_failed_samples() {
+        use crate::state::DaemonState;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = UsageProbeBackend::new(Ok((1000, 950)), Ok(vec![]));
+        backend.data_root = temp.path().join("data");
+        backend.snapshots_root = temp.path().join("snapshots");
+        let backend = Arc::new(backend);
+        let config = DaemonConfig {
+            health_check_interval_secs: 30,
+            ..DaemonConfig::default()
+        };
+        let state = Arc::new(DaemonState::new(
+            config,
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let workspace_path = temp.path().join("workspace");
+        state
+            .register_workspace(
+                "ws-advisory".into(),
+                workspace_path.clone(),
+                ws_ckpt_common::SnapshotIndex::new(workspace_path),
+            )
+            .unwrap();
+
+        state.seed_health_advisory_snapshot(0, 10, 1, std::time::Duration::from_secs(20));
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(1))
+            .await
+            .is_err());
+        let retained = state.health_advisory_snapshot().unwrap();
+        assert_eq!((retained.fs_total_bytes, retained.fs_used_bytes), (10, 1));
+        state.config.write().unwrap().health_check_interval_secs = 1;
+        assert!(state.health_advisory_snapshot().is_none());
+        state.config.write().unwrap().health_check_interval_secs = 30;
+
+        let (first, second) = tokio::join!(
+            state.refresh_health_advisory(),
+            state.refresh_health_advisory()
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            backend.max_active_usage_probes.load(Ordering::SeqCst),
+            1,
+            "concurrent refreshes must not overlap backend usage probes"
+        );
+        let sample = state.health_advisory_snapshot().unwrap();
+        assert_eq!((sample.fs_total_bytes, sample.fs_used_bytes), (1000, 950));
+
+        state.seed_health_advisory_snapshot(0, 10, 1, std::time::Duration::from_secs(20));
+        let workspace = state.get_by_wsid("ws-advisory").unwrap();
+        let _guard = workspace.write().await;
+        assert!(state.refresh_health_advisory().await.is_err());
+        let retained = state.health_advisory_snapshot().unwrap();
+        assert_eq!((retained.fs_total_bytes, retained.fs_used_bytes), (10, 1));
+
+        let error_state = DaemonState::new(
+            DaemonConfig {
+                health_check_interval_secs: 30,
+                ..DaemonConfig::default()
+            },
+            Arc::new(UsageProbeBackend::new(
+                Err("test backend error".into()),
+                Ok(vec![]),
+            )),
+            temp.path().join("error-state"),
+        );
+        assert!(error_state.refresh_health_advisory().await.is_err());
+        assert!(error_state.health_advisory_snapshot().is_none());
+        error_state.seed_health_advisory_snapshot(2, 10, 1, std::time::Duration::from_secs(20));
+        assert!(error_state.refresh_health_advisory().await.is_err());
+        let retained = error_state.health_advisory_snapshot().unwrap();
+        assert_eq!(
+            (
+                retained.over_limit_workspace_count,
+                retained.fs_total_bytes,
+                retained.fs_used_bytes
+            ),
+            (2, 10, 1)
+        );
+        error_state
+            .config
+            .write()
+            .unwrap()
+            .health_check_interval_secs = 1;
+        assert!(error_state.health_advisory_snapshot().is_none());
+        error_state
+            .config
+            .write()
+            .unwrap()
+            .health_check_interval_secs = 30;
+        error_state.seed_health_advisory_snapshot(2, 10, 1, std::time::Duration::from_secs(61));
+        assert!(error_state.refresh_health_advisory().await.is_err());
+        assert!(error_state.health_advisory_snapshot().is_none());
     }
 
     #[tokio::test]

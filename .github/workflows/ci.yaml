@@ -1098,6 +1098,10 @@ jobs:
         working-directory: src/ws-ckpt
         run: make test-package-raw
 
+      - name: Run health load harness unit tests
+        working-directory: src/ws-ckpt
+        run: make test-health-advisory-load
+
       - name: Run OpenClaw script tests
         working-directory: src/ws-ckpt
         run: make test-openclaw-scripts
