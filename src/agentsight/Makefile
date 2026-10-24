@@ -115,8 +115,12 @@ test-batch-analysis: ## Exercise batch discovery and execution without model cal
 # Add the dependency separately from the shared native-test rule.
 test: test-batch-analysis
 
+.PHONY: test-scripts
+test-scripts: ## Run the scripts/tests Python test suites
+	cd $(CURDIR) && python3 -m pytest scripts/tests -q
+
 .PHONY: test
-test: test-rpm-packaging test-raw-package ## Run unit tests (fast, no coverage)
+test: test-rpm-packaging test-raw-package test-scripts ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test
 
 .PHONY: bench
