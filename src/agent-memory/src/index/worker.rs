@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc as stdmpsc};
@@ -12,7 +12,7 @@ use crate::error::{MemoryError, Result};
 use crate::ns::MountPoint;
 
 use super::extractor::{extract_text, is_indexable};
-use super::store::BM25Store;
+use super::store::{BM25Store, IndexStat};
 
 const DEBOUNCE_MS: u64 = 200;
 
@@ -238,6 +238,18 @@ fn classify(
     }
 }
 
+/// Whether `rel` — or a directory containing it — is queued for removal in
+/// the same flush. `BM25Store::remove` deletes the exact path *and* every row
+/// under `rel/`, so a queued removal of an ancestor directory invalidates
+/// `rel` just as one for `rel` itself does.
+fn removal_queued(queued_remove: &HashSet<String>, rel: &str) -> bool {
+    !queued_remove.is_empty()
+        && Path::new(rel).ancestors().any(|a| {
+            let seg = a.as_os_str();
+            !seg.is_empty() && queued_remove.contains(seg.to_str().unwrap_or(""))
+        })
+}
+
 fn flush(
     mount: &MountPointLite,
     store: &Arc<Mutex<BM25Store>>,
@@ -270,11 +282,10 @@ fn flush(
     }
     pending_modify.extend(expanded);
 
-    // Phase 2 (lock-free): I/O — stat + extract text. Walking the FS and
-    // re-reading file bodies used to happen inside the store lock, which
-    // blocked every concurrent `search` for the duration of the flush.
-    // Collecting tuples here lets the lock-holding phase below be just a
-    // batched DB write.
+    // Phase 2 (lock-free): I/O — stat only. Walking the FS and re-reading
+    // file bodies used to happen inside the store lock, which blocked every
+    // concurrent `search` for the duration of the flush. Collecting tuples
+    // here lets the lock-holding phase below stay a batched DB write.
     let mut to_remove: Vec<String> = pending_remove
         .drain()
         .filter_map(|p| relative(mount, &p))
@@ -282,15 +293,23 @@ fn flush(
     let mut to_remove_files: Vec<String> = Vec::new();
     let mut to_upsert: Vec<(String, i64, u64, String)> = Vec::new();
     let mut to_upsert_vec: Vec<(String, Vec<f32>)> = Vec::new();
+    // The removals this same window queued. `classify` files an unlink under
+    // `pending_remove` and a rename back onto the same path under
+    // `pending_modify`, so a file deleted and restored inside one debounce
+    // window appears in both — and phase 3 executes the removal *after* the
+    // phase 2b snapshot was taken. A dedup guard that trusts that snapshot
+    // would skip the upsert while the row is still deleted, leaving a file
+    // that is readable on disk invisible to search until the next event or a
+    // rescan. A queued removal therefore invalidates the snapshot; see
+    // `removal_queued`. Empty for the events this dedup exists for (an
+    // attribute change queues nothing for removal), where the check
+    // short-circuits and costs nothing. Owned strings, because phase 2a still
+    // appends paths that vanished before this flush to `to_remove`.
+    let queued_remove: HashSet<String> = to_remove.iter().cloned().collect();
 
-    // If we have an embedding provider, use the tokio handle captured at
-    // spawn time (the worker runs on a dedicated std::thread that has no
-    // current runtime of its own). `handle.block_on` from a non-runtime
-    // thread is the supported way to drive async work from sync context.
-    // When no handle is available (e.g. tests without a runtime), embedding
-    // is skipped — vector search then degrades to BM25, matching the
-    // no-provider fallback.
-
+    // Phase 2a (lock-free): stat every pending path and keep the indexable
+    // files together with the `(mtime, size)` the index would record.
+    let mut statted: Vec<(String, i64, u64)> = Vec::new();
     for path in pending_modify.drain() {
         let rel = match relative(mount, &path) {
             Some(r) => r,
@@ -312,7 +331,56 @@ fn flush(
             to_remove_files.push(rel);
             continue;
         }
-        let body = match crate::safe_fs::read_to_string(mount.root_fd.as_fd(), rel_path) {
+        statted.push((rel, super::store::mtime_ms_of(&meta), meta.len()));
+    }
+
+    // Phase 2b (one short locked window): read back what the index already
+    // holds for those paths. Phase 1 expands a directory event into every
+    // file under it, and a pure attribute change on the directory (`chmod
+    // notes`, `touch notes`) therefore re-presents a whole subtree whose
+    // content did not move by a single byte. Without this snapshot each of
+    // those files was re-read *and* re-sent to the embedding provider, so a
+    // `chmod -R` over a large tree burned embedding quota linearly in the
+    // subtree size. `full_scan` already dedups on mtime; this brings the
+    // incremental path in line with it. The mutex is held only for the
+    // lookups — never across the body reads or the embedding calls below.
+    let known: HashMap<String, IndexStat> = {
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+        statted
+            .iter()
+            .filter_map(|(rel, _, _)| store.index_stat_for(rel).map(|st| (rel.clone(), st)))
+            .collect()
+    };
+
+    // Phase 2c (lock-free): read bodies and embed only what still needs it.
+    // If we have an embedding provider, use the tokio handle captured at
+    // spawn time (the worker runs on a dedicated std::thread that has no
+    // current runtime of its own). `handle.block_on` from a non-runtime
+    // thread is the supported way to drive async work from sync context.
+    // When no handle is available (e.g. tests without a runtime), embedding
+    // is skipped — vector search then degrades to BM25, matching the
+    // no-provider fallback.
+    for (rel, mtime, size) in statted {
+        let known = known.get(&rel);
+        // The BM25 row is current when both mtime and size match. Size is
+        // part of the comparison so a rewrite landing inside the mtime
+        // granularity (coarse on some filesystems) is still picked up.
+        // A removal queued for the same path in this window overrides that:
+        // phase 3 is about to delete the very row the snapshot describes, so
+        // the snapshot cannot vouch for anything. The file is re-read and
+        // re-indexed, restoring the remove-then-reinsert this flush did before
+        // the dedup landed.
+        let row_current = !removal_queued(&queued_remove, &rel)
+            && known.is_some_and(|k| k.mtime_ms == mtime && k.size == size);
+        // A current row with no vector means an earlier embed failed, or the
+        // provider was configured after the file was indexed. Heal that here
+        // instead of deferring it to the next `full_scan` backfill — i.e. a
+        // restart. With no provider configured there is nothing to heal.
+        let vec_missing = embedding.is_some() && !known.is_some_and(|k| k.has_vector);
+        if row_current && !vec_missing {
+            continue;
+        }
+        let body = match crate::safe_fs::read_to_string(mount.root_fd.as_fd(), Path::new(&rel)) {
             Ok(b) => b,
             Err(MemoryError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
                 // A former text file may now contain binary data. Evict its
@@ -325,12 +393,17 @@ fn flush(
                 continue;
             }
         };
-        let mtime = super::store::mtime_ms_of(&meta);
-        to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
+        if !row_current {
+            to_upsert.push((rel.clone(), mtime, size, body.clone()));
+        }
 
-        // Compute embedding for this file if provider is available.
-        if let Some(v) = embed_sync(embedding, rt_handle, &body) {
-            to_upsert_vec.push((rel, v));
+        // Compute embedding for this file if provider is available: changed
+        // content needs a fresh vector, and a current row that never got one
+        // needs its first.
+        if !row_current || vec_missing {
+            if let Some(v) = embed_sync(embedding, rt_handle, &body) {
+                to_upsert_vec.push((rel, v));
+            }
         }
     }
 
@@ -559,8 +632,19 @@ fn is_overflow(e: &notify::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding::Embedding;
+    use crate::index::store::mtime_ms_of;
     use crate::ns::Namespace;
+    use async_trait::async_trait;
+    use std::fs::{self, FileTimes};
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
+
+    /// Budget for waiting on one watcher flush. Mirrors the 4s the Tier B
+    /// integration tests allow: notify on Linux often delivers Create/Modify
+    /// back-to-back and the 200ms debounce can need a few cycles to drain.
+    const WATCHER_BUDGET_MS: u64 = 4000;
 
     // Keep sibling eviction tests from registering the shared tracing callsite
     // without the capture subscriber: callsite interest is process-global even
@@ -614,6 +698,76 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, changed);
         assert_eq!(store.paths_without_vec().unwrap(), [changed]);
+    }
+
+    /// Embedding provider that only counts calls. The point of these tests is
+    /// *whether* a file was re-embedded, so a call counter is the observable
+    /// that matters — a re-embed is a paid HTTP round trip in production.
+    struct CountingEmbedding {
+        calls: AtomicUsize,
+    }
+
+    impl CountingEmbedding {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for CountingEmbedding {
+        async fn embed(&self, _text: &str) -> Result<Embedding> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Embedding {
+                vector: vec![0.5, 0.25],
+            })
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    fn write(root: &Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, body).expect("write");
+    }
+
+    /// One flush pass over `rels`, mirroring what the watcher thread does
+    /// after a debounce window. Paths are relative to the mount root; pass a
+    /// directory to reproduce the phase-1 subtree expansion.
+    fn flush_rels(
+        mount: &MountPointLite,
+        store: &Arc<Mutex<BM25Store>>,
+        embedding: Option<&dyn EmbeddingProvider>,
+        rels: &[&str],
+    ) {
+        let mut pending_modify: HashSet<PathBuf> =
+            rels.iter().map(|r| mount.root.join(r)).collect();
+        let mut pending_remove: HashSet<PathBuf> = HashSet::new();
+        flush(
+            mount,
+            store,
+            embedding,
+            None,
+            &mut pending_modify,
+            &mut pending_remove,
+        )
+        .expect("flush");
+    }
+
+    fn stat(store: &Arc<Mutex<BM25Store>>, rel: &str) -> IndexStat {
+        store
+            .lock()
+            .expect("lock")
+            .index_stat_for(rel)
+            .unwrap_or_else(|| panic!("{rel} should be indexed"))
     }
 
     #[test]
@@ -723,6 +877,10 @@ mod tests {
         let (_tmp, mount, store) = setup();
         seed_file(&mount, &store, "changed.md");
         let path = mount.root.join("changed.md");
+        // Rewrite with a different length so the flush cannot skip this file on
+        // the stored `(mtime, size)`: the fixture is about the read-error
+        // branch, which the unchanged-file dedup would otherwise never reach.
+        std::fs::write(&path, "cobaltzebra rewritten content").unwrap();
         let permissions = std::fs::metadata(&path).unwrap().permissions();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
         let read_result =
@@ -744,5 +902,241 @@ mod tests {
         let store = store.lock().unwrap();
         assert_eq!(store.search("cobaltzebra", 10, false).unwrap().len(), 1);
         assert_eq!(store.search_vec(&[1.0, 0.0], 10).unwrap().len(), 1);
+    }
+
+    /// A pure attribute change on a directory (`chmod notes`, `touch notes`)
+    /// is expanded by phase 1 into every file below it. None of those files
+    /// changed, so the flush must neither re-read nor re-embed them — that
+    /// write amplification scaled with subtree size and burned embedding
+    /// quota on bytes that never moved.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn directory_attribute_event_leaves_an_unchanged_subtree_alone() {
+        let (_tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/deep/a.md", "rust ownership");
+        write(&root, "notes/b.md", "python gc");
+        let emb = CountingEmbedding::new();
+
+        flush_rels(
+            &mount,
+            &store,
+            Some(&emb),
+            &["notes/deep/a.md", "notes/b.md"],
+        );
+        assert_eq!(emb.calls(), 2, "both files index once");
+        assert!(stat(&store, "notes/deep/a.md").has_vector);
+
+        // The directory itself receives the event; phase 1 walks the subtree.
+        flush_rels(&mount, &store, Some(&emb), &["notes"]);
+        assert_eq!(
+            emb.calls(),
+            2,
+            "unchanged files under the directory must not be re-embedded"
+        );
+    }
+
+    /// The dedup has to stay a *dedup*: a file whose content really changed
+    /// must still be re-read, re-indexed and re-embedded, and only that file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_changed_file_in_a_subtree_is_the_only_one_reindexed() {
+        let (_tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/a.md", "rust ownership");
+        write(&root, "notes/deep/b.md", "python gc");
+        let emb = CountingEmbedding::new();
+
+        flush_rels(&mount, &store, Some(&emb), &["notes"]);
+        assert_eq!(emb.calls(), 2);
+
+        write(
+            &root,
+            "notes/a.md",
+            "rust ownership plus lifetimes, much longer",
+        );
+        flush_rels(&mount, &store, Some(&emb), &["notes"]);
+        assert_eq!(emb.calls(), 3, "only the changed file is re-embedded");
+
+        let hits = store
+            .lock()
+            .expect("lock")
+            .search("lifetimes", 5, true)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "notes/a.md");
+    }
+
+    /// A row whose `(mtime, size)` matches but which has no vector means an
+    /// earlier embed failed, or the provider was configured after the file
+    /// was indexed. Matching metadata must not become an excuse to leave it
+    /// un-embedded — otherwise the watcher would stop healing the gap and
+    /// only the next `full_scan` backfill (i.e. a restart) would close it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_vector_is_reembedded_even_though_the_row_matches() {
+        let (_tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/a.md", "rust ownership");
+
+        // Indexed with no provider configured at all.
+        flush_rels(&mount, &store, None, &["notes/a.md"]);
+        assert!(!stat(&store, "notes/a.md").has_vector);
+
+        let emb = CountingEmbedding::new();
+        flush_rels(&mount, &store, Some(&emb), &["notes"]);
+        assert_eq!(emb.calls(), 1, "the vector gap is healed");
+        assert!(stat(&store, "notes/a.md").has_vector);
+
+        // With the vector in place the same directory event is free again.
+        flush_rels(&mount, &store, Some(&emb), &["notes"]);
+        assert_eq!(emb.calls(), 1);
+    }
+
+    /// A brand-new file inside an expanded subtree has no row at all, so the
+    /// snapshot lookup misses and it must be indexed on this very flush —
+    /// catching newly-created files in nested dirs is why phase 1 walks the
+    /// subtree in the first place.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_file_in_an_expanded_subtree_is_indexed() {
+        let (_tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/a.md", "rust ownership");
+        let emb = CountingEmbedding::new();
+        flush_rels(&mount, &store, Some(&emb), &["notes"]);
+        assert_eq!(emb.calls(), 1);
+
+        write(&root, "notes/observed/new.md", "borrow checker notes");
+        flush_rels(&mount, &store, Some(&emb), &["notes"]);
+        assert_eq!(emb.calls(), 2);
+        let st = stat(&store, "notes/observed/new.md");
+        assert!(st.has_vector);
+        assert!(st.size > 0);
+    }
+
+    /// Stash `body` at `outside` — which must *not* be under the mount, or the
+    /// watcher would see it — stamped with the mtime the index recorded, so
+    /// that renaming it back onto the indexed path reproduces "same path, same
+    /// `(mtime, size)`": exactly what the phase-2c dedup short-circuits on.
+    fn stage_restore_copy(outside: &Path, body: &str, st: &IndexStat) {
+        fs::write(outside, body).expect("stage copy");
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_millis(st.mtime_ms.max(0) as u64);
+        let copy = fs::OpenOptions::new()
+            .write(true)
+            .open(outside)
+            .expect("open copy");
+        copy.set_times(FileTimes::new().set_modified(mtime))
+            .expect("stamp copy with the indexed mtime");
+        let meta = fs::metadata(outside).expect("stat copy");
+        // Guard the fixture itself: were the stamp lost, the flush would
+        // re-index for the ordinary "metadata moved" reason and the test would
+        // stop covering the branch it names.
+        assert_eq!(mtime_ms_of(&meta), st.mtime_ms, "copy mtime");
+        assert_eq!(meta.len(), st.size, "copy size");
+    }
+
+    /// Block until the watcher has flushed at least once since `barrier` was
+    /// written, i.e. until its row exists. Phase 3 removes before it upserts,
+    /// so a flush that published the barrier has already applied everything
+    /// queued ahead of it — no fixed multiple of the debounce window has to be
+    /// guessed at.
+    fn wait_for_flush_barrier(store: &Arc<Mutex<BM25Store>>, barrier: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(WATCHER_BUDGET_MS);
+        while Instant::now() < deadline {
+            if store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .index_stat_for(barrier)
+                .is_some()
+            {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// `classify` files an unlink under `pending_remove` and a rename back
+    /// onto the same path under `pending_modify`, so one debounce window can
+    /// queue a removal *and* a modification for a file that is still there.
+    /// Phase 3 executes the removal after phase 2b took its snapshot, so the
+    /// dedup must not trust that snapshot for such a path: skipping the upsert
+    /// while the row is deleted anyway leaves a file that is readable on disk
+    /// invisible to search until the next event or a rescan. Before the dedup
+    /// landed, phase 3 removed and then reinserted it.
+    #[test]
+    fn queued_removal_of_a_restored_file_does_not_drop_its_row() {
+        let (tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/a.md", "cobaltzebra original content");
+        flush_rels(&mount, &store, None, &["notes/a.md"]);
+        let indexed = stat(&store, "notes/a.md");
+
+        let staged = tmp.path().join("restore.md");
+        stage_restore_copy(&staged, "cobaltzebra original content", &indexed);
+        fs::remove_file(root.join("notes/a.md")).expect("unlink");
+        fs::rename(&staged, root.join("notes/a.md")).expect("restore");
+
+        // Replay what the watcher collected for those two events.
+        let mut pending_modify = HashSet::from([root.join("notes/a.md")]);
+        let mut pending_remove = HashSet::from([root.join("notes/a.md")]);
+        flush(
+            &mount,
+            &store,
+            None,
+            None,
+            &mut pending_modify,
+            &mut pending_remove,
+        )
+        .expect("flush");
+
+        let hits = store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .search("cobaltzebra", 10, false)
+            .expect("search");
+        assert_eq!(hits.len(), 1, "the restored file must still be searchable");
+        assert_eq!(hits[0].path, "notes/a.md");
+        assert_eq!(stat(&store, "notes/a.md").mtime_ms, indexed.mtime_ms);
+    }
+
+    /// The same regression end to end through the real watcher with embedding
+    /// disabled, which is how it was reported: index a file, keep a copy
+    /// outside the mount that preserves its mtime, unlink the indexed file,
+    /// rename the copy straight back. Both events land in one 200 ms debounce
+    /// window. Afterwards the file must be readable *and* still return its
+    /// keyword hit.
+    #[test]
+    fn watcher_keeps_a_file_deleted_and_restored_in_one_debounce_window() {
+        let (tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/a.md", "cobaltzebra original content");
+
+        // No embedding provider, as in the report: nothing but the BM25 row is
+        // at stake, so there is no vector-side healing to mask the loss.
+        let worker = IndexWorker::spawn(mount.clone(), Arc::clone(&store), None).expect("spawn");
+        let indexed = stat(&store, "notes/a.md");
+        let staged = tmp.path().join("restore.md");
+        stage_restore_copy(&staged, "cobaltzebra original content", &indexed);
+
+        // Back-to-back, so both events fall inside one debounce window.
+        fs::remove_file(root.join("notes/a.md")).expect("unlink");
+        fs::rename(&staged, root.join("notes/a.md")).expect("restore");
+
+        write(&root, "notes/barrier.md", "quartz barrier marker");
+        assert!(
+            wait_for_flush_barrier(&store, "notes/barrier.md"),
+            "watcher never flushed the barrier file"
+        );
+        worker.shutdown_blocking();
+
+        assert_eq!(
+            fs::read_to_string(root.join("notes/a.md")).expect("restored file is readable"),
+            "cobaltzebra original content"
+        );
+        let hits = store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .search("cobaltzebra", 10, false)
+            .expect("search");
+        assert_eq!(hits.len(), 1, "the restored file must still be searchable");
+        assert_eq!(hits[0].path, "notes/a.md");
     }
 }

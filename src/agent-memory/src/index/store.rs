@@ -32,6 +32,22 @@ pub struct BM25Store {
 /// doesn't silently corrupt rows it doesn't understand.
 pub(crate) const SCHEMA_VERSION: i64 = 5;
 
+/// What the index currently records for one path.
+///
+/// The watcher reads this back before touching a file, so an event that did
+/// not change the content — a directory `chmod`/`touch` expanded into its
+/// whole subtree, or a write that restores identical bytes — costs neither a
+/// body read nor an embedding call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexStat {
+    /// Last modification time in milliseconds, as stored at index time.
+    pub mtime_ms: i64,
+    /// File size in bytes, as stored at index time.
+    pub size: u64,
+    /// Whether a dense embedding row already exists for this path.
+    pub has_vector: bool,
+}
+
 impl BM25Store {
     pub fn open(
         path: &Path,
@@ -1100,6 +1116,31 @@ impl BM25Store {
                 "SELECT mtime_ms FROM files WHERE path = ?1",
                 params![rel_path],
                 |r| r.get(0),
+            )
+            .ok()
+    }
+
+    /// Everything the watcher needs to decide whether `rel_path` changed:
+    /// the stored `(mtime_ms, size)` plus whether a vector row exists.
+    /// `None` means the path is not indexed at all.
+    ///
+    /// `size` is stored as `INTEGER`; it is clamped at 0 because a negative
+    /// value can only come from a corrupt row and must never compare equal
+    /// to a real `u64` file length.
+    pub fn index_stat_for(&self, rel_path: &str) -> Option<IndexStat> {
+        self.conn
+            .query_row(
+                "SELECT f.mtime_ms, f.size, v.path IS NOT NULL \
+                 FROM files f LEFT JOIN files_vec v ON v.path = f.path \
+                 WHERE f.path = ?1",
+                params![rel_path],
+                |r| {
+                    Ok(IndexStat {
+                        mtime_ms: r.get(0)?,
+                        size: r.get::<_, i64>(1)?.max(0) as u64,
+                        has_vector: r.get::<_, i64>(2)? != 0,
+                    })
+                },
             )
             .ok()
     }
