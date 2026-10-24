@@ -37,9 +37,33 @@ pub fn split(content: &str) -> Option<(&str, &str)> {
     Some((frontmatter, body))
 }
 
+/// Drop the blank line that separates the closing fence from the body.
+///
+/// [`split`] starts the body at the first line after the closing fence, and
+/// every writer in this crate emits that fence as `---\n\n`
+/// (`memory_task::to_markdown`, `memory_import::reconstruct_markdown`,
+/// `memory_observe`, `consolidation::fact::to_markdown`), so for anything they
+/// wrote the first body line is the separator rather than content.
+///
+/// Readers that hand the body back to a writer have to consume it. Otherwise
+/// the round trip is not the inverse of the write and every cycle puts one
+/// more blank line in front of the text: `memory_export` -> `mem_import` grew
+/// each archived memory, and `parse_task` -> `memory_task_save` grew each task
+/// context. Readers that only display or search the body may keep [`split`]'s
+/// output as it is — a leading blank line is invisible to them.
+///
+/// A body that does not start with a line break (a hand-written `---\nBody`,
+/// or a file that ends at its fence) is returned unchanged, so this never
+/// eats real content.
+pub fn strip_separator(body: &str) -> &str {
+    body.strip_prefix("\r\n")
+        .or_else(|| body.strip_prefix('\n'))
+        .unwrap_or(body)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::split;
+    use super::{split, strip_separator};
 
     #[test]
     fn splits_a_well_formed_block() {
@@ -87,5 +111,33 @@ mod tests {
     #[test]
     fn unclosed_frontmatter_returns_none() {
         assert!(split("---\nid: abc\nbody without a fence\n").is_none());
+    }
+
+    #[test]
+    fn strip_separator_drops_only_the_line_below_the_fence() {
+        // What every writer in this crate produces: "---\n\n" + body.
+        assert_eq!(
+            strip_separator("\nThe user prefers tabs.\n"),
+            "The user prefers tabs.\n"
+        );
+        // An empty context is stored as the separator and nothing else.
+        assert_eq!(strip_separator("\n"), "");
+        assert_eq!(strip_separator(""), "");
+        // A hand-written file with no blank line keeps its body.
+        assert_eq!(strip_separator("Body"), "Body");
+        // Only one line break goes: a deliberate blank line is content.
+        assert_eq!(strip_separator("\n\nBody"), "\nBody");
+        // CRLF files separate with "\r\n"; no stray "\r" may survive.
+        assert_eq!(strip_separator("\r\nbody\r\n"), "body\r\n");
+    }
+
+    #[test]
+    fn split_then_strip_separator_round_trips_a_written_file() {
+        let file = "---\nid: abc\n---\n\nBody text\n";
+        let (fm, body) = split(file).unwrap();
+        assert_eq!(fm, "id: abc");
+        assert_eq!(strip_separator(body), "Body text\n");
+        // Writing the pair back the way the writers do reproduces the file.
+        assert_eq!(format!("---\n{fm}\n---\n\n{}", strip_separator(body)), file);
     }
 }
