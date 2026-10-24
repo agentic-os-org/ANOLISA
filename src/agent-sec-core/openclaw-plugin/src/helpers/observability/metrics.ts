@@ -265,11 +265,24 @@ function extractToolCallSummaries(
   ];
 
   const summaries: UnknownRecord[] = [];
+  const seenCallIds = new Set<string>();
   for (const candidate of candidates) {
     const summary = toolCallSummary(candidate);
-    if (summary !== undefined) {
-      summaries.push(summary);
+    if (summary === undefined) {
+      continue;
     }
+    // The five candidate sources can carry the SAME logical call (e.g. the
+    // host duplicates record.tool_calls into lastAssistant.tool_calls or a
+    // toolUse block into lastAssistant.content); without dedup the count
+    // inflates and the metric persists duplicate ids.
+    const callId = firstString(summary.toolCallId);
+    if (callId !== undefined) {
+      if (seenCallIds.has(callId)) {
+        continue;
+      }
+      seenCallIds.add(callId);
+    }
+    summaries.push(summary);
   }
   return summaries;
 }
