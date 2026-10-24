@@ -1,28 +1,32 @@
 # Benchmark
 
-本目录包含与 AI 基准测试（Bench）及 Tokenless 能力测试相关的全部源码，分为以下两大部分。
+[English](README.md)
+
+本目录包含面向 AI 基准测试(Bench)的执行 runner。组件专属的基准测试
+随组件存放——Tokenless 压缩套件(L1 compressor、L2 module、L3 scenario)
+位于 `src/tokenless/benchmark/`。
+
+## Runner 一览
+
+| 目录 | 基准 | 说明 |
+|---|---|---|
+| `claweval-runner/` | ClawEval(OpenClaw 平台评测套件) | 任务执行与结果工具;固定 openclaw 2026.4.22,需要 Docker 与 Python ≥ 3.11 |
+| `swe-runner/` | SWEBench | 面向真实软件工程任务的 Agent 与评测框架(cosh/openclaw agent、trace 提取) |
+| `terminal-runner/` | TerminalBench | 基于固定 harbor 检出的适配器;`scripts/setup.sh` 负责克隆 harbor 与 terminal-bench 数据集 |
 
 ## AI Bench Agent
 
-这部分源码为主流 AI 基准测试提供执行 Agent 实现。所有 Agent 均已适配 OpenClaw 平台，并针对各 Bench 中的任务类型做了专项优化，以提升 instance 运行的稳定度与通过率。
+上述 runner 为主流 AI 基准测试提供执行 Agent 实现。所有 Agent 均已适配
+OpenClaw 平台,并针对各 Bench 中的任务类型做了专项优化,以提升 instance
+运行的稳定度与通过率。
 
-目前已覆盖的 Bench 包括：
+目前已覆盖的 Bench 包括:
 
-- **SWEBench** — 面向真实软件工程任务的基准测试，Agent 针对代码理解、定位、修复等流程做了流程编排与容错优化。
-- **TerminalBench** — 面向终端交互类任务的基准测试，Agent 对命令执行、输出解析、多步交互场景进行了适配与稳定性加固。
-- **ClawEval** — OpenClaw 平台自有评测体系，Agent 覆盖其多种任务类型并做了针对性的 prompt 策略与执行逻辑调优。
+- **SWEBench** — 面向真实软件工程任务的基准测试,Agent 针对代码理解、定位、修复等流程做了流程编排与容错优化。
+- **TerminalBench** — 面向终端交互类任务的基准测试,Agent 对命令执行、输出解析、多步交互场景进行了适配与稳定性加固。
+- **ClawEval** — OpenClaw 平台自有评测套件,Agent 以定制化提示词策略与执行逻辑调优覆盖其多样任务类型。
 
-后续将持续接入更多主流 Bench，新增的 Agent 实现也将遵循相同的适配与优化范式。
+后续将持续接入更多主流基准测试,新的 Agent 实现会沿用同一套适配与
+优化范式。
 
-## Tokenless 功能与性能测试
-
-这部分源码用于验证 Tokenless 在不同任务阶段提供的上下文压缩能力，测试分为两个层级：
-
-### 模块能力测试
-
-针对 Tokenless 各压缩模块进行独立的功能与性能验证，覆盖不同任务阶段（如上下文构建、中间推理、结果生成等）的压缩效果与正确性，确保每个模块在单元粒度上达到预期表现。
-
-### 端到端全流程测试
-
-选取典型业务场景，串联完整的任务流程进行端到端验证，检验 Tokenless 在真实工作负载下的整体压缩能力、信息保真度与对最终任务结果的影响，确保全链路协同工作符合预期。
-
+各 runner 的目录中均有独立 README,说明环境搭建与使用方法。
