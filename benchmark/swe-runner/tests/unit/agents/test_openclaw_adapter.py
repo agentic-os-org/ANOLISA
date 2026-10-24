@@ -121,7 +121,7 @@ def test_prepare_creates_case_profile_and_single_local_sandbox_agent(tmp_path: P
 
     agent = OpenClawAdapter(base_config_path=base_config, profile_link_root=link_root)
     with (
-        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=workspace_root),
+        patch("swe_runner.agents.openclaw.adapter.tempfile.mkdtemp", return_value=workspace_root),
         patch("swe_runner.agents.openclaw.adapter.prepare_workspace_from_image", side_effect=fake_prepare_workspace),
         patch("swe_runner.agents.openclaw.adapter.get_git_revision", return_value="base-rev"),
         patch("swe_runner.agents.openclaw.adapter.build_openclaw_prompt", return_value="fix the bug"),
@@ -132,7 +132,7 @@ def test_prepare_creates_case_profile_and_single_local_sandbox_agent(tmp_path: P
     config_path = Path(prepared.metadata["openclaw_config_path"])
     config = json.loads(config_path.read_text(encoding="utf-8"))
     agent_entries = config["agents"]["list"]
-    local_entry = next(item for item in agent_entries if item["id"] == "django__django-13448")
+    local_entry = next(item for item in agent_entries if item["id"] == prepared.metadata["agent_id"])
 
     assert prepared.prompt == "fix the bug"
     assert prepared.metadata["agent_id"] == local_entry["id"]
@@ -167,7 +167,7 @@ def test_prepare_creates_case_profile_and_single_local_sandbox_agent(tmp_path: P
         "ps",
         "-aq",
         "--filter",
-        "label=openclaw.sessionKey=agent:django__django-13448:main",
+        f"label=openclaw.sessionKey=agent:{prepared.metadata['agent_id']}:main",
     ] in commands
     assert ["docker", "rm", "-f", "stale-container"] in commands
 
@@ -197,11 +197,13 @@ def test_prepare_writes_skill_agents_when_skill_enabled(tmp_path: Path) -> None:
 
     agent = OpenClawAdapter(base_config_path=base_config, profile_link_root=link_root)
     with (
-        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=workspace_root),
+        patch("swe_runner.agents.openclaw.adapter.tempfile.mkdtemp", return_value=workspace_root),
         patch("swe_runner.agents.openclaw.adapter.prepare_workspace_from_image", side_effect=fake_prepare_workspace),
         patch("swe_runner.agents.openclaw.adapter.get_git_revision", return_value="base-rev"),
         patch("swe_runner.agents.openclaw.adapter.build_openclaw_prompt", return_value="fix the bug"),
-        patch("swe_runner.agents.openclaw.adapter.load_optional_builtin_skill_text", return_value="# skill only\n\nDo X"),
+        patch(
+            "swe_runner.agents.openclaw.adapter.load_optional_builtin_skill_text", return_value="# skill only\n\nDo X"
+        ),
         patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run),
     ):
         prepared = agent.prepare(make_instance(), make_settings(tmp_path, use_skill=True))
@@ -243,7 +245,7 @@ def test_prepare_passes_per_case_prompt_into_user_prompt_when_enabled(tmp_path: 
     instance = make_instance()
     agent = OpenClawAdapter(base_config_path=base_config, profile_link_root=link_root)
     with (
-        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=workspace_root),
+        patch("swe_runner.agents.openclaw.adapter.tempfile.mkdtemp", return_value=workspace_root),
         patch("swe_runner.agents.openclaw.adapter.prepare_workspace_from_image", side_effect=fake_prepare_workspace),
         patch("swe_runner.agents.openclaw.adapter.get_git_revision", return_value="base-rev"),
         patch(
@@ -293,7 +295,7 @@ def test_prepare_continues_when_per_case_prompt_file_is_missing(tmp_path: Path) 
 
     agent = OpenClawAdapter(base_config_path=base_config, profile_link_root=link_root)
     with (
-        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=workspace_root),
+        patch("swe_runner.agents.openclaw.adapter.tempfile.mkdtemp", return_value=workspace_root),
         patch("swe_runner.agents.openclaw.adapter.prepare_workspace_from_image", side_effect=fake_prepare_workspace),
         patch("swe_runner.agents.openclaw.adapter.get_git_revision", return_value="base-rev"),
         patch("swe_runner.agents.openclaw.prompts.load_custom_prompt", return_value=None),
