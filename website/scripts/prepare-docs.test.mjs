@@ -24,8 +24,11 @@ test('publishes current guides and changelogs without Copilot Shell entry points
     files[`deprecated/copilot-shell/CHANGELOG${suffix}.md`] = '# Archived component history\n';
     files[`docs/user-guide/${locale}/index.md`] = '# User Guide\n\n<!-- navigation:start -->\n<!-- navigation:end -->\n\n[historical source evidence](https://github.com/alibaba/anolisa/blob/old-commit/src/copilot-shell/core.ts#L10)\n\n## Copilot Shell (cosh)\n\nHistorical integration details remain.\n';
     files[`docs/user-guide/${locale}/getting-started/quickstart.md`] = '# Quickstart\n\n[cosh-ng](../cosh-ng/index.md)\n';
+    files[`docs/user-guide/${locale}/getting-started/support.md`] = '# Support\n';
     files[`docs/user-guide/${locale}/cosh-ng/index.md`] = `# cosh-ng\n\n## ${locale === 'zh' ? '快速上手' : 'Quick start'}\n`;
     files[`docs/user-guide/${locale}/cosh-ng/configuration.md`] = '# Configuration\n';
+    files[`docs/user-guide/${locale}/tokenless/index.md`] = '# Tokenless\n';
+    files[`docs/user-guide/${locale}/aw/index.md`] = '# AW\n';
     files[`docs/user-guide/${locale}/aw/installation.md`] = '# Install AW\n';
     files[`docs/developer-guide/${locale}/index.md`] = '# Developer Guide\n';
     files[`docs/developer-guide/${locale}/aw/index.md`] = '# AW Integration\n';
@@ -60,6 +63,24 @@ groups:
         description:
           en: Use Agents and Shell commands in the same terminal.
           zh: 在同一个终端中使用 Agent 和 Shell 命令。
+  - id: resources
+    label: {en: Support resources, zh: 支持资源}
+    items:
+      - path: getting-started/support.md
+        label: {en: Support, zh: 支持}
+  - id: capabilities
+    label: {en: Runtime services, zh: 运行服务}
+    items:
+      - component: tokenless
+        label: {en: Output compaction, zh: 输出精简}
+        description:
+          en: Compact tool output for Agents.
+          zh: 为 Agent 精简工具输出。
+      - component: aw
+        label: {en: Agent runtime, zh: Agent 运行时}
+        description:
+          en: Connect Agents to system services.
+          zh: 将 Agent 接入系统服务。
 `;
   const website = {
     navbar: [{id: 'sdk', label: {en: 'SDK Catalog', zh: 'SDK 目录'}, to: '/docs/developer-guide/sdk/'}],
@@ -101,6 +122,41 @@ groups:
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
   }
+  const homepageComponents = JSON.parse(await readFile(
+    path.join(root, 'website/.generated/homepage-components.json'), 'utf8'));
+  assert.deepEqual(homepageComponents, {
+    'cosh-ng': {
+      label: {en: 'cosh', zh: 'cosh'},
+      description: {
+        en: 'Use Agents and Shell commands in the same terminal.',
+        zh: '在同一个终端中使用 Agent 和 Shell 命令。',
+      },
+      to: '/docs/user-guide/cosh-ng/',
+    },
+    tokenless: {
+      label: {en: 'Output compaction', zh: '输出精简'},
+      description: {
+        en: 'Compact tool output for Agents.',
+        zh: '为 Agent 精简工具输出。',
+      },
+      to: '/docs/user-guide/tokenless/',
+    },
+    aw: {
+      label: {en: 'Agent runtime', zh: 'Agent 运行时'},
+      description: {
+        en: 'Connect Agents to system services.',
+        zh: '将 Agent 接入系统服务。',
+      },
+      to: '/docs/user-guide/aw/',
+    },
+  });
+  const homepageLayers = JSON.parse(await readFile(
+    path.join(root, 'website/.generated/homepage-layers.json'), 'utf8'));
+  assert.deepEqual(homepageLayers, [
+    {id: 'start', label: {en: 'Start', zh: '开始'}, components: ['cosh-ng']},
+    {id: 'capabilities', label: {en: 'Runtime services', zh: '运行服务'},
+      components: ['tokenless', 'aw']},
+  ], 'Homepage layers must preserve navigation order and labels while excluding ordinary document entries');
   for (const locale of ['en', 'zh']) {
     const output = path.join(root, 'website/.generated', locale === 'en'
       ? 'docs'

@@ -274,7 +274,7 @@ const index = {
   schema_version: '1.3.0',
   project: {
     name: 'ANOLISA',
-    description: 'A server-side operating layer for AI agent workloads.',
+    description: 'A multi-component system software stack for AI Agent workloads.',
   },
   repository: repositoryUrl(),
   default_branch: 'main',
@@ -439,7 +439,7 @@ await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n
 
 await writeGenerated(
   'static/llms.txt',
-  `# ANOLISA\n\n> A server-side operating layer for AI agent workloads.\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
+  `# ANOLISA\n\n> ${index.project.description}\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
 );
 
 const fullDocumentation = [];

@@ -388,6 +388,20 @@ await writeFile(path.join(generatedDir, 'navbar-items.json'),
   `${JSON.stringify(navbarItems(navigation), null, 2)}\n`);
 await writeFile(path.join(generatedDir, 'footer-links.json'),
   `${JSON.stringify(footerLinks(navigation), null, 2)}\n`);
+await writeFile(path.join(generatedDir, 'homepage-components.json'),
+  `${JSON.stringify(Object.fromEntries(navigation.groups.flatMap((group) => group.items)
+    .filter((item) => item.component)
+    .map((item) => [item.component, {
+      label: item.label,
+      description: item.description,
+      to: `/docs/user-guide/${item.component}/`,
+    }])), null, 2)}\n`);
+await writeFile(path.join(generatedDir, 'homepage-layers.json'),
+  `${JSON.stringify(navigation.groups.map((group) => ({
+    id: group.id,
+    label: group.label,
+    components: group.items.filter((item) => item.component).map((item) => item.component),
+  })).filter((group) => group.components.length > 0), null, 2)}\n`);
 
 await rm(path.join(staticOutput, 'docs'), {recursive: true, force: true});
 await rm(path.join(staticOutput, 'zh', 'docs'), {recursive: true, force: true});
