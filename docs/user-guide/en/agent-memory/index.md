@@ -95,7 +95,7 @@ Add to your MCP config:
 }
 ```
 
-`/usr/share/anolisa/mcp-servers/agent-memory.json` lists all 37 tool names for auto-discovering clients.
+`/usr/share/anolisa/mcp-servers/agent-memory.json` lists tool names for auto-discovering clients.
 
 ### OpenClaw
 
@@ -223,7 +223,7 @@ The plugin passes a minimal env allowlist to the subprocess (`PATH`, `HOME`, `US
 
 ---
 
-## MCP tool set (37 tools)
+## MCP tool set (38 tools)
 
 All tools are invoked via MCP `tools/call` with JSON object arguments. Errors return `CallToolResult { isError: true }` so clients can distinguish business errors from "successful but content contains 'failed'". Profile is enforced at both `tools/list` and `tools/call`.
 
@@ -243,12 +243,13 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `mem_promote` | `session_path`, `store_path` | — | atomically move session scratch file into the persistent store |
 | `mem_session_log` | — | — | current session JSONL |
 
-### Tier B — structured retrieval (6)
+### Tier B — structured retrieval (7)
 
 | Tool | Required | Optional | Returns |
 |------|------|------|------|
 | `memory_search` | `query` | `top_k` (default 5), `mode` (bm25/vector/hybrid), `category` | `{path, score, snippet, suspicious}` array |
 | `memory_observe` | `content` | `hint`, `type` | `observed at notes/observed/<ulid>.md` |
+| `memory_capture` | `content` | `hint`, `type` | observation path, or `automatic capture skipped by consent` |
 | `memory_get_context` | — | `max_tokens` (default 2048) | markdown preview of recently modified files; each entry has `suspicious` |
 | `memory_sessions` | — | `limit` (default 10) | historical session list |
 | `memory_timeline` | `session_id` | `limit` (default 50) | tool-call timeline for a specific session |
@@ -283,6 +284,34 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `memory_summary` | — | `recent_limit` (default 10) | memory store statistics overview JSON |
 | `memory_session_context` | — | `limit` | session-start context injection |
 | `mem_dream` | — | — | user profile synthesis JSON |
+
+`memory_consent` with `{"action":"deny","scope":"capture"}` (or scope `all`)
+stops automatic OpenClaw observations. The hook uses `memory_capture`, which reads
+the persisted consent on each call, including changes made by another MCP client.
+Missing settings retain the default allow policy; unreadable or malformed settings
+report an error without writing. Allowed captures carry `source: auto-capture`
+and appear in `memory_auto_created` and the automatic count in `memory_summary`.
+Revocation applies to subsequent captures; it does not abort a capture that has
+already passed its consent check. This opt-out governs the hook, not all writes:
+`memory_observe` and `mem_write` remain ungated, including when an agent calls
+them on its own initiative. A denied or failed attempt can be retried by a later
+hook invocation; successful captures and overlapping identical calls remain
+deduplicated.
+
+The source field identifies automatic notes; audit entries and git commit labels
+still use `memory_observe` to preserve existing versioning and consolidation
+behavior. The existing consent query and consolidation reader keep their prior
+policies: malformed settings can be reported as default allow by the query even
+though automatic capture rejects them. For a malformed regular settings file,
+repair it with an explicit `memory_consent` allow/deny operation. If the
+settings path is a symlink, safe writes reject it too: inspect and remove the
+link itself (not its target), then repeat the allow/deny operation to create
+a regular settings file. The server does not remove symlinks automatically.
+
+Upgrade the server and adapter together. The four tools exposed to the OpenClaw
+agent remain unchanged; `memory_capture` is used by the hook. If the server lacks
+this tool, the hook logs the failure and does not fall back to `memory_observe`.
+Previously stored observations are not relabeled or deleted.
 
 ### Error code semantics
 
@@ -495,9 +524,9 @@ Data storage: `~/.anolisa/memory/<namespace>/`.
 
 Profiles are UX hints, not security boundaries, but enforced at both `tools/list` and `tools/call`:
 
-- **basic** — all 37 tools shown; weaker models can use the Tier B structured API.
-- **advanced** (default) — all 37 tools shown; stronger models should prefer Tier A file ops.
-- **expert** — hides Tier B (`memory_search`, `memory_observe`, `memory_get_context`, `mem_consolidate`, `memory_forget`, `memory_consent`); `tools/call` returns `METHOD_NOT_FOUND`. For proficient models that only need Tier A and Tier C.
+- **basic** — all 38 tools shown; weaker models can use the Tier B structured API.
+- **advanced** (default) — all 38 tools shown; stronger models should prefer Tier A file ops.
+- **expert** — hides Tier B (`memory_search`, `memory_observe`, `memory_capture`, `memory_get_context`, `mem_consolidate`, `memory_forget`, `memory_consent`); `tools/call` returns `METHOD_NOT_FOUND`. For proficient models that only need Tier A and Tier C.
 
 `expert` is a setting for direct MCP clients, which drive the Tier A file tools
 themselves. The OpenClaw adapter rejects

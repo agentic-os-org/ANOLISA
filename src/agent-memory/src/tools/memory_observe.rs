@@ -8,6 +8,9 @@ use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
 use crate::service::MemoryService;
 
+// Keep the shared audit identity to preserve git auto-commit and the existing
+// consolidation quality/heuristic gates. Frontmatter distinguishes capture;
+// changing audit provenance requires updating all three consumers together.
 const TOOL: &str = "memory_observe";
 
 /// Closed 4-type memory taxonomy inspired by Dreaming V3 and Claude Code memdir.
@@ -86,6 +89,32 @@ pub fn memory_observe(
     memory_type: Option<&str>,
     config: &MemoryConfig,
 ) -> Result<String> {
+    write_observation(svc, content, hint, memory_type, config, "manual-observe")
+}
+
+/// Record an automatic observation only when capture consent permits it.
+/// Returns `None` without writing when the user has denied auto-capture.
+pub fn memory_capture(
+    svc: &MemoryService,
+    content: &str,
+    hint: Option<&str>,
+    memory_type: Option<&str>,
+    config: &MemoryConfig,
+) -> Result<Option<String>> {
+    if !crate::tools::memory_sovereignty::capture_allowed(svc)? {
+        return Ok(None);
+    }
+    write_observation(svc, content, hint, memory_type, config, "auto-capture").map(Some)
+}
+
+fn write_observation(
+    svc: &MemoryService,
+    content: &str,
+    hint: Option<&str>,
+    memory_type: Option<&str>,
+    config: &MemoryConfig,
+    source: &str,
+) -> Result<String> {
     let ulid = ulid::Ulid::new();
     let path = format!("notes/observed/{ulid}.md");
 
@@ -125,8 +154,7 @@ pub fn memory_observe(
         body.push_str(&format!("hint: {safe}\n"));
     }
 
-    // Mark source as manual-observe for sovereignty tracking
-    body.push_str("source: manual-observe\n");
+    body.push_str(&format!("source: {source}\n"));
     body.push_str(&format!("created_at: {}\n", Utc::now().to_rfc3339()));
     body.push_str("---\n\n");
     body.push_str(content);
@@ -159,6 +187,7 @@ pub fn memory_observe(
         }
     }
 
+    // Both writers intentionally retain TOOL; see its compatibility contract.
     svc.audit_log(AuditEntry::new(TOOL).path(path.clone()).bytes(n));
     Ok(path)
 }

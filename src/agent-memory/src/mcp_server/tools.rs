@@ -253,6 +253,24 @@ impl MemoryMcpServer {
     }
 
     #[tool(
+        description = "Tier B: record an automatic observation when capture consent allows it. Uses the same content, hint and type rules as memory_observe, but marks source as auto-capture. Returns the relative path or an explicit skipped message when denied. Use memory_observe for explicit manual observations."
+    )]
+    async fn memory_capture(
+        &self,
+        #[tool(param)] content: String,
+        #[tool(param)] hint: Option<String>,
+        #[tool(param)] r#type: Option<String>,
+    ) -> ToolResult {
+        self.svc
+            .memory_capture(&content, hint.as_deref(), r#type.as_deref())
+            .map(|path| match path {
+                Some(path) => format!("observed at {path}"),
+                None => "automatic capture skipped by consent".to_string(),
+            })
+            .map_err(|e| fmt_err("capture failed", e))
+    }
+
+    #[tool(
         description = "Tier B: assemble a token-bounded context from the most recently modified memory files. Returns markdown with previews, capped at roughly max_tokens*4 bytes."
     )]
     async fn memory_get_context(&self, #[tool(param)] max_tokens: Option<u32>) -> ToolResult {
@@ -576,6 +594,7 @@ rmcp::tool_box!(MemoryMcpServer {
     mem_session_log,
     memory_search,
     memory_observe,
+    memory_capture,
     memory_get_context,
     memory_sessions,
     memory_timeline,

@@ -214,6 +214,22 @@ impl MemoryService {
         crate::tools::memory_observe(self, content, hint, memory_type, &self.config.memory)
     }
 
+    /// Record a consent-controlled automatic observation, or skip it without writing.
+    pub fn memory_capture(
+        &self,
+        content: &str,
+        hint: Option<&str>,
+        memory_type: Option<&str>,
+    ) -> Result<Option<String>> {
+        crate::tools::memory_observe::memory_capture(
+            self,
+            content,
+            hint,
+            memory_type,
+            &self.config.memory,
+        )
+    }
+
     pub fn memory_get_context(&self, max_tokens: usize) -> Result<String> {
         crate::tools::memory_get_context(self, max_tokens)
     }

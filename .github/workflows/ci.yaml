@@ -1199,6 +1199,9 @@ jobs:
           cd src/agent-memory
           make test-openclaw-plugin
 
+      - name: Test automatic capture over MCP
+        run: make -C src/agent-memory test-auto-capture
+
   # =========================================================================
   # Step 9: Test anolisa (Rust workspace)
   # =========================================================================
