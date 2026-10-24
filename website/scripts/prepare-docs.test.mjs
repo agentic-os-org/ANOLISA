@@ -20,7 +20,7 @@ test('publishes current guides and changelogs without Copilot Shell entry points
       files[`docs/${name}${suffix}.md`] = `# ${name}\n`;
     }
     files[`CHANGELOG${suffix}.md`] = '# Changelog\n\ncopilot-shell release history. [Historical details](deprecated/copilot-shell/CHANGELOG.md)\n';
-    files[`src/current/CHANGELOG${suffix}.md`] = '# Current component history\n';
+    files[`src/current/CHANGELOG${suffix}.md`] = '# Current component history\n\n[Guide](guide.md?view=1#intro)\n';
     files[`deprecated/copilot-shell/CHANGELOG${suffix}.md`] = '# Archived component history\n';
     files[`docs/user-guide/${locale}/index.md`] = '# User Guide\n\n<!-- navigation:start -->\n<!-- navigation:end -->\n\n[historical source evidence](https://github.com/alibaba/anolisa/blob/old-commit/src/copilot-shell/core.ts#L10)\n\n## Copilot Shell (cosh)\n\nHistorical integration details remain.\n';
     files[`docs/user-guide/${locale}/getting-started/quickstart.md`] = '# Quickstart\n\n[cosh-ng](../cosh-ng/index.md)\n';
@@ -89,7 +89,11 @@ groups:
     await copyFile(path.join(scriptsDir, name), path.join(root, 'website/scripts', name));
   }
 
-  await symlink(path.join(scriptsDir, '../node_modules'), path.join(root, 'website/node_modules'), 'dir');
+  await symlink(
+    path.join(scriptsDir, '../node_modules'),
+    path.join(root, 'website/node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
 
   for (const script of ['prepare-docs.mjs', 'generate-changelog.mjs']) {
     const result = spawnSync(process.execPath, [path.join(root, 'website/scripts', script)], {
@@ -170,6 +174,7 @@ groups:
     }
     const changelog = JSON.parse(await readFile(path.join(root, `website/.generated/data/changelog-${locale}.json`), 'utf8'));
     assert.deepEqual(changelog.map(({name}) => name), ['ANOLISA', 'current']);
+    assert.ok(changelog[1].markdown.includes('https://github.com/agentic-os-org/ANOLISA/blob/main/src/current/guide.md?view=1#intro'));
     assert.ok(changelog[0].markdown.includes('copilot-shell release history. Historical details'));
     assert.ok(!changelog[0].markdown.includes('deprecated/copilot-shell'));
   }
