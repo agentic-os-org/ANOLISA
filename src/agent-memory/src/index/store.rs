@@ -860,11 +860,23 @@ impl BM25Store {
     }
 
     /// Store a dense embedding vector for `rel_path`. The vector is
-    /// serialised as a little-endian f32 BLOB.
+    /// serialised as a little-endian f32 BLOB. The write is skipped when
+    /// the path is no longer in the `files` table: the embedding loop runs
+    /// outside the store lock, so a file deleted mid-scan must not have
+    /// its `files_vec` row resurrected by a late write — the row join in
+    /// `search_vec` would keep serving the deleted path forever.
     pub fn upsert_vec(&mut self, rel_path: &str, embedding: &[f32]) -> Result<()> {
+        // A zero-component answer is provider garbage: writing it would
+        // leave a 0-byte blob that search_vec skips forever and every
+        // later scan re-flags as stale. Keep whatever row is already
+        // there instead.
+        if embedding.is_empty() {
+            return Ok(());
+        }
         let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         self.conn.execute(
-            "INSERT OR REPLACE INTO files_vec (path, embedding) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO files_vec (path, embedding) \
+             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM files WHERE path = ?1)",
             params![rel_path, blob],
         )?;
         Ok(())
@@ -1090,6 +1102,41 @@ impl BM25Store {
              WHERE v.path IS NULL",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let out: Vec<String> = rows.flatten().collect();
+        Ok(out)
+    }
+
+    /// Paths present in the `files` (BM25) table whose stored vector has a
+    /// different byte length than `dim * 4` — i.e. rows embedded by a
+    /// different embedding model. `search_vec` silently skips
+    /// length-mismatched rows, so these stay invisible to vector and hybrid
+    /// search until they are re-embedded at the current dimensionality, and
+    /// `paths_without_vec` cannot surface them because the rows do exist.
+    /// Vectors are serialised as little-endian f32, hence four bytes per
+    /// dimension.
+    /// Paths in the `files` (BM25) table that already carry a stored
+    /// vector. The model-migration probe in `IndexWorker::full_scan` uses
+    /// one of these bodies to confirm the live embedding dimensionality
+    /// before any staleness decision — `paths_with_stale_vec` cannot serve
+    /// that role because deciding staleness needs the confirmed
+    /// dimensionality first, and `provider.dimensions()` is only an
+    /// estimate.
+    pub fn paths_with_vec(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT f.path FROM files f JOIN files_vec v ON v.path = f.path")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let out: Vec<String> = rows.flatten().collect();
+        Ok(out)
+    }
+
+    pub fn paths_with_stale_vec(&self, dim: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.path FROM files f \
+             JOIN files_vec v ON v.path = f.path \
+             WHERE LENGTH(v.embedding) != ?1",
+        )?;
+        let rows = stmt.query_map(params![(dim * 4) as i64], |r| r.get::<_, String>(0))?;
         let out: Vec<String> = rows.flatten().collect();
         Ok(out)
     }
@@ -2179,5 +2226,69 @@ mod tests {
                 "expected InvalidArgument for {bad:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn paths_with_stale_vec_flags_dimension_mismatches_only() {
+        // A vector is a little-endian f32 BLOB, so "stale" means a byte
+        // length other than dim*4 — the signature of a row embedded by a
+        // different model. Rows that simply lack a vector stay
+        // paths_without_vec's business; matching rows are not reported.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("match.md", 0, 0, "body one", None).unwrap();
+        s.upsert("stale.md", 0, 0, "body two", None).unwrap();
+        s.upsert("bare.md", 0, 0, "body three", None).unwrap();
+        s.upsert_vec("match.md", &[1.0, 0.0]).unwrap();
+        s.upsert_vec("stale.md", &[1.0, 0.0, 0.0]).unwrap();
+
+        // dim=2 → 8 bytes: stale.md (3 f32 = 12 bytes) mismatches.
+        let mut stale = s.paths_with_stale_vec(2).unwrap();
+        stale.sort();
+        assert_eq!(stale, vec!["stale.md".to_string()]);
+
+        // dim=3 → 12 bytes: now match.md (2 f32 = 8 bytes) is the mismatch.
+        let mut stale = s.paths_with_stale_vec(3).unwrap();
+        stale.sort();
+        assert_eq!(stale, vec!["match.md".to_string()]);
+
+        // bare.md has no vector at all — it is `missing`, not `stale`.
+        let missing = s.paths_without_vec().unwrap();
+        assert_eq!(missing, vec!["bare.md".to_string()]);
+    }
+
+    #[test]
+    fn paths_with_vec_lists_only_vector_carriers() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("has.md", 0, 0, "body one", None).unwrap();
+        s.upsert("bare.md", 0, 0, "body two", None).unwrap();
+        s.upsert_vec("has.md", &[1.0, 0.0]).unwrap();
+        assert_eq!(s.paths_with_vec().unwrap(), vec!["has.md".to_string()]);
+    }
+
+    #[test]
+    fn upsert_vec_does_not_resurrect_rows_for_deleted_files() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("gone.md", 0, 0, "body", None).unwrap();
+        s.upsert_vec("gone.md", &[1.0, 0.0]).unwrap();
+        s.remove("gone.md").unwrap(); // cascades the files_vec row away
+        // A late embedding write for the deleted path must not recreate
+        // the orphaned vector row.
+        s.upsert_vec("gone.md", &[1.0, 0.0]).unwrap();
+        assert_eq!(s.paths_with_vec().unwrap(), Vec::<String>::new());
+        assert!(s.search_vec(&[1.0, 0.0], 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_vec_refuses_zero_component_answers() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("a.md", 0, 0, "body", None).unwrap();
+        s.upsert_vec("a.md", &[1.0, 0.0]).unwrap();
+        // A provider answering with no components must not clobber the
+        // stored row with a 0-byte blob.
+        s.upsert_vec("a.md", &[]).unwrap();
+        assert_eq!(
+            s.search_vec(&[1.0, 0.0], 5).unwrap(),
+            vec![("a.md".to_string(), 1.0)]
+        );
     }
 }
