@@ -154,6 +154,20 @@ def resolve_task_id(trace_filename: str) -> str:
     return parts[0] if len(parts) == 2 else base
 
 
+def select_task_traces(trace_files: list[str], task_ids: list[str] | None) -> list[str]:
+    """Retain all trials for exact requested task IDs in discovery order."""
+    if task_ids is None:
+        return trace_files
+    requested = {task_id.strip() for task_id in task_ids}
+    if "" in requested:
+        raise ValueError("--task-id values cannot be empty")
+    available = {resolve_task_id(os.path.basename(trace_path)) for trace_path in trace_files}
+    missing = requested - available
+    if missing:
+        raise ValueError("No trace files found for task ID(s): " + ", ".join(sorted(missing)))
+    return [trace_path for trace_path in trace_files if resolve_task_id(os.path.basename(trace_path)) in requested]
+
+
 def load_task_info(task_id: str, tasks_dir: str) -> dict:
     """Load task.yaml and extract relevant fields."""
     yaml_path = os.path.join(tasks_dir, task_id, "task.yaml")
@@ -389,6 +403,8 @@ def main():
                         help="Directory containing task YAML definitions")
     parser.add_argument("--output-dir", "-o", default=None,
                         help="Directory to write per-trial JSON reports")
+    parser.add_argument("--task-id", action="append", default=None, metavar="TASK_ID",
+                        help="Report all trials for this exact task ID; repeat to select multiple tasks")
     parser.add_argument("--judge-model", default=None,
                         help="Override judge model ID (from config YAML)")
     parser.add_argument("--judge-base-url", default=None,
@@ -402,6 +418,12 @@ def main():
     trace_dir = settings["trace_dir"]
     output_dir = settings["output_dir"]
 
+    trace_files = sorted(glob.glob(os.path.join(trace_dir, "*.jsonl")))
+    try:
+        trace_files = select_task_traces(trace_files, args.task_id)
+    except ValueError as error:
+        parser.error(str(error))
+
     # Validate judge config
     if not settings["judge_api_key"]:
         print("Error: judge api_key is not configured. Set it via --config YAML or --judge-api-key.", file=sys.stderr)
@@ -412,7 +434,6 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
 
-    trace_files = sorted(glob.glob(os.path.join(trace_dir, "*.jsonl")))
     print(f"Found {len(trace_files)} trace files")
 
     succ_count = 0
