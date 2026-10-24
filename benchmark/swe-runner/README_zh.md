@@ -399,6 +399,9 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+会话记录中的无效时间戳会触发警告，并在可用时采用其他支持的时间字段。
+即使记录没有有效时间戳，消息和 token 用量仍会保留；显式分析时间范围仍会校验。
+
 分析已有 trace：
 
 ```bash
