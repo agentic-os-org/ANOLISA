@@ -79,6 +79,7 @@ anolisa adapter scan
 
 ## 下一步
 
+- [镜像与云服务入口](images.md)——系统镜像、容器基础镜像、云服务入口与社区条目提交
 - [安装指南](installation.md)——平台支持、system mode、RPM 和所有组件安装命令
 - [完整用户指南](../index.md)——配置、运行和排查各项能力
 - [anolisa CLI 参考](anolisa-cli.md)——生命周期与 Adapter 命令

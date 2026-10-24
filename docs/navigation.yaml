@@ -162,6 +162,8 @@ groups:
     items:
       - path: getting-started/quickstart.md
         label: {en: Quickstart, zh: 快速开始}
+      - path: getting-started/images.md
+        label: {en: Images and cloud services, zh: 镜像与云服务入口}
       - path: getting-started/installation.md
         label: {en: Installation, zh: 安装}
       - path: getting-started/anolisa-cli.md

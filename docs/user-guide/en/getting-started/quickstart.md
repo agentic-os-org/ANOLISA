@@ -81,6 +81,7 @@ anolisa adapter scan
 
 ## Next steps
 
+- [Images and cloud services](images.md) — system images, container base images, cloud services, and community submissions
 - [Installation guide](installation.md) — platform support, system mode, RPM, and all component install commands
 - [Full user guide](../index.md) — configure, operate, and troubleshoot each capability
 - [anolisa CLI reference](anolisa-cli.md) — lifecycle and adapter commands

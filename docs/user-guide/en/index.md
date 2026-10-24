@@ -13,6 +13,7 @@ under Getting started.
 ## Getting started
 
 - [Quickstart](getting-started/quickstart.md)
+- [Images and cloud services](getting-started/images.md)
 - [Installation](getting-started/installation.md)
 - [ANOLISA CLI](getting-started/anolisa-cli.md)
 - [Building and deployment](getting-started/building.md)

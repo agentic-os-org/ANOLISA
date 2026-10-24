@@ -4,6 +4,9 @@
 
 This guide covers the progressive installation of ANOLISA — from the CLI tool to individual components and adapter setup.
 
+For preinstalled systems, cloud environments, or a container base image, see
+[Images and cloud services](images.md).
+
 ---
 
 ## Step 1: Install the ANOLISA CLI

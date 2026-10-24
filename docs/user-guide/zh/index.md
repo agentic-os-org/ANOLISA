@@ -11,6 +11,7 @@
 ## 开始使用
 
 - [快速开始](getting-started/quickstart.md)
+- [镜像与云服务入口](getting-started/images.md)
 - [安装](getting-started/installation.md)
 - [ANOLISA CLI](getting-started/anolisa-cli.md)
 - [构建与部署](getting-started/building.md)
