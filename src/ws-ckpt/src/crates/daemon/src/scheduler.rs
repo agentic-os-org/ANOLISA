@@ -3,12 +3,70 @@
 use std::sync::Arc;
 
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::snapshot_mgr::{delete_snapshots_locked, ensure_index_dir, persist_index_after_cleanup};
 use crate::state::DaemonState;
 use ws_ckpt_common::backend::StorageBackend;
 use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
+
+/// Handle to the background scheduler tasks. Dropping it does NOT stop the
+/// tasks; call [`SchedulerHandle::shutdown`] so the final index flush in
+/// `run_daemon` never runs concurrently with an in-flight cleanup pass
+/// (both write the same `index.json` through `atomic_write`'s fixed
+/// `.tmp` name, which is atomic against crashes, not against concurrent
+/// callers).
+pub struct SchedulerHandle {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl SchedulerHandle {
+    /// Cancel and await both loops (bounded reporting, unbounded await).
+    ///
+    /// A cleanup pass already inside `auto_cleanup` runs to completion by
+    /// design — it holds each workspace's mutation mutex, and the shutdown
+    /// flush takes that same mutex, so the two serialize even if the pass
+    /// overruns the bound. A task that overruns is therefore **awaited,
+    /// never aborted**: the pass may be inside `index_store::save`, whose
+    /// `atomic_write` runs in a `spawn_blocking` closure that `abort()`
+    /// cannot cancel once started. Aborting the async task would drop the
+    /// future and release the mutation mutex while that blocking write is
+    /// still running, and the final flush would then start a second
+    /// `atomic_write` against the same fixed `.tmp` path — recreating the
+    /// concurrent-writer race from #5069.
+    ///
+    /// Returns `false` when at least one task overran the 10s reporting
+    /// bound. The await continues regardless, so when this returns no
+    /// scheduler work is in flight and the final flush cannot interleave
+    /// with one.
+    pub async fn shutdown(self) -> bool {
+        let mut all_within_bound = true;
+        for mut handle in self.tasks {
+            // Each loop selects on the token, so this returns promptly; the
+            // bound only detects a pass wedged inside a slow backend call.
+            // On expiry the task is NOT aborted (see above): report the
+            // overrun and keep waiting until the in-flight pass finishes.
+            let joined = match tokio::time::timeout(Duration::from_secs(10), &mut handle).await {
+                Ok(joined) => joined,
+                Err(_overrun) => {
+                    tracing::warn!(
+                        "scheduler task overran the 10s shutdown bound; \
+                         awaiting its in-flight pass to completion (aborting it \
+                         could release the workspace mutation mutex while its \
+                         blocking index write is still running)"
+                    );
+                    all_within_bound = false;
+                    handle.await
+                }
+            };
+            if let Err(join_err) = joined {
+                tracing::error!("scheduler task failed while stopping: {join_err}");
+            }
+        }
+        all_within_bound
+    }
+}
 
 /// Start background scheduler tasks: periodic auto-cleanup and health checks.
 ///
@@ -18,20 +76,28 @@ use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 /// polling design — loops never wake up "just to check", and a disabled task
 /// (`auto_cleanup = false` or `*_interval_secs == 0`) blocks on the notify
 /// at zero CPU cost until a reload re-enables it.
-pub fn start_scheduler(state: Arc<DaemonState>) {
+///
+/// `cancel` stops both loops; the returned handle lets `run_daemon` join
+/// them before the final index flush.
+pub fn start_scheduler(state: Arc<DaemonState>, cancel: CancellationToken) -> SchedulerHandle {
     // Periodic auto-cleanup: reacts to `ReloadConfig` via `config_notify`.
     let state_clone = state.clone();
-    tokio::spawn(async move {
-        auto_cleanup_loop(state_clone).await;
+    let cancel_cleanup = cancel.clone();
+    let cleanup_task = tokio::spawn(async move {
+        auto_cleanup_loop(state_clone, cancel_cleanup).await;
     });
 
     // Periodic health check: same notify-driven pattern.
     let state_clone2 = state.clone();
-    tokio::spawn(async move {
-        health_check_loop(state_clone2).await;
+    let cancel_health = cancel.clone();
+    let health_task = tokio::spawn(async move {
+        health_check_loop(state_clone2, cancel_health).await;
     });
 
     info!("Background scheduler started");
+    SchedulerHandle {
+        tasks: vec![cleanup_task, health_task],
+    }
 }
 
 /// Auto-cleanup loop: each iteration re-reads `auto_cleanup`,
@@ -44,7 +110,11 @@ pub fn start_scheduler(state: Arc<DaemonState>) {
 /// config read and registration, we build the `Notified` future and
 /// `enable()` it (registers immediately) **before** reading config. Any
 /// `notify_waiters()` issued afterwards is then captured by this waiter.
-async fn auto_cleanup_loop(state: Arc<DaemonState>) {
+///
+/// The shutdown token is a select arm at EVERY wait site, including the
+/// parked branch — a parked loop that only awaits `notified` would
+/// otherwise ignore cancellation forever.
+async fn auto_cleanup_loop(state: Arc<DaemonState>, cancel: CancellationToken) {
     loop {
         let notified = state.config_notify.notified();
         tokio::pin!(notified);
@@ -56,16 +126,21 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
         // skip all workspaces.
         let park = interval == 0 || !state.any_ws_has_effective_cleanup().await;
         if park {
-            notified.await;
+            // Parked (cleanup disabled): wake for reload OR shutdown.
+            tokio::select! {
+                _ = notified => {}
+                _ = cancel.cancelled() => return,
+            }
             continue;
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(interval)) => {
-                auto_cleanup(&state).await;
+                auto_cleanup(&state, &cancel).await;
             }
             _ = notified.as_mut() => {
                 // Config changed mid-sleep: skip this cleanup pass and re-read.
             }
+            _ = cancel.cancelled() => return,
         }
     }
 }
@@ -73,7 +148,7 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
 /// Health-check loop. Same push-based pattern as `auto_cleanup_loop`, keyed
 /// off `health_check_interval_secs`. See that function's comment for why
 /// `enable()` is called before the config read.
-async fn health_check_loop(state: Arc<DaemonState>) {
+async fn health_check_loop(state: Arc<DaemonState>, cancel: CancellationToken) {
     loop {
         let notified = state.config_notify.notified();
         tokio::pin!(notified);
@@ -81,14 +156,18 @@ async fn health_check_loop(state: Arc<DaemonState>) {
 
         let interval = state.config_snapshot().health_check_interval_secs;
         if interval == 0 {
-            notified.await;
+            tokio::select! {
+                _ = notified => {}
+                _ = cancel.cancelled() => return,
+            }
             continue;
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(interval)) => {
-                health_check(&state).await;
+                health_check(&state, &cancel).await;
             }
             _ = notified.as_mut() => {}
+            _ = cancel.cancelled() => return,
         }
     }
 }
@@ -99,12 +178,22 @@ async fn health_check_loop(state: Arc<DaemonState>) {
 ///
 /// Each workspace pass holds its mutation mutex from planning through persistence;
 /// workspace `RwLock` guards are acquired only inside that serialized region.
-async fn auto_cleanup(state: &DaemonState) {
+async fn auto_cleanup(state: &DaemonState, cancel: &CancellationToken) {
     info!("Running auto-cleanup pass (per-ws effective retention)...");
     let all_ws = state.all_workspaces();
     let now = chrono::Utc::now();
 
     for ws_arc in &all_ws {
+        // Shutdown races a pass that has already started: without this
+        // check a pass just beginning at SIGTERM would keep starting new
+        // per-workspace deletes for the whole registry (each may sit in a
+        // guarded btrfs batch for up to BATCH_DELETE_SYNC_TIMEOUT).
+        // A workspace already being processed finishes its cycle under
+        // the mutation mutex, so consistency is unchanged.
+        if cancel.is_cancelled() {
+            info!("Shutdown signalled mid-cleanup; stopping before next workspace");
+            return;
+        }
         let Some((ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(ws_arc).await
         else {
             continue;
@@ -178,9 +267,13 @@ async fn auto_cleanup(state: &DaemonState) {
 /// ERROR when get_usage fails (umount, fs crash, etc.) so upstream monitors
 /// can catch it. Message building lives in [`assess_usage_health`] so the
 /// branches are coverable with stub backends (#3053 review P2).
-async fn health_check(state: &DaemonState) {
+async fn health_check(state: &DaemonState, cancel: &CancellationToken) {
     if state.all_workspaces().is_empty() {
         debug!("Health check skipped: no workspace registered");
+        return;
+    }
+    if cancel.is_cancelled() {
+        debug!("Health check skipped: shutdown in progress");
         return;
     }
     for line in assess_usage_health(state.backend.as_ref()).await {
@@ -278,6 +371,7 @@ async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLin
 mod tests {
     // ── Per-workspace effective policy invariants ──
     // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
+    use super::*;
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
 
     fn cfg(global_on: bool, keep: CleanupRetention) -> DaemonConfig {
@@ -544,7 +638,7 @@ mod tests {
             ] {
                 let arc = state.get_by_wsid(ws_id).unwrap();
                 arc.write().await.policy.auto_cleanup_keep = Some(retention);
-                auto_cleanup(&state).await;
+                auto_cleanup(&state, &CancellationToken::new()).await;
                 let index = index_store::load(&state.index_dir(ws_id)).await.unwrap();
                 assert!(index.snapshots["snap-1"].pinned);
                 assert!(index.recovered_orphans.contains("snap-1"));
@@ -669,6 +763,237 @@ mod tests {
                 assert!(m.contains("injected usage failure"), "{}", m);
             }
             other => panic!("expected Error line, got {:?}", other),
+        }
+    }
+
+    // ── Scheduler cancellation (shutdown ordering) ────────────────────
+
+    fn scheduler_state(state_dir: &std::path::Path) -> std::sync::Arc<crate::state::DaemonState> {
+        let mut backend = UsageProbeBackend::new(Ok((1, 10)), Ok(vec![]));
+        // Keep the backend storage disjoint from the workspace tempdirs so
+        // registration anchors are user paths, not internal ones.
+        backend.data_root = state_dir.join("backend-data");
+        backend.snapshots_root = state_dir.join("backend-snapshots");
+        std::sync::Arc::new(crate::state::DaemonState::new(
+            DaemonConfig::default(),
+            std::sync::Arc::new(backend)
+                as std::sync::Arc<dyn ws_ckpt_common::backend::StorageBackend>,
+            state_dir.to_path_buf(),
+        ))
+    }
+
+    /// Register `ws_id` with an effective `Count(1)` cleanup policy and one
+    /// index entry plus on-disk dir per `ids` (all unpinned).
+    ///
+    /// A cleanup pass over this workspace has *visible* work: it deletes
+    /// every snapshot dir except the newest and persists `index.json` and
+    /// `state.json`. Cancellation tests assert on those side effects, so a
+    /// pass that runs despite the token cannot hide behind an empty index
+    /// (the pre-rebuild tests did exactly that — the reviewer's mutation
+    /// check removed the cancel arms and they still passed).
+    ///
+    /// Returns the snapshot dir paths plus the workspace `TempDir`, which
+    /// the caller must keep bound so the registration anchor outlives the
+    /// test.
+    async fn ws_with_removable_snapshots(
+        state: &std::sync::Arc<crate::state::DaemonState>,
+        ws_id: &str,
+        ids: &[&str],
+    ) -> (Vec<std::path::PathBuf>, tempfile::TempDir) {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws_path = ws_dir.path().join(ws_id);
+        std::fs::create_dir(&ws_path).unwrap();
+        let policy = ws_ckpt_common::WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(1)),
+        };
+        state
+            .register_workspace_with_policy(
+                ws_id.to_string(),
+                ws_path.clone(),
+                ws_ckpt_common::SnapshotIndex::new(ws_path),
+                policy,
+                false,
+            )
+            .unwrap();
+        let arc = state.get_by_wsid(ws_id).unwrap();
+        let mut ws = arc.write().await;
+        for id in ids {
+            let dir = state.backend.snapshots_root().join(ws_id).join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("canary"), "snapshot").unwrap();
+            ws.index.snapshots.insert(
+                id.to_string(),
+                ws_ckpt_common::SnapshotMeta {
+                    message: None,
+                    metadata: None,
+                    pinned: false,
+                    created_at: chrono::Utc::now() - chrono::Duration::days(1),
+                    missing: false,
+                    parent_id: None,
+                    child_ids: Vec::new(),
+                },
+            );
+        }
+        (
+            ids.iter()
+                .map(|id| state.backend.snapshots_root().join(ws_id).join(id))
+                .collect(),
+            ws_dir,
+        )
+    }
+
+    /// An overrunning task must be awaited, never aborted: `abort()` would
+    /// drop the async task (releasing any held workspace mutation mutex)
+    /// while a `spawn_blocking` index write it started keeps running, so
+    /// `shutdown()` would return with work still in flight — exactly what
+    /// the final flush must not race. Paused time advances the 30s task and
+    /// the 10s bound instantly, so this costs no wall clock.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_awaits_an_overrunning_task_instead_of_aborting_it() {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&done);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let handle = SchedulerHandle { tasks: vec![task] };
+        let within_bound = handle.shutdown().await;
+        assert!(!within_bound, "the 30s task must overrun the 10s bound");
+        assert!(
+            done.load(std::sync::atomic::Ordering::SeqCst),
+            "shutdown returned before the overrunning task completed — it was aborted or detached"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_loops_exit_on_cancellation() {
+        // Every cancel arm must actually fire: the parked and the
+        // live-interval branch of both loops. `shutdown()` reports whether
+        // each task joined within its 10s bound, so a loop that lost its
+        // cancel arm fails the assert instead of hiding behind the
+        // swallowed timeout (with the old `-> ()` signature a single
+        // wedged loop finished the whole test in ~10s and still passed).
+        for live in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = scheduler_state(dir.path());
+            {
+                let mut cfg = state.config.write().unwrap();
+                cfg.auto_cleanup = true;
+                cfg.auto_cleanup_interval_secs = u64::from(live);
+                cfg.health_check_interval_secs = u64::from(live);
+            }
+            if live {
+                // An empty registry parks the cleanup loop regardless of
+                // the interval, so its live branch needs a workspace with
+                // an effective policy. The index is empty: the pass runs,
+                // finds nothing to remove, persists nothing.
+                let (_anchors, _ws_dir) = ws_with_removable_snapshots(&state, "ws-live", &[]).await;
+            }
+            let token = tokio_util::sync::CancellationToken::new();
+            let handle = start_scheduler(state, token.clone());
+            if live {
+                // Let the 1s tick fire so a pass genuinely runs before the
+                // token does.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            }
+            token.cancel();
+            // The outer bound only guards the test itself against a wedged
+            // `shutdown()`; pass/fail comes from the reported bool.
+            let stopped =
+                tokio::time::timeout(std::time::Duration::from_secs(15), handle.shutdown())
+                    .await
+                    .expect("shutdown must stay bounded");
+            assert!(stopped, "a scheduler loop ignored the cancel token");
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_does_not_run_a_new_cleanup_pass() {
+        // Cancel must win the race with the NEXT tick, and the test must be
+        // able to notice when it does not: the workspace has a removable
+        // snapshot, so a pass that ran despite the token deletes it and
+        // persists `index.json` + `state.json`. Cancelling before the first
+        // 1s tick and then waiting past that tick turns "the loop kept
+        // sleeping after cancel" into observable filesystem state.
+        let dir = tempfile::tempdir().unwrap();
+        let state = scheduler_state(dir.path());
+        {
+            let mut cfg = state.config.write().unwrap();
+            cfg.auto_cleanup = true;
+            cfg.auto_cleanup_interval_secs = 1;
+        }
+        let (snaps, _ws_dir) =
+            ws_with_removable_snapshots(&state, "ws-sched", &["snap-old", "snap-keep"]).await;
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let handle = start_scheduler(state.clone(), token.clone());
+        // The loop is inside its FIRST 1s sleep; no pass has run yet.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        token.cancel();
+        let stopped = handle.shutdown().await;
+        assert!(stopped, "a scheduler loop ignored the cancel token");
+        // Give a loop that ignored the token time to fire its 1s tick.
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+
+        assert!(
+            !state.state_dir.join("state.json").exists(),
+            "a cleanup pass ran after cancellation (save_manifest wrote state.json)"
+        );
+        assert!(
+            snaps.iter().all(|p| p.exists()),
+            "a cleanup pass deleted snapshots after cancellation"
+        );
+        assert!(
+            !state
+                .index_dir("ws-sched")
+                .join(ws_ckpt_common::INDEX_FILE)
+                .exists(),
+            "a cleanup pass persisted the index after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_cleanup_pass_starts_no_workspace_work() {
+        // The in-pass token check: once the token has fired, a pass must not
+        // BEGIN a workspace's plan → delete → persist cycle — not the first
+        // workspace (pass started after SIGTERM) and not the second (pass
+        // that straddles SIGTERM; the check runs at the top of every
+        // iteration). Driven directly with an already-cancelled token, so
+        // there is no timing window: both workspaces carry removable
+        // snapshots, and a pass that ignored the token would leave visible
+        // deletes plus persisted index/manifest files behind.
+        let dir = tempfile::tempdir().unwrap();
+        let state = scheduler_state(dir.path());
+        {
+            let mut cfg = state.config.write().unwrap();
+            cfg.auto_cleanup = true;
+            cfg.auto_cleanup_interval_secs = 1;
+        }
+        let (a, _ws_a) =
+            ws_with_removable_snapshots(&state, "ws-a", &["snap-a-old", "snap-a-keep"]).await;
+        let (b, _ws_b) =
+            ws_with_removable_snapshots(&state, "ws-b", &["snap-b-old", "snap-b-keep"]).await;
+
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        auto_cleanup(&state, &token).await;
+
+        assert!(
+            !state.state_dir.join("state.json").exists(),
+            "a cancelled pass persisted the manifest"
+        );
+        for p in a.iter().chain(b.iter()) {
+            assert!(p.exists(), "a cancelled pass deleted {p:?}");
+        }
+        for ws in ["ws-a", "ws-b"] {
+            assert!(
+                !state
+                    .index_dir(ws)
+                    .join(ws_ckpt_common::INDEX_FILE)
+                    .exists(),
+                "a cancelled pass persisted {ws}'s index"
+            );
         }
     }
 }
