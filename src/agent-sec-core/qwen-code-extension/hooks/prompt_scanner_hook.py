@@ -198,7 +198,13 @@ def main() -> None:
         return
 
     # 6. Mode-based output
-    verdict = scan_result.get("verdict", "pass")
+    verdict = scan_result.get("verdict")
+    if not isinstance(verdict, str):
+        # Only a string verdict can name a risk; anything else (missing,
+        # number, boolean, nested object) must fail open instead of falling
+        # into the warn/deny arm and blocking the prompt — the qoder
+        # sibling coerces the same way through _safe_string(...) or "pass".
+        verdict = "pass"
 
     if verdict in ("pass", "error"):
         print(_noop())
