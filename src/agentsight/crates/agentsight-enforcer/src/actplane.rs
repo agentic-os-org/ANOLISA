@@ -184,7 +184,7 @@ impl ActPlaneBackend {
         kernel_pid: Option<i32>,
     ) -> Vec<String> {
         let mut errors = Vec::new();
-        let control_pid = std::process::id() as i32;
+        let control_pid = self_host_pid();
         if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
             errors.push(format!("unbind control pid: {error}"));
         }
@@ -306,7 +306,7 @@ impl ActPlaneBackend {
             );
         }
 
-        let control_pid = std::process::id() as i32;
+        let control_pid = self_host_pid();
         let control_state = CapState {
             scope_id: 1,
             labels: label,
@@ -1385,6 +1385,36 @@ fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
     input_pid // fallback
 }
 
+/// Resolve the host-namespace PID of the enforcer process itself.
+///
+/// `resolve_to_host_pid` matches candidates by `start_time`, which is never
+/// zero for a real process, so passing `0` degenerates to the identity
+/// function. We therefore read the enforcer's own start time from
+/// `/proc/self/stat` (which always resolves to the enforcer even when a host
+/// procfs is mounted over `/proc`) and hand it to the resolver.
+///
+/// The result is cached: the enforcer's host PID is fixed for the lifetime of
+/// the process, and `cleanup_binding` runs on every apply and rollback path,
+/// so re-resolving would pay a full `/proc` scan each time.
+fn self_host_pid() -> i32 {
+    use std::sync::OnceLock;
+    static SELF_HOST_PID: OnceLock<i32> = OnceLock::new();
+    *SELF_HOST_PID.get_or_init(|| {
+        let ns_pid = std::process::id() as i32;
+        let self_start = proc_self_start_time().unwrap_or(0);
+        resolve_to_host_pid(ns_pid, self_start)
+    })
+}
+
+/// Read `start_time` (field 22) from `/proc/self/stat`.
+///
+/// Unlike `/proc/<getpid()>/stat`, `/proc/self/stat` always resolves to the
+/// calling process even when the container mounts the host `/proc`.
+fn proc_self_start_time() -> Result<u64, ()> {
+    let stat = read_proc_text_lossy("/proc/self/stat").map_err(|_| ())?;
+    parse_process_start_time(&stat).map_err(|_| ())
+}
+
 /// Read the `NSpid:` chain from `/proc/<pid>/status`.  Returns a Vec where
 /// index 0 is the outermost (host) PID and the last element is the innermost
 /// (namespace-local) PID.
@@ -2118,6 +2148,31 @@ mod tests {
     fn proc_start_time_handles_parenthesized_comm() {
         let stat = "42 (a tricky) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 98765";
         assert_eq!(parse_process_start_time(stat), Ok(98765));
+    }
+
+    #[test]
+    fn proc_self_start_time_is_never_zero() {
+        // /proc/self/stat always resolves to the enforcer process, and a real
+        // process's start_time (field 22) is a positive clock tick count. This
+        // guards against the identity-function regression where a `0`
+        // start_time made `resolve_to_host_pid` a no-op.
+        let start = proc_self_start_time().expect("read /proc/self/stat");
+        assert!(start > 0, "own start_time must be positive, got {start}");
+    }
+
+    #[test]
+    fn self_host_pid_resolves_self_in_init_namespace() {
+        // In the root PID namespace the enforcer's namespace PID is its host
+        // PID, so the resolver must return the live getpid() (not 0, not a
+        // stale cached value from another process).
+        let pid = std::process::id() as i32;
+        assert_eq!(self_host_pid(), pid);
+    }
+
+    #[test]
+    fn self_host_pid_is_stable_across_calls() {
+        // Cached for the process lifetime: the host PID cannot change.
+        assert_eq!(self_host_pid(), self_host_pid());
     }
 
     #[test]
