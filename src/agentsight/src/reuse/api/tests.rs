@@ -190,6 +190,55 @@ fn repeated_runs_reach_trajectories_beyond_the_first_page() {
 }
 
 #[test]
+fn a_re_collection_with_identical_bytes_does_not_hold_the_window() {
+    // The collector bumps `collected_at_ns` on every upsert, even when the
+    // bytes are identical. The unchanged fast path used to leave the label's
+    // update time behind, so every later run re-examined that row, filled the
+    // `limit` window with it and starved older trajectories.
+    let (trajectories, labels) = stores("recollected");
+    insert(&trajectories, "older", &substantive_atif());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    insert(&trajectories, "newest", &substantive_atif());
+    let query = TriageQuery {
+        limit: Some(1),
+        ..TriageQuery::default()
+    };
+    let config = TriageConfig::default();
+
+    let first = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(first.labelled, 1, "the newest row fills the window");
+    assert!(first.truncated);
+
+    // Re-collect the newest row with the same bytes: the collector timestamp
+    // moves, the content hash does not.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    insert(&trajectories, "newest", &substantive_atif());
+
+    let second = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(second.unchanged, 1);
+    assert_eq!(
+        second.labelled, 0,
+        "the re-collected row still filled the window"
+    );
+    assert!(second.truncated);
+    assert!(
+        labels.get_label("older").unwrap().is_none(),
+        "precondition: the older row is still unlabelled"
+    );
+
+    // The second run verified the identical bytes and recorded that version,
+    // so this run skips the row during the scan and reaches the older work.
+    let third = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(third.unchanged, 1);
+    assert_eq!(
+        third.labelled, 1,
+        "the verified row must not occupy the window"
+    );
+    assert!(!third.truncated);
+    assert!(labels.get_label("older").unwrap().is_some());
+}
+
+#[test]
 fn a_second_run_over_unchanged_content_relabels_nothing() {
     // What makes the endpoint safe to poll: identical bytes under identical
     // rules cannot produce a different verdict, so the work is skipped.
@@ -670,4 +719,22 @@ fn overriding_feeds_the_rule_misfire_statistics() {
     let stats = label_stats(&labels).unwrap();
     assert!(!stats.is_empty());
     assert!(stats.iter().all(|s| s.overridden == 1 && s.confirmed == 0));
+}
+
+#[test]
+fn a_label_removed_during_the_unchanged_path_is_not_a_batch_failure() {
+    // Retention deletes the oldest unconfirmed rows, which is exactly the
+    // population on the unchanged fast path, so a row can vanish after the
+    // window listed it. That skips the row; a real store failure still fails
+    // the batch.
+    assert!(
+        tolerate_removed_label(Err(crate::reuse::ReuseStoreError::UnknownSession(
+            "s1".to_string()
+        )))
+        .is_ok()
+    );
+    assert!(
+        tolerate_removed_label(Err(crate::reuse::ReuseStoreError::Poisoned)).is_err(),
+        "a real store error must still fail the batch"
+    );
 }
