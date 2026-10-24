@@ -944,63 +944,36 @@ impl DaemonState {
         ws_id: &str,
         registration_path: Option<&Path>,
     ) -> Quiescence {
-        // Defense in depth: rollback re-arms the watch proactively, but any
-        // other path that replaced the live subvolume (or a failed re-arm)
-        // would leave the watch on a dead inode — indistinguishable from a
-        // healthy one by the flag alone, since no events ever arrive. Heal
-        // it before deciding.
         let heal_path = match registration_path {
             Some(path) => Some(path.to_path_buf()),
-            // Lock-free callers only: guarded flows hold the write lock, so
-            // their try_read would always fail and the heal would never run.
             None => self
                 .get_by_wsid(ws_id)
                 .and_then(|arc| arc.try_read().ok().map(|ws| ws.path.clone())),
         };
-        let mut fresh_watch = false;
         if let Some(path) = heal_path {
-            if !self.watcher_target_is_current(ws_id, &path) {
-                if self.rearm_watcher(ws_id, &path) {
-                    fresh_watch = true;
-                } else {
-                    // The watch is known stale and re-arming failed: monitoring
-                    // is unavailable, so quiescence cannot be established from
-                    // the retired inode's (permanently silent) flag. Report that
-                    // instead of assuming quiescence.
-                    return Quiescence::MonitoringUnavailable;
-                }
+            if !self.watcher_target_is_current(ws_id, &path) && !self.rearm_watcher(ws_id, &path) {
+                return Quiescence::MonitoringUnavailable;
             }
         }
-        // Extract the AtomicBool from the watcher without holding the lock across await
-        let is_writing_arc = {
+        let last_activity_arc = {
             let watchers = match self.watchers.lock() {
                 Ok(w) => w,
                 Err(_) => return Quiescence::Safe,
             };
-            match watchers.get(ws_id) {
-                Some(w) => Some(std::sync::Arc::clone(&w.is_writing_flag())),
-                None => None,
-            }
+            watchers.get(ws_id).map(|w| w.last_activity())
         };
-        match is_writing_arc {
+        match last_activity_arc {
             None => Quiescence::Safe,
-            Some(flag) => {
-                // A freshly re-armed watcher's flag starts false and is set
-                // asynchronously by its forwarder task, so an already-active
-                // writer has not necessarily been observed yet: the check
-                // must complete the quiet-period observation instead of
-                // taking the not-writing shortcut to Safe.
-                if !fresh_watch && !flag.load(std::sync::atomic::Ordering::Acquire) {
-                    return Quiescence::Safe;
-                }
-                // Wait 100ms quiet period
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                flag.store(false, std::sync::atomic::Ordering::Release);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if flag.load(std::sync::atomic::Ordering::Acquire) {
-                    Quiescence::Writing
-                } else {
+            Some(last_activity_ms) => {
+                // Every watcher is seeded at `start` ("just active"), so the
+                // first quiescence report after any creation path — first
+                // init, daemon rebuild, re-arm after rollback — must observe
+                // a full quiet window; an already-active writer cannot
+                // escape before its first event is forwarded.
+                if crate::fs_watcher::wait_quiescent(&last_activity_ms).await {
                     Quiescence::Safe
+                } else {
+                    Quiescence::Writing
                 }
             }
         }
