@@ -189,3 +189,39 @@ class TestToDict:
         assert parsed["session_id"] == "test"
         assert parsed["turn_count"] == 5
         assert parsed["security_hint"] is None
+
+
+class TestNonObjectMetrics:
+    """One malformed event must not crash the whole session report."""
+
+    def test_parse_metrics_treats_nonobject_json_as_absent(self):
+        from agent_sec_cli.observability.session_report import _parse_metrics
+
+        assert _parse_metrics(None) == {}
+        assert _parse_metrics("") == {}
+        assert _parse_metrics("{bad json") == {}
+        for payload in ("null", "[1, 2]", "42", '"text"'):
+            assert _parse_metrics(payload) == {}, payload
+        assert _parse_metrics('{"a": 1}') == {"a": 1}
+
+    def test_nonobject_metrics_events_do_not_crash_report(self):
+        reader = MagicMock()
+        reader.list_sessions.return_value = [_fake_session()]
+        reader.list_runs.return_value = [_fake_run()]
+        events = []
+        for payload in ("null", "[1, 2]", "42", '"text"'):
+            ev = _fake_event("after_llm_call")
+            ev.metrics_json = payload
+            events.append(ev)
+        tool_ev = _fake_event("before_tool_call")
+        tool_ev.metrics_json = "[]"
+        events.append(tool_ev)
+        reader.list_events.return_value = events
+
+        rpt = build_session_report("sess-1", reader)
+
+        assert rpt is not None
+        assert rpt.llm_calls == 4
+        assert rpt.request_bytes == 0
+        assert rpt.response_bytes == 0
+        assert rpt.tool_breakdown == {"unknown": 1}
