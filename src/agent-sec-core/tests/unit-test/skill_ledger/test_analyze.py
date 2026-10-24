@@ -4,7 +4,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agent_sec_cli.skill_ledger.analyze import _sanitize_payload, analyze_skill
+from agent_sec_cli.skill_ledger.analyze import (
+    _finding_error,
+    _sanitize_payload,
+    _sort_findings,
+    analyze_skill,
+)
 
 
 def _write_skill(root: Path, body: str = "Use this Skill safely.\n") -> None:
@@ -215,3 +220,27 @@ def test_analysis_does_not_open_network_connections() -> None:
 
     assert exit_code == 0
     assert payload["coverage_complete"] is True
+
+
+def test_malformed_scanner_error_metadata_is_safe() -> None:
+    error = _finding_error(
+        {
+            "rule": "scanner-error",
+            "message": "failed",
+            "metadata": ["not", "an", "object"],
+        }
+    )
+
+    assert error["metadata"] == {}
+
+
+def test_findings_with_non_numeric_lines_have_stable_order() -> None:
+    findings = [
+        {"file": "a.py", "line": "unknown", "rule": "first"},
+        {"file": "a.py", "line": 3, "rule": "second"},
+    ]
+
+    assert [item["rule"] for item in _sort_findings(findings)] == [
+        "first",
+        "second",
+    ]

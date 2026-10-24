@@ -248,7 +248,8 @@ def _scanner_error(name: str, version: str, error: dict[str, Any]) -> dict[str, 
 
 
 def _finding_error(finding: dict[str, Any]) -> dict[str, Any]:
-    metadata = dict(finding.get("metadata") or {})
+    raw_metadata = finding.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
     metadata.pop("error", None)
     return _error(
         str(finding.get("rule", "scanner-error")),
@@ -310,10 +311,24 @@ def _sort_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         findings,
         key=lambda item: (
             str(item.get("file", "")),
-            int(item.get("line") or 0),
+            _line_sort_key(item.get("line")),
             str(item.get("rule", "")),
         ),
     )
+
+
+def _line_sort_key(value: Any) -> int:
+    """Return a stable sort key for scanner line values of unknown shape."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
 
 
 def _sort_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
