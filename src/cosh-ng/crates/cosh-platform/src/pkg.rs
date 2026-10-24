@@ -678,7 +678,10 @@ fn parse_search_output(stdout: &str, mgr: PkgManager) -> Vec<PkgSearchEntry> {
             // dnf search output: "name.arch : summary"
             for line in stdout.lines() {
                 if let Some((name_part, summary)) = line.split_once(" : ") {
-                    let name = name_part.split('.').next().unwrap_or(name_part).trim();
+                    let name = name_part
+                        .rsplit_once('.')
+                        .map_or(name_part, |(name, _)| name)
+                        .trim();
                     results.push(PkgSearchEntry {
                         name: name.to_string(),
                         version: None,
@@ -933,6 +936,23 @@ mod tests {
         assert_eq!(results[0].name, "nginx");
         assert_eq!(results[0].summary, "A high performance web server");
         assert_eq!(results[1].name, "nginx-filesystem");
+    }
+
+    #[test]
+    fn test_parse_search_dnf_preserves_dotted_names() {
+        let output = "=== Name Matched: python3.11 ===\n\
+                      python3.11.x86_64 : Version 3.11 of the Python interpreter\n\
+                      python3.11-devel.aarch64 : Libraries and header files\n\
+                      python3.11-docs.noarch : Documentation for Python 3.11\n";
+        let results = parse_search_output(output, PkgManager::Dnf);
+        let names: Vec<_> = results
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect();
+        assert_eq!(names, ["python3.11", "python3.11-devel", "python3.11-docs"]);
+        assert_eq!(results[0].summary, "Version 3.11 of the Python interpreter");
+        assert_eq!(results[1].summary, "Libraries and header files");
+        assert_eq!(results[2].summary, "Documentation for Python 3.11");
     }
 
     #[test]
@@ -1620,19 +1640,25 @@ mod tests {
 
     #[test]
     fn test_search_marks_installed_dnf() {
-        let search_output = "bash.x86_64 : The GNU Bourne Again shell\nnginx.x86_64 : A high performance web server\n";
+        let search_output = "bash.x86_64 : The GNU Bourne Again shell\n\
+                             nginx.x86_64 : A high performance web server\n\
+                             python3.11.x86_64 : Python interpreter\n\
+                             python3.11-devel.x86_64 : Python development files\n";
         let mut packages = parse_search_output(search_output, PkgManager::Dnf);
 
         let mut installed_set = HashSet::new();
         installed_set.insert("bash".to_string());
+        installed_set.insert("python3.11".to_string());
 
         for pkg in &mut packages {
             pkg.installed = installed_set.contains(&pkg.name);
         }
 
-        assert_eq!(packages.len(), 2);
+        assert_eq!(packages.len(), 4);
         assert!(packages[0].installed); // bash is installed
         assert!(!packages[1].installed); // nginx is not
+        assert!(packages[2].installed);
+        assert!(!packages[3].installed);
     }
 
     #[test]
