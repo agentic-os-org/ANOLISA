@@ -24,20 +24,28 @@ def percentile(values: list[float], fraction: float = 0.95) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
+    return _percentile_from_sorted(ordered, fraction)
+
+
+def _percentile_from_sorted(ordered: list[float], fraction: float) -> float | None:
+    """Select a nearest rank from an already ordered snapshot."""
+    if not ordered:
+        return None
     index = max(0, math.ceil(len(ordered) * fraction) - 1)
     return ordered[index]
 
 
 def stats(values: list[float]) -> dict[str, float | None]:
     """Calculate the values most useful when scanning a report."""
+    ordered = sorted(values)
     return {
         "first": values[0] if values else None,
         "last": values[-1] if values else None,
         "min": min(values) if values else None,
         "avg": fmean(values) if values else None,
-        "p50": percentile(values, 0.50),
-        "p95": percentile(values),
-        "p99": percentile(values, 0.99),
+        "p50": _percentile_from_sorted(ordered, 0.50),
+        "p95": _percentile_from_sorted(ordered, 0.95),
+        "p99": _percentile_from_sorted(ordered, 0.99),
         "max": max(values) if values else None,
     }
 

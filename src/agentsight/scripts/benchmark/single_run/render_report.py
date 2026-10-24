@@ -98,6 +98,8 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
         data = item.get("data")
         if not isinstance(data, dict):
             continue
+        if metric == "http_req_duration" and latency["benchmark_latency"]:
+            continue
         value = numeric(data.get("value"))
         if metric == "benchmark_requests" and value is not None:
             result["requests"] += int(value)
@@ -107,10 +109,10 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
             result["timeouts"] += int(value)
         elif metric in LOAD_METRICS and value is not None:
             latency[metric].append(value)
+            if metric == "benchmark_latency":
+                latency["http_req_duration"].clear()
 
-    chosen = (
-        "benchmark_latency" if latency["benchmark_latency"] else "http_req_duration"
-    )
+    chosen = "benchmark_latency" if latency["benchmark_latency"] else "http_req_duration"
     result["latency_metric"] = chosen
     result["latency_label"] = LOAD_METRICS[chosen]
     result["latency"] = stats(latency[chosen])
