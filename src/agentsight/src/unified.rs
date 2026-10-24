@@ -618,6 +618,12 @@ impl AgentSight {
                 result.pid,
                 agent_name.as_deref().unwrap_or("unknown"),
             );
+            // Best-effort attach for processes without a recognized agent name:
+            // the first TLS connection may arrive before a later connection
+            // scan identifies the agent.
+            if agent_name.is_none() {
+                Self::best_effort_attach(|| probes.attach_process(result.pid as i32));
+            }
         }
         if !conn_results.is_empty() {
             log::info!(
@@ -818,6 +824,8 @@ impl AgentSight {
         for result in &conn_results {
             if let Some(agent_name) = Self::conn_scan_agent_name(&scanner, result.pid) {
                 Self::register_resource_targets(&resource_targets, result.pid, &agent_name);
+            } else {
+                Self::best_effort_attach(|| probes.attach_process(result.pid as i32));
             }
         }
 
@@ -1134,6 +1142,20 @@ impl AgentSight {
         Self::attach_process_internal(&mut self.probes, pid, agent_name);
     }
 
+    /// Attach SSL probes without treating a failure as fatal.
+    ///
+    /// `Probes::attach_process` already logs the degrade path and registers the
+    /// pid for global uprobe coverage, so callers only need to ignore the
+    /// result.  Taking a closure keeps this error-swallowing path unit-testable
+    /// without constructing eBPF probes.
+    #[inline]
+    pub(crate) fn best_effort_attach<F>(attach: F)
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let _ = attach();
+    }
+
     fn register_resource_targets(
         targets: &Arc<RwLock<HashMap<u32, String>>>,
         pid: u32,
@@ -1385,9 +1407,11 @@ impl AgentSight {
                 );
                 if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
                     log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
-                } else if let Some(agent_name) =
-                    Self::conn_scan_agent_name(&self.scanner, dns_event.pid)
-                {
+                }
+                // Resolve/register the agent name regardless of the attach
+                // result so the resource target is recorded even when the
+                // uprobe attach degrades.
+                if let Some(agent_name) = Self::conn_scan_agent_name(&self.scanner, dns_event.pid) {
                     self.pid_agent_name_cache
                         .put(dns_event.pid, agent_name.clone());
                     if let Ok(mut targets) = self.resource_targets.write() {
@@ -1468,6 +1492,10 @@ impl AgentSight {
                     let agent_name = agent.agent_info.name.clone();
                     self.pid_agent_name_cache.put(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
+                } else {
+                    // Unknown process: attach best-effort so a first TLS
+                    // connection is captured before any scan classifies it.
+                    Self::best_effort_attach(|| self.probes.attach_process(*pid as i32));
                 }
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
@@ -5044,5 +5072,32 @@ mod tests {
                 "descendant registration must be opt-in; {name:?} is not opted in"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod best_effort_attach_tests {
+    use super::*;
+
+    #[test]
+    fn best_effort_attach_swallows_failures() {
+        // A failing attach must not propagate: callers rely on the
+        // warn-log-and-continue contract from `Probes::attach_process`.
+        AgentSight::best_effort_attach(|| Err(anyhow::anyhow!("attach failed")));
+    }
+
+    #[test]
+    fn best_effort_attach_accepts_success() {
+        AgentSight::best_effort_attach(|| Ok(()));
+    }
+
+    #[test]
+    fn best_effort_attach_runs_the_closure_once() {
+        let mut calls = 0;
+        AgentSight::best_effort_attach(|| {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(calls, 1);
     }
 }
