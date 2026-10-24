@@ -133,7 +133,10 @@ def _safe_int(value: object) -> int:
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str) and value.strip():
-        return int(value)
+        try:
+            return int(value)
+        except ValueError:
+            return 0
     return 0
 
 
