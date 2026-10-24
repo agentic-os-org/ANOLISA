@@ -8,4 +8,5 @@ desc_zh: >-
 regex: |-
   \bGIT_SSL_NO_VERIFY\s*=\s*(true|1)\b
   |\bgit\b[^;|&\n]*-c[^;|&\n]*http\.sslVerify\s*=\s*false
+  |\bgit\b[^;|&\n]*\bconfig\b[^;|&\n]*http\.sslVerify\s+false\b
 severity: warn
