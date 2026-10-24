@@ -134,6 +134,22 @@ impl PreparedLaunch for Prepared {
         context
             .files
             .write("bridge.mjs", include_bytes!("../../native/pi/bridge.mjs"))?;
+        for (name, bytes) in [
+            (
+                "transport.mjs",
+                include_bytes!("../../native/pi/transport.mjs").as_slice(),
+            ),
+            (
+                "scope.mjs",
+                include_bytes!("../../native/pi/scope.mjs").as_slice(),
+            ),
+            (
+                "resident.mjs",
+                include_bytes!("../../native/pi/resident.mjs").as_slice(),
+            ),
+        ] {
+            context.files.write(name, bytes)?;
+        }
         let mut command = self.input.command.clone();
         command.args = std::iter::once(entrypoint.into_os_string())
             .chain(std::iter::once(self.application.clone().into_os_string()))

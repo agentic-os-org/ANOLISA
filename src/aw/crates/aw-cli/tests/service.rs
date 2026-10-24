@@ -15,6 +15,9 @@ mod policy;
 #[path = "service/scopes.rs"]
 mod scopes;
 
+#[path = "service/sdk_scopes.rs"]
+mod sdk_scopes;
+
 use aw_service::{Client, Operation, Request, Server, VERSION};
 use common::{
     audit, close, event, invoke, open, second_step, Fixture, Running, PRIVATE_MARKER, TIMEOUT,

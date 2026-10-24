@@ -199,3 +199,5 @@ Reloadable Qoder SDK Queries reuse the stable dispatcher and service policy gate
 The Adapter owns message admission and native queue/close completion; the CLI
 transports lifecycle frames through the existing bridge RPC. See the
 [policy reload contract](runtime/policy-reload.md#qoder-sdk-request-admission).
+
+[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.

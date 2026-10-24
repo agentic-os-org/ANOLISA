@@ -2,6 +2,9 @@
 
 [English](../../en/adapters/pi-adapter.md)
 
+显式常驻模式见[常驻 SDK 生命周期](resident-sdk.md)。
+下文任务 worker 模式保留原有生命周期与失败策略。
+
 Pi Adapter 支持公开的 Coding Agent/Core SDK
 `@earendil-works/pi-coding-agent` 和 `@earendil-works/pi-agent-core` 0.84.2，
 使用 Linux 与 Node.js >=22.19.0。入口为 `sdk`：AW 管理的前台 worker 导入应用

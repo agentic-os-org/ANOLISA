@@ -64,3 +64,5 @@ For install and daily use, see the [user guide](../../../../../docs/user-guide/e
 
 [Qoder SDK worker integration](../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
 uses per-Query registration with the existing Adapter and service contracts.
+
+[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.

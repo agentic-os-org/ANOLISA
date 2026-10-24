@@ -220,3 +220,5 @@ Configuration chooses observation or blocking when the rule matches. `on_error` 
 failures; safety checks typically use `block`. Follow the
 [boolean rule tutorial](../../../developer-guide/en/aw/integration.md) to prepare a script and verify
 both allowed and blocked calls.
+
+Resident Pi/Claude targets retain this configuration format. Select the resident entrypoint and public factory described in the [SDK worker reference](../../../developer-guide/en/aw/native-agents.md#resident-pi-and-claude-sdk-hosts).

@@ -92,6 +92,9 @@ enum Command {
     /// Internal reloadable native lifecycle protocol
     #[command(hide = true)]
     Bridge(Bridge),
+    /// Internal resident SDK task lifecycle protocol
+    #[command(hide = true)]
+    Scope(Scope),
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -260,10 +263,24 @@ struct Hook {
     close_event: Option<String>,
 }
 
+#[derive(Args, Debug, PartialEq)]
+struct Scope {
+    #[command(flatten)]
+    bridge: Bridge,
+    #[arg(long, value_parser = ["open", "acknowledge", "close", "invoke"])]
+    action: String,
+    #[arg(long)]
+    event: Option<String>,
+    #[arg(long)]
+    step: Option<String>,
+    #[arg(long)]
+    on_error: Option<String>,
+}
+
 pub(crate) fn run(arguments: Vec<String>) -> crate::cli::Result<crate::cli::Exit> {
     if let Some(protocol) = arguments
         .first()
-        .filter(|name| matches!(name.as_str(), "hook" | "bridge"))
+        .filter(|name| matches!(name.as_str(), "hook" | "bridge" | "scope"))
     {
         // Native callbacks have fail-closed replies and exit codes even for
         // malformed arguments. Keep their exact parser and protocol boundary.

@@ -161,3 +161,5 @@ Qoder CLI 和 QwenPaw App/API 各自通过临时容器中的真实 sec-core 验�
 本地确定性模型。完整验收边界见 [CI 看护](CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
 
 - [开发环境和测试](CONTRIBUTING_zh.md)
+
+[Pi / Claude 常驻宿主](docs/design/zh/adapters/resident-sdk.md) 使用一份配置和不同 `--agent`，按任务绑定并严格处理回调失败。

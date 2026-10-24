@@ -462,6 +462,14 @@
     "sdk-scope-ack-audit-failure": {
       "target": "aw-service/lib/aw_service",
       "test": "runtime::scopes::tests::failed_acknowledgement_audit_cancels_committed_task"
+    },
+    "sdk-scope-transport": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles"
+    },
+    "sdk-scope-expired-close": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::expired_sdk_handoff_can_close_without_reviving_callbacks"
     }
   },
   "agents": {
@@ -516,7 +524,9 @@
       },
       "lifecycle": [
         "claude-sdk-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close"
       ],
       "security": [
         "security-retry"
@@ -606,7 +616,9 @@
       },
       "lifecycle": [
         "pi-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close"
       ],
       "security": [
         "security-retry"

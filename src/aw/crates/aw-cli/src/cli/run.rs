@@ -171,6 +171,15 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             Err(error) => return interrupted().map(Ok).unwrap_or_else(|| Err(error.into())),
         };
         instance = Some(binding.instance_id.clone());
+        if matches!(name, "pi" | "claude-sdk") {
+            service.client.call(
+                Operation::OwnInstance {
+                    instance_id: binding.instance_id.clone(),
+                    pid: std::process::id(),
+                },
+                Instant::now() + Duration::from_secs(2),
+            )?;
+        }
         let reloadable = args.flags.contains_key("--reloadable");
         if reloadable {
             service.client.call(
