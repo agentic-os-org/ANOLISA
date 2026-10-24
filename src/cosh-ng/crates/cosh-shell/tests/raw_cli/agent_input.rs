@@ -563,7 +563,11 @@ fn raw_cli_shell_only_keeps_slash_bearing_han_prompt_shell_owned() {
 #[test]
 fn raw_cli_routes_path_prompt_after_shell_cwd_change() {
     let prompt = "打开./nonexistent-cosh-2913/SKILL.md";
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let request = format!("{prompt}\n");
+    let received = format!("Received shell prompt request: {prompt}");
+    // Build the completion marker in the shell so echoed input cannot satisfy
+    // it, then wait for the new prompt before testing path-prompt routing.
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -572,11 +576,15 @@ fn raw_cli_routes_path_prompt_after_shell_cwd_change() {
             ("LANG", "C.UTF-8"),
             ("LC_ALL", "C.UTF-8"),
         ],
-        vec![
-            (b"cd /tmp\n".to_vec(), Duration::from_millis(300)),
-            (prompt.as_bytes().to_vec(), Duration::from_millis(200)),
-            (b"\n".to_vec(), Duration::from_millis(50)),
-            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            (
+                "cosh-osc$",
+                b"cd /tmp && printf 'cwd-%s-ready\\n' changed\n",
+            ),
+            ("cwd-changed-ready", b""),
+            ("cosh-osc$", request.as_bytes()),
+            (&received, b"exit 0\n"),
         ],
     );
 
