@@ -297,8 +297,8 @@ When enabled, runner:
 | `--subset, -s` | `lite` | Dataset alias or HuggingFace dataset path |
 | `--split` | `test` | Dataset split |
 | `--output, -o` | `./output` | Output root; run artifacts go under `run/` |
-| `--timeout` | `1200` | Agent timeout per instance, in seconds |
-| `--step-limit` | `0` | Max steps; `0` means unlimited. Currently maps to a cosh CLI turn limit |
+| `--timeout` | `1200` | Positive agent timeout per instance, in seconds |
+| `--step-limit` | `0` | Nonnegative max steps; `0` means unlimited. Currently maps to a cosh CLI turn limit |
 | `--slice` | none | Instance slice, for example `0:10`, `10:`, `:5` |
 | `--filter` | none | Regex filter for instance IDs |
 | `--instance-id, -i` | none | Instance ID, or comma-separated instance IDs |
