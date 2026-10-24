@@ -71,6 +71,10 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 以下所有命令均假设使用 `uv run`（项目 venv 自动解析）。
 
+执行限制参数（`--timeout`、`--parallel`、`--chunk-size` 和 `--trials`）必须
+是正整数。`--grade-parallel` 可设为零以自动选择 worker 数，或设为正整数。
+无效限制会在评测环境初始化前报错。
+
 > **除非已 export model/judge 环境变量，否则必须传 `--config`。** `run`/`batch` **不会**自动加载 `claw-eval/config.yaml`；请传 `--config claw-eval/config.yaml`（由 `scripts/configure_model.py` 写入），或 export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` 与 `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`。
 
 ```bash
