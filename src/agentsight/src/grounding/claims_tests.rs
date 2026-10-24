@@ -275,6 +275,82 @@ fn thousands_separator_does_not_spawn_fragment_claims() {
 }
 
 #[test]
+fn a_bracketed_comma_list_keeps_each_value() {
+    // Inside a list the commas are structural. Splicing them as thousands
+    // separators invents one number ("200404500") that no evidence supports,
+    // and hides the three values the agent actually stated.
+    let numbers = texts_of(
+        &extract_claims("status codes [200,404,500]"),
+        ClaimClass::Number,
+    );
+    assert_eq!(
+        numbers,
+        vec!["200", "404", "500"],
+        "a bracketed list is not one grouped number"
+    );
+}
+
+#[test]
+fn a_spaced_bracketed_comma_list_keeps_each_value() {
+    // Prose usually puts a space after each comma, which splits the list into
+    // tokens `[200,`, `404,`, `500]`. The first token trims to a plain `200`
+    // and used to lose its claim because the raw token still carried a bracket.
+    let numbers = texts_of(
+        &extract_claims("status codes [200, 404, 500]"),
+        ClaimClass::Number,
+    );
+    assert_eq!(
+        numbers,
+        vec!["200", "404", "500"],
+        "a spaced bracketed list must keep every value"
+    );
+}
+
+#[test]
+fn a_spaced_bracketed_date_list_keeps_each_value() {
+    let dates = texts_of(
+        &extract_claims("window [2024-01-01, 2024-01-02]"),
+        ClaimClass::Date,
+    );
+    assert_eq!(
+        dates,
+        vec!["2024-01-01", "2024-01-02"],
+        "the first date of a spaced list must survive trimming"
+    );
+}
+
+#[test]
+fn a_grouped_number_glued_to_a_field_is_not_a_list() {
+    // The brackets do not wrap the token, so this is digit grouping, not a
+    // list; the whole value must stay one claim.
+    let claims = extract_claims("count={244,618}");
+    let numbers: Vec<f64> = claims
+        .iter()
+        .filter(|c| c.class == ClaimClass::Number)
+        .filter_map(|c| c.value)
+        .collect();
+    assert!(
+        numbers.contains(&244_618.0) && !numbers.contains(&244.0),
+        "a field-glued grouped number must stay whole: {claims:?}"
+    );
+}
+
+#[test]
+fn a_bracketed_grouped_number_is_read_as_a_list() {
+    // `(244,781)` and `[1,234,567]` are textually indistinguishable from a
+    // bracketed list: both spell a valid digit grouping. This module prefers
+    // the list reading so a real list is never merged into a fabricated
+    // number; the cost is that a bracket-wrapped grouped value loses its
+    // whole-value claim. Pinned here so the trade-off stays explicit.
+    let numbers = texts_of(&extract_claims("latency (244,781) ms"), ClaimClass::Number);
+    assert_eq!(
+        numbers,
+        vec!["244", "781"],
+        "ambiguous bracket-wrapped digits keep the list reading"
+    );
+}
+
+#[test]
 fn json_glued_value_is_still_recovered() {
     let numbers = texts_of(
         &extract_claims("\\\"stargazers_count\\\": 244618,\\n"),

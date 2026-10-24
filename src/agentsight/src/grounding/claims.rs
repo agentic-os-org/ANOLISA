@@ -40,6 +40,38 @@ const STRUCTURAL_SEPARATORS: &[char] = &[
     '）', '「', '」', '【', '】',
 ];
 
+/// Bracket pairs that can enclose a comma list rather than digit grouping.
+///
+/// `[200,404,500]` states three values, while `244,781` states one. A list must
+/// be enclosed by a matching pair on the *raw* token, before edge trimming
+/// removes the brackets.
+const LIST_BRACKETS: &[(char, char)] = &[
+    ('[', ']'),
+    ('{', '}'),
+    ('(', ')'),
+    ('【', '】'),
+    ('（', '）'),
+    ('「', '」'),
+];
+
+/// Whether a raw token is a bracket-enclosed comma list.
+///
+/// Both conditions matter. The brackets must wrap the whole token, and the
+/// commas must survive edge trimming. The first item of a whitespace-separated
+/// list is a token like `[200,`: trimming leaves `200`, which carries no comma
+/// and must still be classified as a plain value. Requiring the pair also keeps
+/// a grouped number glued to a field (`count={244,618}`) on the digit-splicing
+/// path instead of shattering it into `244` and `618`.
+fn is_bracketed_list(raw: &str, trimmed: &str) -> bool {
+    let (Some(first), Some(last)) = (raw.chars().next(), raw.chars().last()) else {
+        return false;
+    };
+    trimmed.contains([',', '，'])
+        && LIST_BRACKETS
+            .iter()
+            .any(|&(open, close)| first == open && last == close)
+}
+
 /// What kind of fact a claim asserts. The class decides how strict grounding is
 /// and which tool could have supplied it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -171,6 +203,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
     claims.extend(extract_urls(text));
     claims.extend(extract_quoted(text));
     for word in text.split_whitespace() {
+        let raw_word = word;
         // Strip decoration, not content. Agents habitually wrap paths and
         // identifiers in markdown (`/var/log`, **error**), and a claim carrying
         // those marks would never match the plain form sitting in the evidence —
@@ -211,7 +244,16 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         if word.is_empty() {
             continue;
         }
-        let whole_word_claim = classify_word(word);
+        // A bracketed comma list states separate values. Treating its commas
+        // as thousands separators would merge `[200,404,500]` into the
+        // fabricated number 200404500. A partially trimmed token such as
+        // `[200,` is a list *item*, not a list, so it still classifies.
+        let bracketed_list = is_bracketed_list(raw_word, word);
+        let whole_word_claim = if bracketed_list {
+            None
+        } else {
+            classify_word(word)
+        };
         let word_stands_alone = whole_word_claim.is_some();
         if let Some(claim) = whole_word_claim {
             claims.push(claim);
@@ -236,7 +278,11 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
             && !word.starts_with("https://")
             && word.contains(STRUCTURAL_SEPARATORS)
         {
-            let degrouped = splice_digit_groups(word);
+            let degrouped = if bracketed_list {
+                word.to_string()
+            } else {
+                splice_digit_groups(word)
+            };
             for segment in degrouped.split(STRUCTURAL_SEPARATORS) {
                 if let Some(claim) = classify_word(segment) {
                     claims.push(claim);
