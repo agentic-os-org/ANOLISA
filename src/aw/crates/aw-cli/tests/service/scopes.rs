@@ -272,7 +272,9 @@ fn disconnected_scope_preparation_releases_its_reservation() {
 #[test]
 fn scope_capacity_and_invalid_owner_fail_without_extra_bindings() {
     let fixture = Fixture::new();
-    let service = Running::start(&fixture, &fixture.document());
+    let mut document = fixture.document();
+    document["spec"]["daemon"]["limits"] = json!({"bindings": 24});
+    let service = Running::start(&fixture, &document);
     let parent = fixture.bind(&service.client);
     own(&service, &parent);
     for operation in [
@@ -297,7 +299,7 @@ fn scope_capacity_and_invalid_owner_fail_without_extra_bindings() {
         .client
         .call(invalid, Instant::now() + TIMEOUT)
         .is_err());
-    for _ in 0..15 {
+    for _ in 0..23 {
         scope(&fixture, &service, &parent, "capacity");
     }
     assert!(service

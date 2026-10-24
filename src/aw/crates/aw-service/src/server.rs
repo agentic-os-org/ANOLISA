@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_CONNECTIONS: usize = 64;
+const CONTROL_RESERVE: usize = 16;
 
 /// A bootstrap configuration and per-instance policies on a private same-user socket.
 /// Binding preparation executes trusted local commands with an explicit context.
@@ -114,13 +114,15 @@ impl Server {
                 }
                 match self.endpoint.listener().accept() {
                     Ok((stream, _)) => {
-                        if workers.len() >= MAX_CONNECTIONS {
+                        if workers.len() >= self.runtime.limits.connections + CONTROL_RESERVE {
+                            self.runtime.overload("connection_limit");
                             continue;
                         }
                         let Ok(peer) = endpoint::peer_credentials(&stream) else {
                             continue;
                         };
                         let runtime = Arc::clone(&self.runtime);
+                        runtime.resources.connections.fetch_add(1, Ordering::AcqRel);
                         workers.push(
                             thread::Builder::new()
                                 .name("aw-rpc".into())
@@ -158,6 +160,13 @@ impl Server {
 }
 
 fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) {
+    struct Connection(Arc<Runtime>);
+    impl Drop for Connection {
+        fn drop(&mut self) {
+            self.0.resources.connections.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    let _connection = Connection(Arc::clone(&runtime));
     // A legal request may fill the whole eight MiB frame; every received byte
     // resets the initial stall budget so only idle connections are shed,
     // while the total window still matches the protocol's call deadline cap.
@@ -176,6 +185,20 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) 
         Operation::Bind { .. } | Operation::OpenScope { .. }
     );
     let result = (|| {
+        if runtime.resources.connections.load(Ordering::Acquire) > runtime.limits.connections
+            && !matches!(
+                &request.operation,
+                Operation::Status
+                    | Operation::Stop
+                    | Operation::ReleaseInstance { .. }
+                    | Operation::Unbind { .. }
+                    | Operation::CloseEvent { .. }
+                    | Operation::CloseHookEvent { .. }
+                    | Operation::FinishInvocation { .. }
+            )
+        {
+            return Err(runtime.overload("connection_limit"));
+        }
         if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
             return prepare_connected(&stream, &runtime, request, expires, peer);
         }

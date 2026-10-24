@@ -1,5 +1,6 @@
 /** Compose AW with Pi's installed callbacks, preserving native permission and result semantics. */
 import { run } from "./transport.mjs";
+import { modelProducer } from "./producer.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
@@ -132,6 +133,7 @@ export function installSessionBridge(session, scope = null) {
   const previousBefore = agent.beforeToolCall;
   const previousAfter = agent.afterToolCall;
   const active = new Map();
+  const producer = scope ? modelProducer(scope) : null;
   const beforeRoutes = config.hooks.filter(
     (hook) => hook.event === "tool.before",
   );
@@ -171,11 +173,12 @@ export function installSessionBridge(session, scope = null) {
   };
   let before = async function (context, signal) {
     config.scope?.check();
+    producer?.claim(context);
     const original = await previousBefore?.call(agent, context, signal);
     if (original?.block) return original;
     const call = identifier(context.toolCall.id, "tool call id");
     const identity = {
-      invocation_id: randomUUID(),
+      invocation_id: scope ? call : randomUUID(),
       session_id: identifier(
         session.sessionManager.getSessionId(),
         "session id",
@@ -188,26 +191,28 @@ export function installSessionBridge(session, scope = null) {
     };
     if (active.has(call))
       throw new Error("Duplicate in-flight Pi tool call id");
-    if (active.size >= 512)
+    if (active.size >= (config.scope?.invocationLimit ?? 512))
       throw new Error("AW Pi in-flight tool capacity exceeded");
+    if (config.scope)
+      await config.scope.register(identity.invocation_id, identity.tool_call.name, identity.tool_call.input);
     const denied = await evaluate(
       beforeRoutes,
       { ...identity, event: "tool.before" },
       signal,
     );
-    if (denied) return denied;
-    active.set(call, identity);
+    if (denied) {
+      if (config.scope) await config.scope.finish(identity.invocation_id);
+      return denied;
+    }
+    active.set(call, { identity, object: context.toolCall });
     return original;
   };
   let after = async function (context, signal) {
     config.scope?.check();
-    const original = await previousAfter?.call(agent, context, signal);
-    const result = { ...context.result };
-    for (const key of ["content", "details", "usage", "terminate"]) {
-      result[key] = original?.[key] ?? result[key];
-    }
-    const isError = original?.isError ?? context.isError;
-    const identity = active.get(context.toolCall.id);
+    const entry = active.get(context.toolCall.id);
+    const identity = entry?.identity;
+    if (config.scope && entry?.object !== context.toolCall)
+      throw new Error("AW rejected a stale Pi completion object");
     if (!identity && config.scope) {
       config.scope.failed = true;
       agent.abort();
@@ -217,8 +222,14 @@ export function installSessionBridge(session, scope = null) {
       process.stderr.write(
         "AW tool.after skipped: completed call lacks preparation identity\n",
       );
-      return original;
+      return await previousAfter?.call(agent, context, signal);
     }
+    const original = await previousAfter?.call(agent, context, signal);
+    const result = { ...context.result };
+    for (const key of ["content", "details", "usage", "terminate"]) {
+      result[key] = original?.[key] ?? result[key];
+    }
+    const isError = original?.isError ?? context.isError;
     try {
       const directive = await evaluate(
         afterRoutes,
@@ -241,6 +252,7 @@ export function installSessionBridge(session, scope = null) {
         };
       }
     } finally {
+      if (config.scope) await config.scope.finish(identity.invocation_id);
       active.delete(context.toolCall.id);
     }
     return original;
@@ -276,13 +288,22 @@ export function installSessionBridge(session, scope = null) {
   agent[installed] = true;
   // Immediate abort and native errors may skip afterToolCall; the completion event still closes state.
   const unsubscribe = agent.subscribe((event) => {
-    if (event.type === "tool_execution_end") active.delete(event.toolCallId);
+    if (event.type === "tool_execution_end") {
+      active.delete(event.toolCallId);
+      producer?.retire(event.toolCallId);
+    }
   });
   return {
+    model: (stream) => producer.wrap(stream),
     ready() {
       if (agent.beforeToolCall !== before || agent.afterToolCall !== after)
         throw new Error("Pi callbacks replaced before readiness");
       publishReady(config);
+    },
+    async drain() {
+      if (config.scope) await config.scope.drain();
+      active.clear();
+      producer?.clear();
     },
     dispose() {
       managed = false;

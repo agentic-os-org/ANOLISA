@@ -37,6 +37,16 @@ struct Invocation {
     native_input: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Registration {
+    scope: Scope,
+    sequence: u64,
+    call_id: String,
+    tool_name: Option<String>,
+    input: Option<serde_json::Value>,
+}
+
 pub(super) fn run(args: &Arguments) -> Result<Exit> {
     args.check(
         &[
@@ -112,7 +122,12 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
         std::io::stdout().flush()?;
         return Ok(Exit::Code(0));
     }
-    let (scope, native) = if action == "invoke" {
+    let mut registration = None;
+    let (scope, native) = if matches!(action, "register" | "finish") {
+        let value: Registration = serde_json::from_slice(&input)?;
+        registration = Some((value.sequence, value.call_id, value.tool_name, value.input));
+        (value.scope, None)
+    } else if action == "invoke" {
         let value: Invocation = serde_json::from_slice(&input)?;
         (value.scope, Some(value.native_input.into_bytes()))
     } else {
@@ -130,6 +145,37 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
         return Err("SDK task handle does not belong to this host".into());
     }
     match action {
+        "enable" => {
+            let result = client.call(
+                Operation::EnableInvocations {
+                    instance_id: scope.binding.instance_id,
+                },
+                deadline,
+            )?;
+            serde_json::to_writer(std::io::stdout().lock(), &result)?;
+        }
+        "register" | "finish" => {
+            let (sequence, call_id, tool_name, input) = registration.ok_or("missing invocation")?;
+            let operation = if action == "register" {
+                Operation::RegisterInvocation {
+                    instance_id: scope.binding.instance_id,
+                    sequence,
+                    call_id,
+                    tool_name: tool_name.ok_or("missing tool name")?,
+                    input: input.ok_or("missing tool input")?,
+                }
+            } else {
+                if tool_name.is_some() || input.is_some() {
+                    return Err("unexpected finish input".into());
+                }
+                Operation::FinishInvocation {
+                    instance_id: scope.binding.instance_id,
+                    sequence,
+                    call_id,
+                }
+            };
+            client.call(operation, deadline)?;
+        }
         "acknowledge" => {
             client.call(
                 Operation::AcknowledgeScope {

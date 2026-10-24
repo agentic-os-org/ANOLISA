@@ -59,7 +59,7 @@ export async function runWorker(app, sdk, core, args) {
         throw new Error("Pi factory must return a fresh SDK session with the admitted cwd");
       if (poisoned) throw new Error("AW worker requires restart after failed task cleanup");
       const bridge = installSessionBridge(session, scope);
-      const stream = session.agent.streamFunction;
+      const stream = bridge.model(session.agent.streamFunction);
       if (typeof stream !== "function") throw new Error("Pi requires its public model stream function");
       // The SDK may schedule a final turn after abort; gate before any model transport.
       Object.defineProperty(session.agent, "streamFunction", {
@@ -73,7 +73,10 @@ export async function runWorker(app, sdk, core, args) {
         if (prompting) throw new Error("One AW Pi session permits one active prompt");
         prompting = true;
         try { const value = await prompt(...arguments_); scope.check(); return value; }
-        finally { prompting = false; }
+        finally {
+          try { await bridge.drain(); }
+          finally { prompting = false; }
+        }
       }, configurable: false, writable: false });
       active.set(session, { scope, bridge, closing: null });
       return { ...result, close: () => closeSession(session) };

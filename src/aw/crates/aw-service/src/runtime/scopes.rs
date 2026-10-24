@@ -1,6 +1,6 @@
 //! Task bindings retain replay fences until close; the resident host retains no task history.
 
-use super::{process::Process, Instance, Runtime, MAX_BINDINGS};
+use super::{process::Process, Instance, Runtime};
 use crate::{rejected, Binding, Error, Result};
 use aw_host::ProcessContext;
 use serde_json::{json, Value};
@@ -160,8 +160,8 @@ impl Runtime {
                 .filter(|owner| owner.parent.is_none() && !owner.cancelled.load(Ordering::Acquire))
                 .ok_or_else(|| rejected("scope_parent_unowned"))?;
             owner.process.corroborate(pid)?;
-            if instances.len() >= MAX_BINDINGS {
-                return Err(rejected("binding_limit"));
+            if instances.len() >= self.limits.bindings {
+                return Err(self.overload("binding_limit"));
             }
             let policy = (
                 instance.bytes.clone(),

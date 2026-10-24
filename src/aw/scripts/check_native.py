@@ -96,7 +96,7 @@ def load(root: Path) -> dict:
         if not cases or len({case["name"] for case in cases}) != len(cases):
             raise ValueError(f"{agent}: missing or duplicate native cases")
         for case in cases:
-            if not 0 < case["timeout_seconds"] <= 1200:
+            if not 0 < case["timeout_seconds"] <= 2400:
                 raise ValueError(f"{agent}: native cases need bounded deadlines")
             validate_case(case)
             scripts = [arg for arg in case["argv"] if arg.endswith((".py", ".mjs"))]

@@ -190,3 +190,30 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 按[布尔规则教程](../../../developer-guide/zh/aw/integration.md)准备脚本并验证允许和阻断两种情况。
 
 Pi / Claude 常驻目标沿用同一配置格式，按 [SDK worker 说明](../../../developer-guide/zh/aw/native-agents.md#pi-和-claude-sdk-常驻宿主) 选择常驻入口及公共工厂。
+
+## 服务并发预算
+
+Pi/Claude 常驻客户端跨 execution 保留会话，已完成 Hook 状态会回收。资源准入独立于历史调用数：
+
+```yaml
+spec:
+  daemon:
+    limits:
+      bindings: 64
+      events: 128
+      calls: 64
+      connections: 128
+      invocations_per_binding: 256
+```
+
+以上为默认值，省略字段保留默认，各字段接受 1..4096 整数。bindings 包含宿主及准备中、空闲、
+排空中的客户端；events 为 live Hook event；calls 为活动 Provider 调用；connections 为普通
+服务连接；invocations_per_binding 为单个常驻客户端活动的模型工具调用数。额外保留 16 条
+控制/清理连接。过载拒绝新准入，已完成工作释放容量。Pi/Claude 常驻模式没有累计工具次数配额，
+旧入口保留原累计关联限制。
+
+aw status --config aw.yaml 的 resources.limits、resources.usage、peak_invocations_per_binding、
+admission_rejections 和 rejection_reasons 展示容量、用量、峰值与拒绝原因。根据实际负载选择
+并发数，审计磁盘和 SDK 历史另设保留策略。修改 daemon limits 后先排空客户端再重启服务。
+CLI/daemon 升级或回退同样先排空、停止后一起更换：wire v1alpha6 拒绝旧活动会话，配置和 Provider
+协议版本保持不变。

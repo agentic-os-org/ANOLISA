@@ -969,7 +969,7 @@ Worker 1.1.74 的 `UpdateGoal` 只能完成或
 若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
 丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
 
-长寿命 SDK 实例同样受现有服务容量限制：每实例最多保留 1024 条 Hook 关联记录，
+上文 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
 request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
 记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
 并发提交量；策略更新不会清空关联历史。
@@ -1002,8 +1002,9 @@ finally:
     await client.disconnect()
 ```
 
-每次 query 使用新客户端，通过 resume/session-store 选项保留业务会话历史。多个客户端可以
-并发，分别使用自己的 cwd/env。进程内 MCP 同时从 aw_claude 导入 create_sdk_mcp_server，每任务创建新 server，
+每轮响应和回调排空后可在同一客户端继续 query，保留会话；resume/session-store 继续可用。
+并发工作使用独立客户端，分别使用自己的 cwd/env。每次 query 接受字符串或单消息的有限 AsyncIterable，多消息输入在发送前被拒绝；连续轮次逐次 query。
+进程内 MCP 同时从 aw_claude 导入 create_sdk_mcp_server，每客户端创建新 server，
 保留 SDK tool 定义和业务闭包。[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md) 说明成功单文本替换、可靠错误状态及明确关联。
 
 Pi 保留已有 SDK session 工厂，增加常驻入口：
@@ -1027,5 +1028,5 @@ serveRequests 为业务服务，在工厂返回前配置业务回调。任务完
 sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要明确的安全语义。常驻模式
 在回调错误时停止任务，包括 on_error: report；正常策略拒绝沿用原生语义。Claude 中断无法
 确认时会终止 AW 的自有前台进程组，部署需配置监督器重启。发送退出信号前先排空请求，
-外层 launcher 在两秒后强制回收。Schema/BeforeModel、Retrieve 的后续接点和授权依赖见
+外层 launcher 在两秒后强制回收。Schema/BeforeModel、Retrieve 的请求/效果准入和授权依赖见
 [常驻合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/resident-sdk.md)。

@@ -34,7 +34,7 @@ def main():
     parser.add_argument("--agent", choices=["pi", "claude"], required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--npm", type=Path)
-    parser.add_argument("--scenario", choices=["lifecycle", "stop-failure", "cancel", "startup", "mcp", "mcp-failure"], default="lifecycle")
+    parser.add_argument("--scenario", choices=["lifecycle", "stop-failure", "cancel", "startup", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial"], default="lifecycle")
     parser.add_argument("--tokenless", type=Path)
     parser.add_argument("--tokenless-provider", type=Path)
     args = parser.parse_args()
@@ -45,9 +45,11 @@ def main():
     if args.agent == "pi":
         assert args.npm is not None
         application = args.npm.resolve() / "resident.mjs"
-        shutil.copyfile(fixture / "pi.mjs", application)
         for name in ("pi_startup.mjs", "pi_cancel.mjs"):
             shutil.copyfile(fixture / name, application.parent / name)
+        shutil.copyfile(fixture / ("long_pi.mjs" if args.scenario == "long" else "pi.mjs"), application)
+        if args.scenario == "long":
+            shutil.copyfile(fixture / "pi.mjs", application.with_name("resident-fixture.mjs"))
     # AF_UNIX uses an OS path limit independent of the evidence directory length.
     state_parent = Path(tempfile.mkdtemp(prefix="aw-resident-"))
     config = output / "aw.json"
@@ -70,12 +72,12 @@ def main():
             }]} for event in ("tool.before", "tool.after")},
         },
     }
-    if args.scenario in {"mcp", "mcp-failure"}:
-        assert args.agent == "claude" and args.tokenless and args.tokenless_provider
-        document["spec"]["agents"]["claude"]["argv"][-1] = str(fixture / "mcp.py")
+    if args.scenario in {"mcp", "mcp-failure", "long"}:
+        assert args.tokenless and args.tokenless_provider
+        document["spec"]["agents"]["claude"]["argv"][-1] = str(fixture / ("long_claude.py" if args.scenario == "long" else "mcp.py"))
         document["spec"]["providers"]["tokenless"] = {
             "protocol": "aw-provider/v1alpha1", "transport": {"type": "stdio", "location": "agent",
-            "argv": [str(args.tokenless_provider.resolve()), "--cli", str(args.tokenless.resolve()) if args.scenario == "mcp" else "/bin/false", "--data-dir", str(state_parent / "tokenless")]},
+            "argv": [str(args.tokenless_provider.resolve()), "--cli", str(args.tokenless.resolve()) if args.scenario != "mcp-failure" else "/bin/false", "--data-dir", str(state_parent / "tokenless")]},
             "timeout_ms": 2000, "max_output_bytes": 1048576, "config": {"version": 1}}
         for event, operation, effects in (("tool.before", "pre_tool", ["block"]), ("tool.after", "post_tool", ["replace_result"])):
             document["spec"]["events"][event]["steps"].append({"id": "tokenless", "provider": "tokenless",
@@ -84,9 +86,10 @@ def main():
     env = {**os.environ, "AW_TEST_ROOT": str(output), "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0", "AW_TEST_SCENARIO": args.scenario, "PYTHONDONTWRITEBYTECODE": "1",
            "CLAUDE_CONFIG_DIR": str(output / "host-profile"), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
            "AW_TEST_CLAUDE_FIXTURE": str(fixture.parents[2] / "crates/aw-cli/tests/fixtures/claude-sdk/native_worker.py")}
+    timeout = 1800 if args.scenario == "long" else 600
     command = [str(aw), "run", "--config", str(config), "--agent", args.agent]
     record = {"command": command, "cwd": str(output), "ports": "per-task endpoint.json",
-              "timeout_seconds": 600, "state": str(state_parent), "pid": None,
+              "timeout_seconds": timeout, "state": str(state_parent), "pid": None,
               "stop": [str(aw), "stop", "--config", str(config)]}
     (output / "process.json").write_text(json.dumps(record))
     process = None
@@ -96,14 +99,24 @@ def main():
             process = subprocess.Popen(command, cwd=output, env=env, stdout=stdout, stderr=stderr, start_new_session=True)
             record.update(pid=process.pid, stop_worker=f"kill -TERM -- -{process.pid}")
             (output / "process.json").write_text(json.dumps(record))
-            expected = -9 if args.scenario == "stop-failure" else 0
-            assert process.wait(timeout=600) == expected, (output / "stderr.log").read_text()[-6000:]
+            expected = -9 if args.scenario in {"stop-failure", "drain-timeout"} else 0
+            assert process.wait(timeout=timeout) == expected, (output / "stderr.log").read_text()[-6000:]
         for endpoint in output.glob("*/endpoint.json"):
             with socket.socket() as probe:
                 probe.settimeout(1)
                 assert probe.connect_ex(("127.0.0.1", json.loads(endpoint.read_text())["port"])) != 0
         for evidence in output.glob("*/sdk-process.json"):
-            assert_reaped(json.loads(evidence.read_text())["pid"])
+            detail = json.loads(evidence.read_text())
+            assert_reaped(detail["pid"])
+            if "relay_port" in detail:
+                with socket.socket() as probe:
+                    probe.settimeout(1)
+                    assert probe.connect_ex(("127.0.0.1", detail["relay_port"])) != 0
+        if args.scenario == "drain-timeout":
+            assert (output / "drain-timeout-barrier").exists()
+            assert not (output / "result.json").exists()
+            (output / "result.json").write_text(json.dumps({"tasks": 1, "passed": True,
+                "cases": ["undrained-callback-terminates-owned-group"]}))
         if args.scenario == "stop-failure":
             requests = json.loads((output / "0/requests.json").read_text())
             assert len([value for value in requests if "messages" in value]) == 1

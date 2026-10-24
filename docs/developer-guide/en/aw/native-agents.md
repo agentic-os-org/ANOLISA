@@ -1142,7 +1142,7 @@ application stops consuming, stop submitting and await `close()` or `return()`;
 these discard buffered output and await native cleanup. This mode does not
 provide backpressure for an indefinitely paused consumer.
 
-The existing service limits also apply to long-lived SDK instances: 1024 retained
+The Qoder SDK path described above retains 1024
 Hook correlation entries per instance, and 64 active claims per request/tool
 claim set. Completed request claims are released; Hook correlation entries are
 retained until instance release. These are not a count of supported lifetime
@@ -1178,10 +1178,13 @@ finally:
     await client.disconnect()
 ```
 
-Each query uses a fresh client. Resume/session-store options preserve application
-conversation history. Multiple clients can run concurrently with separate cwd/env.
+Sequential queries reuse a client after its response and callbacks drain; each
+client retains its conversation. Resume/session-store options remain available.
+Concurrent work uses independent clients with separate cwd/env.
+Each query accepts a string or a finite one-message AsyncIterable; multi-message
+input is rejected before dispatch. Submit successive turns with sequential queries.
 For in-process MCP tools, also import `create_sdk_mcp_server` from `aw_claude` and
-create a fresh server for each task. Keep SDK `tool` definitions and business closures.
+create a fresh server for each client. Keep SDK `tool` definitions and business closures.
 The [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md) covers single successful text replacement, reliable errors and explicit correlation.
 
 For Pi, export the existing SDK session factory and a resident host entrypoint:
@@ -1209,5 +1212,5 @@ callback errors even for `on_error: report`; policy denial remains a normal nati
 denial. A failed Claude interrupt terminates AW's owned foreground process group,
 so configure supervisor restart. Drain requests before sending termination: the
 outer launcher forces group cleanup after two seconds. Schema/BeforeModel and
-Retrieve require the later native seams and authorization work listed in the
+Retrieve require request/effect admission and authorization work listed in the
 [resident contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/resident-sdk.md).

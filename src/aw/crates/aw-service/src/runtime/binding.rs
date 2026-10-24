@@ -1,6 +1,6 @@
 //! Reserve an instance before Provider preparation and release failed reservations.
 
-use super::{Instance, Runtime, MAX_BINDINGS};
+use super::{Instance, Runtime};
 use crate::{rejected, Binding, Capabilities, Result};
 use aw_host::ProcessContext;
 use serde_json::{json, Value};
@@ -28,8 +28,8 @@ impl Runtime {
                 .instances
                 .lock()
                 .map_err(|_| rejected("state_poisoned"))?;
-            if instances.len() >= MAX_BINDINGS {
-                return Err(rejected("binding_limit"));
+            if instances.len() >= self.limits.bindings {
+                return Err(self.overload("binding_limit"));
             }
             instances.insert(instance_id.clone(), None);
         }
@@ -90,6 +90,7 @@ impl Instance {
             observation: None,
             hooks: Arc::new(Mutex::new(BTreeMap::new())),
             hook_open: Arc::new(Mutex::new(())),
+            invocations: Arc::new(Mutex::new(None)),
         }
     }
 }

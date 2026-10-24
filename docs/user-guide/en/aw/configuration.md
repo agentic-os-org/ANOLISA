@@ -222,3 +222,35 @@ failures; safety checks typically use `block`. Follow the
 both allowed and blocked calls.
 
 Resident Pi/Claude targets retain this configuration format. Select the resident entrypoint and public factory described in the [SDK worker reference](../../../developer-guide/en/aw/native-agents.md#resident-pi-and-claude-sdk-hosts).
+
+## Concurrent service budgets
+
+Resident Pi/Claude clients retain their conversation across executions and reclaim
+completed Hook state. Configure resource admission independently of historical calls:
+
+```yaml
+spec:
+  daemon:
+    limits:
+      bindings: 64
+      events: 128
+      calls: 64
+      connections: 128
+      invocations_per_binding: 256
+```
+
+These are defaults; omitted fields keep their default. Each accepts an integer
+from 1 through 4096. `bindings` includes hosts and preparing, idle or draining
+clients; `events` counts live Hook events, `calls` active Provider invocations,
+`connections` ordinary service connections, and `invocations_per_binding` active
+model-produced tool calls for one resident client. Sixteen additional connection
+slots serve control/cleanup requests. Overload rejects new admission; completed
+work returns capacity. Lifetime tool count has no configurable quota in resident
+Pi/Claude mode. Legacy entrypoints keep their retained-correlation limits.
+
+Use `aw status --config aw.yaml` to inspect `resources.limits`, `resources.usage`,
+`peak_invocations_per_binding`, `admission_rejections` and `rejection_reasons`.
+Select concurrency from actual load measurements; audit disk and SDK history need
+separate retention. Apply daemon limits by draining clients and restarting the
+service. Upgrade or roll back CLI/daemon together after drain and stop: wire
+v1alpha6 rejects older live sessions. Configuration/Provider versions are unchanged.
