@@ -12,7 +12,8 @@ import ssl
 import time
 from pathlib import Path
 
-from collect_metrics import read_status
+from collect_metrics import ProcessIdentity, read_process_identity, read_status
+
 
 def tls_socket(host: str, port: int, timeout: float) -> ssl.SSLSocket:
     """Open an unverified TLS socket to the local benchmark server."""
@@ -140,9 +141,14 @@ def health_check(host: str, port: int, timeout: float) -> bool:
     return " 200 " in exchange(host, port, request, timeout)
 
 
-def process_alive(pid: int | None) -> bool | None:
+def process_alive(pid: int | None, identity: ProcessIdentity | None = None) -> bool | None:
     """Return process liveness, or None when no process is being watched."""
-    return bool(read_status(pid)) if pid else None
+    if not pid:
+        return None
+    if identity is not None and read_process_identity(pid) != identity:
+        return False
+    alive = bool(read_status(pid))
+    return alive and (identity is None or read_process_identity(pid) == identity)
 
 
 def inject(
@@ -155,7 +161,12 @@ def inject(
 ) -> dict[str, object]:
     """Run every fault case and preserve per-case outcomes."""
     started = time.time()
-    before = process_alive(watch_pid)
+    identity = read_process_identity(watch_pid) if watch_pid else None
+    before = (
+        process_alive(watch_pid, identity)
+        if identity is not None
+        else (False if watch_pid else None)
+    )
     outcomes: dict[str, dict[str, int]] = {}
     for name, (payload, read_response) in cases(oversized_bytes).items():
         counts: dict[str, int] = {}
@@ -193,7 +204,9 @@ def inject(
         "server_healthy_after": health_check(host, port, timeout),
         "watched_pid": watch_pid,
         "process_alive_before": before,
-        "process_alive_after": process_alive(watch_pid),
+        "process_alive_after": (
+            process_alive(watch_pid, identity) if identity is not None else before
+        ),
     }
 
 
