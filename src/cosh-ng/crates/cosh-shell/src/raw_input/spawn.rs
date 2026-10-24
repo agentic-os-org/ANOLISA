@@ -120,7 +120,7 @@ where
         let mut state = RawInputRelayState::with_shell_route(input_generation, shell_route);
         loop {
             sync_pending_draft_escape(&mut state);
-            let input = match receive_input(&read_rx, &mut state) {
+            let input = match receive_input(&read_rx, &mut state, &input_classifier) {
                 Ok(input) => input,
                 Err(RecvTimeoutError::Timeout) => {
                     flush_pending_deadlines(
@@ -149,12 +149,33 @@ where
                             .iter()
                             .position(|byte| matches!(byte, b'\n' | b'\r'))
                             .expect("split predicate requires a submission");
-                        let remainder = bytes.split_off(submit + 1);
+                        let mut split_at = submit + 1;
+                        // #7768: startup type-ahead coalesces separately typed
+                        // reads, so a Tab typed right after the Enter would
+                        // otherwise lead the deferred batch and reach ZLE as a
+                        // lone keystroke. Keep it with the submitted line so
+                        // the zsh Tab handoff sees submit+Tab in one read —
+                        // exactly what it receives when the reads do not
+                        // coalesce.
+                        if bytes.get(split_at) == Some(&b'\t')
+                            && state.zsh_path_prompt_buffering.is_some()
+                        {
+                            split_at += 1;
+                        }
+                        let remainder = bytes.split_off(split_at);
                         let shell_owned = is_pending_shell_submission(
                             &bytes[..submit],
                             &state,
                             &input_classifier,
                         );
+                        // A slash-bearing leading submission marks a slash
+                        // candidate batch; its deferred remainder keeps the
+                        // shell-owned delivery instead of waiting for a
+                        // route (#7897).
+                        state.deferred_split_slash_bearing = bytes.first() == Some(&b'/');
+                        // A new remainder replaces the parked one; its hold
+                        // verdict must be decided fresh (#7897 follow-up).
+                        state.deferred_prompt_hold_candidate = None;
                         state.deferred_input = Some(InputRead::Bytes {
                             bytes: remainder,
                             received_at,

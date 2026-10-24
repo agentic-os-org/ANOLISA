@@ -4,6 +4,7 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::super::{PromptGhostCandidate, RawInputCapture};
+use super::deadline::{deferred_waits_for_shell_prompt, resolve_held_delivery};
 use super::*;
 
 struct IdleReader {
@@ -489,4 +490,194 @@ fn delay_escape_does_not_cancel_a_later_capture() {
     master.sync_all().expect("sync test output");
     assert!(fs::read(&path).expect("read test output").is_empty());
     fs::remove_file(path).ok();
+}
+
+fn deferred_read(bytes: &[u8], pending_shell_submits: u16) -> InputRead {
+    InputRead::Bytes {
+        bytes: bytes.to_vec(),
+        received_at: Instant::now(),
+        observed_mode: RawInputMode::Passthrough,
+        ownership_changed_during_read: false,
+        pending_shell_submits,
+    }
+}
+
+fn deferred_pending(read: &InputRead) -> u16 {
+    match read {
+        InputRead::Bytes {
+            pending_shell_submits,
+            ..
+        } => *pending_shell_submits,
+        _ => panic!("bytes read expected"),
+    }
+}
+
+#[test]
+fn deferred_path_prompt_remainder_waits_for_prompt_gate() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let cwd = base
+        .path()
+        .canonicalize()
+        .expect("canonical temp dir")
+        .to_string_lossy()
+        .into_owned();
+    let classifier = InputClassifier::default();
+    classifier.prompt_cwd().set(Some(cwd));
+    let state = RawInputRelayState::default();
+
+    // Startup coalescing parks the path line behind a submitted `cd` while
+    // the gate is down; it must wait instead of reaching the shell unrouted.
+    let remainder = deferred_read("打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(), 1);
+    assert!(deferred_waits_for_shell_prompt(
+        &remainder,
+        &state,
+        &classifier
+    ));
+
+    // Once the gate rises the remainder delivers immediately.
+    state.main_prompt_gate.set_at_prompt(true);
+    assert!(!deferred_waits_for_shell_prompt(
+        &remainder,
+        &state,
+        &classifier
+    ));
+
+    // Plain shell type-ahead, slash controls, resolved submissions, and
+    // control-bearing batches keep today's immediate delivery.
+    state.main_prompt_gate.set_at_prompt(false);
+    assert!(!deferred_waits_for_shell_prompt(
+        &deferred_read(b"ls -la\n", 1),
+        &state,
+        &classifier
+    ));
+    assert!(!deferred_waits_for_shell_prompt(
+        &deferred_read(b"/mode routing shell-only\n", 1),
+        &state,
+        &classifier
+    ));
+    assert!(!deferred_waits_for_shell_prompt(
+        &deferred_read("打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(), 0),
+        &state,
+        &classifier
+    ));
+    assert!(!deferred_waits_for_shell_prompt(
+        &deferred_read(b"\x1b[A\n", 1),
+        &state,
+        &classifier
+    ));
+
+    // A slash-bearing leading submission marks a slash candidate batch: the
+    // remainder keeps the shell-owned delivery even when it is a path prompt.
+    let slash_batch = RawInputRelayState {
+        deferred_split_slash_bearing: true,
+        ..RawInputRelayState::default()
+    };
+    assert!(!deferred_waits_for_shell_prompt(
+        &deferred_read("打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(), 1),
+        &slash_batch,
+        &classifier
+    ));
+
+    // Sensitive remainders never wait for a route either; the pending count
+    // keeps refusing them into the shell-owned path.
+    assert!(!deferred_waits_for_shell_prompt(
+        &deferred_read(
+            "打开./nonexistent-cosh-2913 API Key: sk-review-fixture\n".as_bytes(),
+            1
+        ),
+        &state,
+        &classifier
+    ));
+}
+
+#[test]
+fn held_remainder_resolves_pending_submits_once_gate_rises() {
+    let mut state = RawInputRelayState::default();
+
+    // Delivered while never held: the pending count is preserved.
+    let delivered = resolve_held_delivery(deferred_read(b"echo ok\n", 1), &mut state);
+    assert_eq!(deferred_pending(&delivered), 1);
+
+    // Held behind the gate, then delivered after it rose: the completed
+    // submissions resolve so the path-prompt route re-evaluates cleanly.
+    state.deferred_prompt_hold_since = Some(Instant::now());
+    state.main_prompt_gate.set_at_prompt(true);
+    let delivered = resolve_held_delivery(
+        deferred_read("打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(), 1),
+        &mut state,
+    );
+    assert_eq!(deferred_pending(&delivered), 0);
+    assert!(state.deferred_prompt_hold_since.is_none());
+    assert!(state.deferred_prompt_poll.is_none());
+    assert!(state.deferred_prompt_hold_candidate.is_none());
+}
+
+#[test]
+fn main_prompt_gate_tracks_whether_it_ever_rose() {
+    let gate = MainPromptGate::default();
+    assert!(!gate.has_ever_been_ready());
+
+    gate.set_at_prompt(true);
+    assert!(gate.has_ever_been_ready());
+
+    // Falling back while a submission runs must not forget that this session
+    // raises its gate: held remainders stay releaseable.
+    gate.set_at_prompt(false);
+    assert!(gate.has_ever_been_ready());
+
+    // The startup latch counts as a risen gate too.
+    let seeded = MainPromptGate::default();
+    seeded.seed_initial_prompt();
+    assert!(seeded.has_ever_been_ready());
+}
+
+#[test]
+fn gateless_session_delivers_deferred_path_prompt_immediately() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let cwd = base
+        .path()
+        .canonicalize()
+        .expect("canonical temp dir")
+        .to_string_lossy()
+        .into_owned();
+    let classifier = InputClassifier::default();
+    classifier.prompt_cwd().set(Some(cwd));
+
+    // A session that never showed a prompt can never re-raise the gate, so
+    // holding would only burn the wait cap: the remainder delivers at once
+    // (pre-#7897 behavior) instead of parking for 2 s.
+    let mut state = RawInputRelayState::default();
+    assert!(!state.main_prompt_gate.has_ever_been_ready());
+    state.deferred_input = Some(deferred_read(
+        "打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(),
+        1,
+    ));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let input = receive_input(&receiver, &mut state, &classifier)
+        .expect("gateless session delivers without parking");
+    assert_eq!(deferred_pending(&input), 1);
+    assert!(state.deferred_prompt_hold_since.is_none());
+    assert!(state.deferred_prompt_poll.is_none());
+    drop(sender);
+
+    // A marker session (gate already rose once) parks the same remainder
+    // while the gate is down, and the poll re-checks only the gate.
+    let mut state = RawInputRelayState::default();
+    state.main_prompt_gate.set_at_prompt(true);
+    state.main_prompt_gate.set_at_prompt(false);
+    assert!(state.main_prompt_gate.has_ever_been_ready());
+    state.deferred_input = Some(deferred_read(
+        "打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(),
+        1,
+    ));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let parked = receive_input(&receiver, &mut state, &classifier);
+    assert!(
+        matches!(parked, Err(RecvTimeoutError::Timeout)),
+        "marker session parks the remainder for the gate"
+    );
+    assert!(state.deferred_input.is_some());
+    assert!(state.deferred_prompt_hold_since.is_some());
+    assert_eq!(state.deferred_prompt_hold_candidate, Some(true));
+    drop(sender);
 }
