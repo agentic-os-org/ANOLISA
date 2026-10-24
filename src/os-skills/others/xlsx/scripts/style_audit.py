@@ -160,19 +160,75 @@ def _is_green_font(font: dict) -> bool:
     return font["rgb"] == GREEN_RGB
 
 
+def _strip_format_literals(fmt_section: str) -> str:
+    """Remove quoted literals ("K", "%", ...) and [bracket] tokens from a format section."""
+    stripped = re.sub(r'"[^"]*"', "", fmt_section)
+    return re.sub(r"\[[^\]]*\]", "", stripped)
+
+
 def _fmt_is_percent(num_fmt_id: int, num_fmts: dict) -> bool:
     if num_fmt_id in PERCENT_FMT_IDS:
         return True
     fmt_code = num_fmts.get(num_fmt_id, "")
-    return "%" in fmt_code
+    # A quoted "%" is a literal suffix (0.0"%" shows 8 as 8.0% as-is); only
+    # an unquoted % scales the value by 100.
+    return "%" in _strip_format_literals(fmt_code)
 
 
-def _fmt_is_comma(num_fmt_id: int, num_fmts: dict) -> bool:
+_COND_RE = re.compile(r"^\s*\[(>=|<=|<>|>|<|=)\s*([^\]]+)\]")
+
+
+def _select_format_section(fmt_code: str, value: float) -> str:
+    """Pick the section of a (possibly conditional) formatCode that renders `value`.
+
+    Excel semantics: the first conditional section ([>=1000]..., [<100]...)
+    whose condition the value satisfies wins; otherwise the sign-based
+    positive/negative/zero sections apply (the text section with @ never
+    renders a numeric value).
+    """
+    sections = fmt_code.split(";")
+    for sec in sections:
+        m = _COND_RE.match(sec)
+        if m is None:
+            continue
+        try:
+            bound = float(m.group(2))
+        except ValueError:
+            continue
+        op = m.group(1)
+        if ((op == ">=" and value >= bound) or (op == "<=" and value <= bound)
+                or (op == ">" and value > bound) or (op == "<" and value < bound)
+                or (op == "=" and value == bound) or (op == "<>" and value != bound)):
+            return sec
+    plain = [s for s in sections if not _COND_RE.match(s) and "@" not in s]
+    if not plain:
+        return sections[0]
+    if value < 0 and len(plain) > 1:
+        return plain[1]
+    if value == 0 and len(plain) > 2:
+        return plain[2]
+    return plain[0]
+
+
+def _fmt_is_comma(num_fmt_id: int, num_fmts: dict, value: float) -> bool:
     if num_fmt_id in COMMA_FMT_IDS:
         return True
     fmt_code = num_fmts.get(num_fmt_id, "")
-    # formatCode has comma separator if it contains #,##0 but not a trailing , (scale)
-    return "#,##" in fmt_code and not fmt_code.endswith(",") and not fmt_code.endswith(",\"M\"") and not fmt_code.endswith(",\"K\"")
+    # Evaluate the section that actually renders `value`. Grouping ("#,##0"
+    # shows 2024 as 2,024) corrupts year display; a comma after the digit
+    # placeholders scales by 10^3 per comma instead (2024 -> "2" or "2K" with
+    # a "K" literal) — a deliberate compact format, not the comma-grouping
+    # corruption this rule targets.
+    section = _select_format_section(fmt_code, value)
+    stripped = _strip_format_literals(section)
+    if "#,##" not in stripped:
+        return False
+    # A scaling comma sits after the last digit placeholder (0 # ? .);
+    # grouping commas never do.
+    placeholder_pos = [i for i, ch in enumerate(stripped) if ch in "0#?."]
+    if not placeholder_pos:
+        return False
+    return "," not in stripped[max(placeholder_pos) + 1:]
 
 
 def _looks_like_year(value_text: str) -> bool:
@@ -348,7 +404,8 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
                     pass
 
             # Check C4: year value with comma-formatted numFmt
-            if value_text and _looks_like_year(value_text) and _fmt_is_comma(num_fmt_id, num_fmts):
+            if value_text and _looks_like_year(value_text) and _fmt_is_comma(num_fmt_id, num_fmts,
+                                                                            float(value_text)):
                 v.append({
                     "type": "year_with_comma_format",
                     "sheet": sheet_name,
