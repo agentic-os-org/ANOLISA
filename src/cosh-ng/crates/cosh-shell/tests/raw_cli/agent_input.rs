@@ -90,6 +90,11 @@ fn raw_cli_redacts_cjk_adjacent_secret_in_path_prompt_notice() {
         !output.contains(&format!("Agent input: {prompt}")),
         "{output}"
     );
+    // The notice panel must start on the fresh line left by the replay's
+    // accept echo: gluing onto the echoed submission (#8760) or doubling up
+    // into a blank line are both wrong. The relay emits CRLF line endings.
+    assert!(output.contains("\r\n╭ · AI request"), "{output}");
+    assert!(!output.contains("\r\n\r\n╭ · AI request"), "{output}");
 }
 
 #[test]

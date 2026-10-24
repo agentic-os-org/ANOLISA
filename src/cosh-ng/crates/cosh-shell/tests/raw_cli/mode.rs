@@ -596,5 +596,8 @@ fn raw_cli_auto_mode_trusted_command_requires_exact_match() {
     let _ = fs::remove_file("/tmp/cosh-shell-fake-action-should-not-run");
 }
 
+// Uses the vt100-backed terminal screen support, which only builds on
+// Linux (see tests/support/mod.rs).
+#[cfg(target_os = "linux")]
 #[path = "mode/routing_recovery.rs"]
 mod routing_recovery;

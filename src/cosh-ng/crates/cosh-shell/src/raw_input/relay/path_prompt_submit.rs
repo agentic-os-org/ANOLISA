@@ -58,6 +58,12 @@ pub(super) fn route_missing_path_submission(
     if let Ok(mut mode) = relay.input_mode.lock() {
         *mode = new_delay_input_mode();
     }
+    // Arm SyntheticPromptRepaint: the replay's Ctrl-U line clear and empty
+    // accept are display noise that must not overwrite the echoed
+    // submission (Linux Readline clears the whole line; #8760 follow-up).
+    // The notice itself is safe from this drop because the intercept event
+    // is held for the next prompt boundary, where the arm is consumed
+    // before the notice renders.
     let _ = relay
         .input_events
         .send(RawInputEvent::SyntheticPromptRepaint);
@@ -83,6 +89,7 @@ pub(super) fn route_missing_path_submission(
             input,
             cwd,
             sensitive,
+            hold_until_prompt_boundary: true,
         });
     send_shell_input_state(true, relay.input_events);
     Ok(true)
@@ -136,6 +143,9 @@ pub(super) fn route_candidate_missing_path_submission(
             input,
             cwd,
             sensitive,
+            // CandidateCommit already displayed the echo's newline, and a
+            // Rust-owned line may never paint a prompt boundary.
+            hold_until_prompt_boundary: false,
         }
     };
     let _ = relay.input_events.send(event);

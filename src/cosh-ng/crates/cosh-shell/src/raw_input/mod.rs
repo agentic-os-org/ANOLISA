@@ -81,12 +81,20 @@ pub(crate) enum RawInputEvent {
         cwd: String,
         sensitive: bool,
     },
-    /// A missing-path prompt withheld from shell execution, so the runtime
-    /// must acknowledge it on a stable UI surface.
+    /// A missing-path prompt withheld from shell execution. The resulting
+    /// notice is held until the next prompt boundary, so it renders after the
+    /// replayed submission's accept echo has owned the notice's line (#8760).
     NativePathPromptIntercept {
         input: String,
         cwd: String,
         sensitive: bool,
+        /// The bash replay path writes the submission through the PTY, so
+        /// the accept echo that owns the notice's line is still in flight
+        /// when this event drains (#8760). The zsh candidate path displays
+        /// its echo synchronously via CandidateCommit, and a Rust-owned line
+        /// may never paint a prompt boundary, so only the replay path holds
+        /// the notice.
+        hold_until_prompt_boundary: bool,
     },
     /// Delivers a queued control only after all preceding shell submissions
     /// in the same input batch reach their primary prompts.
