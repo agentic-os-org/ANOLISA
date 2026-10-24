@@ -28,6 +28,7 @@ After running, repack with xlsx_pack.py.
 
 import argparse
 import os
+import urllib.parse
 import re
 import subprocess
 import sys
@@ -86,10 +87,25 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     for rel in rels_tree.getroot():
         if rel.get("Id") == rid:
             target = rel.get("Target")
-            # Handle absolute paths (starting with /) and relative paths
+            # Absolute part names ("/xl/worksheets/sheet1.xml", the openpyxl
+            # form) resolve from the package root. Relative targets are the
+            # Excel/LibreOffice form and resolve against the source part's
+            # directory — the rels file lives in xl/_rels/, so the base is xl/.
+            # Percent-encoded names ("sheet%201.xml") are legal OPC; decode
+            # before resolution. The Target comes from XML inside a package
+            # the caller did not author and the resolved path is written back
+            # to, so it must stay inside the package.
+            target = urllib.parse.unquote(target)
             if target.startswith("/"):
-                target = target[1:]  # Remove leading /
-            return os.path.join(work_dir, target)
+                target = target[1:]
+            else:
+                target = "xl/" + target
+            resolved = os.path.abspath(os.path.join(work_dir, target))
+            root = os.path.abspath(work_dir)
+            if os.path.commonpath([root, resolved]) != root:
+                print(f"ERROR: worksheet target escapes the package: {target}")
+                sys.exit(1)
+            return resolved
 
     print(f"ERROR: Relationship not found: {rid}")
     sys.exit(1)
