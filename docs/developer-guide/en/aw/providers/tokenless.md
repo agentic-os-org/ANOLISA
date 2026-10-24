@@ -283,3 +283,5 @@ cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
 Use the resulting `providers/tokenless/target/debug/aw-provider-tokenless` and
 `src/tokenless/target/debug/tokenless` paths in the shared example. The clean-source
 Preview builder accepts `--component tokenless` or `--component all`.
+
+Resident Claude clients can use `aw_claude.create_sdk_mcp_server` for in-process MCP results. The public handler seam supplies reliable `is_error`; successful single text blocks can be compressed, while error, multi-block, media and structured results retain their envelope. See the [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md). Schema/BeforeModel and Retrieve remain separate admitted-capability work.

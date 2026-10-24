@@ -62,3 +62,10 @@ flowchart LR
 
 [Qoder SDK Worker 接入](../../../../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)
 按 Query 注册回调，复用现有 Adapter 和服务契约。
+
+[常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi / Claude 的每客户端任务准入、回调路由、fail-close 与释放边界。
+
+[Claude 受管 MCP handler](adapters/claude-mcp.md) 使用明确来源、任务所属调用身份和可靠成功状态，复用现有 Provider 链路采纳结果。
+
+常驻 SDK 模型响应在原生调度前进入 Adapter 的身份生产接点，服务负责递增登记和活动状态回收。
+[长期会话归属与限制](adapters/resident-sdk.md) 同时说明回调排空、MCP 调度和固定 Claude 传输。

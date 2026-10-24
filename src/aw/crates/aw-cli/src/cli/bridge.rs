@@ -2,35 +2,10 @@
 
 use super::{adapter::HookBinding, Arguments, Exit, Result};
 use aw_service::{Client, LifecyclePhase, Operation};
-use std::{
-    fs::OpenOptions,
-    io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 pub(super) fn binding(path: &str) -> Result<HookBinding> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    // SAFETY: geteuid reads the current user identity without changing it.
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o7777 != 0o600
-        || metadata.len() > 1024 * 1024
-    {
-        return Err("unsafe or oversized hook binding".into());
-    }
-    let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("oversized hook binding".into());
-    }
-    let binding: HookBinding = serde_json::from_slice(&bytes)?;
+    let binding = HookBinding::read(path)?;
     if !binding.reloadable {
         return Err("instance has no stable reload bridge".into());
     }

@@ -46,6 +46,9 @@ impl Adapter for ClaudeSdk {
         Ok(Box::new(Prepared { input }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if native.get("aw_source").is_some() {
+            return super::claude_mcp::normalize(binding, event, native);
+        }
         super::sdk_tools::normalize_tools(binding, event, native, "claude-sdk")
     }
 
@@ -73,6 +76,34 @@ impl PreparedLaunch for Prepared {
         context.files.write(
             "aw_claude.py",
             include_bytes!("../../native/claude-sdk/aw_claude.py"),
+        )?;
+        context.files.write(
+            "aw_scope.py",
+            include_bytes!("../../native/claude-sdk/aw_scope.py"),
+        )?;
+        context.files.write(
+            "aw_resident.py",
+            include_bytes!("../../native/claude-sdk/aw_resident.py"),
+        )?;
+        context.files.write(
+            "aw_mcp.py",
+            include_bytes!("../../native/claude-sdk/aw_mcp.py"),
+        )?;
+        context.files.write(
+            "aw_invocations.py",
+            include_bytes!("../../native/claude-sdk/aw_invocations.py"),
+        )?;
+        context.files.write(
+            "aw_model.py",
+            include_bytes!("../../native/claude-sdk/aw_model.py"),
+        )?;
+        context.files.write(
+            "aw_model_stream.py",
+            include_bytes!("../../native/claude-sdk/aw_model_stream.py"),
+        )?;
+        context.files.write(
+            "aw_transport.py",
+            include_bytes!("../../native/claude-sdk/aw_transport.py"),
         )?;
         let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "hooks": hooks}))?)?;
         let mut command = self.input.command.clone();

@@ -845,7 +845,7 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py --aw target/de
 工厂要求 `setting_sources=[]`、无 `settings` 覆盖、无 CLI plugins。`extra_args`
 仅允许 `strict-mcp-config: None`；SDK 原生 `strict_mcp_config` 也保留。模型和认证
 配置不变。通过 settings sources 发现项目 skills 的应用，需要先明确接入设计才能
-使用该首版受限 Bridge。每个前台 worker 只允许创建一个 client。
+使用该首版受限 Bridge。直接任务 worker 模式每进程只允许一个 client；多个任务客户端使用下文显式常驻入口。
 
 当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
@@ -860,7 +860,7 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
 PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一
 最终 `replace_result` 前，看到原始结果；stderr 与其余原生字段保留。失败/report
-保留原始结果。MCP tools 仍可观察，但原生回调不能可靠报告业务错误状态，因此不压缩。
+保留原始结果。该原生回调路径的 MCP tools 仍可观察，缺少可靠业务错误状态；使用下文受管 MCP 工厂获得结果压缩接点。
 
 构建 AW、其 Tokenless Provider 与当前 Tokenless Protocol v2 CLI 后，扩展原生验收
 （PATH 中需要 RTK）：
@@ -969,7 +969,64 @@ Worker 1.1.74 的 `UpdateGoal` 只能完成或
 若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
 丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
 
-长寿命 SDK 实例同样受现有服务容量限制：每实例最多保留 1024 条 Hook 关联记录，
+上文 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
 request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
 记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
 并发提交量；策略更新不会清空关联历史。
+
+## Pi 和 Claude SDK 常驻宿主
+
+镜像安装相互匹配的 AW、Provider 和固定版本 SDK。使用
+[共用配置示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.resident-sdk.yaml)，
+替换部署路径后选择目标：
+
+```bash
+aw run --config /etc/aw/aw.yaml --agent claude
+aw run --config /etc/aw/aw.yaml --agent pi
+```
+
+Claude target argv 使用应用的 Python 解释器，后接 `-m aw_claude -- -m application`。
+前台 Gunicorn 可使用 `-m aw_claude -- -m gunicorn -c conf/gunicorn.py main:app`，客户端
+在 fork 后的 worker 内创建。公共工厂接入方式：
+
+```python
+from aw_claude import create_client
+
+client = create_client(options)
+try:
+    await client.connect()
+    await client.query(prompt)
+    async for message in client.receive_response():
+        yield message
+finally:
+    await client.disconnect()
+```
+
+每轮响应和回调排空后可在同一客户端继续 query，保留会话；resume/session-store 继续可用。
+并发工作使用独立客户端，分别使用自己的 cwd/env。每次 query 接受字符串或单消息的有限 AsyncIterable，多消息输入在发送前被拒绝；连续轮次逐次 query。
+进程内 MCP 同时从 aw_claude 导入 create_sdk_mcp_server，每客户端创建新 server，
+保留 SDK tool 定义和业务闭包。[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md) 说明成功单文本替换、可靠错误状态及明确关联。
+
+Pi 保留已有 SDK session 工厂，增加常驻入口：
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd /* application model/tools/options */ });
+}
+export async function runWorker({ withSession }) {
+  await serveRequests(async (request) => {
+    return withSession({ cwd: request.workspace, environment: request.environment },
+      async (session) => session.prompt(request.prompt));
+  });
+}
+```
+
+serveRequests 为业务服务，在工厂返回前配置业务回调。任务完成即关闭 session，同一 session
+并发 prompt 会被拒绝；其他路径也必须经过公共工厂。
+
+示例组合自定义 Hook、sec-core Bash 扫描及 Tokenless PreTool/PostTool。需要单独启动
+sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要明确的安全语义。常驻模式
+在回调错误时停止任务，包括 on_error: report；正常策略拒绝沿用原生语义。Claude 中断无法
+确认时会终止 AW 的自有前台进程组，部署需配置监督器重启。发送退出信号前先排空请求，
+外层 launcher 在两秒后强制回收。Schema/BeforeModel、Retrieve 的请求/效果准入和授权依赖见
+[常驻合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/resident-sdk.md)。

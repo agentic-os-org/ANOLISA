@@ -990,7 +990,7 @@ CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
 `strict_mcp_config` option is also preserved. Model/authentication options are
 unchanged. Applications which discover project skills through settings sources
 need an explicit integration design before using this restricted first bridge.
-Only one client can be created in each foreground worker.
+The direct task-worker mode permits one client per worker. Use the resident entrypoint below for multiple task clients.
 
 The `claude-sdk` adapter supports this restricted foreground worker factory;
 `aw agent connect` does not provide persistent installation for it, and all `--native-*`
@@ -1010,7 +1010,7 @@ the new call passes all policies and native permissions again. PostTool replaces
 only completed, non-image, non-interrupted Bash stdout. Put completion observers
 and custom steps before the single final `replace_result` step. They see the
 original result; stderr and other native fields are retained. Failure/report keeps
-the original result. MCP tools remain observable but are not compressed because
+the original result. MCP tools on this native callback path remain observable but are not compressed because
 the native callback does not expose reliable business-error status.
 
 After building AW, its Tokenless Provider and the current Tokenless Protocol v2
@@ -1142,9 +1142,75 @@ application stops consuming, stop submitting and await `close()` or `return()`;
 these discard buffered output and await native cleanup. This mode does not
 provide backpressure for an indefinitely paused consumer.
 
-The existing service limits also apply to long-lived SDK instances: 1024 retained
+The Qoder SDK path described above retains 1024
 Hook correlation entries per instance, and 64 active claims per request/tool
 claim set. Completed request claims are released; Hook correlation entries are
 retained until instance release. These are not a count of supported lifetime
 turns. Bound instance lifetime and concurrent submissions; policy updates do not
 reset correlation history.
+
+## Resident Pi and Claude SDK hosts
+
+Install matching AW, Providers and pinned SDK packages in the image. Use the
+[shared configuration example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.resident-sdk.yaml),
+replace its paths and select the target:
+
+```bash
+aw run --config /etc/aw/aw.yaml --agent claude
+aw run --config /etc/aw/aw.yaml --agent pi
+```
+
+For Claude, set the target argv to the application's Python interpreter followed
+by `-m aw_claude -- -m application`. A foreground Gunicorn host can use
+`-m aw_claude -- -m gunicorn -c conf/gunicorn.py main:app`; create task clients
+inside workers after fork. In the common client factory:
+
+```python
+from aw_claude import create_client
+
+client = create_client(options)
+try:
+    await client.connect()
+    await client.query(prompt)
+    async for message in client.receive_response():
+        yield message
+finally:
+    await client.disconnect()
+```
+
+Sequential queries reuse a client after its response and callbacks drain; each
+client retains its conversation. Resume/session-store options remain available.
+Concurrent work uses independent clients with separate cwd/env.
+Each query accepts a string or a finite one-message AsyncIterable; multi-message
+input is rejected before dispatch. Submit successive turns with sequential queries.
+For in-process MCP tools, also import `create_sdk_mcp_server` from `aw_claude` and
+create a fresh server for each client. Keep SDK `tool` definitions and business closures.
+The [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md) covers single successful text replacement, reliable errors and explicit correlation.
+
+For Pi, export the existing SDK session factory and a resident host entrypoint:
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd /* application model/tools/options */ });
+}
+export async function runWorker({ withSession }) {
+  await serveRequests(async (request) => {
+    return withSession({ cwd: request.workspace, environment: request.environment },
+      async (session) => session.prompt(request.prompt));
+  });
+}
+```
+
+`serveRequests` is the application's server. Install business callbacks before
+returning from the factory. Close sessions at task completion; concurrent prompts
+on one session are rejected. Avoid creating unmanaged SDK clients elsewhere.
+
+The example composes custom Hooks, sec-core Bash scanning and Tokenless PreTool/
+PostTool. Start the sec-core daemon separately and supply a real custom Hook.
+Opaque MCP tools need explicit security semantics. Resident mode stops tasks on
+callback errors even for `on_error: report`; policy denial remains a normal native
+denial. A failed Claude interrupt terminates AW's owned foreground process group,
+so configure supervisor restart. Drain requests before sending termination: the
+outer launcher forces group cleanup after two seconds. Schema/BeforeModel and
+Retrieve require request/effect admission and authorization work listed in the
+[resident contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/resident-sdk.md).

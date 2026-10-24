@@ -2,6 +2,9 @@
 
 [English](../../en/adapters/claude-sdk-adapter.md)
 
+显式常驻模式见[常驻 SDK 生命周期](resident-sdk.md)。
+下文任务 worker 模式保留原有生命周期与失败策略。
+
 `claude-sdk` Adapter 启动一个前台 Python worker，使用 Claude Agent SDK 0.2.88
 及其 bundled Claude Code CLI 2.1.161。Python script 或 `-m` module 在公共工厂中
 显式使用 `aw_claude.create_client(options)`。AW 通过私有启动目录和 `PYTHONPATH`
@@ -85,3 +88,5 @@ SDK 使用的 `Server.list_tools` 方法。
 仅允许 `strict-mcp-config: None`；SDK 原生 `strict_mcp_config` 也保留。模型和认证
 配置不变。通过 settings sources 发现项目 skills 的应用，需要先明确接入设计才能
 使用该首版受限 Bridge。每个前台 worker 只允许创建一个 client。
+
+显式常驻 [MCP handler 工厂](claude-mcp.md) 进一步支持可靠 MCP 成功状态分类及单文本替换，使用 Adapter 所属调用关联，并抑制已认领工具重复的 AW 原生回调。

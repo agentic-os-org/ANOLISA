@@ -2,6 +2,9 @@
 
 [中文版](../../zh/adapters/pi-adapter.md)
 
+Explicit resident mode is described in [Resident SDK lifecycle](resident-sdk.md).
+The task-worker mode below retains its original one-worker lifecycle and failure policy.
+
 The Pi adapter supports the public Coding Agent/Core SDKs
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-agent-core` 0.84.2,
 with Node.js >=22.19.0 on Linux. Its entrypoint is `sdk`: one AW-owned foreground
@@ -69,10 +72,10 @@ The bridge tracks at most 512 in-flight prepared calls and clears entries on
 native completion events, including abort paths that skip after.
 Pi's sequential preparation and parallel execution schedule is preserved:
 after events follow completion order, result messages retain source order.
-No global tool lock is added. The service's retained correlation capacity still
-limits a long-lived worker: there are at most 32 live events and 1024 retained
-event correlations per instance, including closed before/after events. Release/rebind
-before reaching that limit. A denial before the final configured step explicitly
+No global tool lock is added. Legacy task workers retain at most 1024 event
+correlations per instance, including closed before/after events. Resident factories
+use model-produced identity, active-state reclamation and configurable concurrent
+budgets; see [long sessions](resident-sdk.md). A denial before the final configured step explicitly
 closes the event without running remaining steps, including native invalid JSON,
 nonzero/signal exits and execution failures under `on_error:block`. A failure to
 close is reported and never changes a denial into an allow. SDK cancellation or a

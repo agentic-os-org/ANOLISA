@@ -6,6 +6,15 @@ use crate::{
 };
 use serde_json::Value;
 
+/// Identify Adapter-owned correlation when the public callback has no native call ID.
+///
+/// This metadata labels task and invocation identities; it grants no execution authority.
+pub fn correlation_source(event: &Value) -> Option<&'static str> {
+    (event["agent"]["adapter"] == "claude-sdk"
+        && event["native"]["aw_source"] == crate::adapters::claude_mcp::SOURCE)
+        .then_some(crate::adapters::claude_mcp::SOURCE)
+}
+
 /// Whether the native bridge explicitly closes an abandoned event.
 pub fn supports_event_close(adapter: &str) -> bool {
     adapter == "agentscope"

@@ -1,6 +1,6 @@
 //! Task bindings retain replay fences until close; the resident host retains no task history.
 
-use super::{process::Process, Instance, Runtime, MAX_BINDINGS};
+use super::{process::Process, Instance, Runtime};
 use crate::{rejected, Binding, Error, Result};
 use aw_host::ProcessContext;
 use serde_json::{json, Value};
@@ -94,20 +94,25 @@ impl Runtime {
         Ok(json!({"acknowledged": true}))
     }
 
+    pub(super) fn scope_allows_observation(&self, id: &str) -> Result<bool> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        Ok(!owners.get(id).is_some_and(|owner| owner.parent.is_some())
+            && !owners
+                .values()
+                .any(|owner| owner.parent.as_deref() == Some(id)))
+    }
+
     pub(super) fn own_instance(&self, id: &str, pid: u32) -> Result<Value> {
         let process = Process::read(pid)?;
         let instances = self
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
-        let instance = instances
+        let _instance = instances
             .get(id)
             .and_then(Option::as_ref)
             .filter(|instance| !instance.closing && instance.reload.is_none())
             .ok_or_else(|| rejected("scope_parent_unavailable"))?;
-        if instance.observation.is_some() {
-            return Err(rejected("scope_observation_unsupported"));
-        }
         let mut owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         if owners.contains_key(id) {
             return Err(rejected("instance_already_owned"));
@@ -155,8 +160,8 @@ impl Runtime {
                 .filter(|owner| owner.parent.is_none() && !owner.cancelled.load(Ordering::Acquire))
                 .ok_or_else(|| rejected("scope_parent_unowned"))?;
             owner.process.corroborate(pid)?;
-            if instances.len() >= MAX_BINDINGS {
-                return Err(rejected("binding_limit"));
+            if instances.len() >= self.limits.bindings {
+                return Err(self.overload("binding_limit"));
             }
             let policy = (
                 instance.bytes.clone(),

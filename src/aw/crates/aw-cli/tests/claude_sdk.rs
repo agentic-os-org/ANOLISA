@@ -6,7 +6,7 @@
 mod support;
 use aw_service::{Binding, Capabilities, Operation};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, time::Instant};
+use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, time::Instant};
 use support::{Fixture, Service, TIMEOUT};
 
 #[test]
@@ -135,4 +135,21 @@ fn claude_hook_cli_preserves_deny_success_failure_identity_and_audit() {
         )
         .unwrap();
     service.released(&fixture);
+}
+
+#[test]
+fn model_producer_identity_and_callback_drain_contracts() {
+    let fixture = Fixture::new();
+    let mut command = std::process::Command::new(&fixture.python);
+    command.arg("-I").arg(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/identity_contract.py"),
+    );
+    let output = fixture.run(command);
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("Ran 9 tests")
+            && String::from_utf8_lossy(&output.stderr).contains("\nOK\n"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

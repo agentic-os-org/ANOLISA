@@ -229,3 +229,5 @@ cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
 将生成的 `providers/tokenless/target/debug/aw-provider-tokenless` 和
 `src/tokenless/target/debug/tokenless` 路径填入共用示例。干净源码的 Preview 构建器
 支持 `--component tokenless` 或 `--component all`。
+
+常驻 Claude 客户端通过 aw_claude.create_sdk_mcp_server 接入进程内 MCP 结果。公开 handler 提供可靠 is_error，成功单文本块可压缩，错误、多块、媒体和结构化结果保留 envelope。详见[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md)。Schema/BeforeModel 与 Retrieve 仍需独立能力准入和接点工作。

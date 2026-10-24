@@ -31,7 +31,7 @@ service.
 ## Local protocol
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) defines the experimental
-`aw-service/v1alpha5` protocol. It is separate from the Provider stdio protocol
+`aw-service/v1alpha6` protocol. It is separate from the Provider stdio protocol
 `aw-provider/v1alpha1`. Each connection carries one length-framed JSON request
 and one response; a frame is limited to 8 MiB. Native stdin and normalized event data each retain
 a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
@@ -143,22 +143,20 @@ reuse. Queued steps recheck both owners after ordered predecessors and again aft
 durable audit, immediately before Provider invocation. Failed cleanup
 retains the draining state and returns an error; maintenance retries bounded work.
 
-The service-wide limit remains 16 bindings, including roots and tasks; capacity
-exhaustion rejects admission without starting the SDK client. Each task retains
-at most 1,024 Hook correlations until release. A new task gets a fresh binding;
-completed entries are never evicted to permit replay under an existing binding.
-Pending preparation, idle admitted tasks and draining tasks occupy binding slots;
-one root leaves at most 15 task slots across all workers sharing that service.
-The correlation limit counts cumulative event/session/call identities, with
-PreTool and PostTool counted separately. Enabling both permits at most 512 complete
-tool-call pairs per task; failed opens also consume identities. Closing an event
-does not reset this replay fence. These fixed limits need deployment-specific
-capacity validation before a resident service is released to production.
-Task release reclaims memory; durable metadata remains subject to operator disk
-retention. Disk/audit failures stop admission. These APIs are the service foundation;
-native Pi/Claude resident factories are delivered separately.
+Concurrent budgets live in `spec.daemon.limits`: bindings 64 (including roots),
+live events 128, Provider calls 64, connections 128 and active invocations per
+binding 256 by default. Each field accepts 1..4096; status exposes usage, peaks and
+rejection reasons. Preparing, idle and draining bindings count toward capacity.
+Resident Pi/Claude producers register strictly increasing invocation sequences.
+FinishInvocation fences new opens, drains workers and retires both phase claims;
+unknown/retired callbacks fail closed while the sequence high-water mark rejects
+old registrations. Slow active calls remain retained. These bindings have no
+cumulative correlation quota. Legacy bindings retain their 1,024-claim boundary.
+See [long sessions](../adapters/resident-sdk.md) for model identity and callback drain.
+Audit disk and SDK conversation history need separate retention; disk/audit failures
+stop admission. Service generation and owner checks remain mandatory.
 
-Upgrade CLI and daemon together to `aw-service/v1alpha5` after draining old
+Upgrade CLI and daemon together to `aw-service/v1alpha6` after draining old
 sessions and stopping the old daemon. The configuration and Provider protocols
 retain their versions. Rollback requires the same drain/stop procedure.
 
@@ -240,11 +238,10 @@ one `aw_host::Event` on its stack. Bounded channels route requests into scoped
 workers. The shared deadline and claims remain in that one Event; no borrowed
 Event is stored beside its owning Host in a self-referential registry.
 
-Current resource limits are 16 binding slots, 32 open events, 64 admitted steps
-per binding, 64 concurrent step calls and 64 active connections. Exceeding a
-limit produces a visible rejection or transport failure. There is no implicit
-queue retry. These are service admission limits, not additional configuration
-fields.
+Concurrent limits are configurable through `spec.daemon.limits`; defaults and
+usage are documented above. Each binding permits at most 64 configured steps across its events.
+Sixteen additional connection workers reserve control/cleanup admission.
+Overload fails visibly without retries or new execution budgets.
 
 ## Audit and uncertain outcomes
 
@@ -385,3 +382,5 @@ claimed across updates; evidence is built from the owning Host snapshot.
 
 The [policy reload design](policy-reload.md) defines the lifecycle, process
 association, pinned entrypoints, manual acceptance and later attach/steer scope.
+
+Owned roots may use observation while no scopes exist. Task scopes and roots with preparing or active scopes reject observation; active root observation rejects opening a scope.

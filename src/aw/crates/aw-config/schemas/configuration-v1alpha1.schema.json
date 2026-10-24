@@ -195,6 +195,42 @@
         },
         "state_dir": {
           "$ref": "#/$defs/text"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bindings": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 64
+            },
+            "events": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 128
+            },
+            "calls": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 64
+            },
+            "connections": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 128
+            },
+            "invocations_per_binding": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 256
+            }
+          }
         }
       }
     },

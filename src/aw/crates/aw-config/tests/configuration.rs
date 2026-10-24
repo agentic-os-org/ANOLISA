@@ -617,3 +617,33 @@ fn yaml_scalar_context_preserves_strings_and_explicit_float_spellings() {
         WIDE
     );
 }
+
+#[test]
+fn daemon_limits_accept_concurrent_budgets_and_reject_invalid_values() {
+    let mut value = example();
+    for field in [
+        "bindings",
+        "events",
+        "calls",
+        "connections",
+        "invocations_per_binding",
+    ] {
+        for limit in [1, 64, 4096] {
+            value["spec"]["daemon"]["limits"] = json!({field:limit});
+            parse(&value).unwrap();
+        }
+        for limit in [
+            json!(0),
+            json!(-1),
+            json!(4097),
+            json!(1.5),
+            json!("64"),
+            Value::Null,
+        ] {
+            value["spec"]["daemon"]["limits"] = json!({field:limit});
+            assert!(parse(&value).is_err());
+        }
+    }
+    value["spec"]["daemon"]["limits"] = json!({"history_calls":1024});
+    assert!(parse(&value).is_err());
+}

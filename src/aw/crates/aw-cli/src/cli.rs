@@ -7,6 +7,7 @@ mod hook;
 mod policy;
 mod readiness;
 mod run;
+mod scope;
 mod update;
 
 use std::{collections::BTreeMap, io::Read, path::Path, time::Instant};
@@ -130,6 +131,7 @@ pub(crate) fn dispatch(command: &str, args: &Arguments) -> Result<Exit> {
         "run" => run::launch(args),
         "update" => update::update(args),
         "bridge" => bridge::lifecycle(args),
+        "scope" => scope::run(args),
         "install" => adapter::install(args),
         "hook" => Ok(hook::callback(args)),
         "policy" => {

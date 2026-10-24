@@ -2,6 +2,9 @@
 
 [中文版](../../zh/adapters/claude-sdk-adapter.md)
 
+Explicit resident mode is described in [Resident SDK lifecycle](resident-sdk.md).
+The task-worker mode below retains its original one-worker lifecycle and failure policy.
+
 The `claude-sdk` Adapter launches one foreground Python worker with Claude Agent
 SDK 0.2.88 and its bundled Claude Code CLI 2.1.161. The Python script or `-m`
 module explicitly uses `aw_claude.create_client(options)` in its public factory.
@@ -105,3 +108,5 @@ CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
 unchanged. Applications which discover project skills through settings sources
 need an explicit integration design before using this restricted first bridge.
 Only one client can be created in each foreground worker.
+
+The explicit resident [MCP handler factory](claude-mcp.md) additionally supports reliable MCP success/error classification and single-text replacement. It uses Adapter-owned correlation and suppresses duplicate AW native callbacks for claimed tools.
