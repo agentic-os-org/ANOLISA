@@ -46,6 +46,28 @@ Tracing still requires root or eBPF capabilities. See the
 [benchmark usage guide](../../../../src/agentsight/scripts/docs/BENCHMARK_USAGE.md#71-measure-the-ffi-library-with-a-minimal-c-host)
 for build requirements, A/B options and measurement boundaries.
 
+## Offline trajectory statistics
+
+From a source checkout, run these commands in `src/agentsight`:
+
+```bash
+cargo run -q -p agentsight-opt --bin analyze -- trajectory.json --dim perf --stats-only
+cargo run -q -p agentsight-opt --bin analyze -- trajectory.json --dim cost --stats-only
+python3 scripts/batch-analyze.py --file session.jsonl --dim cost --stats-only --min-steps 1
+```
+
+`trajectory.json` is an ATIF document; `session.jsonl` is a Claude/Qoder session.
+`--stats-only` calls the existing local computations without an API key, model request,
+or eBPF privileges. Output contains `perf` or `cost` statistics; it omits the LLM-only
+`perf_issues` and `cost_waste` judgments. Cost statistics describe recorded tokens and
+estimated replay headroom, not a provider billing invoice. `accuracy --stats-only`
+is rejected because accuracy attribution needs model judgment.
+
+Without the flag, the existing full analysis still requires `OPENAI_API_KEY` and can
+make paid model requests. The batch wrapper forwards the flag to its analyzer; a
+custom `--binary` must support it. These are source-checkout tools, separate from
+the installed `agentsight` subcommands.
+
 ## agentsight trace
 
 Loads the eBPF probes, discovers Agent processes, and writes captured events to SQLite.

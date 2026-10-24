@@ -546,7 +546,14 @@ def main():
         default=None,
         help="Path to analyze binary (default: cargo run -p agentsight-opt --bin analyze)",
     )
+    parser.add_argument(
+        "--stats-only",
+        action="store_true",
+        help="Compute local perf/cost statistics without LLM requests or credentials",
+    )
     args = parser.parse_args()
+    if args.stats_only and args.dim == "accuracy":
+        parser.error("--stats-only supports perf and cost; accuracy requires LLM analysis")
 
     if args.export_atif is not None:
         if args.binary:
@@ -559,6 +566,8 @@ def main():
         analyze_cmd = [args.binary]
     else:
         analyze_cmd = ["cargo", "run", "-q", "-p", "agentsight-opt", "--bin", "analyze", "--"]
+    if args.stats_only:
+        analyze_cmd.append("--stats-only")
 
     # Collect files
     if args.file:

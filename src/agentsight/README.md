@@ -451,6 +451,11 @@ Open `http://127.0.0.1:7396` to view the Agent Dashboard. `trace` scans local AI
 sudo agentsight trace
 ```
 
+## Offline analysis
+
+Use `--stats-only` with the standalone analyzer or batch script for local perf/cost statistics without credentials or model requests.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
+
 ## Configuration
 
 AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/config.json`; falls back to embedded defaults if absent).

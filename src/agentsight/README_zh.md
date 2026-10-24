@@ -441,6 +441,11 @@ agentsight serve --host 0.0.0.0 --port 8080
 sudo agentsight trace
 ```
 
+## 离线分析
+
+独立分析器和批处理脚本可用 `--stats-only` 运行本地 perf/cost 统计，无需凭据或模型请求。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
+
 ## 配置
 
 AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路径 `/etc/agentsight/config.json`，若不存在则使用内嵌默认值）。

@@ -43,6 +43,26 @@ FFI 就绪和采集校验直接读取回调凭证，不要求 SQLite 存储。
 采集仍需要 root 或 eBPF capabilities。构建条件、A/B 参数及测量范围见
 [benchmark 使用指南](../../../../src/agentsight/scripts/docs/BENCHMARK_USAGE_zh.md#71-使用最小-c-宿主测量-ffi-动态库)。
 
+## 离线轨迹统计
+
+从源码仓库进入 `src/agentsight` 后运行：
+
+```bash
+cargo run -q -p agentsight-opt --bin analyze -- trajectory.json --dim perf --stats-only
+cargo run -q -p agentsight-opt --bin analyze -- trajectory.json --dim cost --stats-only
+python3 scripts/batch-analyze.py --file session.jsonl --dim cost --stats-only --min-steps 1
+```
+
+`trajectory.json` 是 ATIF 文档；`session.jsonl` 是 Claude/Qoder 会话。
+`--stats-only` 复用本地计算，不需要 API key，不发起模型请求，也不需要 eBPF 权限。
+输出包含 `perf` 或 `cost` 统计，不包含需要 LLM 判定的 `perf_issues` 或 `cost_waste`。
+成本统计描述记录的 Token 与估计的重放优化空间，不是服务商账单。
+`accuracy --stats-only` 会被拒绝，因为准确性归因需要模型判定。
+
+不传该参数时，原有完整分析仍要求 `OPENAI_API_KEY`，可能产生付费模型请求。
+批处理脚本会向分析器传递该参数；自定义 `--binary` 必须支持它。
+这些工具从源码仓库运行，与安装后的 `agentsight` 子命令分开。
+
 ## agentsight trace
 
 加载 eBPF 探针、发现 Agent 进程、把采集到的事件写入 SQLite。
