@@ -12,6 +12,9 @@ mod cancellation;
 #[path = "service/policy.rs"]
 mod policy;
 
+#[path = "service/scopes.rs"]
+mod scopes;
+
 use aw_service::{Client, Operation, Request, Server, VERSION};
 use common::{
     audit, close, event, invoke, open, second_step, Fixture, Running, PRIVATE_MARKER, TIMEOUT,

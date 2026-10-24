@@ -7,6 +7,12 @@ callbacks, the local service manages bindings and events, the Host invokes
 Providers, and the Adapter returns results to the Agent. The Agent owns model
 calls, tool scheduling, and permission approval.
 
+Resident SDK support uses the service's owned root and per-task child bindings.
+The root policy stays immutable; each task pins its own cwd and environment,
+keeps replay fences until release, and is reclaimed when its owner exits.
+Native factories remain Adapter responsibilities. See
+[task scope lifecycle](runtime/local-service.md#resident-hosts-and-task-scopes).
+
 ## User workflow
 
 ![AW user workflow and component architecture](../../../../../docs/images/aw/architecture.png)

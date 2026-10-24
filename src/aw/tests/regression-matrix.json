@@ -410,6 +410,58 @@
     "qoder-sdk-reload": {
       "target": "aw-cli/test/qoder_sdk",
       "test": "existing_queries_update_only_after_native_cleanup"
+    },
+    "task-scope-isolation": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::task_scopes_isolate_context_reject_nested_and_reclaim_capacity"
+    },
+    "task-scope-preparation-close": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::closing_parent_cancels_inflight_scope_preparation"
+    },
+    "task-scope-owner-death": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::dead_worker_scope_is_reaped_without_releasing_live_parent"
+    },
+    "task-scope-disconnected-preparation": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::disconnected_scope_preparation_releases_its_reservation"
+    },
+    "task-scope-capacity": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::scope_capacity_and_invalid_owner_fail_without_extra_bindings"
+    },
+    "task-scope-parent-drain": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::parent_close_cancels_active_child_steps_and_rejects_late_calls"
+    },
+    "task-scope-launcher-death": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::launcher_death_drains_all_owned_scopes_and_rejects_old_handles"
+    },
+    "task-scope-lost-handoff": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::unacknowledged_handoff_expires_and_cannot_invoke_or_revive"
+    },
+    "sdk-scope-dispatch-owner": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::queued_step_rechecks_worker_and_launcher_before_provider_dispatch"
+    },
+    "sdk-scope-dispatch-after-audit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::audited_step_rechecks_worker_and_launcher_before_provider_dispatch"
+    },
+    "sdk-scope-ack-durable": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::committed_acknowledgement_survives_audit_delay_across_handoff_deadline"
+    },
+    "sdk-scope-ack-expired-audit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::expired_acknowledgement_has_no_success_record"
+    },
+    "sdk-scope-ack-audit-failure": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::failed_acknowledgement_audit_cancels_committed_task"
     }
   },
   "agents": {

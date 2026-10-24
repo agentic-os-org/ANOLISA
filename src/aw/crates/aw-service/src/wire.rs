@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha4";
+pub const VERSION: &str = "aw-service/v1alpha5";
 
 /// Bootstrap configuration and daemon lifetime to which mutable requests bind.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -167,6 +167,30 @@ pub enum Operation {
         /// Complete explicit environment; no implicit daemon inheritance.
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
+    },
+    /// Tie a prepared root binding to its same-user launcher lifetime.
+    OwnInstance {
+        /// Prepared root instance; ownership is immutable after registration.
+        instance_id: String,
+        /// Launcher PID, corroborated with start time, UID and PID namespace.
+        pid: u32,
+    },
+    /// Prepare an isolated task binding under an owned root's immutable policy.
+    OpenScope {
+        /// Owned root; nested task scopes and reloadable roots are rejected.
+        parent_id: String,
+        /// Task worker PID: the root launcher itself or one of its descendants.
+        pid: u32,
+        /// Absolute task working directory.
+        cwd: String,
+        /// Complete explicit task environment, with no daemon inheritance.
+        #[serde(with = "environment")]
+        environment: BTreeMap<OsString, OsString>,
+    },
+    /// Confirm that the native owner received its task handle within five seconds.
+    AcknowledgeScope {
+        /// Prepared task binding; callbacks remain closed until acknowledgement.
+        instance_id: String,
     },
     /// Opt an AW-launched instance into stable bridge policy updates before spawning.
     EnableReload {

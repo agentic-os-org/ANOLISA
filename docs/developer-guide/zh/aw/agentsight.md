@@ -13,7 +13,7 @@ Pi 保留已有原生策略能力；其纯观测回调及可信来源关联需�
 ## 前提与配置
 
 按 [Preview 安装指南](../../../user-guide/zh/aw/installation.md)安装 AW。client、回调与 daemon 必须来自支持
-`aw-service/v1alpha4` 的同一构建。升级前先退出所属会话，用旧二进制停止旧 daemon，
+`aw-service/v1alpha5` 的同一构建。升级前先退出所属会话，用旧二进制停止旧 daemon，
 保留 Journal 历史。Provider stdio 仍使用 `aw-provider/v1alpha1`。
 
 AgentSight 查询服务由外部独立管理，并已开启认证。两种传输均校验公共 auth-status

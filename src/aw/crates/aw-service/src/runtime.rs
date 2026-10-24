@@ -23,6 +23,8 @@ mod binding;
 mod evidence;
 mod hooks;
 mod policy;
+mod process;
+mod scopes;
 
 const MAX_BINDINGS: usize = 16;
 const MAX_EVENTS: usize = 32;
@@ -34,6 +36,7 @@ struct Instance {
     context: ProcessContext,
     reload: Option<policy::Reload>,
     policy_update: Arc<Mutex<()>>,
+    release: Arc<Mutex<()>>,
     host: Arc<Host>,
     closing: bool,
     hooks: Arc<Mutex<BTreeMap<String, hooks::Lease>>>,
@@ -75,6 +78,7 @@ pub(crate) struct Runtime {
     next: AtomicU64,
     calls: AtomicU64,
     contexts: evidence::Contexts,
+    owners: Mutex<BTreeMap<String, scopes::Owner>>,
 }
 
 impl Runtime {
@@ -90,6 +94,7 @@ impl Runtime {
         let contexts = evidence::Contexts::new(&bytes)?;
         Ok(Arc::new(Self {
             contexts,
+            owners: Mutex::new(BTreeMap::new()),
             identity: Identity {
                 generation,
                 config_revision: revision,
@@ -139,6 +144,24 @@ impl Runtime {
                 "observations": observations, "instances": policies, "guarantee": "native_hook", "adoption": "unverified"}),
                 )
             }
+            Operation::AcknowledgeScope { instance_id } => self.acknowledge_scope(&instance_id),
+            Operation::OwnInstance { instance_id, pid } => self.own_instance(&instance_id, pid),
+            Operation::OpenScope {
+                parent_id,
+                pid,
+                cwd,
+                environment,
+            } => self.open_scope(
+                &parent_id,
+                pid,
+                ProcessContext {
+                    cwd: cwd.into(),
+                    environment,
+                    stderr_bytes: 64 * 1024,
+                },
+                deadline,
+                cancelled,
+            ),
             Operation::EnableReload { instance_id } => self.enable_reload(&instance_id),
             Operation::AssociateProcess { instance_id, pid } => {
                 self.associate_process(&instance_id, pid)
@@ -203,6 +226,7 @@ impl Runtime {
                 step_id,
                 native_environment,
             } => {
+                self.check_scope_owner(&instance_id)?;
                 let (sender, cancelled) = self.event_sender(&event_id, &instance_id)?;
                 let (reply, result) = mpsc::sync_channel(1);
                 sender
@@ -327,6 +351,7 @@ impl Runtime {
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
+        self.check_scope_owner(&instance_id)?;
         let host = Arc::clone(
             &instances
                 .get(&instance_id)
@@ -403,7 +428,7 @@ impl Runtime {
                             } else {
                                 let _ = ready.send(Ok(json!(handle)));
                             }
-                            runtime.event_loop(&thread_key, &event, (&cancelled, &context), receiver, automatic, ordered);
+                            runtime.event_loop((&thread_key, &instance_id), &event, (&cancelled, &context), receiver, automatic, ordered);
                         }
                         Err(error) => { let _ = ready.send(Err(error)); }
                     }
@@ -448,13 +473,14 @@ impl Runtime {
 
     fn event_loop(
         &self,
-        key: &str,
+        identity: (&str, &str),
         event: &aw_host::Event<'_>,
         lease: (&AtomicBool, &evidence::Cell),
         receiver: Receiver<Job>,
         automatic: bool,
         ordered: bool,
     ) {
+        let (key, instance_id) = identity;
         let (cancelled, context) = lease;
         let mut close = None;
         let mut claimed = BTreeSet::new();
@@ -548,8 +574,11 @@ impl Runtime {
                                     }
                                     thread::sleep(std::time::Duration::from_millis(2));
                                 }
+                                self.check_scope_owner(instance_id)?;
                                 self.audit
                                     .append(key, json!({"phase": "started", "step_id": step}))?;
+                                // Queueing and durable audit can outlive the admitted owner.
+                                self.check_scope_owner(instance_id)?;
                                 let invocation = match native_environment {
                                     Some(environment) => {
                                         event.invoke_with_native_environment(&step, &environment)
@@ -589,6 +618,9 @@ impl Runtime {
     }
 
     pub(crate) fn maintain(&self, shutdown: bool) -> Result<()> {
+        if !shutdown {
+            self.maintain_scopes()?;
+        }
         if shutdown {
             self.stopped.store(true, Ordering::Release);
             let mut events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;

@@ -6,6 +6,10 @@ AW 在原生 Agent 的工具调用前后执行策略。Adapter 接收原生回�
 绑定和事件，Host 调用 Provider，最后由 Adapter 将结果交还 Agent。
 模型调用、工具调度和权限审批仍由 Agent 负责。
 
+常驻 SDK 通过服务端的受管根 binding 和任务子 binding 接入。根策略保持不可变；
+每个任务固定独立 cwd 和环境，保留重放阻断记录到释放，所属进程退出后执行回收。
+原生工厂继续由 Adapter 负责，见[任务生命周期](runtime/local-service.md#常驻宿主与任务-scope)。
+
 ## 使用流程
 
 ![AW 用户流程与组件架构](../../../../../docs/images/aw/architecture_zh.png)

@@ -13,8 +13,7 @@ use std::{
     time::Instant,
 };
 
-mod process;
-use process::Process;
+use super::process::Process;
 
 pub(super) struct Reload {
     process: Option<Process>,
@@ -34,6 +33,14 @@ impl Runtime {
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
         let instance = instance(&mut instances, id)?;
+        if self
+            .owners
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?
+            .contains_key(id)
+        {
+            return Err(rejected("scope_reload_unsupported"));
+        }
         if instance.reload.is_some() {
             return Err(rejected("reload_already_enabled"));
         }
@@ -68,7 +75,7 @@ impl Runtime {
         if let Some(pid) = state.pending_bridge {
             process.corroborate(pid)?;
         }
-        let key = self.policy_record(
+        let key = self.lifecycle_record(
             "process_association",
             id,
             json!({"process":process.metadata(),"native_bridge_pid":state.pending_bridge}),
@@ -120,7 +127,7 @@ impl Runtime {
                     return Err(rejected("bridge_already_ready"));
                 }
                 state.bridge_audit =
-                    Some(self.policy_record("bridge_ready", id, json!({"pid":pid}))?);
+                    Some(self.lifecycle_record("bridge_ready", id, json!({"pid":pid}))?);
                 state.ready = true;
             }
             LifecyclePhase::RequestStart | LifecyclePhase::ToolStart => {
@@ -198,20 +205,6 @@ impl Runtime {
                 "requests":state.map(|s| s.requests.len()),"tools":state.map(|s| s.tools.len()),
                 "process":state.and_then(|s| s.process.as_ref()).map(Process::metadata)})
         })).collect()))
-    }
-
-    fn policy_record(&self, kind: &str, id: &str, metadata: Value) -> Result<String> {
-        let key = self.identifier()?;
-        self.audit.claim(
-            &key,
-            json!({"kind":kind,"identity":self.identity,"instance_id":id,"metadata":metadata}),
-        )?;
-        let result = self
-            .audit
-            .append(&key, json!({"phase":"closed","status":"ok"}));
-        self.audit.release(&key);
-        result?;
-        Ok(key)
     }
 
     fn idle(&self, instance: &Instance, id: &str) -> Result<()> {

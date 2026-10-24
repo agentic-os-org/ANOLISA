@@ -28,7 +28,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha4`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
+`aw-service/v1alpha5`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
@@ -41,6 +41,9 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | --- | --- | --- |
 | `status` | 无 | PID、资源数量、审计健康状态及尚未验证的采用状态 |
 | `bind` | `target`、可信 `capabilities`、绝对 `cwd`、完整 `environment` | 服务签发的 `instance_id`、身份和准备阶段 `audit_key` |
+| `own_instance` | `instance_id`、launcher `pid` | 不可变进程归属和审计 key |
+| `open_scope` | 根 `parent_id`、launcher 自身或其后代 worker `pid`、绝对 `cwd`、完整 `environment` | 继承根策略、独立完成准入的任务 binding |
+| `acknowledge_scope` | 任务 `instance_id` | 准备完成五秒内确认句柄交接，再允许回调 |
 | `unbind` | `instance_id` | 在全部事件关闭后释放绑定 |
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
@@ -93,6 +96,41 @@ Rust 客户端通过 `Error::Attempt` 暴露该记录键。
 本地协议 v1alpha2 在 status 发现阶段拒绝 v1alpha1 daemon，不会继续绑定或回调。
 升级前先退出旧会话并用旧版命令停止服务，再一起更新 CLI 和 daemon；不得替换仍在
 使用的 socket。该版本隔离了回调环境的线协议变更，配置和 Provider 协议保持不变。
+
+## 常驻宿主与任务 scope
+
+`own_instance` 固定同用户 launcher 的 PID、启动时刻和 PID namespace。
+`open_scope` 继承根 binding 已准入的 target、能力与配置，再以任务自己的 cwd 和完整
+环境重新进行 Provider 准备。嵌套 scope、可热更新的根和已启动观测均被拒绝。
+worker 可以是 launcher 自身或其后代；fork worker 在 fork 后创建独立 scope。
+进程身份用于同用户信任边界内的生命周期核对。
+
+新任务在 `acknowledge_scope` 前拒绝回调。调用方收到句柄后先纳入清理保护，再在准备
+完成后的五秒内确认。响应丢失时即使 worker 继续存活，预留也会过期回收；过期或重复
+确认均被拒绝，回调不能延长交接时间。
+确认在窗口内持有准入锁提交状态，再写入成功审计；持久化完成前回调继续等待锁。
+慢审计不能把已提交的确认改判为过期。审计失败则取消任务、拒绝回调，并由维护循环回收。
+
+每个任务独立持有事件、重放阻断记录和 Provider 上下文。根关闭先取消全部子任务工作，
+再逐个等待清理，同时取消准备中的 scope；并发关闭按 binding 串行完成。
+关闭中的根拒绝新任务。连接断开取消准备，成功响应无法送达则释放预留。
+维护循环回收 launcher / worker 已退出的 scope，并核对启动时刻以拒绝 PID 复用。
+排队步骤在前序完成后及审计写入后重新核对两级 owner，再调用 Provider。
+清理超时保留 draining 状态并返回错误，
+维护循环继续进行有界回收。
+
+服务上限仍为 16 个 binding，包含根与任务；容量不足时在创建 SDK client 前拒绝准入。
+单任务最多保留 1,024 个 Hook 关联，直到任务释放。新任务获得新 binding；已完成关联
+保留其重放阻断能力。准备中、已准入但空闲、正在排空的任务都占绑定槽；一个根绑定
+最多留下 15 个任务槽，由连接同一服务的全部 worker 共享。关联上限累计计算事件、
+session 和 call 身份，PreTool 与 PostTool 分别计数；两者都启用时单任务最多容纳
+512 对完整工具调用，打开失败也消耗关联。关闭事件不会重置重放保护记录。
+常驻服务发布到生产前，需要按实际部署验证这些固定上限的容量。
+任务释放回收内存；持久元数据的磁盘保留由运维管理，磁盘或审计
+故障会停止准入。这组 API 交付服务端基础，Pi / Claude 常驻工厂由后续改动接入。
+
+升级时先排空旧会话并停止旧 daemon，再同时更新 CLI 和 daemon 到
+`aw-service/v1alpha5`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
 
 ## 共享事件生命周期
 

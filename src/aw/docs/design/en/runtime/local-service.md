@@ -31,7 +31,7 @@ service.
 ## Local protocol
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) defines the experimental
-`aw-service/v1alpha4` protocol. It is separate from the Provider stdio protocol
+`aw-service/v1alpha5` protocol. It is separate from the Provider stdio protocol
 `aw-provider/v1alpha1`. Each connection carries one length-framed JSON request
 and one response; a frame is limited to 8 MiB. Native stdin and normalized event data each retain
 a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
@@ -47,6 +47,9 @@ running service.
 | --- | --- | --- |
 | `status` | None | PID, resource counts, audit health and unverified adoption status |
 | `bind` | `target`, trusted `capabilities`, absolute `cwd`, complete `environment` | Service-issued `instance_id`, identity and preparation `audit_key` |
+| `own_instance` | `instance_id`, launcher `pid` | Immutable process ownership and an audit key |
+| `open_scope` | root `parent_id`, launcher or descendant worker `pid`, absolute `cwd`, complete `environment` | Independently prepared task binding under the root policy |
+| `acknowledge_scope` | task `instance_id` | Enable callbacks after the owner receives its handle, within five seconds of preparation |
 | `unbind` | `instance_id` | Release a binding after all its events have closed |
 | `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
 | `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
@@ -112,6 +115,52 @@ binding or callback. Stop old sessions and their daemons using the old binary
 before upgrading the CLI and daemon together; never replace a live socket.
 This separates the callback-environment wire change from the unchanged
 configuration and Provider protocols.
+
+## Resident hosts and task scopes
+
+`own_instance` pins the same-user launcher's PID, start ticks and PID namespace.
+`open_scope` inherits the root's admitted target, capabilities and configuration,
+then runs Provider preparation with the task's own cwd and complete environment.
+Nested scopes, reloadable roots and active observation are rejected. The owning
+worker must be the launcher itself or its descendant; forked workers create new
+scopes after fork. Process identity corroborates lifetime within the same-user trust boundary.
+
+A new task stays closed to callbacks until `acknowledge_scope`. The owner must
+retain the returned handle in its cleanup guard before acknowledging within five
+seconds. Lost responses expire even when the worker remains alive. Expired or
+repeated acknowledgements fail; no callback can extend this handoff window.
+Acknowledgement commits under the admission lock within that window, before its
+success audit record is written. Callbacks remain locked until durable completion;
+slow audit I/O cannot turn a committed acknowledgement into a deadline rejection.
+An audit failure cancels the task, rejects callbacks and leaves reclamation to maintenance.
+
+Every task owns its events, replay fences and Provider context. Release cancels
+all sibling work before draining it, also cancels pending scope preparation, and
+serializes concurrent closes. A closing root admits no new scopes. Connection
+loss cancels preparation; an undeliverable successful response releases its slot.
+Maintenance reaps dead launcher/worker scopes and checks start time to reject PID
+reuse. Queued steps recheck both owners after ordered predecessors and again after
+durable audit, immediately before Provider invocation. Failed cleanup
+retains the draining state and returns an error; maintenance retries bounded work.
+
+The service-wide limit remains 16 bindings, including roots and tasks; capacity
+exhaustion rejects admission without starting the SDK client. Each task retains
+at most 1,024 Hook correlations until release. A new task gets a fresh binding;
+completed entries are never evicted to permit replay under an existing binding.
+Pending preparation, idle admitted tasks and draining tasks occupy binding slots;
+one root leaves at most 15 task slots across all workers sharing that service.
+The correlation limit counts cumulative event/session/call identities, with
+PreTool and PostTool counted separately. Enabling both permits at most 512 complete
+tool-call pairs per task; failed opens also consume identities. Closing an event
+does not reset this replay fence. These fixed limits need deployment-specific
+capacity validation before a resident service is released to production.
+Task release reclaims memory; durable metadata remains subject to operator disk
+retention. Disk/audit failures stop admission. These APIs are the service foundation;
+native Pi/Claude resident factories are delivered separately.
+
+Upgrade CLI and daemon together to `aw-service/v1alpha5` after draining old
+sessions and stopping the old daemon. The configuration and Provider protocols
+retain their versions. Rollback requires the same drain/stop procedure.
 
 ## Shared event lifetime
 

@@ -245,6 +245,14 @@ impl Runtime {
                     json!({"audit_key":null,"source_state":"disabled","query_state":"disabled","coverage":"unknown"}),
                 );
             };
+            if self
+                .owners
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?
+                .contains_key(instance_id)
+            {
+                return Err(rejected("scope_observation_unsupported"));
+            }
             let key = self.identifier()?;
             let (sender, receiver) = mpsc::sync_channel(2);
             self.audit.claim(

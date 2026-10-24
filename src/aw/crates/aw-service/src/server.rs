@@ -171,7 +171,10 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) 
         .as_ref()
         .copied()
         .unwrap_or_else(|_| Instant::now() + stall);
-    let binding = matches!(&request.operation, Operation::Bind { .. });
+    let binding = matches!(
+        &request.operation,
+        Operation::Bind { .. } | Operation::OpenScope { .. }
+    );
     let result = (|| {
         if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
             return prepare_connected(&stream, &runtime, request, expires, peer);

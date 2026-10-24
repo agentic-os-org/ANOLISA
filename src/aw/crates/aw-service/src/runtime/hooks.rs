@@ -32,10 +32,14 @@ fn correlation(event: &str, session: &str, call: &str) -> Result<String> {
     ))
 }
 
-fn lock_hooks<T>(hooks: &Mutex<T>, deadline: Instant) -> Result<MutexGuard<'_, T>> {
+fn lock_until<'a, T>(
+    hooks: &'a Mutex<T>,
+    deadline: Instant,
+    timeout: &str,
+) -> Result<MutexGuard<'a, T>> {
     loop {
         if Instant::now() >= deadline {
-            return Err(rejected("event_open_timeout"));
+            return Err(rejected(timeout));
         }
         match hooks.try_lock() {
             Ok(guard) => return Ok(guard),
@@ -74,7 +78,7 @@ impl Runtime {
         let key = correlation(event, session, call)?;
         let cancelled = {
             // The worker shares this flag even before its handle is ready.
-            let mut hooks = lock_hooks(&hooks, deadline)?;
+            let mut hooks = lock_until(&hooks, deadline, "event_open_timeout")?;
             if !hooks.contains_key(&key) && hooks.len() >= MAX_HOOK_EVENTS {
                 return Err(rejected("native_event_limit"));
             }
@@ -110,15 +114,26 @@ impl Runtime {
     }
 
     pub(super) fn release_instance(&self, instance_id: &str, deadline: Instant) -> Result<Value> {
+        let release = Arc::clone(
+            &self
+                .instances
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?
+                .get(instance_id)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| rejected("unknown_instance"))?
+                .release,
+        );
+        let _release = lock_until(&release, deadline, "instance_release_timeout")?;
         let update = {
             let mut instances = self
                 .instances
                 .lock()
                 .map_err(|_| rejected("state_poisoned"))?;
-            let instance = instances
-                .get_mut(instance_id)
-                .and_then(Option::as_mut)
-                .ok_or_else(|| rejected("unknown_instance"))?;
+            let Some(instance) = instances.get_mut(instance_id).and_then(Option::as_mut) else {
+                // A concurrent close acknowledged this same live binding first.
+                return Ok(json!({"released": true}));
+            };
             instance.closing = true;
             if let Some(cancelled) = instance
                 .reload
@@ -129,6 +144,7 @@ impl Runtime {
             }
             Arc::clone(&instance.policy_update)
         };
+        self.drain_scope_children(instance_id, deadline)?;
         loop {
             let active = {
                 let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
@@ -151,6 +167,10 @@ impl Runtime {
                 self.release_source_sessions(instance_id)?;
                 let observation = self.observation_metadata(instance_id)?;
                 self.instances
+                    .lock()
+                    .map_err(|_| rejected("state_poisoned"))?
+                    .remove(instance_id);
+                self.owners
                     .lock()
                     .map_err(|_| rejected("state_poisoned"))?
                     .remove(instance_id);
@@ -238,8 +258,8 @@ impl Runtime {
         digest.update(&compared_input);
         let digest: [u8; 32] = digest.finalize().into();
         // Preserve shared-handle opens without excluding cancellation during I/O.
-        let _opening = lock_hooks(&hook_open, deadline)?;
-        let mut leases = lock_hooks(&hooks, deadline)?;
+        let _opening = lock_until(&hook_open, deadline, "event_open_timeout")?;
+        let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
         if let Some(lease) = leases.get_mut(&correlation) {
             if lease.cancelled.load(Ordering::Acquire) {
                 return Err(rejected("native_event_closed"));
@@ -303,7 +323,7 @@ impl Runtime {
         // Initialization may wait on durable storage. Keep cancellation writable.
         drop(leases);
         let handle = self.open(instance_id, value, Some(native_input), deadline, cancelled)?;
-        let mut leases = lock_hooks(&hooks, deadline)?;
+        let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
         let lease = leases
             .get_mut(&correlation)
             .ok_or_else(|| rejected("native_event_closed"))?;
@@ -385,6 +405,7 @@ mod tests {
                 },
                 reload: None,
                 policy_update: Arc::new(Mutex::new(())),
+                release: Arc::new(Mutex::new(())),
                 host: Arc::new(host),
                 closing: false,
                 observation: None,

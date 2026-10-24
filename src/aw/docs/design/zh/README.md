@@ -32,7 +32,7 @@ flowchart LR
 | [配置](configuration/configuration.md) | `aw-config` 在运行前校验期望配置 |
 | [策略更新边界](runtime/policy-reload.md) | 离线比较和显式空闲激活；外部接入仍在规划中 |
 | [Adapter 分发](adapters/adapter-dispatch.md) | aw-adapter 准备原生注册、转换事件并采用效果 |
-| [本地服务](runtime/local-service.md) | `aw-service` 管理绑定、事件和审计，把步骤交给 Host |
+| [本地服务](runtime/local-service.md)：受管根与独立任务 binding | `aw-service` 管理绑定、事件和审计，把步骤交给 Host |
 | [Provider Host](runtime/provider-host.md) | `aw-host` 准备 Provider，执行已准入的步骤 |
 | [Provider 协议](../../../../../docs/developer-guide/zh/aw/providers/protocol.md) | `aw-provider` 校验请求、响应和能力 |
 | [有界执行](runtime/bounded-execution.md) | `aw-exec` 管理命令传输和进程清理 |
