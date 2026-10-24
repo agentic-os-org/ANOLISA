@@ -4,6 +4,8 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - "tests/acceptance.py"
+      - "tests/test_acceptance.py"
       - ".github/components.json"
       - ".github/labels.json"
       - ".github/CODEOWNERS"
@@ -31,6 +33,8 @@ on:
   push:
     branches: [main]
     paths:
+      - "tests/acceptance.py"
+      - "tests/test_acceptance.py"
       - ".github/components.json"
       - ".github/labels.json"
       - ".github/CODEOWNERS"
@@ -80,6 +84,9 @@ jobs:
 
       - name: Test source archive paths and identity
         run: python3 .github/scripts/test_package_source_paths.py
+
+      - name: Test required acceptance evidence
+        run: python3 -m unittest discover -s tests -p test_acceptance.py
 
       - name: Test automatic release notes
         run: python3 -B .github/scripts/test_release_notes.py

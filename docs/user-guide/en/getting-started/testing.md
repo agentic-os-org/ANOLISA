@@ -66,7 +66,51 @@ integration, smoke, frontend, or documentation checks when the changed files
 require them. Keep the aggregate runner as a quick signal rather than the
 pull-request acceptance criterion.
 
-## 3. Further documentation
+## 3. Required regression evidence
+
+`python3 tests/acceptance.py /path/to/evidence/manifest.json` validates collected
+JUnit reports and prints one JSON result (exit 0 for passed, 1 otherwise).
+It does not launch tests. Run component entry points first and retain their
+logs and exit codes alongside the reports. For Python suites, pytest's
+`--junitxml=/path/to/evidence/report.xml` produces compatible reports.
+
+The manifest has this shape; replace the commit and digest placeholders with
+the tested candidate's full Git SHA and the report file's SHA-256:
+
+```json
+{
+  "schema_version": 1,
+  "candidate_sha": "<40-character-lowercase-commit-sha>",
+  "reports": [
+    {
+      "id": "tokenless-attribution",
+      "component": "tokenless",
+      "kind": "regression",
+      "required": true,
+      "exit_code": 0,
+      "path": "report.xml",
+      "sha256": "<64-character-report-sha256>"
+    }
+  ]
+}
+```
+
+Declare each required suite explicitly with a unique ID and a component ID
+from `.github/components.json`; at least one report must be required. Report
+paths stay inside the manifest directory. Required missing, changed, malformed,
+empty or skipped evidence fails acceptance. Record the actual process exit code;
+a nonzero exit fails even when XML reports success. An executed failure also fails an
+optional suite; optional blocked/skipped reports remain visible without failing
+the whole result. Reports are limited to 16 MiB and must have consistent JUnit
+case counts. A case without a failure/error/skip element is counted as passed.
+
+This first stage aggregates **component regression** evidence. It counts test
+cases, not individual assertions, and does not certify cross-component journeys,
+native SDK behavior, or how a report was produced. The caller is responsible
+for the candidate SHA and trusted report provenance; hashes detect changes to
+the declared artifacts. Keep native and regression acceptance separate.
+
+## 4. Further documentation
 
 - [Build from source](building.md)
 - [Troubleshooting](troubleshooting.md)

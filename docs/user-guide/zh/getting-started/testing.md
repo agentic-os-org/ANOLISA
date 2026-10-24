@@ -57,7 +57,46 @@ PR 应根据变更文件选择组件矩阵中的对应行，运行相应的构�
 涉及的平台、集成、smoke、前端或文档时，还要补充相应检查。聚合脚本适合作为快速
 信号，不应作为 PR 的唯一验收依据。
 
-## 3. 延伸阅读
+## 3. 必需回归证据
+
+`python3 tests/acceptance.py /path/to/evidence/manifest.json` 校验已收集的 JUnit
+报告并输出一份 JSON 结果（通过返回 0，否则返回 1）。它不启动测试。先运行各组件
+入口，并在报告旁保留日志和退出码。Python 套件可通过 pytest 的
+`--junitxml=/path/to/evidence/report.xml` 生成兼容报告。
+
+清单格式如下；请将提交和摘要占位符替换为实际受测候选的完整 Git SHA 和报告文件的
+SHA-256：
+
+```json
+{
+  "schema_version": 1,
+  "candidate_sha": "<40-character-lowercase-commit-sha>",
+  "reports": [
+    {
+      "id": "tokenless-attribution",
+      "component": "tokenless",
+      "kind": "regression",
+      "required": true,
+      "exit_code": 0,
+      "path": "report.xml",
+      "sha256": "<64-character-report-sha256>"
+    }
+  ]
+}
+```
+
+使用唯一 ID 和 `.github/components.json` 中的组件 ID 显式声明每个必需套件；
+至少一份报告必须为必需项。报告路径不能超出清单目录。必需证据缺失、被修改、格式
+非法、为空或包含跳过项，都会使验收失败。请记录实际进程退出码，非零退出码即使
+XML 报告成功也会导致失败。可选套件若实际执行失败，也会导致失败；
+可选项的 blocked/skipped 状态会保留展示，但不影响总体通过。报告上限为 16 MiB，
+JUnit 用例计数必须一致。没有 failure/error/skip 元素的用例视为通过。
+
+首阶段聚合的是**组件回归**证据，统计测试用例而非单条断言，不证明跨组件流程、
+原生 SDK 行为或报告的生成过程。调用方负责候选 SHA 和可信报告来源，哈希用于检测
+已声明工件的变化。原生验收与回归验收应分别保留。
+
+## 4. 延伸阅读
 
 - [从源码构建](building.md)
 - [故障排查](troubleshooting.md)
