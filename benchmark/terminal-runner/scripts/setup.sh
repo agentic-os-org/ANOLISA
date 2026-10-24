@@ -119,19 +119,19 @@ source "$VENV_DIR/bin/activate"
 if [ -d "$ROOT_DIR/harbor" ]; then
     echo "==> harbor/ exists, checking out $HARBOR_REF ..."
     git -C "$ROOT_DIR/harbor" fetch --tags origin 2>/dev/null || true
-    git -C "$ROOT_DIR/harbor" checkout "$HARBOR_REF" 2>/dev/null || echo "WARNING: could not checkout $HARBOR_REF"
 else
     echo "==> Cloning harbor from $HARBOR_URL ..."
     git clone "$HARBOR_URL" "$ROOT_DIR/harbor"
-    git -C "$ROOT_DIR/harbor" checkout "$HARBOR_REF"
 fi
-
-echo "==> Installing harbor (pip install -e) ..."
-pip install -e "$ROOT_DIR/harbor"
+if ! git -C "$ROOT_DIR/harbor" checkout "$HARBOR_REF"; then
+    echo "ERROR: could not select Harbor ref '$HARBOR_REF'; installation stopped." >&2
+    exit 1
+fi
 
 # --- Dataset ---
 if [ -d "$ROOT_DIR/dataset" ]; then
-    echo "==> dataset/ exists, skipping clone"
+    echo "==> dataset/ exists, checking out $DATASET_REF ..."
+    git -C "$ROOT_DIR/dataset" fetch --tags origin 2>/dev/null || true
 else
     if ! command -v git-lfs &>/dev/null; then
         echo "ERROR: git-lfs is required to clone the dataset." >&2
@@ -140,10 +140,14 @@ else
     fi
     echo "==> Cloning dataset from HuggingFace (requires git-lfs) ..."
     git clone "$DATASET_URL" "$ROOT_DIR/dataset"
-    if [ "$DATASET_REF" != "main" ]; then
-        git -C "$ROOT_DIR/dataset" checkout "$DATASET_REF"
-    fi
 fi
+if ! git -C "$ROOT_DIR/dataset" checkout "$DATASET_REF"; then
+    echo "ERROR: could not select Dataset ref '$DATASET_REF'; installation stopped." >&2
+    exit 1
+fi
+
+echo "==> Installing harbor (pip install -e) ..."
+pip install -e "$ROOT_DIR/harbor"
 
 echo ""
 echo "==> Setup complete."

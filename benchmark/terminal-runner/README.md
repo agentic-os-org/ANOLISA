@@ -100,8 +100,15 @@ cd anolisa/benchmark/terminal-runner
 `setup.sh` does:
 1. Checks Python version — if < 3.12, auto-detects conda (Miniconda/Anaconda) and creates a 3.12 environment (env name configurable via `CONDA_ENV_NAME`, default `terminal-runner-py312`)
 2. Creates a Python virtual environment at `.venv/`
-3. `git clone` harbor upstream → `harbor/`, **checks out the pinned release tag** (`v0.15.0`), then `pip install -e` into the venv
-4. `git clone` dataset (via Git LFS) from HuggingFace → `dataset/`
+3. Clones harbor upstream → `harbor/` if needed and selects `HARBOR_REF` (default `v0.15.0`)
+4. Clones the dataset (via Git LFS) from HuggingFace → `dataset/` if needed and selects `DATASET_REF` (default `main`)
+5. Installs harbor with `pip install -e` into the venv after both checkouts succeed
+
+Rerunning setup selects both refs in existing repositories. Existing clones fetch
+tags when the origin is available; locally cached refs can work when fetch fails.
+An unavailable ref or conflicting local edit stops setup before pip installation
+and prints the checkout error. Resolve local edits or choose an available ref,
+then rerun setup; checkout never forces away your edits.
 
 > **Note:** Harbor is pinned to a specific release (`v0.15.0`) for stability. Override with `HARBOR_REF` if needed.
 
@@ -111,6 +118,7 @@ Override sources:
 HARBOR_URL=git@github.com:your-fork/harbor.git \
 HARBOR_REF=v0.15.0 \
 DATASET_URL=https://huggingface.co/datasets/<org>/<dataset> \
+DATASET_REF=main \
   ./scripts/setup.sh
 ```
 
