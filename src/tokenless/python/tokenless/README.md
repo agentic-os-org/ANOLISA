@@ -73,3 +73,13 @@ opening the client follows CLI initialization and may create or migrate `stats.d
 directory must be writable. `limit=None` for summary or comparison reads at most the newest 10,000
 records. Session and tool-use diffs also read at most the newest 10,000 matching records;
 comparisons should pass a dry-run session before an active Tokenless session.
+
+
+`TokenlessStats.summary()` exposes the same reporting boundary through
+`summary.summary_scope` (`StatsSummaryScope`). Its `records_selected` and
+`records_total` counts include dry-run rows; `complete` indicates whether the
+window covers every stored row. When incomplete, the optional retrieval/net
+fields in `summary.attribution` are `None`, while gross savings still cover
+only selected active records. Retrieval-query failures also remain best-effort
+and omit those optional fields. An older native backend may omit scope metadata,
+in which case `summary_scope` is `None`.
