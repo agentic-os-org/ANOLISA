@@ -1152,6 +1152,9 @@ jobs:
           cd src/agent-memory
           make test-openclaw-install
 
+      - name: Test memory smoke failure detection
+        run: python3 src/agent-memory/tests/test_smoke.py -v
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'

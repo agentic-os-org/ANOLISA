@@ -24,6 +24,12 @@
 | [SkillFS](../../../../src/skillfs/README_zh.md) | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`；Linux 上再运行 `cd src/skillfs && scripts/test.sh` 执行 FUSE smoke test。 |
 | [ktuner](../../../../src/ktuner/README.md) | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
 
+Agent Memory 的 `make smoke` 需要 Python 3，在临时 userland 命名空间中检查
+release 二进制。它校验 MCP 响应和回读数据，在服务出错或超过 30 秒时失败，
+并在停止子进程后清理临时数据。它不验证特权挂载隔离。
+运行 `python3 src/agent-memory/tests/test_smoke.py -v` 可以在不构建组件的情况下
+验证 smoke 入口的故障检测。
+
 修改公共 API 或 rustdoc 时，在受影响的 Rust 组件门禁中追加
 `cargo doc --workspace --no-deps`。`ktuner tune`、FUSE 挂载、
 eBPF tracing 和系统 daemon 需要普通单元测试之外的主机权限或内核能力。

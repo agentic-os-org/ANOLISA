@@ -27,6 +27,13 @@ guide before changing component internals.
 | [SkillFS](../../../../src/skillfs/README.md) | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; on Linux, `cd src/skillfs && scripts/test.sh` adds the FUSE smoke test. |
 | [ktuner](../../../../src/ktuner/README.md) | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
 
+Agent Memory's `make smoke` requires Python 3 and checks the release binary in
+a temporary userland namespace. It validates MCP responses and read-back data,
+fails on server errors or a 30-second timeout, and removes temporary data after
+stopping the child process. It does not validate privileged mount isolation.
+Run `python3 src/agent-memory/tests/test_smoke.py -v` to check the smoke runner's
+failure detection without building the component.
+
 For a public API or rustdoc change, add `cargo doc --workspace --no-deps` to
 the affected Rust component's gate. `ktuner tune`,
 FUSE mounts, eBPF tracing, and system daemons need host privileges or kernel
