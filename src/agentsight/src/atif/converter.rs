@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Metrics, Observation,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
     ObservationResult, Step, StepSource, ToolCall, same_call_id,
 };
 
@@ -811,26 +811,13 @@ fn collect_tool_responses(
                     _ => None,
                 };
                 let envelope = encoded.as_ref().unwrap_or(response);
-                let status_is_error = envelope
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|status| status.eq_ignore_ascii_case("error"));
-                let declared = envelope
-                    .get(EXTRA_IS_ERROR)
-                    .or_else(|| envelope.get("isError"))
-                    .and_then(|v| v.as_bool())
-                    .or_else(|| {
-                        envelope
-                            .get("success")
-                            .and_then(|v| v.as_bool())
-                            .map(|success| !success)
-                    });
-                let is_error = declared
-                    .map(|is_error| is_error || status_is_error)
-                    .or_else(|| status_is_error.then_some(true));
-                let extra = is_error.map(|flag| {
-                    HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(flag))])
-                });
+                //
+                // The precedence itself lives in `agentsight_atif` beside the
+                // schema, because the interruption detector, the grader and the
+                // trajectory collectors all read the same spellings and must
+                // resolve a self-contradicting payload the same way.
+                let is_error = agentsight_atif::declared_tool_failure(envelope);
+                let extra = is_error.map(agentsight_atif::is_error_extra);
 
                 // ATIF allows any JSON for observation content, but downstream
                 // consumers (analyzers, dashboard) render it as text — flatten
