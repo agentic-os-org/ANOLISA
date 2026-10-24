@@ -144,9 +144,7 @@ impl Registry {
             runtime,
             &["runtime_id", "binding_revision", "environment_id"],
         )?;
-        if runtime.get("session_id").is_some() {
-            same(scope, runtime, &["session_id"])?;
-        }
+        crate::session_scope::validate(scope, runtime)?;
         require(
             scope["runtime_generation"] == runtime["generation"] && runtime["state"] == "running",
             "runtime binding is not current and running",
