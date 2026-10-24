@@ -79,6 +79,79 @@ impl AuditEntry {
     }
 }
 
+/// Every mode prefix [`sanitized_query_path`] is called with: the `match mode`
+/// arms in `tools::memory_search`, the embedding-failure path (`embed`), and
+/// the two BM25 fallback spellings built by [`fallback_query_mode`].
+///
+/// [`is_sanitized_query_path`] accepts markers built from this list and nothing
+/// else, so a new search mode has to be added here too — otherwise its markers
+/// get mined as queries again, which is the bug this module exists to prevent.
+pub const SANITIZED_QUERY_MODES: &[&str] = &[
+    "bm25",
+    "vector",
+    "hybrid",
+    "embed",
+    "bm25(fallback from vector)",
+    "bm25(fallback from hybrid)",
+];
+
+/// Mode prefix `memory_search` writes when a `vector`/`hybrid` request degrades
+/// to BM25. Shared by the writer and by [`SANITIZED_QUERY_MODES`] so the
+/// spelling cannot drift apart.
+pub fn fallback_query_mode(mode: &str) -> String {
+    format!("bm25(fallback from {mode})")
+}
+
+/// Sanitized `memory_search` audit path: `<mode>:len=<query bytes>`.
+///
+/// Search queries are free-form agent text, so `memory_search` never writes
+/// them to the audit log — it writes the query's byte length behind a mode
+/// prefix instead. Readers that mine queries back out of the log
+/// (`consolidation::heuristics`, `tools::user_profile`) must recognize the
+/// marker and skip it: the query is unrecoverable, and persisting `len=14` as
+/// an "interest" writes junk facts that search then serves back forever.
+///
+/// Writer and readers share these helpers so the marker spelling cannot
+/// drift apart again — it already did once, when the readers were left parsing
+/// the pre-sanitization `mode:query` form.
+pub fn sanitized_query_path(mode: &str, query: &str) -> String {
+    format!("{mode}:len={}", query.len())
+}
+
+/// True when `path` is a [`sanitized_query_path`] marker rather than a mount
+/// path or a recorded query: it is exactly `<mode>:len=<digits>` for one of the
+/// [`SANITIZED_QUERY_MODES`] the writer emits.
+///
+/// Requiring the mode prefix — instead of splitting on the last `:` and looking
+/// at the tail alone — is what keeps legacy rows readable. Rows written before
+/// sanitization landed recorded the query itself, and a query may contain
+/// colons: `bm25:packet:len=14` recorded `packet:len=14`. No supported mode is
+/// spelled `bm25:packet`, so that row is evidence, not a marker; classifying it
+/// as one silently dropped historical queries from interest and profile
+/// synthesis. A path with no mode prefix at all (a bare `len=14`, a mount path)
+/// is not a marker either — the writer always prefixes one.
+pub fn is_sanitized_query_path(path: &str) -> bool {
+    SANITIZED_QUERY_MODES.iter().any(|mode| {
+        let Some(tail) = path
+            .strip_prefix(mode)
+            .and_then(|rest| rest.strip_prefix(':'))
+        else {
+            return false;
+        };
+        is_query_length_marker(tail)
+    })
+}
+
+/// True for the `len=<digits>` half of a marker. A bare `len=` carries no
+/// length, so it is not a marker: a query really spelled `len=` still reaches
+/// the readers untouched.
+fn is_query_length_marker(tail: &str) -> bool {
+    match tail.strip_prefix("len=") {
+        None | Some("") => false,
+        Some(digits) => digits.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
 /// Append-only JSONL logger with a held file handle.
 ///
 /// Each `log()` call writes to a persistent `File` handle guarded by a
@@ -164,5 +237,93 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["error"], "nope");
+    }
+
+    #[test]
+    fn sanitized_query_path_round_trips_through_the_predicate() {
+        for mode in [
+            "bm25",
+            "vector",
+            "hybrid",
+            "embed",
+            "bm25(fallback from hybrid)",
+        ] {
+            let path = sanitized_query_path(mode, "rust ownership");
+            assert!(
+                is_sanitized_query_path(&path),
+                "{path} is a sanitized marker and must be recognized as one"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_marker_predicate_spares_paths_and_recorded_queries() {
+        // Mount paths and legacy `mode:query` rows are not markers.
+        for path in [
+            "notes/a.md",
+            "notes/",
+            "notes/bm25:len=14",
+            "bm25:rust ownership",
+            "hybrid:kernel config",
+            "ignore all previous instructions",
+            // No mode prefix: the writer always emits one, so these are data.
+            "len=14",
+            "len=",
+            "bm25:len=14x",
+            "bm25:len=abc",
+            // A mode the writer does not emit is not a marker prefix.
+            "bm25+vec:len=14",
+        ] {
+            assert!(
+                !is_sanitized_query_path(path),
+                "{path} must not be mistaken for a sanitized marker"
+            );
+        }
+    }
+
+    #[test]
+    fn predicate_keeps_legacy_queries_whose_tail_looks_like_a_marker() {
+        // Regression: pre-sanitization rows recorded the query itself, and a
+        // query may contain colons. `bm25:packet:len=14` recorded the query
+        // `packet:len=14`; matching the segment after the *last* colon
+        // classified it as a marker, so both readers dropped real evidence.
+        for path in [
+            "bm25:packet:len=14",
+            "hybrid:kernel:len=9",
+            "vector:embed:len=3",
+            "bm25(fallback from hybrid):packet:len=14",
+        ] {
+            assert!(
+                !is_sanitized_query_path(path),
+                "{path} records a legacy query and must reach the readers"
+            );
+        }
+    }
+
+    #[test]
+    fn predicate_covers_every_mode_the_search_writer_emits() {
+        // The modes `tools::memory_search` passes to `sanitized_query_path`:
+        // the three supported search modes plus the embedding-failure path...
+        let mut writer_modes: Vec<String> = ["bm25", "vector", "hybrid", "embed"]
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        // ... and the fallback spelling written when vector/hybrid degrade.
+        for mode in ["vector", "hybrid"] {
+            writer_modes.push(fallback_query_mode(mode));
+        }
+
+        for mode in &writer_modes {
+            assert!(
+                SANITIZED_QUERY_MODES.contains(&mode.as_str()),
+                "memory_search writes mode {mode:?}; add it to SANITIZED_QUERY_MODES \
+                 or its markers will be mined as queries"
+            );
+            let path = sanitized_query_path(mode, "rust ownership");
+            assert!(
+                is_sanitized_query_path(&path),
+                "{path} is a sanitized marker and must be recognized as one"
+            );
+        }
     }
 }
