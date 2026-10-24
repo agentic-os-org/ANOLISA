@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use ws_ckpt_common::{
     decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
     ChangeType, CleanupRetention, DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp,
-    RecoveryPreview, Request, Response, SnapshotListItem, WorkspacePolicyJson,
+    RecoveryPreview, Request, Response, SnapshotListItem, StatusReport, WorkspacePolicyJson,
     ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
     DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
@@ -23,6 +23,10 @@ use std::cell::RefCell;
 /// Backend-usage advisory threshold (percent); CLI-side since daemon returns raw bytes.
 const ADVISORY_FS_USAGE_PCT: f64 = 90.0;
 const ADVISORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
+/// Watcher-health sidecar timeout for `status`: interactive, and the
+/// daemon-side computation is a lock walk over registered workspaces, so
+/// it gets more headroom than the post-command advisory poll.
+const WATCHER_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const DEFAULT_LIST_PAGE_LIMIT: u32 = 1000;
 
 // JSON output buffer: handlers stage their payload here so main() can wrap
@@ -564,7 +568,12 @@ async fn run(cli: Cli) -> Result<()> {
                 workspace: workspace.as_deref().map(resolve_workspace_arg),
             };
             let response = send_request_to_daemon(&request).await?;
-            handle_status_response(response, &format)?;
+            // Watcher health rides a sidecar request so the bincode status
+            // layout stays byte-compatible with older daemons and the
+            // cosh-ng mirror (#7592 review). An older daemon fails the
+            // request and the section is simply omitted.
+            let watcher_health = fetch_watcher_health().await;
+            handle_status_response(response, &format, watcher_health)?;
         }
         Commands::Cleanup { workspace, keep } => {
             let request = Request::Cleanup {
@@ -1356,11 +1365,73 @@ fn escape_diff_text(text: &str) -> String {
 }
 
 /// Handle StatusOk response, formatting the status report.
-fn handle_status_response(response: Response, format: &str) -> Result<()> {
+/// Fetch watcher health from the daemon. `None` on any error, timeout, or
+/// older daemon (which cannot decode the request and drops the
+/// connection): the caller then omits the section instead of failing
+/// `status`.
+async fn fetch_watcher_health() -> Option<(Vec<String>, u64)> {
+    match tokio::time::timeout(
+        WATCHER_HEALTH_TIMEOUT,
+        try_send_request_to_daemon_silent(&Request::WatcherHealth),
+    )
+    .await
+    {
+        Ok(Ok(Response::WatcherHealthOk {
+            workspaces_without_watcher,
+            watcher_queue_overflows,
+        })) => Some((workspaces_without_watcher, watcher_queue_overflows)),
+        _ => None,
+    }
+}
+
+/// Restrict the global watcher-health sidecar to the workspaces the status
+/// report actually covers.
+///
+/// The sidecar request carries no scope parameter (its shape is
+/// wire-frozen: `Request::WatcherHealth` is a unit variant), so the daemon
+/// answers with every registered workspace's watcher state. A scoped
+/// `status --workspace A` must not import unrelated workspaces' failures:
+/// with healthy A and degraded B it used to list only A under
+/// `workspaces` but B under `workspaces_without_watcher` (#7592 review).
+/// For a global report the filter is the identity — both lists enumerate
+/// the same registered workspaces.
+fn scope_watcher_health_to_report(
+    health: Option<(Vec<String>, u64)>,
+    report: &StatusReport,
+) -> Option<(Vec<String>, u64)> {
+    health.map(|(workspaces_without_watcher, watcher_queue_overflows)| {
+        let scoped: Vec<String> = workspaces_without_watcher
+            .into_iter()
+            .filter(|degraded| report.workspaces.iter().any(|ws| &ws.ws_id == degraded))
+            .collect();
+        (scoped, watcher_queue_overflows)
+    })
+}
+
+/// Handle StatusOk response.
+///
+/// `watcher_health` is the sidecar data from [`fetch_watcher_health`];
+/// `None` means the daemon did not answer it (older daemon or timeout) and
+/// the watcher section is omitted.
+fn handle_status_response(
+    response: Response,
+    format: &str,
+    watcher_health: Option<(Vec<String>, u64)>,
+) -> Result<()> {
     match response {
         Response::StatusOk { report } => {
+            // Scope the global sidecar to the workspaces this report covers
+            // before rendering (#7592 review).
+            let watcher_health = scope_watcher_health_to_report(watcher_health, &report);
             if format == "json" {
-                emit_json(serde_json::to_value(&report)?);
+                let mut value = serde_json::to_value(&report)?;
+                if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health
+                {
+                    value["workspaces_without_watcher"] =
+                        serde_json::json!(workspaces_without_watcher);
+                    value["watcher_queue_overflows"] = serde_json::json!(watcher_queue_overflows);
+                }
+                emit_json(value);
             } else {
                 println!("\x1b[1mDaemon Status\x1b[0m");
                 println!("  Uptime: {} seconds", report.uptime_secs);
@@ -1379,6 +1450,24 @@ fn handle_status_response(response: Response, format: &str) -> Result<()> {
                         println!("  {:<25} {:<40} {}", ws.ws_id, ws.path, ws.snapshot_count);
                     }
                     println!("\n  Total: {} workspace(s)", report.workspaces.len());
+                }
+                if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health
+                {
+                    if !workspaces_without_watcher.is_empty() {
+                        println!(
+                            "\x1b[33m  Watcher: {} workspace(s) run without a live file \
+                             watcher (change detection degraded): {}\x1b[0m",
+                            workspaces_without_watcher.len(),
+                            workspaces_without_watcher.join(", ")
+                        );
+                    }
+                    if *watcher_queue_overflows > 0 {
+                        println!(
+                            "\x1b[33m  Watcher: the shared inotify queue overflowed {} \
+                             time(s); dropped events forced quiescence re-checks\x1b[0m",
+                            watcher_queue_overflows
+                        );
+                    }
                 }
             }
         }
@@ -2402,6 +2491,61 @@ mod tests {
         assert_eq!(format_diff_entry(&literal), "\x1b[32m+  file\\\\n\x1b[0m");
         assert_eq!(format_diff_entry(&control), "\x1b[32m+  file\\n\x1b[0m");
     }
+
+    fn report_for(ws_ids: &[&str]) -> ws_ckpt_common::StatusReport {
+        ws_ckpt_common::StatusReport {
+            uptime_secs: 1,
+            workspaces: ws_ids
+                .iter()
+                .map(|ws_id| ws_ckpt_common::WorkspaceInfo {
+                    ws_id: (*ws_id).to_string(),
+                    path: format!("/tmp/{ws_id}"),
+                    snapshot_count: 0,
+                })
+                .collect(),
+            fs_total_bytes: 1000,
+            fs_used_bytes: 500,
+        }
+    }
+
+    #[test]
+    fn scoped_status_does_not_import_unrelated_watcher_failures() {
+        // #7592 review: `status --workspace ws-a` reports only ws-a, so a
+        // globally degraded ws-b must not appear under
+        // `workspaces_without_watcher`.
+        let report = report_for(&["ws-a"]);
+        assert_eq!(
+            scope_watcher_health_to_report(Some((vec!["ws-b".to_string()], 2)), &report),
+            Some((vec![], 2)),
+            "unrelated workspaces must be filtered out of the scoped output"
+        );
+        // The scoped workspace's own degradation stays visible...
+        assert_eq!(
+            scope_watcher_health_to_report(
+                Some((vec!["ws-a".to_string(), "ws-b".to_string()], 2)),
+                &report
+            ),
+            Some((vec!["ws-a".to_string()], 2)),
+            "the scoped workspace's own degradation must stay visible"
+        );
+        // ...and a missing sidecar (older daemon) stays missing.
+        assert_eq!(scope_watcher_health_to_report(None, &report), None);
+    }
+
+    #[test]
+    fn global_status_keeps_every_watcher_failure() {
+        // A global report covers every registered workspace, so the filter
+        // must be the identity there.
+        let report = report_for(&["ws-a", "ws-b"]);
+        assert_eq!(
+            scope_watcher_health_to_report(
+                Some((vec!["ws-a".to_string(), "ws-b".to_string()], 1)),
+                &report
+            ),
+            Some((vec!["ws-a".to_string(), "ws-b".to_string()], 1)),
+        );
+    }
+
     fn assert_existing_plugin_install_behavior(
         runtime: PluginRuntime,
         runtime_dir: &str,

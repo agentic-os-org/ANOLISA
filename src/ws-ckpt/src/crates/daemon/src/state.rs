@@ -6,7 +6,7 @@ use anyhow::Context;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, Notify, OnceCell, RwLock, Semaphore};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use ws_ckpt_common::backend::BackendType;
 use ws_ckpt_common::backend::StorageBackend;
@@ -247,6 +247,8 @@ impl DaemonState {
         let mut state = Self::new(config, backend, state_dir);
         state.selection_method = selection_method.to_string();
 
+        let mut restored_workspaces = 0usize;
+        let mut workspaces_without_watcher: Vec<String> = Vec::new();
         for entry in &state_file.workspaces {
             let ws_id = &entry.ws_id;
             let workspace_path = normalize_registration_path(&entry.workspace_path).with_context(|| {
@@ -296,17 +298,34 @@ impl DaemonState {
                 )
                 .with_context(|| format!("restore workspace registration {ws_id:?}"))?;
             // Start file watcher
+            restored_workspaces += 1;
             match WorkspaceWatcher::start(&workspace_path) {
                 Ok(watcher) => {
                     state.register_watcher(ws_id.clone(), watcher);
                 }
                 Err(e) => {
+                    workspaces_without_watcher.push(ws_id.clone());
                     warn!(
                         "Failed to start file watcher for workspace {}: {}",
                         ws_id, e
                     );
                 }
             }
+        }
+
+        // One aggregate error beats one WARN per workspace: a fleet-scale
+        // restart used to bury the degradation in hundreds of log lines
+        // while nothing else exposed it (#7233).
+        if !workspaces_without_watcher.is_empty() {
+            error!(
+                "file watchers failed to start for {} of {} restored workspaces ({}); \
+                 change detection is degraded for them - check the fs.inotify \
+                 max_user_instances / max_user_watches limits; `ws-ckpt status` \
+                 names them in its watcher-health section",
+                workspaces_without_watcher.len(),
+                restored_workspaces,
+                workspaces_without_watcher.join(", ")
+            );
         }
 
         // Reconcile both sides of a crash between backend mutation and index save.
@@ -886,6 +905,22 @@ impl DaemonState {
         }
     }
 
+    /// Whether a live, covered file watcher is registered for `ws_id`.
+    /// Status exposes the degraded set so watcher loss is visible instead
+    /// of silent (#7233). A handle whose survivor re-arm failed is NOT
+    /// covered — its route is published but no kernel watch backs it, so
+    /// reporting it as watched would hide exactly the silent
+    /// change-detection loss this surface exists to name (#7592 review).
+    pub fn has_watcher(&self, ws_id: &str) -> bool {
+        self.watchers
+            .lock()
+            .map(|watchers| match watchers.get(ws_id) {
+                Some(watch) => !watch.is_degraded(),
+                None => false,
+            })
+            .unwrap_or(false)
+    }
+
     /// Re-arm the write watcher for `ws_id` after the backend swapped the
     /// live subvolume behind the registration path (rollback). inotify
     /// watches inodes, not paths, so the old watch keeps observing the
@@ -929,6 +964,23 @@ impl DaemonState {
         }
     }
 
+    /// True when the stored watcher for `ws_id` is degraded: its route is
+    /// published but its kernel coverage is gone (a survivor re-arm failed
+    /// after an overlapping release). Inode identity cannot detect this —
+    /// the watched root can be renamed away, fail the re-arm, and have the
+    /// SAME inode moved back — so the explicit mark is the only signal.
+    fn watcher_route_degraded(&self, ws_id: &str) -> bool {
+        self.watchers
+            .lock()
+            .map(|watchers| {
+                watchers
+                    .get(ws_id)
+                    .map(|watch| watch.is_degraded())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
     /// Check if a workspace is quiescent (no recent writes).
     ///
     /// `registration_path` is supplied by the guarded flows, which call this
@@ -938,7 +990,11 @@ impl DaemonState {
     /// the heal uses the workspace state opportunistically.
     ///
     /// Returns [`Quiescence::Safe`] when no watcher is registered (the
-    /// long-standing contract: registration alone gates the flows).
+    /// long-standing contract: registration alone gates the flows). A
+    /// quiet period observed across a kernel-coverage interruption (a
+    /// survivor re-arm under an overlapping release) never yields `Safe`:
+    /// writes to directories the re-arm has not reached yet leave no
+    /// event, so the observation is void (#7592 review).
     pub async fn check_workspace_quiescent(
         &self,
         ws_id: &str,
@@ -959,32 +1015,45 @@ impl DaemonState {
         };
         let mut fresh_watch = false;
         if let Some(path) = heal_path {
-            if !self.watcher_target_is_current(ws_id, &path) {
+            // Heal when the stored watch went stale OR when its route lost
+            // kernel coverage (a failed survivor re-arm marked it
+            // degraded). Identity alone cannot prove coverage: the root can
+            // be renamed away while the re-arm fails and the SAME inode
+            // moved back, leaving a permanently silent flag behind (#7592
+            // review).
+            if !self.watcher_target_is_current(ws_id, &path) || self.watcher_route_degraded(ws_id) {
                 if self.rearm_watcher(ws_id, &path) {
                     fresh_watch = true;
                 } else {
-                    // The watch is known stale and re-arming failed: monitoring
-                    // is unavailable, so quiescence cannot be established from
-                    // the retired inode's (permanently silent) flag. Report that
-                    // instead of assuming quiescence.
+                    // The watch is known stale or degraded and re-arming
+                    // failed: monitoring is unavailable, so quiescence
+                    // cannot be established from the retired inode's
+                    // (permanently silent) flag. Report that instead of
+                    // assuming quiescence.
                     return Quiescence::MonitoringUnavailable;
                 }
             }
         }
         // Extract the AtomicBool from the watcher without holding the lock across await
-        let is_writing_arc = {
+        let observation = {
             let watchers = match self.watchers.lock() {
                 Ok(w) => w,
                 Err(_) => return Quiescence::Safe,
             };
             match watchers.get(ws_id) {
-                Some(w) => Some(std::sync::Arc::clone(&w.is_writing_flag())),
+                // Snapshot the coverage generation together with the flag:
+                // the quiet period below is only evidence when kernel
+                // coverage stays continuous throughout it.
+                Some(w) => Some((
+                    std::sync::Arc::clone(&w.is_writing_flag()),
+                    w.coverage_epoch(),
+                )),
                 None => None,
             }
         };
-        match is_writing_arc {
+        match observation {
             None => Quiescence::Safe,
-            Some(flag) => {
+            Some((flag, observed_epoch)) => {
                 // A freshly re-armed watcher's flag starts false and is set
                 // asynchronously by its forwarder task, so an already-active
                 // writer has not necessarily been observed yet: the check
@@ -999,9 +1068,55 @@ impl DaemonState {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if flag.load(std::sync::atomic::Ordering::Acquire) {
                     Quiescence::Writing
+                } else if self.quiescence_observation_voided(ws_id, &flag, observed_epoch) {
+                    // The flag stayed silent, but that only proves
+                    // quiescence when coverage was continuous for the
+                    // whole observation: a survivor re-arm under an
+                    // overlapping release interrupts coverage
+                    // mid-observation, and writes to directories the
+                    // recursive walk had not reached yet leave no event
+                    // — the check observed them as silence (#7592
+                    // review, P1). Report activity so the caller
+                    // re-observes once coverage is stable.
+                    Quiescence::Writing
                 } else {
                     Quiescence::Safe
                 }
+            }
+        }
+    }
+
+    /// Whether the quiet-period observation that snapshotted `flag` and
+    /// `observed_epoch` was invalidated afterwards: the route lost (or
+    /// lost and regained) kernel coverage, or the watcher was replaced,
+    /// so the observed flag's silence proves nothing. The decision to
+    /// return `Safe` must account for coverage changes during the
+    /// observation, not just the initial degraded check.
+    fn quiescence_observation_voided(
+        &self,
+        ws_id: &str,
+        observed_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        observed_epoch: u64,
+    ) -> bool {
+        let watchers = match self.watchers.lock() {
+            Ok(w) => w,
+            // The watcher table is permanently unavailable: cannot prove
+            // the observation stayed valid — fail closed.
+            Err(_) => return true,
+        };
+        match watchers.get(ws_id) {
+            // The watcher vanished mid-observation (unregister racing the
+            // check): the observed flag belongs to a retired handle.
+            None => true,
+            Some(w) => {
+                // A concurrent heal replaced the watcher: the observed
+                // flag is retired, and its silence proves nothing.
+                !std::sync::Arc::ptr_eq(&w.is_writing_flag(), observed_flag)
+                    // Coverage was interrupted during the observation —
+                    // possibly restored already (the mark cleared), which
+                    // the interruption counter still detects.
+                    || w.is_degraded()
+                    || w.coverage_epoch() != observed_epoch
             }
         }
     }
@@ -1220,6 +1335,163 @@ mod tests {
     fn new_state_has_empty_workspaces() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         assert!(state.all_workspaces().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_survivor_rearm_is_not_reported_healthy_or_quiescent() {
+        // #7592 second review: watch an outer root plus a nested root,
+        // rename the nested directory away, then drop the outer handle —
+        // the survivor re-arm of the nested root fails with NotFound. Its
+        // route and watcher handle stay registered, so the workspace used
+        // to look healthy (has_watcher) AND quiescent while its kernel
+        // coverage was gone; moving the SAME inode back keeps the recorded
+        // (dev, ino) identity matching, so the heal path never retried.
+        let outer = tempfile::tempdir().unwrap();
+        let nested = outer.path().join("nested-ws");
+        std::fs::create_dir(&nested).unwrap();
+        let outer_watcher = crate::fs_watcher::WorkspaceWatcher::start(outer.path()).unwrap();
+        let nested_watcher = crate::fs_watcher::WorkspaceWatcher::start(&nested).unwrap();
+
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        state.register_watcher("ws-nested".to_string(), nested_watcher);
+
+        let moved = outer.path().join("moved-ws");
+        std::fs::rename(&nested, &moved).unwrap();
+        drop(outer_watcher); // survivor re-arm of `nested` fails: path missing
+
+        // RED: the failed re-arm must not leave the workspace looking
+        // healthy — it has no kernel coverage.
+        assert!(
+            !state.has_watcher("ws-nested"),
+            "a watcher whose survivor re-arm failed has no kernel coverage; the health \
+             surface must name it as running without a watcher"
+        );
+
+        // Move the SAME inode back: the recorded (dev, ino) still matches,
+        // so only the degraded mark can force the heal to retry.
+        std::fs::rename(&moved, &nested).unwrap();
+
+        // RED: an active writer must not look quiescent through the dead
+        // watch.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let stop = std::sync::Arc::clone(&stop);
+            let path = nested.join("writer.log");
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let mut held = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = held.write_all(b"data");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            })
+        };
+        let quiescence = state
+            .check_workspace_quiescent("ws-nested", Some(&nested))
+            .await;
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        writer.join().unwrap();
+        assert!(
+            !matches!(quiescence, Quiescence::Safe),
+            "quiescence must not be established through a watch whose re-arm failed \
+             (got {quiescence:?})"
+        );
+
+        // After the heal the workspace is covered again and reports healthy.
+        assert!(
+            state.has_watcher("ws-nested"),
+            "the healed re-registration must restore watcher health"
+        );
+    }
+
+    #[tokio::test]
+    async fn quiescence_observed_across_a_coverage_interruption_is_void() {
+        // #7592 fourth review (P1): dropping an overlapping handle
+        // interrupts the survivor's kernel coverage for the whole
+        // recursive re-arm. A quiescence check that entered its quiet
+        // period while the route still looked healthy used to trust the
+        // flag's silence: writes to directories the re-arm had not
+        // reached yet (here: the entire tree, because the re-arm of the
+        // renamed-away root failed) leave no event, so the check could
+        // return Safe mid-interruption. The Safe decision must account
+        // for coverage changes during the observation, not just the
+        // initial degraded check.
+        let outer = tempfile::tempdir().unwrap();
+        let nested = outer.path().join("nested-ws");
+        std::fs::create_dir(&nested).unwrap();
+        let outer_watcher = crate::fs_watcher::WorkspaceWatcher::start(outer.path()).unwrap();
+        let nested_watcher = crate::fs_watcher::WorkspaceWatcher::start(&nested).unwrap();
+        let observed_flag = nested_watcher.is_writing_flag();
+
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        state.register_watcher("ws-nested".to_string(), nested_watcher);
+
+        // An active writer makes the workspace genuinely busy, so the
+        // check must run the full quiet-period observation instead of
+        // taking the not-writing shortcut.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let stop = std::sync::Arc::clone(&stop);
+            let path = nested.join("writer.log");
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let mut held = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = held.write_all(b"data");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            })
+        };
+        // Latch gate: wait until the writer is OBSERVED before starting
+        // the check, so the observation is guaranteed to be in progress
+        // when the interruption begins.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !observed_flag.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the nested watcher never observed the writer"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // The check runs concurrently; the interruption happens well
+        // inside its first 100 ms quiet-period sleep: rename the nested
+        // root away, drop the outer handle (survivor latch + unwatch +
+        // failed re-arm of the now-missing path), then move it back. The
+        // writer keeps writing the whole time — into a tree nothing
+        // watches anymore.
+        let state = std::sync::Arc::new(state);
+        let check = {
+            let state = std::sync::Arc::clone(&state);
+            let registration_path = nested.clone();
+            tokio::spawn(async move {
+                state
+                    .check_workspace_quiescent("ws-nested", Some(&registration_path))
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let moved = outer.path().join("moved-ws");
+        std::fs::rename(&nested, &moved).unwrap();
+        drop(outer_watcher); // survivor re-arm of `nested` fails: path missing
+        std::fs::rename(&moved, &nested).unwrap();
+
+        let quiescence = check.await.unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        writer.join().unwrap();
+        assert!(
+            !matches!(quiescence, Quiescence::Safe),
+            "a quiet period observed across a coverage interruption proves nothing; \
+             the check must not return Safe (got {quiescence:?})"
+        );
     }
 
     #[tokio::test]
