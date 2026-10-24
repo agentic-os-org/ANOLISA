@@ -396,3 +396,113 @@ fn audit_log_is_mirrored_to_session() {
     assert!(store_audit.contains("\"tool\":\"mem_write\""));
     assert!(session_log.contains("\"tool\":\"mem_write\""));
 }
+
+// ---------- consolidation: episodic facts on disk ----------
+
+/// The 8-call sequence from the PR #8305 review. `extract_promote_chain`
+/// retains only calls 0, 1 and 7, but the episode it builds spans `0..=7`, so
+/// the independent task at calls 3, 4, 5 sits inside that span without sharing
+/// a single call with it.
+fn promote_span_audit_entries() -> Vec<AuditEntry> {
+    vec![
+        AuditEntry::new("mem_read")
+            .path("source/context.md")
+            .bytes(120),
+        AuditEntry::new("mem_write")
+            .path("scratch/draft.md")
+            .bytes(150),
+        // mem_list is chain noise: it separates the two spans below.
+        AuditEntry::new("mem_list").path("notes/").bytes(2),
+        AuditEntry::new("mem_write")
+            .path("notes/independent.md")
+            .bytes(40),
+        AuditEntry::new("mem_append")
+            .path("notes/independent.md")
+            .bytes(10),
+        AuditEntry::new("mem_read").path("notes/other.md").bytes(80),
+        AuditEntry::new("mem_list").path("notes/").bytes(2),
+        AuditEntry::new("mem_promote")
+            .path("scratch/draft.md -> saved/draft.md")
+            .bytes(150),
+    ]
+}
+
+/// Bodies of every `facts/episodic/*.md` the store holds after consolidation.
+fn episodic_fact_bodies(svc: &MemoryService) -> Vec<String> {
+    let dir = svc.mount.root.join("facts").join("episodic");
+    let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    let mut bodies = Vec::new();
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|ext| ext == "md") {
+            bodies.push(std::fs::read_to_string(&path).unwrap());
+        }
+    }
+    bodies
+}
+
+#[test]
+fn consolidate_keeps_a_disjoint_task_inside_a_promote_span() {
+    let (_store_tmp, _session_tmp, svc) = setup_service();
+    let session = svc.session.as_ref().expect("session ready");
+    for entry in promote_span_audit_entries() {
+        session.append_log(entry).unwrap();
+    }
+
+    let written = svc.consolidate();
+    assert!(written > 0, "consolidation should have written facts");
+
+    let bodies = episodic_fact_bodies(&svc);
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains("title: 情景: promote: scratch/draft.md")),
+        "the promote episode must be on disk, got {} episodic facts: {bodies:?}",
+        bodies.len()
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains("title: 情景: task chain: 3 tools")),
+        "the independent task (calls 3-5) shares no call with the promote episode, so it must be \
+         on disk too; got {} episodic facts: {bodies:?}",
+        bodies.len()
+    );
+}
+
+#[test]
+fn consolidate_keeps_a_recovery_episode_inside_a_promote_span() {
+    let (_store_tmp, _session_tmp, svc) = setup_service();
+    let session = svc.session.as_ref().expect("session ready");
+    let mut entries = promote_span_audit_entries();
+    // Replace the independent task with a failed write and its retry.
+    entries[3] = AuditEntry::new("mem_write")
+        .path("notes/independent.md")
+        .error("already exists");
+    entries[4] = AuditEntry::new("mem_write")
+        .path("notes/independent.md")
+        .bytes(40);
+    for entry in entries {
+        session.append_log(entry).unwrap();
+    }
+
+    let written = svc.consolidate();
+    assert!(written > 0, "consolidation should have written facts");
+
+    let bodies = episodic_fact_bodies(&svc);
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains("title: 情景: error recovery: mem_write")),
+        "the recovery episode must be on disk -- the Lesson fact records the failure, not the \
+         retry that resolved it; got {} episodic facts: {bodies:?}",
+        bodies.len()
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains("title: 情景: promote: scratch/draft.md")),
+        "the promote episode must be on disk, got {} episodic facts: {bodies:?}",
+        bodies.len()
+    );
+}

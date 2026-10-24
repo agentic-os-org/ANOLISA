@@ -176,6 +176,44 @@ impl Episode {
     }
 }
 
+/// An episode together with the audit entries it actually retained. The
+/// patterns deliberately overlap, so the retained entries are what makes
+/// "these two episodes describe the same memory" decidable; they are an
+/// extraction detail and are not part of the serialized [`Episode`].
+///
+/// This is deliberately *not* the inclusive `first..=last` range the episode
+/// spans. `extract_promote_chain` retains the source read, the scratch write
+/// and the promote — three calls out of a range that can wrap any number of
+/// unrelated tasks in between — so the range claims material the episode does
+/// not carry, and comparing ranges discards that material as a duplicate.
+#[derive(Debug)]
+struct SpannedEpisode {
+    episode: Episode,
+    /// Indices of the audit entries the episode retained, in ascending order.
+    indices: Vec<usize>,
+}
+
+impl SpannedEpisode {
+    fn new(episode: Episode, indices: Vec<usize>) -> Self {
+        Self { episode, indices }
+    }
+
+    /// True when this episode retained exactly the audit entries `other`
+    /// retained — two readings of one set of calls, of which only the more
+    /// specific one is worth a fact. Both index lists are ascending, so
+    /// element-wise equality is set equality.
+    ///
+    /// A *proper* subset is not a duplicate. The shorter episode is a pattern
+    /// the longer one does not express — an `error → retry` recovery inside a
+    /// generic task chain reports `Recovered`, while the chain only reports
+    /// `Partial` with an `error_count`, and the Lesson fact records the
+    /// failure without the retry that resolved it — so dropping it would lose
+    /// that sequence.
+    fn retains_same_calls_as(&self, other: &Self) -> bool {
+        self.indices == other.indices
+    }
+}
+
 /// Extract episodes from a sequence of audit entries.
 /// Returns up to `max_episodes` episodes.
 /// `session_id` is the actual session identifier, propagated to every
@@ -200,17 +238,37 @@ pub fn extract_episodes(
     // Pattern 4: general task chains (≥min_steps consecutive diverse calls)
     episodes.extend(extract_general_chains(entries, session_id, min_steps));
 
-    // Deduplicate overlapping episodes (prefer longer ones)
-    episodes.sort_by_key(|e| std::cmp::Reverse(e.chain.len()));
-    episodes.truncate(max_episodes);
+    // Deduplicate overlapping episodes (prefer the more specific pattern). One
+    // span of entries can satisfy two patterns — search → read → edit → read
+    // is also a 4-tool task chain — and every episode becomes its own fact, so
+    // an undeduplicated overlap double-writes the same episodic memory and
+    // spends budget distinct memories should get. Two episodes are the same
+    // memory only when they retained the same calls; an episode that merely
+    // sits inside another one's range describes a pattern the other does not
+    // carry, and stays. Longer chains sort first, and the sort is stable, so
+    // equal lengths — which is what two episodes over the same calls always
+    // are — keep pattern priority: the specific patterns are extracted before
+    // the general one. Deduplication runs before the truncate so duplicates
+    // cannot consume `max_episodes` slots.
+    episodes.sort_by_key(|e| std::cmp::Reverse(e.episode.chain.len()));
+    let mut deduped: Vec<SpannedEpisode> = Vec::with_capacity(episodes.len());
+    for candidate in episodes {
+        if !deduped
+            .iter()
+            .any(|kept| candidate.retains_same_calls_as(kept))
+        {
+            deduped.push(candidate);
+        }
+    }
+    deduped.truncate(max_episodes);
 
-    episodes
+    deduped.into_iter().map(|s| s.episode).collect()
 }
 
 // ── Pattern 1: Edit-Verify Cycle ──────────────────────────────────
 // search/grep → read → edit → read
 
-fn extract_edit_cycle(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Episode> {
+fn extract_edit_cycle(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<SpannedEpisode> {
     let mut episodes = Vec::new();
     let mut i = 0;
 
@@ -259,13 +317,9 @@ fn extract_edit_cycle(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Epis
         let trigger = format!("{} {}", entries[i].tool, entries[i].path);
         let duration = duration_between(&entries[i].ts, &entries[l].ts);
 
-        episodes.push(Episode::new(
-            session_id,
-            trigger,
-            chain,
-            outcome,
-            error_count,
-            duration,
+        episodes.push(SpannedEpisode::new(
+            Episode::new(session_id, trigger, chain, outcome, error_count, duration),
+            vec![i, j, k, l],
         ));
 
         i = l + 1; // Skip past this episode
@@ -277,7 +331,7 @@ fn extract_edit_cycle(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Epis
 // ── Pattern 2: Promote Chain ──────────────────────────────────────
 // read → write(scratch/) → promote
 
-fn extract_promote_chain(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Episode> {
+fn extract_promote_chain(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<SpannedEpisode> {
     let mut episodes = Vec::new();
     let mut i = 0;
 
@@ -312,13 +366,18 @@ fn extract_promote_chain(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<E
 
             let trigger = format!("promote: {}", entries[i].path);
             let duration = duration_between(&entries[ri].ts, &entries[i].ts);
-            episodes.push(Episode::new(
-                session_id,
-                trigger,
-                chain,
-                EpisodeOutcome::Promoted,
-                0,
-                duration,
+            episodes.push(SpannedEpisode::new(
+                Episode::new(
+                    session_id,
+                    trigger,
+                    chain,
+                    EpisodeOutcome::Promoted,
+                    0,
+                    duration,
+                ),
+                // Only these three calls are retained; everything between
+                // `ri` and `i` belongs to whatever else the session did.
+                vec![ri, wi, i],
             ));
         }
 
@@ -331,7 +390,7 @@ fn extract_promote_chain(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<E
 // ── Pattern 3: Error Recovery ─────────────────────────────────────
 // tool(error) → tool(ok) or different_tool(ok)
 
-fn extract_error_recovery(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Episode> {
+fn extract_error_recovery(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<SpannedEpisode> {
     let mut episodes = Vec::new();
 
     for i in 0..entries.len().saturating_sub(1) {
@@ -345,13 +404,16 @@ fn extract_error_recovery(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<
                 let chain = vec![make_step(1, &entries[i]), make_step(2, &entries[j])];
                 let trigger = format!("error recovery: {}", entries[i].tool);
                 let duration = duration_between(&entries[i].ts, &entries[j].ts);
-                episodes.push(Episode::new(
-                    session_id,
-                    trigger,
-                    chain,
-                    EpisodeOutcome::Recovered,
-                    1,
-                    duration,
+                episodes.push(SpannedEpisode::new(
+                    Episode::new(
+                        session_id,
+                        trigger,
+                        chain,
+                        EpisodeOutcome::Recovered,
+                        1,
+                        duration,
+                    ),
+                    vec![i, j],
                 ));
                 break;
             }
@@ -368,7 +430,7 @@ fn extract_general_chains(
     entries: &[OwnedAuditEntry],
     session_id: &str,
     min_steps: usize,
-) -> Vec<Episode> {
+) -> Vec<SpannedEpisode> {
     let mut episodes = Vec::new();
 
     // Find contiguous blocks of "interesting" tools (not mem_list, not repeated reads)
@@ -402,13 +464,9 @@ fn extract_general_chains(
                 let start_idx: usize = *current_chain.first().unwrap();
                 let end_idx: usize = *current_chain.last().unwrap();
                 let duration = duration_between(&entries[start_idx].ts, &entries[end_idx].ts);
-                episodes.push(Episode::new(
-                    session_id,
-                    trigger,
-                    chain,
-                    outcome,
-                    error_count,
-                    duration,
+                episodes.push(SpannedEpisode::new(
+                    Episode::new(session_id, trigger, chain, outcome, error_count, duration),
+                    current_chain.clone(),
                 ));
             }
             current_chain.clear();
@@ -444,13 +502,9 @@ fn extract_general_chains(
         let start_idx: usize = *current_chain.first().unwrap();
         let end_idx: usize = *current_chain.last().unwrap();
         let duration = duration_between(&entries[start_idx].ts, &entries[end_idx].ts);
-        episodes.push(Episode::new(
-            session_id,
-            trigger,
-            chain,
-            outcome,
-            error_count,
-            duration,
+        episodes.push(SpannedEpisode::new(
+            Episode::new(session_id, trigger, chain, outcome, error_count, duration),
+            current_chain.clone(),
         ));
     }
 
@@ -522,6 +576,30 @@ mod tests {
         }
     }
 
+    /// The 8-call sequence from the PR #8305 review: a promote chain that
+    /// retains calls `0, 1, 7` while spanning `0..=7`, so the independent
+    /// task at `3, 4, 5` sits inside the span without sharing a single call
+    /// with the episode that claims it.
+    fn promote_span_entries() -> Vec<OwnedAuditEntry> {
+        vec![
+            make_entry("mem_read", "source/context.md", true, None, Some(120)),
+            make_entry("mem_write", "scratch/draft.md", true, None, Some(150)),
+            // mem_list is chain noise: it separates the two spans below.
+            make_entry("mem_list", "notes/", true, None, Some(2)),
+            make_entry("mem_write", "notes/independent.md", true, None, Some(40)),
+            make_entry("mem_append", "notes/independent.md", true, None, Some(10)),
+            make_entry("mem_read", "notes/other.md", true, None, Some(80)),
+            make_entry("mem_list", "notes/", true, None, Some(2)),
+            make_entry(
+                "mem_promote",
+                "scratch/draft.md -> saved/draft.md",
+                true,
+                None,
+                Some(150),
+            ),
+        ]
+    }
+
     #[test]
     fn detects_edit_verify_cycle() {
         let entries = vec![
@@ -532,8 +610,13 @@ mod tests {
         ];
         let episodes = extract_edit_cycle(&entries, "test-sid");
         assert_eq!(episodes.len(), 1);
-        assert_eq!(episodes[0].chain.len(), 4);
-        assert_eq!(episodes[0].outcome, EpisodeOutcome::Success);
+        assert_eq!(episodes[0].episode.chain.len(), 4);
+        assert_eq!(episodes[0].episode.outcome, EpisodeOutcome::Success);
+        assert_eq!(
+            episodes[0].indices,
+            vec![0, 1, 2, 3],
+            "the episode must retain exactly the cycle's four entries"
+        );
     }
 
     #[test]
@@ -551,8 +634,13 @@ mod tests {
         ];
         let episodes = extract_promote_chain(&entries, "test-sid");
         assert_eq!(episodes.len(), 1);
-        assert_eq!(episodes[0].chain.len(), 3);
-        assert_eq!(episodes[0].outcome, EpisodeOutcome::Promoted);
+        assert_eq!(episodes[0].episode.chain.len(), 3);
+        assert_eq!(episodes[0].episode.outcome, EpisodeOutcome::Promoted);
+        assert_eq!(
+            episodes[0].indices,
+            vec![0, 1, 2],
+            "the episode retains the source read, the scratch write and the promote"
+        );
     }
 
     #[test]
@@ -569,7 +657,12 @@ mod tests {
         ];
         let episodes = extract_error_recovery(&entries, "test-sid");
         assert_eq!(episodes.len(), 1);
-        assert_eq!(episodes[0].outcome, EpisodeOutcome::Recovered);
+        assert_eq!(episodes[0].episode.outcome, EpisodeOutcome::Recovered);
+        assert_eq!(
+            episodes[0].indices,
+            vec![0, 1],
+            "the episode retains the failure and the successful retry"
+        );
     }
 
     #[test]
@@ -582,7 +675,7 @@ mod tests {
         ];
         let episodes = extract_edit_cycle(&entries, "test-sid");
         assert_eq!(episodes.len(), 1);
-        let fact = episodes[0].to_fact();
+        let fact = episodes[0].episode.to_fact();
         assert_eq!(fact.category, FactCategory::Episodic);
         assert!(
             fact.title.contains("情景") || fact.content.contains("episodic"),
@@ -591,6 +684,202 @@ mod tests {
             &fact.content[..100.min(fact.content.len())]
         );
         assert!(fact.confidence >= 0.9);
+    }
+
+    // ── Overlap deduplication ───────────────────────────────────────
+    //
+    // The four patterns deliberately overlap: one span of audit entries can
+    // satisfy two of them, and every episode becomes its own
+    // `ConsolidatedFact`, so an undeduplicated overlap writes the same
+    // episodic memory twice and spends `max_episodes` / `max_facts` budget
+    // that distinct memories should get.
+
+    /// search → read → edit → read satisfies both the edit-verify cycle
+    /// (pattern 1) and the general task chain (pattern 4): one span, one
+    /// episode, and the more specific pattern keeps it.
+    #[test]
+    fn extract_episodes_dedups_one_span_to_one_episode() {
+        let entries = vec![
+            make_entry("memory_search", "bm25:rust config", true, None, Some(3)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+            make_entry("mem_edit", "src/config.rs", true, None, Some(1)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+        ];
+        let episodes = extract_episodes(&entries, "test-sid", 3, 10);
+        let triggers: Vec<_> = episodes.iter().map(|e| e.trigger.clone()).collect();
+        assert_eq!(
+            episodes.len(),
+            1,
+            "one span must not yield two episodes: {triggers:?}"
+        );
+        assert_eq!(triggers[0], "memory_search bm25:rust config");
+    }
+
+    /// Episodes extracted from disjoint entry ranges describe different
+    /// memories and must all survive, whatever their length.
+    #[test]
+    fn extract_episodes_keeps_disjoint_spans() {
+        let entries = vec![
+            make_entry(
+                "mem_write",
+                "notes/a.md",
+                false,
+                Some("already exists"),
+                None,
+            ),
+            make_entry("mem_write", "notes/a.md", true, None, Some(100)),
+            // mem_list is chain noise: it separates the two spans below.
+            make_entry("mem_list", "", true, None, Some(2)),
+            make_entry("mem_read", "notes/b.md", false, Some("transient"), None),
+            make_entry("mem_append", "notes/b.md", true, None, Some(50)),
+        ];
+        let episodes = extract_episodes(&entries, "test-sid", 3, 10);
+        let triggers: Vec<_> = episodes.iter().map(|e| e.trigger.clone()).collect();
+        assert_eq!(
+            episodes.len(),
+            2,
+            "two disjoint error-recovery spans must both survive: {triggers:?}"
+        );
+        assert_eq!(triggers[0], "error recovery: mem_write");
+        assert_eq!(triggers[1], "error recovery: mem_read");
+    }
+
+    /// A shorter episode nested inside a longer one is NOT the same memory.
+    /// The `error → retry` recovery is a pattern the generic task chain does
+    /// not express: the chain reports `Partial` with an `error_count`, and the
+    /// Lesson fact records the failure alone -- neither carries the recovery
+    /// sequence, so discarding the nested episode loses information.
+    #[test]
+    fn extract_episodes_keeps_a_recovery_nested_in_a_task_chain() {
+        let entries = vec![
+            make_entry(
+                "mem_write",
+                "notes/x.md",
+                false,
+                Some("already exists"),
+                None,
+            ),
+            make_entry("mem_write", "notes/x.md", true, None, Some(100)),
+            make_entry("mem_read", "notes/y.md", true, None, Some(80)),
+            make_entry("mem_append", "notes/y.md", true, None, Some(20)),
+        ];
+        let episodes = extract_episodes(&entries, "test-sid", 3, 10);
+        let triggers: Vec<_> = episodes.iter().map(|e| e.trigger.clone()).collect();
+        assert_eq!(
+            episodes.len(),
+            2,
+            "the nested recovery is its own memory: {triggers:?}"
+        );
+        assert_eq!(triggers[0], "task chain: 4 tools");
+        assert_eq!(triggers[1], "error recovery: mem_write");
+        assert_eq!(episodes[1].outcome, EpisodeOutcome::Recovered);
+        assert_eq!(
+            episodes[0].error_count, 1,
+            "the failure stays visible in the chain too"
+        );
+    }
+
+    /// The promote chain keeps only the source read, the scratch write and the
+    /// promote itself, so the entries between them can belong to an entirely
+    /// separate task. That task shares no call with the promote episode and
+    /// must survive: deduplication has to compare the calls an episode
+    /// actually retained, never the first..last span it happens to cover.
+    #[test]
+    fn extract_episodes_keeps_a_disjoint_task_inside_a_promote_span() {
+        let entries = promote_span_entries();
+        let episodes = extract_episodes(&entries, "test-sid", 3, 10);
+        let triggers: Vec<_> = episodes.iter().map(|e| e.trigger.clone()).collect();
+        assert_eq!(
+            triggers,
+            vec![
+                "promote: scratch/draft.md -> saved/draft.md".to_string(),
+                "task chain: 3 tools".to_string()
+            ],
+            "the independent task must not be discarded as a duplicate of the promote span"
+        );
+        let calls: Vec<_> = episodes[1]
+            .chain
+            .iter()
+            .map(|s| (s.tool.as_str(), s.input.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("mem_write", "notes/independent.md"),
+                ("mem_append", "notes/independent.md"),
+                ("mem_read", "notes/other.md"),
+            ],
+            "the surviving task must be the independent one"
+        );
+    }
+
+    /// Same skeleton, with the independent task replaced by a failed write and
+    /// its successful retry. The recovery episode sits inside the promote span
+    /// and inside the general chain's span, yet it is the only record of the
+    /// recovery sequence, so all three episodes must survive.
+    #[test]
+    fn extract_episodes_keeps_a_recovery_inside_a_promote_span() {
+        let mut entries = promote_span_entries();
+        entries[3] = make_entry(
+            "mem_write",
+            "notes/independent.md",
+            false,
+            Some("already exists"),
+            None,
+        );
+        entries[4] = make_entry("mem_write", "notes/independent.md", true, None, Some(40));
+
+        let episodes = extract_episodes(&entries, "test-sid", 3, 10);
+        let triggers: Vec<_> = episodes.iter().map(|e| e.trigger.clone()).collect();
+        assert!(
+            triggers.contains(&"error recovery: mem_write".to_string()),
+            "the recovery episode must survive: {triggers:?}"
+        );
+        assert!(
+            triggers.contains(&"promote: scratch/draft.md -> saved/draft.md".to_string()),
+            "the promote episode must survive: {triggers:?}"
+        );
+        assert!(
+            triggers.contains(&"task chain: 3 tools".to_string()),
+            "the task the recovery belongs to must survive: {triggers:?}"
+        );
+    }
+
+    /// Deduplication must run before the `max_episodes` truncate, otherwise
+    /// duplicates eat the budget and a distinct memory is dropped.
+    #[test]
+    fn extract_episodes_dedups_before_truncating_to_max_episodes() {
+        let entries = vec![
+            // Span 1: an edit-verify cycle, which also reads as a task chain.
+            make_entry("memory_search", "bm25:rust config", true, None, Some(3)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+            make_entry("mem_edit", "src/config.rs", true, None, Some(1)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+            // Chain noise separates the two spans.
+            make_entry("mem_list", "", true, None, Some(2)),
+            // Span 2: a plain task chain, no other pattern fires on it.
+            make_entry("mem_write", "notes/b1.md", true, None, Some(10)),
+            make_entry("mem_append", "notes/b1.md", true, None, Some(10)),
+            make_entry("mem_read", "notes/b2.md", true, None, Some(10)),
+            make_entry("mem_write", "notes/b3.md", true, None, Some(10)),
+        ];
+        let episodes = extract_episodes(&entries, "test-sid", 3, 2);
+        let triggers: Vec<_> = episodes.iter().map(|e| e.trigger.clone()).collect();
+        assert_eq!(
+            triggers,
+            vec![
+                "memory_search bm25:rust config".to_string(),
+                "task chain: 4 tools".to_string()
+            ],
+            "both distinct memories must fit the budget of 2"
+        );
+        // The surviving task chain must be the *second* span's: on the
+        // undeduplicated path the budget is spent on a duplicate of the
+        // edit-verify cycle's own entries and this memory is lost.
+        assert_eq!(
+            episodes[1].chain[0].tool, "mem_write",
+            "the second budget slot must hold the distinct span, not a duplicate"
+        );
     }
 
     #[test]
@@ -602,7 +891,7 @@ mod tests {
             make_entry("mem_read", "src/lib.rs", true, None, Some(100)),
         ];
         let episodes = extract_edit_cycle(&entries, "test-sid");
-        let md = episodes[0].to_markdown();
+        let md = episodes[0].episode.to_markdown();
         assert!(md.starts_with("---\n"));
         assert!(md.contains("outcome: success"));
         assert!(md.contains("## Step 1: memory_search"));

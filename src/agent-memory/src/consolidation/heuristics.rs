@@ -619,6 +619,32 @@ mod tests {
     }
 
     #[test]
+    fn episodic_facts_are_written_once_per_span() {
+        // search → read → edit → read satisfies both the edit-verify cycle
+        // and the general 4-tool task chain. Each episode becomes its own
+        // Episodic fact, so without overlap deduplication the same memory is
+        // double-written and spends `max_facts` budget other facts should get.
+        let config = default_config();
+        let entries = vec![
+            make_entry("memory_search", "bm25:rust config", true, None),
+            make_entry("mem_read", "src/config.rs", true, None),
+            make_entry("mem_edit", "src/config.rs", true, None),
+            make_entry("mem_read", "src/config.rs", true, None),
+        ];
+        let facts = run_consolidation_owned(&entries, "ep-sid", &config);
+        let episodic: Vec<&str> = facts
+            .iter()
+            .filter(|f| f.category == FactCategory::Episodic)
+            .map(|f| f.title.as_str())
+            .collect();
+        assert_eq!(
+            episodic.len(),
+            1,
+            "one span of entries must yield one episodic fact, got {episodic:?}"
+        );
+    }
+
+    #[test]
     fn consolidation_drops_prompt_injection_facts() {
         // Facts whose content looks like prompt injection must be filtered.
         let config = default_config();
