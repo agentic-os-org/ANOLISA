@@ -123,6 +123,11 @@ def _trace_context_with_fallback_trace_id(
     trace_id = clean_correlation_value("trace_id", payload.get("trace_id"))
     if trace_id is None:
         trace_id = clean_correlation_value("trace_id", payload.get("traceId"))
+        if trace_id is not None:
+            # The alias was accepted but never persisted: the wire payload
+            # carried traceId only, so the helper's own invariant (always
+            # inject a trace_id) was violated on this branch.
+            payload["trace_id"] = trace_id
     if trace_id is None:
         payload["trace_id"] = get_invocation_id()
     return payload
