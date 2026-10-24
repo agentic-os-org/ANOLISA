@@ -568,3 +568,56 @@ async fn full_scan_backfills_vectors_for_preexisting_files() {
     );
     assert_eq!(hits[0].path, "notes/a.md");
 }
+
+// ---------- agent scope on the synchronous reindex ----------
+
+/// `reindex_file` is the path `memory_observe` uses to make a fresh note
+/// searchable before the notify watcher's debounce fires. It has to tag the
+/// row with the observing agent exactly like the watcher's flush and full-scan
+/// paths do: an untagged row is invisible under `isolated:<agent>` — which
+/// defeats the immediate-recall guarantee the synchronous upsert exists for —
+/// and is shared with every *other* agent under `filter:<agent>` (#4538).
+///
+/// The note is deliberately never written to disk, so the watcher cannot
+/// re-tag it behind our back and both assertions are about this call alone.
+#[test]
+fn reindex_file_tags_the_row_with_the_observing_agent() {
+    let (_tmp, svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    let mtime_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    index
+        .reindex_file(
+            "notes/observed/virtual.md",
+            "the deploy codename is zephyr",
+            mtime_ms,
+            27,
+            Some("alpha"),
+        )
+        .unwrap();
+
+    let own: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("isolated:alpha"))
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        own.iter().any(|p| p == "notes/observed/virtual.md"),
+        "isolated:alpha cannot see the row attributed to it: {own:?}"
+    );
+
+    let others: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("filter:beta"))
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        !others.iter().any(|p| p == "notes/observed/virtual.md"),
+        "filter:beta must not see a row tagged for alpha: {others:?}"
+    );
+}
