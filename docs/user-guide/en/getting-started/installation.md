@@ -308,6 +308,27 @@ for an RPM-owned CLI.
 
 ---
 
+## Container health
+
+Images built from `distribution/docker/Dockerfile.alinux` probe AgentSight's loopback
+`/health` endpoint every 30 seconds, after a 30-second startup grace period.
+Three consecutive failures mark the container unhealthy. The probe emits JSON
+with `ready`, `degraded`, or `blocked` status in Docker's health log.
+
+AgentSight is optional by default: an unavailable HTTP service reports
+`degraded` and exits successfully so shell-only containers remain usable.
+Set `ANOLISA_REQUIRE_AGENTSIGHT=1` to make the HTTP service required; its loss
+then fails the health check. `ANOLISA_AGENTSIGHT_PORT` selects the probe port
+(default `7396`) and must match the separately configured server port.
+Invalid settings always fail the check. Requests use a two-second socket
+timeout, a four-second total deadline and a 64 KiB response limit.
+
+Run `python3 /usr/local/lib/anolisa/healthcheck.py` inside the container to
+inspect the same JSON directly. This check verifies HTTP availability only;
+it does not certify eBPF attachment or event capture. It does not wait before
+starting the main command, restart services, or change signal forwarding.
+Use Docker's `--no-healthcheck` to disable this probe.
+
 ## Next Steps
 
 - [anolisa CLI Reference](anolisa-cli.md)
