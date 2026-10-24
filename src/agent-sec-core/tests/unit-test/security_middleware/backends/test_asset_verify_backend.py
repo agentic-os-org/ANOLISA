@@ -107,3 +107,20 @@ class TestAssetVerifyBackend(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_manifest_invalid_non_object(tmp_path):
+    from agent_sec_cli.asset_verify import verifier
+    from agent_sec_cli.asset_verify.errors import ErrManifestInvalid
+
+    skill = tmp_path / "bad-skill"
+    meta = skill / ".skill-meta"
+    meta.mkdir(parents=True)
+    (meta / "Manifest.json").write_text("[]", encoding="utf-8")
+    (meta / ".skill.sig").write_text("dummy", encoding="utf-8")
+    try:
+        verifier.verify_skill(str(skill), [])
+    except ErrManifestInvalid as e:
+        assert e.code == 15
+    else:
+        assert False, "expected ErrManifestInvalid"
