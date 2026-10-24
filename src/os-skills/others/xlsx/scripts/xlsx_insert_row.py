@@ -165,6 +165,13 @@ def main() -> None:
     num_cells = parse_kv(args.values)
     formula_cells = parse_kv(args.formula)
 
+    # Reject invalid sheet selection before the shift can modify other workbook parts.
+    try:
+        ws_path = find_ws_path(args.work_dir, args.sheet)
+        ET.parse(ws_path)
+    except (OSError, ET.ParseError) as exc:
+        parser.exit(1, f"ERROR: Cannot read selected worksheet: {exc}\n")
+
     # Step 1: Shift rows down using xlsx_shift_rows.py
     script_dir = os.path.dirname(os.path.abspath(__file__))
     shift_script = os.path.join(script_dir, "xlsx_shift_rows.py")
@@ -179,8 +186,7 @@ def main() -> None:
         sys.exit(1)
     print(result.stdout)
 
-    # Step 2: Resolve worksheet path and get reference styles
-    ws_path = find_ws_path(args.work_dir, args.sheet)
+    # Step 2: Read the shifted worksheet and get reference styles
     ws_tree = ET.parse(ws_path)
 
     ref_styles = {}
