@@ -952,7 +952,7 @@ fn spec_path_candidates_ordered_correctly() {
 fn fix_script_candidates_ordered_correctly() {
     // Pure-function check: covers the auto_fix candidate list to prevent
     // the two lists (spec + fix script) from drifting apart.
-    let c = fix_script_candidates();
+    let c = fix_script_candidates("/home/alice");
 
     assert!(
         c.iter().any(|p| p
@@ -984,6 +984,94 @@ fn detect_system_manager_env_override() {
     let _guard = EnvGuard::set("TOKENLESS_PACKAGE_MANAGER", "test-mgr");
     let mgr = detect_system_manager();
     assert_eq!(mgr, "test-mgr");
+}
+
+#[cfg(unix)]
+fn write_fix_script(path: &std::path::Path, marker: &std::path::Path) {
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\ncat >/dev/null\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn find_fix_script_requires_a_trusted_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let untrusted = dir.path().join("untrusted-fix.sh");
+    let trusted = dir.path().join("trusted-fix.sh");
+    std::fs::write(&untrusted, "#!/bin/sh\n").unwrap();
+    std::fs::write(&trusted, "#!/bin/sh\n").unwrap();
+    chmod_file(&untrusted, 0o666); // world-writable -> rejected by is_trusted_path
+    chmod_file(&trusted, 0o755);
+
+    let untrusted = untrusted.to_string_lossy().into_owned();
+    let trusted = trusted.to_string_lossy().into_owned();
+
+    // An untrusted candidate is skipped even when it comes first.
+    let found = find_fix_script(&[untrusted.clone(), trusted.clone()]).unwrap();
+    assert_eq!(found, trusted);
+
+    // No trusted candidate at all -> error, never an unchecked fallback.
+    let err = find_fix_script(&[untrusted]).unwrap_err();
+    assert!(
+        err.contains("No trusted env-fix script"),
+        "unexpected error: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_never_executes_an_unchecked_fallback_script() {
+    // A world-writable fix script is exactly what is_trusted_path exists to
+    // reject. When no candidate is trusted, auto-fix must fail closed:
+    // executing the rejected dot-dir script (or any default location)
+    // without the trust check would let a local attacker run arbitrary
+    // code with the user's privileges via `tokenless env-check --fix`.
+    let dir = tempfile::tempdir().unwrap();
+    let dot = dir.path().join(".tokenless");
+    std::fs::create_dir_all(&dot).unwrap();
+    let marker = dir.path().join("executed-marker");
+    let script = dot.join("tokenless-env-fix.sh");
+    write_fix_script(&script, &marker);
+    chmod_file(&script, 0o666); // world-writable -> rejected by is_trusted_path
+
+    // Candidate list shaped like fix_script_candidates(home): env override
+    // slot first (unset in production), then the dot-dir default.
+    let candidates = vec![
+        dir.path().join("env-override-fix.sh").to_string_lossy().into_owned(),
+        script.to_string_lossy().into_owned(),
+    ];
+    let result = auto_fix_with_candidates(&candidates, &[make_dep("jq")]);
+
+    assert!(
+        result.is_err(),
+        "auto-fix with no trusted candidate must fail, got Ok({result:?})"
+    );
+    assert!(
+        !marker.exists(),
+        "auto-fix must not execute a script the trust scan rejected"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_runs_the_first_trusted_candidate() {
+    // Control: a trusted script is still executed and its output returned.
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("executed-marker");
+    let script = dir.path().join("trusted-fix.sh");
+    write_fix_script(&script, &marker);
+    chmod_file(&script, 0o755);
+
+    let result = auto_fix_with_candidates(
+        &[script.to_string_lossy().into_owned()],
+        &[make_dep("jq")],
+    );
+
+    assert!(result.is_ok(), "trusted script must run: {result:?}");
+    assert!(marker.exists(), "trusted script must have been executed");
 }
 
 #[test]
