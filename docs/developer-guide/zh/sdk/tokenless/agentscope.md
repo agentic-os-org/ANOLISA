@@ -150,6 +150,17 @@ Model 边界快速失败，绝不通过输出文本猜测 Origin。
 环境错误提示和逐调用归属。平台 Wheel 内置 RTK 并直接链接 TOON，不会搜索系统 Helper。
 Tool Ready 仍保持硬关闭。
 
+### 压缩失败时保留已完成的工具结果
+
+AgentScope 1.x 和 2.x 适配器在 PostTool 压缩失败时保留宿主交付的完整工具响应，
+包括 Core 错误、无效 SDK 响应和不兼容 Wheel 的请求签名。中间流式 Chunk、非文本
+Block、Metadata 和最终结果状态均保持不变；后续 Block 失败时，也会放弃先前生成的
+替换文本和恢复提示。日志包含工具调用标识和实例内累计失败次数。
+
+该边界只覆盖宿主工具完成后的 SDK 请求构造与执行。取消操作和其他 `BaseException`
+信号仍向外传播，AgentScope 1.x 仍要求先执行 `install()`。此前成功的压缩调用可能
+留下未被引用的 Stash 条目，但不会向模型暴露部分恢复 Marker。
+
 ## 验证集成
 
 在源码 checkout 中运行 installed-wheel 与支持版本矩阵测试：

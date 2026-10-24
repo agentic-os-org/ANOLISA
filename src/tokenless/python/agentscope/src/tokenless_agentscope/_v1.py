@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
@@ -34,6 +35,9 @@ from tokenless_agentscope._contracts import (
     build_tool_contracts,
     retrieve_tool_declaration,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class _TokenlessToolkit(Toolkit):
@@ -150,6 +154,7 @@ class TokenlessAgentScope:
     ) -> None:
         self.config = config or TokenlessConfig()
         self.sdk = TokenlessSdk(self.config)
+        self._post_tool_failures = 0
         self._tool_contracts = build_tool_contracts(tool_contracts)
         self._retrieve_declaration = retrieve_tool_declaration(self.config.retrieve_tool_name)
         self._installed_agent: Any | None = None
@@ -237,6 +242,8 @@ class TokenlessAgentScope:
         if not response.is_last:
             return response
         contract = self.contract_for(tool_call["name"])
+        attribution = self._attribution(tool_call["id"])
+        status = self._status(response)
         optimization = toolkit.output_optimizations.pop(tool_call["id"], OutputOptimization.NONE)
         command = None
         if contract.command_field is not None:
@@ -246,28 +253,41 @@ class TokenlessAgentScope:
         for index, block in enumerate(response.content):
             if block.get("type") != "text":
                 continue
-            transformed = await self.sdk.post_tool(
-                PostToolRequest(
-                    result_kind=ResultKind.TOOL,
-                    tool_name=tool_call["name"],
-                    content=block.get("text", ""),
-                    status=self._status(response),
-                    content_origin=contract.content_origin,
-                    output_optimization=optimization,
-                    capabilities=PostToolCapabilities(
-                        replace_output=True,
-                        recovery=(
-                            RecoveryMethod.tool(self.config.retrieve_tool_name)
-                            if self._status(response) == ToolResultStatus.SUCCESS
-                            and optimization == OutputOptimization.NONE
-                            else RecoveryMethod()
+            try:
+                transformed = await self.sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name=tool_call["name"],
+                        content=block.get("text", ""),
+                        status=status,
+                        content_origin=contract.content_origin,
+                        output_optimization=optimization,
+                        capabilities=PostToolCapabilities(
+                            replace_output=True,
+                            recovery=(
+                                RecoveryMethod.tool(self.config.retrieve_tool_name)
+                                if status == ToolResultStatus.SUCCESS
+                                and optimization == OutputOptimization.NONE
+                                else RecoveryMethod()
+                            ),
+                            replace_with_text=True,
                         ),
-                        replace_with_text=True,
-                    ),
-                    attribution=self._attribution(tool_call["id"]),
-                    command=command if isinstance(command, str) else None,
+                        attribution=attribution,
+                        command=command if isinstance(command, str) else None,
+                    )
                 )
-            )
+            except Exception:
+                # SDK/version failures cannot abort completed host tool calls.
+                # Earlier stash writes remain unreferenced: no partial markers escape.
+                self._post_tool_failures += 1
+                logger.exception(
+                    "tokenless: post_tool failed for %s; preserving original result "
+                    "(failures=%d, tool_use_id=%r)",
+                    tool_call["name"],
+                    self._post_tool_failures,
+                    attribution.tool_use_id,
+                )
+                return response
             extra_context = extra_context or transformed.additional_context
             if transformed.output != block.get("text", ""):
                 replacements[index] = TextBlock(type="text", text=transformed.output)

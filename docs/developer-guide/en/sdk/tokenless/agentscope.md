@@ -161,6 +161,21 @@ compression, TOON, retrieval, environment-error guidance, and per-call attributi
 wheel contains RTK and links TOON directly, so it does not search for system helper binaries. Tool
 Ready remains hard-disabled.
 
+### Completed tool results on compression failure
+
+The AgentScope 1.x and 2.x adapters retain the complete received tool response
+when PostTool compression fails, including Core errors, invalid SDK responses,
+and incompatible wheel request signatures. Intermediate streamed chunks,
+non-text blocks, metadata, and the final result state remain unchanged; a later
+block failure also discards earlier replacement text and recovery hints.
+Failures are logged with the tool-use identifier and a per-instance count.
+
+This boundary covers SDK request construction and execution after a host tool
+has completed. Cancellation and other `BaseException` signals still propagate,
+and AgentScope 1.x still requires `install()` before use. Earlier successful
+compression calls can leave unreferenced Stash entries, but no partial recovery
+markers are exposed to the model.
+
 ## Validate the integration
 
 Run the installed-wheel and supported-version matrix tests from a source checkout:
