@@ -413,6 +413,71 @@ fn search_category_filter_works() {
     assert!(hits.is_empty(), "expected no hits for unknown category");
 }
 
+#[test]
+fn category_filtered_search_does_not_keep_memory_warm() {
+    // Regression: access bookkeeping used to run inside the store, before
+    // `memory_search` applied its category filter. A hit the requested
+    // category discarded still bumped `access_count` and refreshed
+    // `last_accessed_ms`, so repeated category-restricted searches kept
+    // memories the caller never saw warm indefinitely and `compact()`
+    // archived nothing.
+    let (_tmp, svc) = setup();
+
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/lesson").unwrap();
+    const INTEREST: &str = "---\ncategory: interest\n---\n\nwalrus blubber notes";
+    const LESSON: &str = "---\ncategory: lesson\n---\n\nwalrus handling lesson";
+    svc.write("facts/interest/old.md", INTEREST, false).unwrap();
+    svc.write("facts/lesson/kept.md", LESSON, false).unwrap();
+    // README is auto-created by MountPoint::ensure → 3 rows.
+    assert!(wait_for_index(&svc, 3));
+    // Let the watcher's Create/Modify pair drain so no pending flush can
+    // overwrite the backdated mtimes below.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Age both facts past cold_after_days (30) without touching the disk, so
+    // only a recorded search access can still shield them from compaction.
+    let index = svc.index.as_ref().unwrap();
+    let old_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        - 100 * 86_400_000;
+    index
+        .reindex_file(
+            "facts/interest/old.md",
+            INTEREST,
+            old_ms,
+            INTEREST.len() as u64,
+        )
+        .unwrap();
+    index
+        .reindex_file("facts/lesson/kept.md", LESSON, old_ms, LESSON.len() as u64)
+        .unwrap();
+
+    // Both facts match the query, but category=lesson drops the interest one:
+    // it never reaches the caller.
+    let hits = svc
+        .memory_search("walrus", 5, None, Some("lesson"), None)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "facts/lesson/kept.md");
+
+    // The returned fact stays warm; the filtered-out one is still compactable.
+    assert_eq!(
+        svc.compact().unwrap(),
+        1,
+        "a category-filtered hit must not protect its file from compaction"
+    );
+    assert_eq!(index.warm_cold_counts().unwrap(), (2, 1));
+    assert!(
+        svc.memory_search("walrus", 5, None, Some("interest"), None)
+            .unwrap()
+            .is_empty(),
+        "the archived fact must drop out of normal search"
+    );
+}
+
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic

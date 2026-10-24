@@ -222,8 +222,9 @@ pub struct IndexConfig {
     /// Default 0.3 — time contributes 30% of the final score boost.
     #[serde(default = "default_decay_alpha")]
     pub time_decay_alpha: f64,
-    /// Files with zero access_count older than this many days are marked
-    /// as cold (excluded from normal search). Default: 30 days.
+    /// Files that have neither been modified nor searched within this many
+    /// days are marked as cold (excluded from normal search). Default: 30
+    /// days.
     #[serde(default = "default_cold_after_days")]
     pub cold_after_days: u64,
     /// Whether normal search excludes cold files. Default: true.

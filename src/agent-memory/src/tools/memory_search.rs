@@ -13,7 +13,9 @@ const TOOL: &str = "memory_search";
 /// - `"hybrid"`: reciprocal rank fusion of BM25 + vector results.
 ///
 /// `category` filters results to a specific fact category (e.g. "lesson",
-/// "interest"). When empty, all categories are included.
+/// "interest"). When empty, all categories are included. The filter is applied
+/// inside the index, before search-access bookkeeping, so a hit the category
+/// discards is never counted as an access and cannot keep its file warm.
 ///
 /// Returns up to `top_k` ranked snippets. Errors with `NotImplemented` if the
 /// index worker isn't running, or if `mode=vector|hybrid` is requested without
@@ -73,8 +75,7 @@ pub fn memory_search(
 
     match mode {
         "bm25" => {
-            let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
-            let hits = filter_by_category(hits, category);
+            let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
             let tokens = hits
                 .iter()
                 .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
@@ -112,11 +113,11 @@ pub fn memory_search(
                     // silently degrades to BM25 so that callers (auto-recall,
                     // corpus supplement) can safely request hybrid without
                     // checking config first. Uses search_scoped for consistent
-                    // agent scope filtering.
+                    // agent scope and category filtering.
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
-                    let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
+                    let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(format!("bm25(fallback from {mode}):len={}", query.len()))
@@ -154,11 +155,10 @@ pub fn memory_search(
             })?;
 
             let hits = if mode == "vector" {
-                index.search_vec(&embedding.vector, top_k.max(1))?
+                index.search_vec(&embedding.vector, top_k.max(1), category)?
             } else {
-                index.search_hybrid(query, &embedding.vector, top_k.max(1))?
+                index.search_hybrid(query, &embedding.vector, top_k.max(1), category)?
             };
-            let hits = filter_by_category(hits, category);
             let tokens = hits
                 .iter()
                 .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
@@ -176,19 +176,4 @@ pub fn memory_search(
             "unknown search mode '{unknown}'; expected bm25, vector, or hybrid"
         ))),
     }
-}
-
-/// Filter search hits by category, based on the path prefix.
-/// Facts are stored under facts/<category>/<ulid>.md.
-fn filter_by_category(
-    hits: Vec<crate::index::SearchHit>,
-    category: Option<&str>,
-) -> Vec<crate::index::SearchHit> {
-    let Some(cat) = category else { return hits };
-    hits.into_iter()
-        .filter(|h| {
-            // Path like "facts/lesson/ulid.md" → category is the second component.
-            h.path.split('/').nth(1) == Some(cat)
-        })
-        .collect()
 }

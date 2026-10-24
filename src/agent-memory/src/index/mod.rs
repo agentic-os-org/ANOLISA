@@ -89,14 +89,19 @@ impl IndexHandle {
     }
 
     /// Search with agent scope filter.
+    ///
+    /// `category` keeps only hits under `facts/<category>/`. The filter runs
+    /// inside the store and *before* search-access bookkeeping, so a hit the
+    /// caller never sees cannot refresh that file's warmth.
     pub fn search_scoped(
         &self,
         query: &str,
         top_k: usize,
         agent_scope: Option<&str>,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.search_scoped(query, top_k, self.exclude_cold, agent_scope)
+        store.search_scoped(query, top_k, self.exclude_cold, agent_scope, category)
     }
 
     /// Deep search: include cold files too.
@@ -109,9 +114,16 @@ impl IndexHandle {
     /// Superseded rows and cold rows excluded by `exclude_cold_on_search`
     /// are filtered before ranking and never consume the `top_k` budget.
     /// Vector rows without a matching file entry remain eligible.
-    pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
+    /// `category` filters the ranked list before access bookkeeping, exactly
+    /// as `search_scoped` does.
+    pub fn search_vec(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        let raw = store.search_vec(query_vec, top_k)?;
+        let raw = store.search_vec_category(query_vec, top_k, category)?;
         Ok(raw
             .into_iter()
             .map(|(path, score)| SearchHit {
@@ -123,14 +135,18 @@ impl IndexHandle {
             .collect())
     }
 
+    /// Reciprocal-rank fusion of the BM25 and vector rankings. One access is
+    /// charged per merged hit that survives `category` — never per candidate
+    /// used to rank it.
     pub fn search_hybrid(
         &self,
         query: &str,
         query_vec: &[f32],
         top_k: usize,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.search_hybrid(query, query_vec, top_k)
+        store.search_hybrid_category(query, query_vec, top_k, category)
     }
 
     /// Synchronously upsert a single file into the BM25 index. Used by
@@ -146,14 +162,16 @@ impl IndexHandle {
     /// default, which is correct — a freshly observed file should be warm.
     /// This matches the watcher's own upsert path, so there is no
     /// behavioural divergence. The `compact()` method only marks files
-    /// cold when `access_count = 0 AND mtime_ms < cutoff`, so a newly
-    /// indexed file is unaffected regardless of which path inserts it.
+    /// cold when both `mtime_ms` and `last_accessed_ms` are older than the
+    /// cutoff, so a newly indexed file is unaffected regardless of which
+    /// path inserts it.
     pub fn reindex_file(&self, rel_path: &str, body: &str, mtime_ms: i64, size: u64) -> Result<()> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.upsert(rel_path, mtime_ms, size, body, None)
     }
 
-    /// Compact the index: mark old, never-accessed files as cold.
+    /// Compact the index: mark files that were neither modified nor
+    /// searched within the cold window as cold.
     pub fn compact(&self, cold_after_days: u64) -> Result<usize> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.compact(cold_after_days)
