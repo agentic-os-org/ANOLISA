@@ -799,18 +799,29 @@ fn collect_tool_responses(
                 // JSON-encoded *string* rather than an object. The detector and
                 // the grader both re-parse that shape before judging it; read
                 // the same envelope here so the same bytes get the same
-                // outcome. Only an object envelope is looked through — a
-                // plain string payload keeps its previous rendering, which is
+                // outcome. An object envelope is looked through for its flags;
+                // a plain string payload keeps its previous rendering, which is
                 // what the flattening below expects.
                 let encoded = match response {
                     serde_json::Value::String(text) => {
-                        serde_json::from_str::<serde_json::Value>(text.trim())
-                            .ok()
-                            .filter(serde_json::Value::is_object)
+                        serde_json::from_str::<serde_json::Value>(text.trim()).ok()
                     }
                     _ => None,
                 };
-                let envelope = encoded.as_ref().unwrap_or(response);
+                // An encoded *array* is not an envelope: an MCP tool with
+                // several content items serialises its block array as that
+                // string, and there are no flags to read off it. The typed
+                // path parses such strings into real arrays, and both twins
+                // recurse through the parsed array
+                // (`tool_response_failure_text`, `value_has_error_signal`),
+                // so the parsed array becomes the payload below and the
+                // flattening reads its text blocks instead of exporting the
+                // encoding.
+                let encoded_blocks = encoded.as_ref().filter(|value| value.is_array());
+                let envelope = encoded
+                    .as_ref()
+                    .filter(|value| value.is_object())
+                    .unwrap_or(response);
                 let status_is_error = envelope
                     .get("status")
                     .and_then(|v| v.as_str())
@@ -849,7 +860,9 @@ fn collect_tool_responses(
                 // "output"]. `content` stays first (the common spelling), a
                 // null value is skipped, and an envelope with none of the keys
                 // keeps the whole response as before.
-                let payload = if is_error.is_some() {
+                let payload = if let Some(blocks) = encoded_blocks {
+                    blocks
+                } else if is_error.is_some() {
                     ERROR_ENVELOPE_KEYS
                         .iter()
                         .filter_map(|key| envelope.get(*key))
@@ -1506,21 +1519,36 @@ pub(crate) mod tests {
     /// stayed in the evidence pool, where `grep: no such file or directory`
     /// could ground — or refuse to ground — a later claim it never sourced.
     ///
+    /// An encoded *array* is the other shape that string arrives in: an MCP
+    /// tool with several content items serialises its block array as that
+    /// string, and the converter rejected it with the same object filter, so
+    /// the observation exported the raw encoding — the `[{"type":"text"`
+    /// punctuation that defeats a classifier matching lines that start with
+    /// an error token — while both twins recurse through the parsed array.
+    ///
     /// Both spellings must agree on the same bytes; that agreement is what
     /// this pins.
     #[test]
     fn an_encoded_tool_result_envelope_keeps_its_declared_outcome() {
         use crate::grounding::{evidence::build_index, outcome::CallStatus};
 
-        for (encoded, flag, expected) in [
+        for (encoded, flag, expected_content, expected) in [
             (
                 r#"{"content":"grep: no such file or directory","isError":false}"#,
                 Some(false),
+                "grep: no such file or directory",
                 CallStatus::Ok,
             ),
             (
                 r#"{"content":"command failed","isError":true}"#,
                 Some(true),
+                "command failed",
+                CallStatus::Failed,
+            ),
+            (
+                r#"[{"type":"text","text":"command failed"},{"type":"text","text":"exit code 1"}]"#,
+                None,
+                "command failed\nexit code 1",
                 CallStatus::Failed,
             ),
         ] {
@@ -1553,6 +1581,11 @@ pub(crate) mod tests {
             .unwrap();
             let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
             assert_eq!(result.is_error(), flag, "payload {encoded}");
+            assert_eq!(
+                result.content.as_ref().and_then(|content| content.as_str()),
+                Some(expected_content),
+                "the payload must be read through its encoded form, got {encoded}"
+            );
 
             let index = build_index(&doc, 0..doc.steps.len());
             assert_eq!(
