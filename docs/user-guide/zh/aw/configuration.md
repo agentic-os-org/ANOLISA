@@ -88,13 +88,27 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 [显式 daemon 和 Query 工厂](../../../developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)；
 实例内所有受管 session 都须空闲，包括原生清理完成。
 QwenPaw 按原生接入参考选择配置目标并设置已初始化的 `QWENPAW_WORKING_DIR`。
-普通 `aw run` 保持现有行为；未预装稳定桥接的实例不能通过此命令升级，外部 attach 后续提供。
+普通 `aw run` 保持现有行为；未预装稳定桥接的实例不能通过此命令升级。外部启动的原生进程可使用下方的安装流程。
 
-独立准备 `next.yaml`，在另一个终端通过原启动配置定位现有服务并更新目标：
+启动或连接后，继续编辑同一份 `aw.yaml`。在另一个终端显式应用其中的完整期望策略：
 
 ```bash
-aw update --config "$AW_HOME/aw.yaml" --agent qoder --policy next.yaml
+aw update --config "$AW_HOME/aw.yaml" --agent qoder
 ```
+
+AW 记录该配置路径已经连接的服务身份。编辑或原子替换文件不会改变连接、重启 Agent
+或自动激活策略。busy、验证失败或冲突时，旧策略继续生效；文件保留期望修改，供显式重试。
+保持启动字段不变，通过 `aw service status --config` 查看当前生效版本。
+这些命令应使用相同的文件路径和运行时目录。
+
+`qoder-sdk` 目标使用相同更新流程；目标配置名为 `sdk` 时，选择 `--agent sdk`。
+所有受管 Query 共用实例策略；请求、后台任务清理和 Query 关闭期间保持 busy，
+直到原生清理完成。原服务仍在运行时，使用已修改的文件重新启动会被拒绝。
+再次启动前，先关闭 Worker 并停止该服务。
+
+仍支持独立候选文件：`aw update --config aw.yaml --agent qoder --policy next.yaml`。
+此形式应用 `next.yaml`，不改写任何文件。之后若使用单文件更新，先将完整期望策略写入
+`aw.yaml`；AW 不会将一次更新按补丁自动合并。
 
 命令选择该目标唯一的存活实例，并读取当前策略版本。这个版本仍用于乐观并发校验：
 若另一个更新先完成，本次返回冲突，不会自动重试。没有匹配实例时报错；多个匹配实例时
@@ -112,9 +126,11 @@ aw update --socket "$AW_SOCKET" --instance "$AW_INSTANCE" \
 `--expected-revision` 可选，在调用方需要指定前置版本时覆盖查询到的版本。冲突不自动重试。
 
 成功返回实际激活的 `policy_revision`、前版本、审计 key、`preparation_ms` 和 `activation_ms`。
-命令不修改两份文件、不重启原生宿主，也不会启动服务。原启动文件保持不变，用于
-`aw update`、`aw status` 和 `aw stop`：自动服务路径由启动摘要决定，不使用候选策略摘要。
-新 binding 仍使用服务最初的默认策略；原地修改启动文件不能重新定位运行中的实例。
+命令不修改配置、不重启原生宿主，也不会启动服务。保存的连接使 `aw update`、
+`aw status` 和 `aw stop` 在策略编辑后仍访问原服务。该服务存活时，用已编辑文件再次
+启动 reloadable 实例会在创建新 daemon 前被拒绝；请更新已有实例，或先停止服务再用
+编辑后的配置启动。新 binding 初始使用服务默认策略；native attach 在报告成功前
+应用当前期望策略。
 
 热更新模式下，生命周期确认缺失或无法取得激活计划时，`tool.before` 会阻断。
 成功取得计划后，每个步骤仍使用配置的 report/block 错误策略。
@@ -190,3 +206,87 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 按[布尔规则教程](../../../developer-guide/zh/aw/integration.md)准备脚本并验证允许和阻断两种情况。
 
 Pi / Claude 常驻目标沿用同一配置格式，按 [SDK worker 说明](../../../developer-guide/zh/aw/native-agents.md#pi-和-claude-sdk-常驻宿主) 选择常驻入口及公共工厂。
+
+## 接入已启动的原生进程
+
+容器控制器可以照常启动 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
+AgentScope 2.0.9 App，在派发首个请求前安装 AW。进程、终端和生命周期仍由控制器
+管理。启动时记录 PID，在安装成功前保持请求派发暂停。
+
+这些精确版本既是当前 Preview attach/update 路径允许的支持集合，也是实际验收版本。
+尚未建立更宽的兼容范围；普通 `aw run` 的 Qoder 最低版本要求不代表此路径的支持范围。
+扩展版本前，需要验证原生加载确认、完整请求空闲和移除契约。
+
+| 原生入口 | 当前 Preview 的 attach/update 支持 |
+| --- | --- |
+| Qoder TUI | 支持 1.1.73；输入前通过 ConfigChange 确认，请求后等待原生 idle-prompt 确认 |
+| Qoder 单次 `-p` / `--print` 执行 | 普通 `aw run` 支持 print；attach/update 不接纳此模式 |
+| Qoder 常驻 headless 输入 | 尚未接纳或验收；需要单独验证输入前 readiness、多次请求及请求结束/空闲边界 |
+| QwenPaw `app` | 支持 2.2.2b4 / AgentScope 2.0.9；它是 HTTP 后端，可通过 API 无界面使用，无须打开 UI |
+| QwenPaw ACP / TUI | 不支持；固定版本的 TUI 使用 ACP 子进程，不经过 App 的 HTTP 插件管理端点 |
+| QwenPaw `desktop` | 不是受支持的 attach 目标；它通过 `python -m qwenpaw` 启动独立 App，其入口及进程归属尚未纳入本版直接 `qwenpaw app` 的验收 |
+
+容器预热时，使用已初始化的 profile 和 loopback 监听直接启动 `qwenpaw app`。
+真实 attach 验收通过 HTTP 请求执行，无须桌面或浏览器会话。
+
+Qoder SDK 的 `startDaemon()` 及其 Worker/session 控制是独立于 TUI 的入口。
+PID attach 不提供每个 session 的策略隔离；SDK daemon 需要单独验证原生生命周期和隔离能力。
+已支持的 QwenPaw App 版本也不代表旧版本兼容。
+
+```bash
+aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
+aw update --config current.yaml --agent TARGET
+aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remove
+```
+
+`aw install --config ... --agent ... --pid ... [--remove]` 保留为相同操作的兼容入口。
+
+分阶段增加 Hook 时，直接编辑同一份完整期望配置，保留已有 Provider 和步骤。
+现有 `aw config add-provider` 和 `aw config add-hook` 支持 `--definition`，
+用法见[配置工具参考](packages.md#编辑已有-provider-与-hook-配置)。
+这些操作属于离线编辑；验证文件后，在空闲时显式执行 `aw update` 激活。
+无须单独维护启动配置副本。之后用相同路径重新 attach 时，会先应用文件中的当前期望策略，
+再报告连接成功。初始化工具当前生成 Qoder/OpenClaw 配置；
+QwenPaw 目标按上方链接的原生集成参考准备。
+
+连接命令在获得原生确认后返回实例、当前策略版本和进程身份。后续策略
+变更复用 reloadable `aw run` 的 `update` 命令。`--remove` 检查完整的原生请求和
+工具执行边界；忙碌时返回错误，保留保护且不排队。移除保留原生进程、无关 Hook 和
+用户配置修改。移除期间也应暂停请求派发。普通 `aw run` 和 Hermes 安装保持现有行为。
+
+每个预热进程使用独占的原生配置作用域。AW 与 Agent 必须处于同一用户、PID 和
+mount namespace。所选原生配置目录必须是规范路径、归该用户所有且权限为 `0700`。
+已发现的共享进程和重复挂载会被拒绝；控制器也必须阻止其他进程后续进入同一作用域。
+
+- Qoder 使用 `HOME/.qoder/settings.json`，启动时不传 `--settings`、自定义配置目录
+  或禁用 Hook 的选项。AW 读取运行中进程的环境和参数，合并所属配置组，并在用户
+  输入前通过原生 `ConfigChange` 确认加载。已有 settings 必须是同用户的普通文件，
+  且不允许组或其他用户写入。文件原先不存在时由 AW 创建，移除后保留空的原生配置
+  文档。工作目录信任和原生权限仍由 Qoder 决定。
+- QwenPaw 使用运行中 App 已初始化的 `QWENPAW_WORKING_DIR`。App 应监听
+  `127.0.0.1`；AW 验证所选 PID 拥有该端口。原生插件 API 安装带私有描述文件的
+  现有 AW middleware，必须收到该 App 的确认；仅 HTTP 成功不足以表示接入成功。
+  首版不支持单独托管的 runtime。
+  同环境中的其他 App 也应在初始环境中显式设置绝对路径的
+  `QWENPAW_WORKING_DIR`。当原生 `.env` 加载可能决定 peer 的配置目录或 HOME
+  展开结果时，AW 会报告该 PID 并拒绝挂载。当前不存在 `.env` 仍无法确认启动时
+  使用的目录；请使用显式 profile 重启该 peer，或先停止它再挂载。
+
+QwenPaw 还要求与 AW 处于相同的 network namespace。已安装插件目录缺失时，
+detach 会查询原生运行时状态。确认插件不存在后允许清理；插件仍加载或状态端点
+不可用时，保留所有权、暂存插件和桥接文件用于重试。仍加载时先恢复原有插件目录，
+或在 API 恢复后重试 detach，成功后再继续派发请求。
+
+首次挂载要求进程处于首请求前的空闲状态。桥接建立之前已经执行的工作无法由 AW
+重建。请先移除挂载，再停止外部进程；首版不监督该进程，也不运行自动挂载回收器。
+移除失败时保留所有权记录和桥接文件，可用相同命令显式重试。原生插件被替换或
+服务代次改变时拒绝操作并要求检查，避免删除其他所有者的资源。
+Qoder 回滚同样等待原生移除确认。取消或安装失败后若无法确认卸载，AW 保留所有权和
+桥接文件，待原生回调恢复后通过 `--remove` 重试。将 AW 配置组移动到其他 Hook 事件
+会被视为所有权编辑，移除前应恢复原配置组。
+
+安装进程终止后遗留的未加锁空所有权记录，可由 connect 复用或通过 `--remove` 清除；
+不会抢占仍在运行的安装进程持有的锁。强制终止不提供事务恢复保证：SIGKILL 可能留下
+本地暂存文件；成功收到 Bind 回复后、记录持久化前中断，也可能留下未记录的服务绑定。
+这种情况下，应由所属 supervisor 退出受影响的服务并清理其私有状态。
+正常取消或安装失败仍执行回滚；本 Preview 尚无崩溃恢复日志或自动垃圾回收器。

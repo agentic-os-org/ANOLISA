@@ -131,6 +131,11 @@ fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
             let expires = Instant::now() + Duration::from_millis(budget);
             let client = cli::connect_service(args, expires)?;
             let result = client.call(operation, expires)?;
+            if command == "stop" {
+                if let Some(config) = args.flags.get("--config") {
+                    cli::connection::forget(std::path::Path::new(config), client.identity())?;
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(

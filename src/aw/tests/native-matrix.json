@@ -928,7 +928,7 @@
         "qwenpaw==2.2.2b4",
         "agentscope==2.0.9"
       ],
-      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks.",
       "cases": [
         {
           "name": "middleware",
@@ -938,7 +938,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 20
+          "tests": 22
         },
         {
           "name": "runtime-reload",
@@ -963,6 +963,20 @@
             "{qwenpaw}"
           ],
           "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 1
+        },
+        {
+          "name": "native-attach",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_attach.py",
+            "--bin",
+            "{bin}",
+            "--qwenpaw",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 240,
           "report": "unittest",
           "tests": 1
         },
@@ -1094,6 +1108,47 @@
               }
             }
           ]
+        },
+        {
+          "name": "native-attach",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder/attach.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/native-attach"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-attach/results.json",
+              "values": {
+                "passed": true,
+                "native_version": "1.1.73",
+                "same_process": true,
+                "instance_released": true,
+                "runtime_removed": true,
+                "other_profile_process_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "confirmed-before-input",
+                  "first-native-tool-denied",
+                  "busy-detach-preserves-binding",
+                  "same-file-update-allows-next-tool",
+                  "detach-preserves-process-and-edits",
+                  "reattach"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
         }
       ],
       "qoder_cli": {
@@ -1109,7 +1164,7 @@
           }
         }
       },
-      "boundary": "Pinned Qoder 1.1.64 print-mode sec-core allow, scan denial, backend error and timeout blocking with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN. A separate checksummed 1.1.73 TUI lane requires a native startup handshake and default/add/remove idle policy activation before dispatch, retaining the same process. Full TUI tool-turn lifecycle/replacement adoption remains a separate acceptance boundary.",
+      "boundary": "Pinned Qoder 1.1.64 print-mode sec-core allow, scan denial, backend error and timeout blocking with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN. A separate checksummed 1.1.73 TUI lane requires a native startup handshake and default/add/remove idle policy activation before dispatch, retaining the same process. Full TUI tool-turn lifecycle/replacement adoption remains a separate acceptance boundary. Native attach separately starts the 1.1.73 TUI in an isolated Ubuntu container, requires ConfigChange adoption before input, and verifies a hosted first-tool denial, ownership-aware detach and reattachment in the same process. Attachment acceptance also holds a native tool Hook during busy detach rejection and applies a same-file idle update before the next hosted tool executes.",
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
       "qoder_reload_cli": {
         "version": "1.1.73",

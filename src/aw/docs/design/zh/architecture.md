@@ -36,7 +36,7 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 | `aw-package` | 本地包数据库、计划、持久事务和配置 API，以及 `aw-build` | config、exec |
 
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
-`aw-contracts`。底层库不依赖 `aw-cli`；`aw` 在进程内调用安装 API。
+`aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；`aw` 在进程内调用安装 API。
 独立 `aw-package` 可执行文件已删除，Rust crate 和 `aw-build` 保留。
 
 公开 `aw` 命令树使用一份 typed Clap 声明生成解析与帮助；准入后的选项直接
@@ -165,3 +165,14 @@ Query 才能使用该 daemon。工具分发复用现有 CLI callback → service
 [策略更新契约](runtime/policy-reload.md#qoder-sdk-请求准入)。
 
 [常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi / Claude 的每客户端任务准入、回调路由、fail-close 与释放边界。
+
+## 外部管理进程的原生接入
+
+`aw install --pid` 复用现有配置与 Adapter 准备、Bind/Host 准入、EnableReload、
+AssociateProcess 和稳定 dispatch。CLI 管理私有挂载记录及服务绑定；`aw-adapter`
+管理 Qoder settings 合并与确认，以及 QwenPaw 插件 API 安装和移除，有限时长的
+loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享现有进程身份帮助函数。
+
+原生回调确认就绪后，调用者才派发输入。后续 `aw update` 使用已有空闲激活门控。
+`install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
+私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。

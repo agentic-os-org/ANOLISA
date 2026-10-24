@@ -6,10 +6,10 @@ use clap::Args;
 #[group(multiple = true)]
 pub(super) struct Install {
     /// Absolute installation directory for a local bundle
-    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile"])]
+    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
     pub prefix: Option<String>,
     /// Absolute unpacked bundle directory; no URL or RPM/DEB backend
-    #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile"])]
+    #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
     pub bundle: Option<String>,
     /// Show packages, files and conflicts without creating or changing anything
     #[arg(long, requires = "prefix", conflicts_with = "config")]
@@ -26,6 +26,8 @@ pub(super) struct Install {
     /// Native framework profile for legacy Hook connection
     #[arg(long, value_name = "NAME", requires_all = ["config", "agent"])]
     pub native_profile: Option<String>,
+    #[command(flatten)]
+    pub attachment: super::Attachment,
     #[command(flatten)]
     pub output: crate::output::Options,
 }

@@ -20,9 +20,19 @@ request = json.loads(raw)
 (args.root / f"environment-bytes-{args.protocol}.json").write_text(
     json.dumps([(key.hex(), value.hex()) for key, value in sorted(os.environb.items())
                 if key.startswith(b"AW_TEST_BYTES")]))
-if args.protocol == "provider" and request["method"] == "describe" and os.environ.get("FAKE_PREPARE_BLOCK") == "1":
+if (args.protocol == "provider" and request["method"] == "describe"
+        and os.environ.get("FAKE_PREPARE_BLOCK") == "1"
+        and not (args.root / "allow-prepare").exists()):
     (args.root / "preparing.pid").write_text(str(os.getpid()))
     time.sleep(8)
+if (args.protocol == "provider" and request["method"] == "describe"
+        and os.environ.get("FAKE_PREPARE_WAIT") == "1"):
+    (args.root / "preparing.pid").write_text(str(os.getpid()))
+    deadline = time.monotonic() + 5
+    while not (args.root / "allow-prepare").exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("preparation release missing")
+        time.sleep(.01)
 if args.protocol == "provider":
     (args.root / f"qoder-version-{request['method']}.txt").write_text(
         os.environ.get("QODER_HOOK_VERSION", ""))

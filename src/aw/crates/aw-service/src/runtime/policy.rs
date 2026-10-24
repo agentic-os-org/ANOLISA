@@ -207,7 +207,7 @@ impl Runtime {
         })).collect()))
     }
 
-    fn idle(&self, instance: &Instance, id: &str) -> Result<()> {
+    pub(super) fn idle(&self, instance: &Instance, id: &str) -> Result<()> {
         let state = instance
             .reload
             .as_ref()

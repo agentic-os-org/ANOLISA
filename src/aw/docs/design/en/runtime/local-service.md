@@ -31,7 +31,8 @@ service.
 ## Local protocol
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) defines the experimental
-`aw-service/v1alpha5` protocol. It is separate from the Provider stdio protocol
+`aw-service/v1alpha6` protocol. Version 5 task-scope daemons lack the native-request
+idle check for `unbind` and are rejected during discovery. It is separate from the Provider stdio protocol
 `aw-provider/v1alpha1`. Each connection carries one length-framed JSON request
 and one response; a frame is limited to 8 MiB. Native stdin and normalized event data each retain
 a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
@@ -50,7 +51,7 @@ running service.
 | `own_instance` | `instance_id`, launcher `pid` | Immutable process ownership and an audit key |
 | `open_scope` | root `parent_id`, launcher or descendant worker `pid`, absolute `cwd`, complete `environment` | Independently prepared task binding under the root policy |
 | `acknowledge_scope` | task `instance_id` | Enable callbacks after the owner receives its handle, within five seconds of preparation |
-| `unbind` | `instance_id` | Release a binding after all its events have closed |
+| `unbind` | `instance_id` | Release after events close; reloadable instances also require complete native request/tool idle |
 | `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
 | `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
 | `open_hook_event` | `instance_id`, normalized `event`, exact `native_input` bytes | Shared native event handle; repeated callbacks retain the original deadline |
@@ -158,7 +159,7 @@ Task release reclaims memory; durable metadata remains subject to operator disk
 retention. Disk/audit failures stop admission. These APIs are the service foundation;
 native Pi/Claude resident factories are delivered separately.
 
-Upgrade CLI and daemon together to `aw-service/v1alpha5` after draining old
+Upgrade CLI and daemon together to `aw-service/v1alpha6` after draining old
 sessions and stopping the old daemon. The configuration and Provider protocols
 retain their versions. Rollback requires the same drain/stop procedure.
 

@@ -359,6 +359,21 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
             fs::read(fixture.root.join("aw.json")).unwrap(),
             original_config
         );
+        // The default update reads this same mutable file for both Adapters.
+        fixture.save(&candidate);
+        let mut single = fixture.command();
+        single
+            .args(["update", "--config"])
+            .arg(fixture.root.join("aw.json"))
+            .args(["--agent", "qoder"]);
+        let single = fixture.run(single);
+        assert!(
+            single.status.success(),
+            "{}",
+            String::from_utf8_lossy(&single.stderr)
+        );
+        assert_eq!(active(&service)["process"]["pid"], native_pid);
+        assert_ne!(active(&service)["policy_revision"], initial);
         command(&fixture, 4, json!({"action":"stop"}));
         let output = process.finish();
         assert!(

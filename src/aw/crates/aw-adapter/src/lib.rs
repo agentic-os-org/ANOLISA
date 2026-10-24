@@ -6,6 +6,7 @@
 mod adapter;
 mod adapters;
 pub mod association;
+pub mod attachment;
 pub mod callback;
 pub mod completion;
 pub mod projection;

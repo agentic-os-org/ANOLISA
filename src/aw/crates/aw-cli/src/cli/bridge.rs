@@ -18,13 +18,17 @@ pub(super) fn lifecycle(args: &Arguments) -> Result<Exit> {
         Err(error) => {
             eprintln!("AW lifecycle failed: {error}");
             // Qoder requires exit 2 to stop a prompt before model dispatch.
-            Ok(Exit::Code(2))
+            Ok(Exit::Code(if args.flags.contains_key("--confirm") {
+                0
+            } else {
+                2
+            }))
         }
     }
 }
 
 fn invoke(args: &Arguments) -> Result<Exit> {
-    args.check(&["--adapter", "--binding"], false)?;
+    args.check(&["--adapter", "--binding", "--confirm"], false)?;
     let binding = binding(args.required("--binding")?)?;
     if binding.adapter != args.required("--adapter")? {
         return Err("lifecycle adapter mismatch".into());
@@ -32,6 +36,10 @@ fn invoke(args: &Arguments) -> Result<Exit> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let bytes = super::hook::read_input(deadline)?;
     let native: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if let Some(path) = args.flags.get("--confirm") {
+        super::attachment::confirm::confirm(&binding, path, &native, deadline)?;
+        return Ok(Exit::Code(0));
+    }
     let (phase, key, pid) = if binding.adapter == "qoder" {
         let (phase, key) = aw_adapter::reload::qoder_lifecycle(&binding.native_context(), &native)?;
         // SAFETY: getppid reads the native exec-form callback's parent process.

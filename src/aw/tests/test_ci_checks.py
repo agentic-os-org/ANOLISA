@@ -239,12 +239,12 @@ class GateTests(GateFixture):
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "aw-provider-sec-core"],
             ),
             ("aw-adapter", self.root / "crates/aw-adapter",
-             ["aw-config", "aw-contracts", "aw-exec", "aw-provider", "serde_json"]),
+             ["aw-config", "aw-contracts", "aw-exec", "aw-provider", "serde_json", "reqwest"]),
             (
                 "aw-cli", self.root / "crates/aw-cli",
                 ["aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
                  "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde", "serde_json",
-                 "serde_yaml_ng", "sha2", "tempfile"],
+                 "serde_yaml_ng", "sha2", "tempfile", "reqwest"],
             ),
         ):
             (directory / "src").mkdir(parents=True)

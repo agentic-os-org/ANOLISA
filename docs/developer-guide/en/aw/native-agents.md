@@ -386,7 +386,7 @@ The native Hook output dialect and event coverage remain framework-specific.
 
 ## Upgrade the service
 
-This build uses local protocol `aw-service/v1alpha5`. A daemon from an older
+This build uses local protocol `aw-service/v1alpha6`. A daemon from an older
 build is rejected with `protocol_version` before Agent binding or callbacks.
 Before replacing the executable, exit its Agent sessions and use the **old**
 `aw stop --config FILE` (or `--socket ABSOLUTE_PATH`) to stop each old daemon.

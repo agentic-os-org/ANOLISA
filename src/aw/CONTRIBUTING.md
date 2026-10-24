@@ -257,7 +257,7 @@ cargo build --locked -p aw-provider --example policy
 
 The [user guide](../../docs/developer-guide/en/aw/native-agents.md#run-the-local-service-demo)
 walks through a foreground service and separate client, including state-directory
-and audit-history cleanup. The service uses the local `aw-service/v1alpha5`
+and audit-history cleanup. The service uses the local `aw-service/v1alpha6`
 protocol; Providers retain `aw-provider/v1alpha1`. They are versioned separately.
 
 ## Runtime validation

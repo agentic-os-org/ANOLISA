@@ -490,6 +490,130 @@
     "pi-legacy-observation": {
       "target": "aw-cli/test/pi",
       "test": "legacy_pi_observation_remains_supported"
+    },
+    "attach-cli": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_first_hook_busy_detach_isolation_and_owned_cleanup"
+    },
+    "attach-scope": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_rejects_wrong_pid_and_shared_profile_without_writes"
+    },
+    "attach-cancel": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::cancelled_unconfirmed_install_retains_bridge_until_confirmed_cleanup"
+    },
+    "detach-idle": {
+      "target": "aw-cli/test/service",
+      "test": "policy::detach::unbind_keeps_busy_requests_and_native_cleanup_protected"
+    },
+    "attach-settings": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "attachment::files::tests::settings_updates_preserve_native_data_and_reject_symlinks_and_racing_edits"
+    },
+    "attach-default-settings": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_creates_missing_native_settings_without_launching_an_agent"
+    },
+    "attach-qwenpaw": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection"
+    },
+    "attach-network": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::process::tests::qwenpaw_requires_the_callers_network_namespace"
+    },
+    "attach-python-options": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::process::tests::qwenpaw_python_options_preserve_profile_isolation_and_command_boundaries"
+    },
+    "attach-profile-default": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_default_peer_is_shared"
+    },
+    "attach-profile-empty": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_empty_peer_uses_default"
+    },
+    "attach-profile-tilde": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_tilde_peer_is_shared"
+    },
+    "attach-profile-legacy": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_legacy_default_takes_precedence"
+    },
+    "attach-profile-relative": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_relative_peer_uses_its_cwd"
+    },
+    "attach-profile-isolation": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_different_home_remains_isolated"
+    },
+    "update-single-config": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::edited_connection_config_updates_explicitly_and_detaches_without_bootstrap_file"
+    },
+    "reload-connection-conflict": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::edited_reloadable_launch_rejects_connection_before_starting_another_daemon"
+    },
+    "ordinary-connection-conflict": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_stop"
+    },
+    "attach-rollback-confirmed": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::rejected_reattach_confirms_qoder_unload_before_deleting_bridge"
+    },
+    "attach-relocated-group": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "attachment::tests::edited_owned_groups_are_retained_and_unrelated_groups_survive_removal"
+    },
+    "attach-confirmation-cleanup": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::confirm::tests::receipt_cleanup_waits_for_writer_and_rejects_a_late_callback"
+    },
+    "attach-relative-script": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::process::tests::relative_interpreted_entrypoint_uses_the_selected_process_working_directory"
+    },
+    "qoder-sdk-single-config": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "single_configuration_keeps_sdk_updates_busy_checks_and_service_identity"
+    },
+    "attach-dotenv-shared": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_shared_peer_is_rejected_before_writes"
+    },
+    "attach-dotenv-removed": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_removed_after_startup_does_not_prove_isolation"
+    },
+    "attach-dotenv-absent": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_absence_does_not_prove_an_initially_missing_profile"
+    },
+    "attach-dotenv-explicit": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_preserves_explicit_independent_profile"
+    },
+    "attach-dotenv-disabled": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_runtime_id_keeps_independent_default_profile"
+    },
+    "attach-dotenv-home": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_home_alias_requires_initial_home"
+    },
+    "attach-dotenv-empty": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_preserves_initially_empty_profile"
+    },
+    "service-idle-unbind-version": {
+      "target": "aw-service/lib/aw_service",
+      "test": "client::tests::discovery_rejects_daemons_without_idle_unbind_semantics"
     }
   },
   "agents": {
@@ -681,7 +805,19 @@
         "reload-busy",
         "reload-race",
         "reload-rollback",
-        "reload-cancel"
+        "reload-cancel",
+        "attach-cli",
+        "attach-scope",
+        "attach-cancel",
+        "detach-idle",
+        "attach-settings",
+        "attach-default-settings",
+        "update-single-config",
+        "reload-connection-conflict",
+        "ordinary-connection-conflict",
+        "attach-rollback-confirmed",
+        "attach-relocated-group",
+        "attach-relative-script"
       ],
       "security": [
         "security-retry"
@@ -716,7 +852,24 @@
         "reload-busy",
         "reload-race",
         "reload-rollback",
-        "reload-cancel"
+        "reload-cancel",
+        "detach-idle",
+        "attach-qwenpaw",
+        "attach-network",
+        "attach-python-options",
+        "attach-profile-default",
+        "attach-profile-empty",
+        "attach-profile-tilde",
+        "attach-profile-legacy",
+        "attach-profile-relative",
+        "attach-profile-isolation",
+        "attach-dotenv-shared",
+        "attach-dotenv-removed",
+        "attach-dotenv-absent",
+        "attach-dotenv-explicit",
+        "attach-dotenv-disabled",
+        "attach-dotenv-home",
+        "attach-dotenv-empty"
       ],
       "security": [
         "security-retry"
@@ -744,7 +897,8 @@
       "lifecycle": [
         "qoder-sdk-lifecycle",
         "cancel-initialization",
-        "qoder-sdk-reload"
+        "qoder-sdk-reload",
+        "qoder-sdk-single-config"
       ],
       "security": [
         "security-retry"

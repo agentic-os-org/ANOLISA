@@ -6,14 +6,16 @@
 #[path = "launcher/support.rs"]
 mod support;
 
+use aw_service::Operation;
 use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
+    time::Instant,
 };
-use support::{Fixture, Service, LITERAL};
+use support::{Fixture, Service, LITERAL, TIMEOUT};
 
 fn action() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qwenpaw/action.py")
@@ -273,12 +275,19 @@ fn app_exit_before_readiness_releases_instance_and_owned_files() {
 
 #[test]
 fn serial_steps_share_one_event_deadline_and_failure_policy() {
+    const EVENT_BUDGET_MS: u64 = 5000;
+    const STEP_DELAY_MS: u64 = 3000;
     let fixture = Fixture::new();
     let mut document = setup(&fixture);
     for label in ["budget-first", "budget-second"] {
         native(&fixture, &mut document, "tool.before", label);
+        document["spec"]["providers"][label]["transport"]["argv"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(STEP_DELAY_MS.to_string()));
     }
-    document["spec"]["events"]["tool.before"]["budget_ms"] = json!(600);
+    // Leave startup/scheduling headroom while two delays still exceed one budget.
+    document["spec"]["events"]["tool.before"]["budget_ms"] = json!(EVENT_BUDGET_MS);
     for step in document["spec"]["events"]["tool.before"]["steps"]
         .as_array_mut()
         .unwrap()
@@ -287,14 +296,43 @@ fn serial_steps_share_one_event_deadline_and_failure_policy() {
     }
     let service = Service::start(&fixture, &document);
     let output = fixture.run(launch(&fixture));
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let recent = service
+        .client
+        .call(Operation::RecentExecutions, Instant::now() + TIMEOUT)
+        .unwrap();
+    let markers = [
+        "budget-first-started",
+        "budget-first-completed",
+        "budget-second-started",
+        "budget-second-completed",
+    ]
+    .map(|name| (name, fs::read_to_string(fixture.root.join(name))));
+    let diagnostic = format!(
+        "event budget={EVENT_BUDGET_MS}ms, step delay={STEP_DELAY_MS}ms; markers={markers:?}\nexecutions={recent}\nstatus={}\nstdout={}\nstderr={stderr}",
+        output.status, String::from_utf8_lossy(&output.stdout),
     );
-    assert!(fixture.root.join("budget-first-completed").exists());
-    assert!(!fixture.root.join("budget-second-completed").exists());
-    assert!(fixture.root.join("tool-executed").exists());
+    assert!(output.status.success(), "{diagnostic}");
+    assert!(
+        fixture.root.join("budget-first-completed").exists(),
+        "{diagnostic}"
+    );
+    assert!(
+        fixture.root.join("budget-second-started").exists(),
+        "{diagnostic}"
+    );
+    assert!(
+        !fixture.root.join("budget-second-completed").exists(),
+        "{diagnostic}"
+    );
+    let calls = recent["items"].as_array().unwrap();
+    assert_eq!(calls.len(), 2, "{diagnostic}");
+    assert_eq!(calls[1]["step_id"], "budget-first", "{diagnostic}");
+    assert_eq!(calls[1]["status"], "ok", "{diagnostic}");
+    assert_eq!(calls[0]["step_id"], "budget-second", "{diagnostic}");
+    assert_eq!(calls[0]["failure"], "transport", "{diagnostic}");
+    assert_eq!(calls[0]["failure_action"], "report", "{diagnostic}");
+    assert!(fixture.root.join("tool-executed").exists(), "{diagnostic}");
     preserved(&fixture);
     service.released(&fixture);
 }

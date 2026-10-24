@@ -38,8 +38,9 @@ else:
     with (root / "order.jsonl").open("a") as output:
         output.write(json.dumps(label) + "\n")
     if label.startswith("budget-"):
-        time.sleep(.35)
-        (root / (label + "-completed")).write_text("yes")
+        (root / (label + "-started")).write_text(str(time.monotonic()))
+        time.sleep(int(sys.argv[5]) / 1000)
+        (root / (label + "-completed")).write_text(str(time.monotonic()))
     if label == "barrier":
         identifier = request["tool_call"]["id"]
         (root / ("barrier-" + identifier)).write_text("entered")

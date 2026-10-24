@@ -11,15 +11,37 @@ const config = JSON.parse(fs.readFileSync(process.env.AW_QODER_SDK_CONFIG));
 const binding = JSON.parse(fs.readFileSync(config.binding));
 const root = process.cwd();
 const aw = (args) => spawnSync(config.executable, args, { encoding: "utf8", timeout: 15000 });
+const singleConfig = process.env.QODER_SINGLE_CONFIG === "1";
+const desired = path.join(root, "aw.json");
+const initialBytes = fs.readFileSync(desired);
+let serviceIdentity;
 const state = () => {
-  const result = aw(["service", "status", "--socket", binding.socket]);
+  const endpoint = singleConfig ? ["--config", desired] : ["--socket", binding.socket];
+  const result = aw(["service", "status", ...endpoint]);
   assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(result.stdout).result.instances[0];
+  const status = JSON.parse(result.stdout);
+  serviceIdentity ??= status.identity;
+  assert.deepEqual(status.identity, serviceIdentity);
+  return status.result.instances[0];
 };
 function update(file, busy = false) {
-  const result = aw(["update", "--socket", binding.socket, "--agent", "sdk", "--policy", path.join(root, file)]);
-  if (busy) { assert.notEqual(result.status, 0); assert.match(result.stderr, /busy/); }
+  const previous = singleConfig && busy ? state().policy_revision : undefined;
+  let args = ["update", "--socket", binding.socket, "--agent", "sdk", "--policy", path.join(root, file)];
+  let candidate;
+  if (singleConfig) {
+    candidate = file === "aw.json" ? initialBytes : fs.readFileSync(path.join(root, file));
+    const temporary = path.join(root, "editor.tmp");
+    fs.writeFileSync(temporary, candidate, { mode: 0o600 });
+    fs.renameSync(temporary, desired);
+    args = ["update", "--config", desired, "--agent", "sdk"];
+  }
+  const result = aw(args);
+  if (busy) {
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /busy/);
+    if (singleConfig) assert.equal(state().policy_revision, previous);
+  }
   else assert.equal(result.status, 0, result.stderr);
+  if (singleConfig) assert.deepEqual(fs.readFileSync(desired), candidate);
 }
 function input() {
   let wake, ended = false;
@@ -60,6 +82,14 @@ const initial = state();
 assert.equal(initial.ready, true);
 assert.equal(initial.requests, 0);
 update("candidate.json");
+if (singleConfig) {
+  for (const flags of [[], ["--reloadable"]]) {
+    const result = aw(["run", "--config", desired, "--agent", "sdk", ...flags]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /configuration path already selects another service/);
+    assert.deepEqual(state().process, initial.process);
+  }
+}
 inputs[0].send("first");
 const first = await result(sessions[0]);
 assert.equal(first.denied, true);

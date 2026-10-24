@@ -118,7 +118,7 @@ try {
   assert(events().some((event) => event.name === "tool.before" && event.session_id === after.session_id && event.tool.call_id === after.tool.call_id));
   results.push({ case: "allow-before-after", status: "passed" });
   const failure = await session(true);
-  await turn(failure, "exit 7", "failed-marker.txt", false);
+  await turn(failure, "sh -c 'exit 7'", "failed-marker.txt", false);
   assert(events().some((event) => event.native.hook_event_name === "PostToolUseFailure" && event.tool.result.is_error === true));
   results.push({ case: "tool-failure-observed", status: "passed" });
   let permissions = 0;

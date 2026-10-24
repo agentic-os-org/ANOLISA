@@ -28,7 +28,8 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha5`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
+`aw-service/v1alpha6`。第 5 版 task-scope daemon 缺少 `unbind` 的完整原生请求空闲检查，
+连接发现阶段即拒绝。该协议与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
@@ -130,7 +131,7 @@ session 和 call 身份，PreTool 与 PostTool 分别计数；两者都启用时
 故障会停止准入。这组 API 交付服务端基础，Pi / Claude 常驻工厂由后续改动接入。
 
 升级时先排空旧会话并停止旧 daemon，再同时更新 CLI 和 daemon 到
-`aw-service/v1alpha5`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
+`aw-service/v1alpha6`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
 
 ## 共享事件生命周期
 
@@ -299,3 +300,6 @@ SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意
 后续 attach/steer 范围。
 
 受管根 binding 在没有任务 scope 时可使用 observation。任务 scope 及正在准备或持有 scope 的根拒绝 observation；已开启 observation 的根拒绝创建 scope。
+
+`unbind` 对 reloadable 实例在同一准入锁下检查完整请求/工具空闲状态并关闭准入；
+忙碌时返回 `busy`。`release_instance` 仍是取消并回收的内部清理操作，不能替代 detach 的空闲检查。
