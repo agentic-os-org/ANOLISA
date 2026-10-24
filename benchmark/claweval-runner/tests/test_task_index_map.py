@@ -66,11 +66,32 @@ class TestScanTaskIndex:
         result = scan_task_index(tmp_path)
         assert result == [(1, "T001_ok")]
 
-    def test_prefix_filter_keeps_global_index(self, tmp_path):
+    def test_prefix_indices_match_range_slice(self, tmp_path):
+        """With --prefix, indices must be per-prefix so they can be fed back
+        into `ce-runner --prefix <p> --range N-N` (discover_tasks filters by
+        prefix BEFORE slicing, so global indices would select wrong tasks)."""
         _make_tasks(tmp_path, ["C01_a", "M01_b", "T01_c", "T02_d"])
         result = scan_task_index(tmp_path, prefix="T")
-        # Global order: C01_a(1), M01_b(2), T01_c(3), T02_d(4)
-        assert result == [(3, "T01_c"), (4, "T02_d")]
+        assert result == [(1, "T01_c"), (2, "T02_d")]
+
+    def test_prefix_index_roundtrips_through_discover_tasks(self, tmp_path):
+        """Every index the tool prints under --prefix must select exactly
+        that task via discover_tasks(prefix, range_str='N-N')."""
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from ce_runner.run_task import discover_tasks
+
+        names = ["C01_a", "M01_b"] + [f"T{i:03d}_x" for i in range(1, 6)]
+        _make_tasks(tmp_path, names)
+        for index, task_id in scan_task_index(tmp_path, prefix="T"):
+            selected = discover_tasks(
+                str(tmp_path), prefix="T", range_str=f"{index}-{index}")
+            assert len(selected) == 1, (index, selected)
+            assert Path(selected[0]).name == task_id
+
+    def test_no_prefix_indices_stay_global(self, tmp_path):
+        _make_tasks(tmp_path, ["C01_a", "M01_b", "T01_c"])
+        assert scan_task_index(tmp_path) == [
+            (1, "C01_a"), (2, "M01_b"), (3, "T01_c")]
 
     def test_prefix_no_match(self, tmp_path):
         _make_tasks(tmp_path, ["T001_a"])
