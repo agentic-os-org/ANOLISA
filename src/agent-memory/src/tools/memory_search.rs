@@ -13,7 +13,10 @@ const TOOL: &str = "memory_search";
 /// - `"hybrid"`: reciprocal rank fusion of BM25 + vector results.
 ///
 /// `category` filters results to a specific fact category (e.g. "lesson",
-/// "interest"). When empty, all categories are included.
+/// "interest"). When empty, all categories are included. On the bm25 paths the
+/// filter is applied in SQL before the `top_k` limit, so a category that ranks
+/// below the unfiltered window still fills it; the vector/hybrid paths have no
+/// SQL to push it into and still filter afterwards (see `filter_by_category`).
 ///
 /// Returns up to `top_k` ranked snippets. Errors with `NotImplemented` if the
 /// index worker isn't running, or if `mode=vector|hybrid` is requested without
@@ -73,8 +76,10 @@ pub fn memory_search(
 
     match mode {
         "bm25" => {
-            let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
-            let hits = filter_by_category(hits, category);
+            // `category` is part of the SQL WHERE clause, so it narrows the
+            // candidate set before `LIMIT top_k` rather than trimming an
+            // already-truncated window down to nothing.
+            let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
             let tokens = hits
                 .iter()
                 .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
@@ -116,7 +121,7 @@ pub fn memory_search(
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
-                    let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
+                    let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(format!("bm25(fallback from {mode}):len={}", query.len()))
@@ -180,6 +185,14 @@ pub fn memory_search(
 
 /// Filter search hits by category, based on the path prefix.
 /// Facts are stored under facts/<category>/<ulid>.md.
+///
+/// Only the vector/hybrid paths use this now: `search_vec` scores a full-table
+/// scan in Rust and `search_hybrid` fuses two such lists, so neither has a SQL
+/// `WHERE` to push the filter into yet. Both truncate to `top_k` before this
+/// runs, so a `category` filter can still come back short — or empty — when
+/// other categories own the window: the same truncation defect the bm25 paths
+/// now avoid by filtering in SQL. Closing it here means plumbing `category`
+/// into `search_vec` / `search_hybrid_inner`.
 fn filter_by_category(
     hits: Vec<crate::index::SearchHit>,
     category: Option<&str>,

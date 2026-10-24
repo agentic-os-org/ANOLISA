@@ -316,7 +316,7 @@ impl BM25Store {
     }
 
     pub fn search(&self, query: &str, top_k: usize, exclude_cold: bool) -> Result<Vec<SearchHit>> {
-        self.search_scoped(query, top_k, exclude_cold, None)
+        self.search_scoped(query, top_k, exclude_cold, None, None)
     }
 
     /// Search with optional agent scope filter.
@@ -332,12 +332,22 @@ impl BM25Store {
     /// surface the error rather than silently falling back to shared mode,
     /// otherwise a misconfigured `MCP_CLIENT_NAME` would silently widen the
     /// visibility domain.
+    ///
+    /// `category` restricts results to one fact category and is applied **in
+    /// SQL, before `LIMIT`**, on every bm25 path — the MATCH query, its
+    /// OR-quoted retry and the short-CJK LIKE fallback. Facts live under
+    /// `facts/<category>/<ulid>.md`, so the filter is a path-prefix `GLOB`
+    /// (case-sensitive; see `category_glob_pattern`). Filtering in Rust
+    /// *after* the limit instead would return zero hits whenever another
+    /// category filled the unfiltered top-k window, which is exactly what bm25
+    /// term-frequency/length normalization produces.
     pub fn search_scoped(
         &self,
         query: &str,
         top_k: usize,
         exclude_cold: bool,
         agent_scope: Option<&str>,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if query.trim().is_empty() {
             return Err(MemoryError::InvalidArgument("empty search query".into()));
@@ -366,7 +376,14 @@ impl BM25Store {
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         let needs_like_fallback = tokens.iter().any(|t| t.chars().count() < 3);
         if needs_like_fallback {
-            return self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope);
+            return self.search_like(
+                &tokens,
+                top_k,
+                cold_filter,
+                superseded_filter,
+                &scope,
+                category,
+            );
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
@@ -376,6 +393,10 @@ impl BM25Store {
         // `/` and `\` are rejected so a client name like `org/team/agent`
         // cannot be confused with a path component elsewhere in the query.
         let (agent_filter, agent_param) = agent_scope_sql_match(&scope);
+        // The MATCH query numbers its parameters, so the category slot is `?3`
+        // only when the agent filter did not already take it.
+        let category_slot = if agent_param.is_some() { "?4" } else { "?3" };
+        let (category_filter, category_param) = category_filter_sql(category, category_slot);
 
         // Join with files to get mtime for time decay.
         let sql = format!(
@@ -388,41 +409,25 @@ impl BM25Store {
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
+                  {category_filter}
             ORDER BY rank
             LIMIT ?2
         "#
         );
+        let bind = match_bind(&fts_q, top_k, &agent_param, &category_param);
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows: Vec<(String, String, f64, String, i64)> = if let Some(ref agent_id) = agent_param
-        {
-            stmt.query_map(params![fts_q, top_k as i64, agent_id], |row| {
-                let body: String = row.get(3)?;
-                let mtime_ms: i64 = row.get(4)?;
+        let rows: Vec<(String, String, f64, String, i64)> = stmt
+            .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, f64>(2)?,
-                    body,
-                    mtime_ms,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })?
             .flatten()
-            .collect()
-        } else {
-            stmt.query_map(params![fts_q, top_k as i64], |row| {
-                let body: String = row.get(3)?;
-                let mtime_ms: i64 = row.get(4)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                    body,
-                    mtime_ms,
-                ))
-            })?
-            .flatten()
-            .collect()
-        };
+            .collect();
 
         // OR fallback: FTS5 implicit-AND semantics return 0 results
         // when any single query term is absent from the corpus.
@@ -448,41 +453,25 @@ impl BM25Store {
                 FROM files_fts
                 JOIN files f ON f.rowid = files_fts.rowid
                 WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
+                      {category_filter}
                 ORDER BY rank
                 LIMIT ?2
-                "#,
-                cold_filter = cold_filter,
-                superseded_filter = superseded_filter,
-                agent_filter = agent_filter,
+                "#
             );
+            let or_bind = match_bind(&or_q, top_k, &agent_param, &category_param);
             let mut or_stmt = self.conn.prepare(&or_sql)?;
-            if let Some(ref agent_id) = agent_param {
-                or_stmt
-                    .query_map(params![or_q, top_k as i64, agent_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    })?
-                    .flatten()
-                    .collect()
-            } else {
-                or_stmt
-                    .query_map(params![or_q, top_k as i64], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    })?
-                    .flatten()
-                    .collect()
-            }
+            or_stmt
+                .query_map(rusqlite::params_from_iter(or_bind.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .flatten()
+                .collect()
         } else {
             rows
         };
@@ -529,7 +518,9 @@ impl BM25Store {
     /// OR fallback). `_` and `%` surviving `sanitize_fts_query` are
     /// backslash-escaped so they match literally. Scoring is a coarse
     /// term-frequency sum plus time decay — no BM25 is available off the
-    /// MATCH path, but recall (not ranking) is the goal.
+    /// MATCH path, but recall (not ranking) is the goal. `category` is applied
+    /// here too, so the LIKE fallback filters before its `LIMIT` exactly like
+    /// the MATCH path does.
     fn search_like(
         &self,
         tokens: &[&str],
@@ -537,11 +528,13 @@ impl BM25Store {
         cold_filter: &str,
         superseded_filter: &str,
         scope: &AgentScope,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
         let (agent_filter, agent_param) = agent_scope_sql_like(scope);
+        let (category_filter, category_param) = category_filter_sql(category, "?");
 
         let run_query =
             |joiner: &str, pool: usize, rank_matches: bool| -> Result<Vec<(String, String, i64)>> {
@@ -581,6 +574,7 @@ impl BM25Store {
                 FROM files_fts
                 JOIN files f ON f.rowid = files_fts.rowid
                 WHERE ({like_clause}) {cold_filter} {superseded_filter} {agent_filter}
+                      {category_filter}
                 {order_clause}
                 LIMIT ?
                 "#
@@ -594,8 +588,11 @@ impl BM25Store {
                 if let Some(ref agent_id) = agent_param {
                     bind.push(rusqlite::types::Value::Text(agent_id.clone()));
                 }
+                if let Some(ref pattern) = category_param {
+                    bind.push(rusqlite::types::Value::Text(pattern.clone()));
+                }
                 // ORDER BY comes after WHERE in the SQL text, so its pattern
-                // params bind after the WHERE + agent params.
+                // params bind after the WHERE + agent + category params.
                 if rank_matches {
                     for s in &like_patterns {
                         bind.push(rusqlite::types::Value::Text(s.clone()));
@@ -1212,6 +1209,77 @@ fn like_pattern(token: &str) -> String {
     s
 }
 
+/// Build the `GLOB` pattern that restricts a search to one fact category.
+/// Facts are written to `facts/<category>/<ulid>.md` (see
+/// `consolidation::writer`), so a prefix pattern is exact.
+///
+/// `GLOB` and not `LIKE` because SQLite folds ASCII case in `LIKE`
+/// (`'facts/Interest/x.md' LIKE 'facts/interest/%'` is true), while category
+/// matching has always been a case-sensitive comparison — the Rust-side
+/// `filter_by_category` this pushed into SQL used `==` on the second path
+/// component. On Linux one store can hold both `facts/interest/` and
+/// `facts/Interest/`, and conflating them does more than leak a row: the
+/// wrong-case file also spends a `top_k` slot that a requested-category fact
+/// should have filled.
+///
+/// `GLOB` has no `ESCAPE` clause, so its three metacharacters — `*`, `?` and
+/// `[` — are neutralised by wrapping each in a single-character bracket class
+/// (`[*]`, `[?]`, `[[]`), which `GLOB` reads as a literal. `]` and `^` are
+/// literal outside a class and must not be escaped. That leaves a category
+/// unable to widen the prefix or swallow the trailing separator, the same
+/// guarantee the backslash escaping gave `like_pattern`.
+fn category_glob_pattern(category: &str) -> String {
+    let mut s = String::with_capacity(category.len() + 8);
+    s.push_str("facts/");
+    for c in category.chars() {
+        match c {
+            '*' | '?' | '[' => {
+                s.push('[');
+                s.push(c);
+                s.push(']');
+            }
+            other => s.push(other),
+        }
+    }
+    s.push_str("/*");
+    s
+}
+
+/// Category filter SQL plus the pattern to bind for it. `placeholder` is the
+/// parameter marker the surrounding query needs: a numbered `?3`/`?4` on the
+/// MATCH paths (whose query numbers its parameters), a bare `?` on the LIKE
+/// fallback (which binds a variable number of leading pattern params).
+fn category_filter_sql(category: Option<&str>, placeholder: &str) -> (String, Option<String>) {
+    match category {
+        None => (String::new(), None),
+        Some(cat) => (
+            format!("AND f.path GLOB {placeholder}"),
+            Some(category_glob_pattern(cat)),
+        ),
+    }
+}
+
+/// Bind values for the FTS5 MATCH queries: `?1` = FTS query, `?2` = limit, then
+/// the optional agent-scope and category params in the order their `?N` slots
+/// were allocated (`category_filter_sql` picks `?3` when there is no agent
+/// filter and `?4` when there is one). rusqlite binds positionally, so this
+/// stays in step with the SQL text without a branch per combination.
+fn match_bind(
+    fts_q: &str,
+    top_k: usize,
+    agent_param: &Option<String>,
+    category_param: &Option<String>,
+) -> Vec<rusqlite::types::Value> {
+    let mut bind = vec![
+        rusqlite::types::Value::Text(fts_q.to_string()),
+        rusqlite::types::Value::Integer(top_k as i64),
+    ];
+    for v in [agent_param, category_param].into_iter().flatten() {
+        bind.push(rusqlite::types::Value::Text(v.clone()));
+    }
+    bind
+}
+
 /// Byte-wise ASCII case-insensitive substring search, mirroring SQLite
 /// LIKE semantics (ASCII case-insensitive, exact bytes otherwise).
 /// Returned offsets are always char boundaries: a valid UTF-8 needle
@@ -1454,19 +1522,285 @@ mod tests {
 
         // isolated:alpha sees only its own — not beta, not the unscoped row.
         let hits = s
-            .search_scoped("花名", 10, true, Some("isolated:alpha"))
+            .search_scoped("花名", 10, true, Some("isolated:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths, vec!["own.md"]);
 
         // filter:alpha sees its own + unscoped, never beta.
         let hits = s
-            .search_scoped("花名", 10, true, Some("filter:alpha"))
+            .search_scoped("花名", 10, true, Some("filter:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert!(paths.contains(&"own.md"));
         assert!(paths.contains(&"legacy.md"));
         assert!(!paths.contains(&"other.md"));
+    }
+
+    /// Regression for GH-4366: `category` used to be applied in Rust *after*
+    /// the SQL `LIMIT top_k`, so a category whose facts ranked below the
+    /// unfiltered window came back empty even though matching rows existed.
+    #[test]
+    fn search_category_filters_in_sql_before_limit() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        // Six lesson facts repeat every query term (bm25 ranks them high);
+        // six interest facts mention two of them once (ranked below).
+        for i in 0..6 {
+            s.upsert(
+                &format!("facts/lesson/01JLESSON{i}.md"),
+                100,
+                10,
+                &format!(
+                    "quantum lattice dynamics quantum lattice dynamics \
+                     quantum lattice dynamics variant {i}"
+                ),
+                None,
+            )
+            .unwrap();
+            s.upsert(
+                &format!("facts/interest/01JINTEREST{i}.md"),
+                100,
+                10,
+                "the agent noted a quantum lattice once",
+                None,
+            )
+            .unwrap();
+        }
+
+        // Premise: the unfiltered top-5 window is entirely lesson facts, so a
+        // post-LIMIT filter would have nothing left to return.
+        let all = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 5, "expected a full top_k window");
+        assert!(
+            all.iter().all(|h| h.path.starts_with("facts/lesson/")),
+            "premise broken, the top-5 window is not all lesson facts: {all:?}"
+        );
+
+        // The AND query matches no interest fact, so this also exercises the
+        // OR-quoted retry carrying the category filter.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("interest"))
+            .unwrap();
+        assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+        assert!(
+            hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+            "category=interest returned other paths: {hits:?}"
+        );
+
+        // An unknown category is a non-matching path prefix, not an error.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("nope"))
+            .unwrap();
+        assert!(hits.is_empty());
+
+        // Non-fact paths never match the facts/<category>/ prefix.
+        s.upsert(
+            "notes/interest/x.md",
+            100,
+            10,
+            "quantum lattice dynamics",
+            None,
+        )
+        .unwrap();
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("interest"))
+            .unwrap();
+        assert!(
+            !hits.iter().any(|h| h.path.starts_with("notes/")),
+            "category filter leaked a non-fact path: {hits:?}"
+        );
+    }
+
+    /// The short-CJK LIKE fallback must filter by category before its own
+    /// `LIMIT`, and must combine with the agent-scope filter.
+    #[test]
+    fn search_like_category_filters_before_limit() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("facts/lesson/01JCJK0.md", 100, 10, "花名是小云", None)
+            .unwrap();
+        s.upsert(
+            "facts/interest/01JCJK1.md",
+            100,
+            10,
+            "花名是大云",
+            Some("alpha"),
+        )
+        .unwrap();
+        s.upsert(
+            "facts/interest/01JCJK2.md",
+            100,
+            10,
+            "花名是老云",
+            Some("beta"),
+        )
+        .unwrap();
+
+        let hits = s
+            .search_scoped("花名", 10, true, None, Some("interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths.len(), 2, "expected both interest facts: {paths:?}");
+
+        // Category + isolated agent scope together.
+        let hits = s
+            .search_scoped("花名", 10, true, Some("isolated:alpha"), Some("interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/interest/01JCJK1.md"]);
+
+        // The lesson fact is untouched by an interest filter.
+        let hits = s
+            .search_scoped("花名", 10, true, None, Some("lesson"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/lesson/01JCJK0.md"]);
+    }
+
+    #[test]
+    fn category_glob_pattern_escapes_wildcards() {
+        assert_eq!(category_glob_pattern("lesson"), "facts/lesson/*");
+        // `*`, `?` and `[` would otherwise widen the prefix or stand in for an
+        // arbitrary character; a bracket class pins each to itself.
+        assert_eq!(category_glob_pattern("a*b"), "facts/a[*]b/*");
+        assert_eq!(category_glob_pattern("a?b"), "facts/a[?]b/*");
+        assert_eq!(category_glob_pattern("a[b"), "facts/a[[]b/*");
+        // `]` and `^` are literal outside a class, and GLOB has no backslash
+        // escape, so neither is touched.
+        assert_eq!(category_glob_pattern("a]b^c"), "facts/a]b^c/*");
+        assert_eq!(category_glob_pattern("a\\b"), "facts/a\\b/*");
+        // A CJK category survives byte-for-byte.
+        assert_eq!(category_glob_pattern("花名"), "facts/花名/*");
+    }
+
+    /// The escaped metacharacters must match literally once they reach SQL, not
+    /// just in the pattern string above.
+    #[test]
+    fn search_category_glob_metacharacters_are_literal() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert(
+            "facts/int?rest/01JMETA0.md",
+            100,
+            10,
+            "quantum lattice dynamics",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "facts/intxrest/01JMETA1.md",
+            100,
+            10,
+            "quantum lattice dynamics",
+            None,
+        )
+        .unwrap();
+
+        // `?` matches the literal question mark, and nothing else.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 10, true, None, Some("int?rest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/int?rest/01JMETA0.md"]);
+
+        // The category that `?` would have wildcarded matches its own literal.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 10, true, None, Some("intxrest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/intxrest/01JMETA1.md"]);
+    }
+
+    /// Regression for the P2 review on this PR: SQLite `LIKE` folds ASCII case,
+    /// so pushing the filter into SQL as a `LIKE` made `category="interest"`
+    /// match `facts/Interest/` too — the Rust-side `filter_by_category` it
+    /// replaced compared with a case-sensitive `==`. The wrong-case file did not
+    /// merely leak into the results, it occupied a `top_k` slot and displaced a
+    /// fact from the category actually requested.
+    #[test]
+    fn search_category_matching_is_case_sensitive() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        // Six lowercase-category facts, then one mixed-case sibling that
+        // repeats the query terms so bm25 ranks it above all six.
+        for i in 0..6 {
+            s.upsert(
+                &format!("facts/interest/01JINTEREST{i}.md"),
+                100,
+                10,
+                &format!("quantum lattice note about interest topic {i}"),
+                None,
+            )
+            .unwrap();
+        }
+        s.upsert(
+            "facts/Interest/mixedcase.md",
+            100,
+            10,
+            "quantum lattice quantum lattice quantum lattice",
+            None,
+        )
+        .unwrap();
+
+        // Premise: unfiltered, the mixed-case fact is inside the top-5 window,
+        // so a case-insensitive filter would spend one of those five slots on
+        // it rather than pushing it out before the LIMIT.
+        let all = s
+            .search_scoped("quantum lattice", 5, true, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 5, "expected a full top_k window");
+        assert!(
+            all.iter().any(|h| h.path == "facts/Interest/mixedcase.md"),
+            "premise broken, the mixed-case fact is not in the window: {all:?}"
+        );
+
+        let hits = s
+            .search_scoped("quantum lattice", 5, true, None, Some("interest"))
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            5,
+            "expected five lowercase interest hits: {hits:?}"
+        );
+        assert!(
+            hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+            "case-insensitive category match leaked facts/Interest/: {hits:?}"
+        );
+
+        // And the mixed-case category is reachable on its own terms.
+        let hits = s
+            .search_scoped("quantum lattice", 5, true, None, Some("Interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/Interest/mixedcase.md"]);
+    }
+
+    /// Same case-sensitivity requirement on the short-CJK `LIKE` fallback path,
+    /// which carries its own `LIMIT` and its own copy of the category filter.
+    #[test]
+    fn search_like_category_matching_is_case_sensitive() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("facts/interest/01JCJKC0.md", 100, 10, "花名是小云", None)
+            .unwrap();
+        s.upsert("facts/interest/01JCJKC1.md", 100, 10, "花名是大云", None)
+            .unwrap();
+        s.upsert("facts/Interest/mixedcase.md", 100, 10, "花名是老云", None)
+            .unwrap();
+
+        let hits = s
+            .search_scoped("花名", 5, true, None, Some("interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["facts/interest/01JCJKC0.md", "facts/interest/01JCJKC1.md"],
+            "LIKE fallback conflated facts/Interest/ with facts/interest/"
+        );
+
+        let hits = s
+            .search_scoped("花名", 5, true, None, Some("Interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/Interest/mixedcase.md"]);
     }
 
     #[test]
@@ -2149,7 +2483,7 @@ mod tests {
 
         // isolated:alpha sees ONLY alpha's own — not beta, not legacy.
         let hits = s
-            .search_scoped("agent alpha", 10, true, Some("isolated:alpha"))
+            .search_scoped("agent alpha", 10, true, Some("isolated:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths.len(), 2, "isolated:alpha should see 2 own memories");
@@ -2158,7 +2492,7 @@ mod tests {
         // filter:alpha sees alpha's own + unscoped (NULL) — legacy included,
         // but never beta's.
         let hits = s
-            .search_scoped("agent alpha", 10, true, Some("filter:alpha"))
+            .search_scoped("agent alpha", 10, true, Some("filter:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert!(paths.contains(&"u/legacy.md"));
@@ -2172,7 +2506,7 @@ mod tests {
         // widened to shared mode.
         for bad in ["isolated:foo'bar", "filter:a;b", "isolated:with/slash"] {
             let err = s
-                .search_scoped("agent alpha", 10, true, Some(bad))
+                .search_scoped("agent alpha", 10, true, Some(bad), None)
                 .unwrap_err();
             assert!(
                 matches!(err, MemoryError::InvalidArgument(_)),
