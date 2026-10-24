@@ -66,6 +66,12 @@ def load_rules(language: Language) -> List[RuleDefinition]:
                 raise ErrRuleYamlParse(yaml_file.stem)
         if data is None:
             continue
+        # Guard the shape before field access: ``data["regex"]`` is touched
+        # before RuleDefinition validation runs, so a rule file without a
+        # string ``regex`` would escape the typed ErrRuleValidation contract
+        # below as a raw KeyError/TypeError/AttributeError.
+        if not isinstance(data, dict) or not isinstance(data.get("regex"), str):
+            raise ErrRuleValidation(yaml_file.stem)
         data["regex"] = data["regex"].replace("\n", "")
         _resolve_refs(data, shared, yaml_file.stem)
         try:
