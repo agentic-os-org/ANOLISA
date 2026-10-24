@@ -571,6 +571,10 @@ pub struct EnvDelta {
 // =====================================================================
 
 impl OutputMessage {
+    /// Emits the `system` initialization handshake record.
+    ///
+    /// Announces the core binary and runtime environment to the host before
+    /// any session traffic. Hosts gate the rest of the protocol on receiving it.
     pub fn system_init(
         session_id: &str,
         model: &str,
@@ -589,6 +593,10 @@ impl OutputMessage {
         }
     }
 
+    /// Emits the `initialize_success` handshake answer.
+    ///
+    /// `can_handle_shell_evidence_tool` is the capability flag the shell host
+    /// keys on: when `false` the host must not send shell-evidence tool calls.
     pub fn initialize_success(request_id: &str, can_handle_shell_evidence_tool: bool) -> Self {
         Self::initialize_success_for_profile(
             request_id,
@@ -672,6 +680,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits a `system` status record (e.g. `ready`, `error`).
     pub fn system_status(status: &str) -> Self {
         Self::System {
             subtype: "status".to_string(),
@@ -682,6 +691,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits a `hook_notification` control message for the host.
     pub fn hook_notification(
         hook_name: &str,
         message: &str,
@@ -700,6 +710,11 @@ impl OutputMessage {
         }
     }
 
+    /// Emits an assistant text message for a session.
+    ///
+    /// Wraps `text` in a single text content block inside an assistant
+    /// envelope. Use the `stream_text_*` family for incremental output;
+    /// this constructor emits the whole message at once.
     pub fn assistant_text(session_id: &str, text: &str) -> Self {
         Self::Assistant {
             session_id: session_id.to_string(),
@@ -711,6 +726,10 @@ impl OutputMessage {
         }
     }
 
+    /// Emits the result of one tool invocation.
+    ///
+    /// `is_error` marks the content as the tool's failure output rather
+    /// than its normal payload.
     pub fn tool_result(session_id: &str, tool_use_id: &str, content: &str, is_error: bool) -> Self {
         Self::User {
             session_id: session_id.to_string(),
@@ -744,6 +763,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits the successful terminal result of a session turn.
     pub fn result_success(session_id: &str, result: &str) -> Self {
         Self::Result {
             subtype: Some("success".to_string()),
@@ -760,6 +780,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits the failed terminal result of a session turn.
     pub fn result_error(session_id: &str, error: &str) -> Self {
         Self::result_error_with_code(session_id, error, None)
     }
@@ -798,6 +819,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits a session-level error result (the whole turn is unusable).
     pub fn session_result_error(
         session_id: &str,
         error: &str,
@@ -819,18 +841,24 @@ impl OutputMessage {
         }
     }
 
+    /// Opens a streamed assistant message.
     pub fn stream_message_start() -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::MessageStart,
         }
     }
 
+    /// Closes a streamed assistant message.
     pub fn stream_message_stop() -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::MessageStop,
         }
     }
 
+    /// Opens a streamed text block.
+    ///
+    /// `index` identifies the content block and is shared by the matching
+    /// `stream_text_delta` calls and the closing `stream_block_stop`.
     pub fn stream_text_start(index: u32) -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::ContentBlockStart {
@@ -840,6 +868,7 @@ impl OutputMessage {
         }
     }
 
+    /// Appends incremental text to the streamed block with the given index.
     pub fn stream_text_delta(index: u32, text: &str) -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::ContentBlockDelta {
@@ -851,6 +880,10 @@ impl OutputMessage {
         }
     }
 
+    /// Opens a streamed tool-use block.
+    ///
+    /// The `index` contract matches the text family; `id` and `name` name
+    /// the tool call the host must later answer with a tool result.
     pub fn stream_tool_use_start(index: u32, id: &str, name: &str) -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::ContentBlockStart {
@@ -863,6 +896,10 @@ impl OutputMessage {
         }
     }
 
+    /// Appends partial tool-call arguments to the streamed block.
+    ///
+    /// The payload is a fragment of the tool input JSON, not plain text;
+    /// the host concatenates fragments and parses once the block closes.
     pub fn stream_tool_use_delta(index: u32, partial_json: &str) -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::ContentBlockDelta {
@@ -874,6 +911,7 @@ impl OutputMessage {
         }
     }
 
+    /// Opens a streamed thinking (reasoning) block.
     pub fn stream_thinking_start(index: u32) -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::ContentBlockStart {
@@ -883,6 +921,7 @@ impl OutputMessage {
         }
     }
 
+    /// Appends incremental reasoning text to the streamed thinking block.
     pub fn stream_thinking_delta(index: u32, thinking: &str) -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::ContentBlockDelta {
@@ -894,12 +933,18 @@ impl OutputMessage {
         }
     }
 
+    /// Closes the streamed content block with the given index.
     pub fn stream_block_stop(index: u32) -> Self {
         Self::StreamEvent {
             event: StreamEventPayload::ContentBlockStop { index },
         }
     }
 
+    /// Emits a `can_use_tool` approval request for one tool call.
+    ///
+    /// The host must answer on stdin with an approval decision for
+    /// `tool_use_id` before the tool runs; while a request is outstanding
+    /// the model turn is suspended.
     pub fn can_use_tool(
         request_id: &str,
         tool_name: &str,
@@ -939,6 +984,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits the `auth_required` handshake request with provider choices.
     pub fn auth_required(
         request_id: &str,
         reason: AuthReason,
@@ -955,6 +1001,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits a shell-evidence listing request for captured commands.
     pub fn shell_evidence_list_commands(
         request_id: &str,
         tool_use_id: &str,
@@ -976,6 +1023,7 @@ impl OutputMessage {
         }
     }
 
+    /// Emits a shell-evidence read request for captured command output.
     pub fn shell_evidence_read_output(
         request_id: &str,
         tool_use_id: &str,
