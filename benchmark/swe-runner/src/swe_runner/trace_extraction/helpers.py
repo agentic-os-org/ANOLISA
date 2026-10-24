@@ -121,7 +121,14 @@ def sanitize_path_component(value: str | None) -> str:
     """Make a string safe for use as a directory name."""
     if not value:
         return "__unknown__"
-    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    # ``.`` and ``..`` are valid directory names, so the substitution keeps
+    # them, and joining one under the trace root lands on the trace root or
+    # its parent: two instances then share a directory, or an instance id
+    # escapes the export tree. Treat every all-dot name as missing.
+    if not sanitized.strip("."):
+        return "__unknown__"
+    return sanitized
 
 
 def _safe_int(value: object) -> int:
