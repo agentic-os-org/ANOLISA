@@ -6,8 +6,9 @@ import os
 from pathlib import Path
 
 from check import AW, sha
-from check_native import load
+from check_native import load, select
 from native_reports import verify_case
+from resident_contract import verify as verify_resident
 
 
 def summarize(manifest: dict, directory: Path, expected: str, outcomes: dict) -> tuple[str, bool]:
@@ -67,6 +68,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--results", required=True, type=Path)
+    parser.add_argument("--credential-free", action="store_true")
+    parser.add_argument("--resident-results", required=True, type=Path)
     args = parser.parse_args()
     outcomes = {
         name: os.environ.get(variable)
@@ -76,7 +79,26 @@ def main() -> None:
             ("native", "NATIVE_RESULT"),
         )
     }
-    summary, passed = summarize(load(AW), args.results, args.candidate_sha, outcomes)
+    manifest = load(AW)
+    summary, passed = summarize(
+        select(manifest, args.credential_free), args.results, args.candidate_sha, outcomes
+    )
+    if args.credential_free:
+        summary += (
+            "\nCredential-free candidate run: Qoder CLI and Qoder SDK hosted-model "
+            "suites require the full trusted-main nightly.\n"
+        )
+    try:
+        if any(os.environ.get(name) != "success" for name in ("RESIDENT_RESULT", "RESIDENT_IMAGE_RESULT")):
+            raise ValueError("resident container job did not succeed")
+        resident = verify_resident(args.resident_results, manifest, args.candidate_sha)
+        summary += (
+            f"\nResident container: PASS, {len(resident['suites'])} verified suites; "
+            "network disabled, no host mounts, container and image removed.\n"
+        )
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        passed = False
+        summary += f"\nResident container: FAIL / missing ({error}).\n"
     print(summary)
     if "GITHUB_STEP_SUMMARY" in os.environ:
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:

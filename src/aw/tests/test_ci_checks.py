@@ -114,7 +114,7 @@ class ScopeTests(GateFixture):
         self.git("checkout", "-qb", "workflow-only", advanced)
         workflow_head = self.commit(".github/workflows/aw-ci.yml", "workflow only")
         event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": workflow_head}}
-        self.assertFalse(gate.scope("pull_request", event, workflow_head, self.root))
+        self.assertTrue(gate.scope("pull_request", event, workflow_head, self.root))
 
     def test_scope_handles_removal_noop_and_event_errors(self) -> None:
         base = self.init_git()
@@ -170,6 +170,8 @@ class ScopeTests(GateFixture):
         sha = "a" * 40
         valid = {
             "GITHUB_SHA": sha,
+            "TOKENLESS_SELECTED": "false",
+            "TOKENLESS_RESULT": "skipped",
             "SCOPE_RESULT": "success",
             "CHECKS_RESULT": "success",
             "SELECTED": "true",

@@ -2,12 +2,14 @@
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
 from check import AW, git, output, sha
 from native_reports import validate_case
 from native_qoder import validate_pin
+from resident_contract import shards
 
 
 def load(root: Path) -> dict:
@@ -105,14 +107,26 @@ def load(root: Path) -> dict:
     return manifest
 
 
-def plan(root: Path, expected: str) -> dict:
+def select(manifest: dict, credential_free: bool = False) -> dict:
+    """Keep hosted-model acceptance explicit when validating an unmerged fork."""
+    return {
+        **manifest,
+        "agents": {
+            agent: row for agent, row in manifest["agents"].items()
+            if not credential_free or agent not in {"qoder", "qoder-sdk"}
+        },
+    }
+
+
+def plan(root: Path, expected: str, credential_free: bool = False) -> dict:
     """Generate the job matrix from the tested checkout, never a second Agent list."""
     if git("rev-parse", "HEAD", repo=root.parents[1]) != sha(expected):
         raise ValueError("native plan checkout does not match candidate SHA")
-    manifest = load(root)
+    manifest = select(load(root), credential_free)
     return {
         "include": [
-            {"agent": agent, "python": row["python"]}
+            {"agent": agent, "python": row["python"],
+             "minutes": math.ceil((sum(c["timeout_seconds"] + 20 for c in row["cases"]) + 1800) / 60)}
             for agent, row in manifest["agents"].items()
             if row["mode"] == "automated"
         ]
@@ -122,8 +136,15 @@ def plan(root: Path, expected: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--credential-free", action="store_true")
     args = parser.parse_args()
-    output(matrix=json.dumps(plan(AW, args.candidate_sha), separators=(",", ":")))
+    matrix = plan(AW, args.candidate_sha, args.credential_free)
+    resident = {"include": [
+        {"shard": name, "minutes": row["job_minutes"]}
+        for name, row in shards(load(AW)).items()
+    ]}
+    output(matrix=json.dumps(matrix, separators=(",", ":")),
+           resident_matrix=json.dumps(resident, separators=(",", ":")))
 
 
 if __name__ == "__main__":

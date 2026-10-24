@@ -29,7 +29,7 @@ ignored、向量错误及命令失败均返回非零。每条命令都有超时�
 依赖，Schema 校验只读取随包资源。检查入口、本地服务、Provider Host 执行、命令执行及 FileJournal 要求 Linux；
 本门禁不认证其他操作系统或最低支持版本。
 
-仅 PR 修改 `src/aw/**` 或 `providers/**` 时，[AW CI](../../.github/workflows/aw-ci.yml)
+PR 修改 AW、Provider、AW workflow 或声明的 Tokenless 消费合同路径时，[AW CI](../../.github/workflows/aw-ci.yml)
 会对候选合并提交运行上述检查。提交 AW 改动前，请先在 Linux 上运行上面的命令。
 CI 失败时，从任务日志中找到失败的命令，再到本地 `src/aw` 目录单独运行，定位问题。
 
@@ -75,10 +75,33 @@ python3 -B -m unittest discover -s tests -p 'test_ci_*.py'
 
 ## 日常 CI 与 nightly 集成
 
-只有改动 `src/aw/**` 或 `providers/**` 的 PR 才运行 AW 检查。日常门禁保留全部无需凭证的安全、
+AW、Provider 和 AW workflow 变化运行完整门禁。日常门禁保留全部无需凭证的安全、
 Tokenless、生命周期、Agent/Hook 矩阵契约，以及原生验收清单和文件大小检查。
-其他组件的内部改动由各自 CI 负责；AW 消费的公开契约发生变化时，需要对候选
-SHA 显式运行兼容性验证。
+其他组件的内部改动由各自 CI 负责。Tokenless CLI/protocol/runtime/statistics 源码、
+其 AW Provider 与真实夹具、RTK setup/patch、依赖和工具链、共享 Provider 协议/执行器
+源码及包构建输入会选中真实兼容测试，
+确切路径在 `scripts/check.py`。它复用现有包构建器，显式运行四个具名的真实 CLI
+Provider 测试，包括带归因的 RTK 重试和 PostTool 合同。测试缺失/被忽略、失败或
+验证 SHA 不一致均使必需结果失败。其他后端公开合同仍需明确兼容验收入口。
+
+范围判断后，AW 与 Tokenless 两个独立任务并行验证同一候选 SHA，各自使用 runner、
+构建目录和缓存 key；Tokenless 任务无需安装 Node.js。现有 `AW / required` 始终汇总
+两个任务的整体结果和验证 SHA。失败、取消、意外跳过和证据缺失均阻断，包括测试已
+发布输出后的失败；只有明确未选中该范围时才允许跳过。AW 检查保持 35 分钟期限，
+真实后端构建和合同另有 60 分钟期限。并行实际耗时取决于可用 runner 和缓存。
+普通 Agent、service、CLI、安装/事务、文档，以及共享 crate 的测试/示例改动只运行
+AW 快速夹具门禁，无需构建真实 Tokenless/RTK。混合改动中任何消费输入变化仍会触发
+真实合同；手动运行和强制推送选中两组检查。Tokenless 自身组件、Adapter 和预构建
+CI 的触发规则与完整覆盖独立保留。
+
+在干净、已提交的 checkout 中执行：
+
+```bash
+python3 -B src/aw/scripts/check_tokenless.py --output /absolute/new/evidence-directory
+```
+
+输出目录须尚未存在，保留包清单、二进制摘要、测试日志和清理记录；无需托管模型凭据。
+评审后删除该精确证据目录；常规组件构建缓存保留供复用。
 
 [AW Integration](../../.github/workflows/aw-preview.yml) 每晚北京时间 03:23 运行，
 也接受完整 40 位 `candidate_sha`，用于发布前手动验收。它一次构建全部四种
@@ -133,14 +156,62 @@ Docker 命令和版本检查会从环境中明确移除它。凭据缺失或过�
 对确切发布提交重新运行，并验收发布所需的其他原生边界。
 
 日常 Rust 缓存由 PR 读取，仅 main 推送写入；重型构建缓存由 nightly 写入。
-原生 Python/npm 依赖分别缓存，原生任务最多三个并行。须从 `main` 触发；
+原生 Python/npm 依赖分别缓存，原生任务最多三个并行。完整模式须从 `main` 触发，
 候选提交须属于拉取到的 `origin/main` 历史，才能执行候选脚本或接收 Qoder Secret。
-未合入的 feature/release 提交会被拒绝；这些提交仍可显式提供本地凭据进行原生验证。
+fork 的手动运行可选择 `credential_free=true`，验收该 workflow 的确切 SHA。
+该模式执行包验收、六种无凭据 Agent 和常驻容器；汇总明确列出待完整主线 nightly
+验收的 Qoder CLI/SDK 托管模型任务。调用方与原生任务均在该模式下禁止传递 Qoder Secret。
 
 ```bash
 gh workflow run aw-ci.yml --ref main -f integration=true
 gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
 ```
+
+### 最小常驻测试容器
+
+新增必需的容器任务复用原生清单中全部 `tests/sdk_resident.py` 命令及其确切 JSON
+报告：当前为 24 个（Claude 16、Pi 8），来自全部 47 个原生套件，无凭据档为 42 个。
+覆盖 1,280 次长会话、状态回收、资源增长断言、回调排空、session-store 和原生拒绝，
+保留既有生命周期/MCP 场景。model-relay 和 dispatch 合同入口继续由宿主原生任务验证。
+
+镜像只包含明确列出的公开夹具、固定 SDK 依赖和四个候选二进制：`aw`、
+`aw-provider-tokenless`、`tokenless`、`rtk`。混合 Bash/MCP 长会话的 PreTool 需要 RTK。
+Ubuntu、Node 和 uv 镜像通过 manifest digest
+固定；Python/SDK 版本来自原生清单，Pi 使用已提交的 npm lock。构建上下文排除完整
+仓库、部署文件和用户配置。运行使用普通测试用户、合成数据和 loopback 模型夹具，
+关闭外网、禁止宿主挂载，且不传递凭据。一次构建的镜像归档通过保留一天的 Actions
+artifact 供四个 Agent/常规或长会话分片使用；加载后校验归档 SHA-256、image ID 和源码版本。
+镜像不推送到 registry。
+保留产物限于声明的结果 JSON、运行时版本、输入摘要及命令/清理记录；私有 profile 和任务数据
+随容器删除。汇总重新核对逐项报告、候选 SHA、运行时版本及容器/镜像清理。
+
+显式运行 fork 候选模式：
+
+```bash
+gh workflow run aw-ci.yml --repo <owner>/anolisa --ref <branch> \
+  -f integration=true -f credential_free=true
+```
+
+在 `src/aw` 中使用匹配的 nightly bundle，仅运行本地容器验收：
+
+```bash
+python3 -B scripts/resident_container.py --candidate-sha "$(git rev-parse HEAD)" \
+  --bin target/native-binaries --output target/resident-evidence
+```
+
+输出目录须尚未存在，镜像输入须已提交。本地命令构建一次再顺序执行四个分片；
+CI 构建一次，最多两个分片并行。分片期限为用例期限之和加清理余量，job 再预留
+15 分钟用于加载镜像、证据上传和清理。宿主原生 job 同样按清单加安装余量计算预算。
+汇总要求全部分片与同一已清理的镜像构建身份。执行器在成功或失败后删除所属构建上下文、
+容器及唯一镜像标签。构建或载入镜像时收到中断，会先等待有界 Docker 操作结束再删除标签。
+镜像操作超时会记录清理不完整，因为 daemon 仍可能稍后创建标签；按记录命令核对并删除。
+保留 `target/resident-evidence` 供检查，评审后运行
+`rm -rf -- target/resident-evidence` 清理。Docker 不可用时，可按容器记录中的确切
+停止/删除命令完成清理。
+
+常驻 SDK 与真实 sec-core 组合、SDK 饱和/恢复、请求接流/排空和监督器重启继续独立验收。
+常驻套件保留 fail-close、原生权限与仅元数据证据；生产 endpoint、流量和部署退出链路
+由对应部署验收覆盖。
 
 本地清单检查与原生执行使用和 CI 相同的入口：
 
