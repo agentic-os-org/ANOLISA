@@ -118,7 +118,13 @@ async function rewriteLinks(markdown, source) {
       continue;
     }
 
-    let resolved = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutHash));
+    let decodedTarget;
+    try {
+      decodedTarget = decodeURIComponent(targetWithoutHash);
+    } catch {
+      continue;
+    }
+    let resolved = path.posix.normalize(path.posix.join(sourceDirectory, decodedTarget));
     if (resolved === '..' || resolved.startsWith('../')) continue;
     if (!(await exists(path.join(repoRoot, resolved)))) {
       resolved = knownAlias(source, resolved) || resolved;

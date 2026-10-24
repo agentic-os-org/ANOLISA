@@ -23,7 +23,8 @@ test('publishes current guides and changelogs without Copilot Shell entry points
     files[`src/current/CHANGELOG${suffix}.md`] = '# Current component history\n';
     files[`deprecated/copilot-shell/CHANGELOG${suffix}.md`] = '# Archived component history\n';
     files[`docs/user-guide/${locale}/index.md`] = '# User Guide\n\n<!-- navigation:start -->\n<!-- navigation:end -->\n\n[historical source evidence](https://github.com/alibaba/anolisa/blob/old-commit/src/copilot-shell/core.ts#L10)\n\n## Copilot Shell (cosh)\n\nHistorical integration details remain.\n';
-    files[`docs/user-guide/${locale}/getting-started/quickstart.md`] = '# Quickstart\n\n[cosh-ng](../cosh-ng/index.md)\n';
+    files[`docs/user-guide/${locale}/getting-started/quickstart.md`] = '# Quickstart\n\n[cosh-ng](../cosh-ng/index.md)\n\n[Encoded](../%45ncoded.md)\n';
+    files[`docs/user-guide/${locale}/Encoded.md`] = '# Encoded target\n';
     files[`docs/user-guide/${locale}/cosh-ng/index.md`] = `# cosh-ng\n\n## ${locale === 'zh' ? '快速上手' : 'Quick start'}\n`;
     files[`docs/user-guide/${locale}/cosh-ng/configuration.md`] = '# Configuration\n';
     files[`docs/user-guide/${locale}/aw/installation.md`] = '# Install AW\n';
@@ -89,7 +90,11 @@ groups:
     await copyFile(path.join(scriptsDir, name), path.join(root, 'website/scripts', name));
   }
 
-  await symlink(path.join(scriptsDir, '../node_modules'), path.join(root, 'website/node_modules'), 'dir');
+  await symlink(
+    path.join(scriptsDir, '../node_modules'),
+    path.join(root, 'website/node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
 
   for (const script of ['prepare-docs.mjs', 'generate-changelog.mjs']) {
     const result = spawnSync(process.execPath, [path.join(root, 'website/scripts', script)], {
@@ -122,6 +127,7 @@ groups:
     assert.ok(entry.includes(`## ${locale === 'zh' ? '快速上手' : 'Quick start'} {#quick-start}`));
     const quickstart = await readFile(path.join(output, 'user-guide/getting-started/quickstart.md'), 'utf8');
     assert.ok(quickstart.includes('[cosh-ng](/docs/user-guide/cosh-ng)'));
+    assert.ok(quickstart.includes('[Encoded](/docs/user-guide/encoded)'));
     const aw = await readFile(path.join(output, 'user-guide/aw/installation.md'), 'utf8');
     assert.match(aw, /slug: "\/user-guide\/aw\/installation"/);
     const contribute = await readFile(path.join(output, 'contribute/index.md'), 'utf8');
