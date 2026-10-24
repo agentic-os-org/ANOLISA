@@ -4,6 +4,7 @@ use asc_daemon_protocol::method;
 use asc_daemon_protocol::{
     CreatePolicyParams, CreateScopeParams, DaemonRequest, DaemonResponse, ErrorCode, ListParams,
     ListResult, RequestId, ResourceParams, RevisionParams, UpdatePolicyParams, error_code,
+    next_list_offset,
 };
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
@@ -89,15 +90,53 @@ fn method_results_reuse_complete_domain_contracts() {
     round_trip_value(&ListResult {
         items: vec![policy],
         total: 1,
+        next_offset: None,
     });
     round_trip_value(&ListResult {
         items: vec![scope],
         total: 1,
+        next_offset: None,
     });
     round_trip_value(&ListResult {
         items: vec![binding],
         total: 1,
+        next_offset: None,
     });
+}
+
+/// A page cut short of `limit` must expose a resume cursor, and the cursor
+/// must disappear at end-of-list so exhausted pages stay byte-identical to
+/// the pre-field wire form.
+#[test]
+fn list_results_expose_a_resume_cursor_only_mid_listing() {
+    let mid_listing: ListResult<PreparedPolicy> =
+        serde_json::from_value(json!({"items": [], "total": 5, "nextOffset": 3})).unwrap();
+    assert_eq!(mid_listing.next_offset, Some(3));
+    assert_eq!(
+        serde_json::to_value(mid_listing).unwrap(),
+        json!({"items": [], "total": 5, "nextOffset": 3})
+    );
+
+    // A response without the field (the pre-field form) still deserializes.
+    let exhausted: ListResult<PreparedPolicy> =
+        serde_json::from_value(json!({"items": [], "total": 5})).unwrap();
+    assert_eq!(exhausted.next_offset, None);
+    assert_eq!(
+        serde_json::to_value(exhausted).unwrap(),
+        json!({"items": [], "total": 5}),
+        "an exhausted page must not grow the wire form"
+    );
+
+    // Cursor semantics mirror the observability query API's next_offset.
+    assert_eq!(next_list_offset(0, 3, 5), Some(3));
+    assert_eq!(next_list_offset(3, 2, 5), None);
+    assert_eq!(next_list_offset(0, 5, 5), None);
+    assert_eq!(next_list_offset(0, 6, 5), None);
+    assert_eq!(next_list_offset(2, 0, 5), None);
+    assert_eq!(
+        next_list_offset(u32::MAX, 1, u64::MAX),
+        Some(u64::from(u32::MAX) + 1)
+    );
 }
 
 #[test]
