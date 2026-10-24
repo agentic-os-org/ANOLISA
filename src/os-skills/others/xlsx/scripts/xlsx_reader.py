@@ -66,7 +66,11 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
                 df = pd.read_csv(file_path, sep=sep, encoding=enc)
                 df._reader_encoding = enc  # attach metadata (non-standard, for reporting)
                 return {path.stem: df}
-            except (UnicodeDecodeError, Exception) as e:
+            except UnicodeDecodeError as e:
+                # Only decode failures justify trying the next encoding. Catching
+                # broader errors here used to mask structural problems (e.g. a
+                # ragged row's ParserError) and re-report them as "Cannot decode",
+                # with latin-1 as the last attempt guaranteeing the wrong diagnosis.
                 last_error = e
                 continue
         raise ValueError(
