@@ -121,6 +121,22 @@ printf '{"name":"anolisa-tokenless","version":"%s","type":"module"}\n' "$FAKE_VE
 printf '{"component":"tokenless","version":"%s"}\n' "$FAKE_VERSION" \
   > "$PKG/adapters/tokenless/manifest.json"
 printf '#!/usr/bin/env bash\n' > "$PKG/adapters/tokenless/claude-code/scripts/install.sh"
+# The opencode helper records how the postinstall invoked it: an npm-owned
+# upgrade replaces the adapter tree the plugin link points into, so the
+# registration has to be reconciled — in reconcile-only mode, never registering
+# a host the user did not enable.
+mkdir -p "$PKG/adapters/tokenless/opencode/scripts"
+cat > "$PKG/adapters/tokenless/opencode/scripts/install.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+echo "reconcile=${ANOLISA_ADAPTER_RECONCILE:-unset}" >> "$HOME/opencode-reconcile.log"
+if [ -n "${TOKENLESS_TEST_PARTIAL:-}" ]; then
+  # A removal the installer could not finish receipt-wise still exits 0, and
+  # says so on stdout because that is all the postinstall consumes.
+  echo "[tokenless] opencode: partial cleanup: the link is removed, but an ANOLISA receipt may"
+  echo "[tokenless] opencode: still claim it. Reconcile with:"
+  echo "[tokenless] opencode:   anolisa adapter disable tokenless opencode"
+fi
+FIXTURE
 printf '{"name":"%s","version":"%s"}\n' "$PLATFORM_PKG" "$FAKE_VERSION" \
   > "$PKG/node_modules/$PLATFORM_PKG/package.json"
 for b in tokenless rtk; do
@@ -233,6 +249,22 @@ assert_eq "marks the tree it placed" "$(cat "$FRESH/.tokenless-owner")" \
   "npm:anolisa-tokenless@$FAKE_VERSION"
 assert_file "links the tokenless launcher" "$PKG/bin/tokenless"
 assert_file "links the rtk launcher" "$PKG/bin/rtk"
+assert_file "reconciles the opencode registration after placing the tree" \
+  "$TEST_DIR/fresh/home/opencode-reconcile.log"
+assert_contains "runs the opencode installer in reconcile-only mode" \
+  "$(cat "$TEST_DIR/fresh/home/opencode-reconcile.log")" "reconcile=1"
+
+# =============================================================================
+# 1b. A partial reconcile is surfaced, not swallowed
+# =============================================================================
+# The installer exits 0 after removing a link whose receipt it cannot clear, and
+# reports that on stdout. `execFileSync(..., { stdio: 'pipe' })` returns stdout
+# only, so a warning written to stderr would vanish with the parent's exit code.
+run_postinstall opencode_partial TOKENLESS_TEST_PARTIAL=1
+assert_eq "postinstall exits 0 when the reconcile was partial" "$STATUS" "0"
+assert_contains "surfaces the unreconciled receipt" "$OUT" "receipt may"
+assert_contains "names the command that reconciles it" "$OUT" \
+  "anolisa adapter disable tokenless opencode"
 
 # =============================================================================
 # 2. An anolisa-managed tree is preserved

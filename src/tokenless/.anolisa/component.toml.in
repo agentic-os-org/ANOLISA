@@ -186,6 +186,15 @@ dest = "{datadir}/adapters/{component}/opencode/"
 [adapters.bundle]
 entry = "plugin.js"
 
+# OpenCode 1.0.0-1.3.3 call every module export as a plugin function, so they
+# cannot initialize the object default export OpenCode 2 requires. Keep this
+# floor in sync with targets.opencode.compatibleVersions in
+# adapters/tokenless/manifest.json.in and MIN_OPENCODE_VERSION in
+# adapters/tokenless/opencode/scripts/{detect,install}.sh --
+# tests/test-opencode-plugin-v2.mjs fails when the declarations disagree.
+[adapters.compat]
+framework_version = ">=1.3.4"
+
 [[adapters.notices]]
 when = "post_enable"
 level = "info"
