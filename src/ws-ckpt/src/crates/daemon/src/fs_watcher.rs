@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Monotonic watcher generation counter: every `start` increments it, so
 /// tests can observe re-arming (a fresh watcher has a strictly larger seq)
@@ -47,9 +47,23 @@ impl WorkspaceWatcher {
             })
             .map_err(|e| anyhow::anyhow!("Failed to init notify watcher for {:?}: {}", path, e))?;
 
-        watcher
-            .watch(&path, RecursiveMode::Recursive)
-            .map_err(|e| anyhow::anyhow!("Failed to add recursive watch for {:?}: {}", path, e))?;
+        for entry in walkdir::WalkDir::new(&path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| match e {
+                Ok(e) => Some(e),
+                Err(err) => {
+                    debug!("skipping entry while walking {:?}: {}", path, err);
+                    None
+                }
+            })
+        {
+            if entry.file_type().is_dir() {
+                if let Err(e) = watcher.watch(entry.path(), RecursiveMode::NonRecursive) {
+                    debug!("failed to add watch for {:?}: {}", entry.path(), e);
+                }
+            }
+        }
 
         // std::fs::metadata FOLLOWS symlinks, so this is the directory
         // inode inotify actually observes — the identity to compare against
