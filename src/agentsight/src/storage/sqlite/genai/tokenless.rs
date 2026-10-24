@@ -693,13 +693,21 @@ mod tests {
         )
         .unwrap();
         for (id, mode) in [
-            (1, json!("active")),
-            (2, json!("dry-run")),
-            (3, Value::Null),
-            (4, json!("future")),
+            (1, Some(json!("active"))),
+            (2, Some(json!("dry-run"))),
+            (3, Some(Value::Null)),
+            (4, Some(json!("future"))),
+            (5, Some(json!("ACTIVE"))),
+            (6, Some(json!("DrY-RuN"))),
+            (7, Some(json!("dryrun"))),
+            (8, Some(json!("DRYRUN"))),
+            (9, None),
         ] {
-            let record = json!({"id":id,"timestamp":"2026-01-01T00:00:00Z","mode":mode,
-                "session_id":"source-session","tool_use_id":"tool","before_tokens":10,"after_tokens":2,"content_included":false});
+            let mut record = json!({"id":id,"timestamp":"2026-01-01T00:00:00Z",
+                "session_id":"source-session","tool_use_id":"tool","before_tokens":10+id,"after_tokens":2,"content_included":false});
+            if let Some(mode) = mode {
+                record["mode"] = mode;
+            }
             store
                 .save_tokenless_records("source", std::slice::from_ref(&record))
                 .unwrap();
@@ -721,8 +729,13 @@ mod tests {
         let rows = store
             .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, None)
             .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].before_tokens - rows[0].after_tokens, 8);
+        assert_eq!(rows.len(), 5);
+        let mut savings: Vec<_> = rows
+            .iter()
+            .map(|row| row.before_tokens - row.after_tokens)
+            .collect();
+        savings.sort_unstable();
+        assert_eq!(savings, [9, 11, 12, 13, 17]);
         assert!(
             store
                 .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, Some(&[]))
