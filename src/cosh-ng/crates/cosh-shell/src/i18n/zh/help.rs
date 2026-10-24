@@ -4,10 +4,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
         MessageId::HelpFooter => {
-            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可多行组稿。"
+            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可编写多行内容。"
         }
         MessageId::PromptSoftNewlineTip => {
-            "提示：以 ?? 开头可组稿多行 prompt（Shift+Enter 换行）。"
+            "提示：以 ?? 开头可编写多行 prompt（Shift+Enter 换行）。"
         }
         MessageId::PromptDraftTitle => "Prompt 草稿",
         MessageId::PromptDraftFooterEditing => {

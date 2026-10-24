@@ -68,6 +68,9 @@ mod ui;
 #[cfg(test)]
 #[path = "ui/wrap_tests.rs"]
 mod wrap_tests;
+#[cfg(test)]
+#[path = "i18n/zh_wording_tests.rs"]
+mod zh_wording_tests;
 
 pub use adapter::{AuthFieldInfo, AuthProviderInfo, AuthResponse};
 pub use config::{
