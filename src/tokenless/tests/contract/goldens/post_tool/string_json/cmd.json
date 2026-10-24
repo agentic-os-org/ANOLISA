@@ -1,0 +1,9 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolOutput": "matches[8]{file,line,column,context,preview}:\n  src/mod_0.rs,10,5,null,\"\"\n  src/mod_1.rs,17,5,null,\"\"\n  src/mod_2.rs,24,5,null,\"\"\n  src/mod_3.rs,31,5,null,\"\"\n  src/mod_4.rs,38,5,null,\"\"\n  src/mod_5.rs,45,5,null,\"\"\n  src/mod_6.rs,52,5,null,\"\"\n  src/mod_7.rs,59,5,null,\"\"\ntotal: 8\ntruncated: false"
+    },
+    "suppressOutput": true
+  }
+}

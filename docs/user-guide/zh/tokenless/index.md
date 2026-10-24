@@ -267,6 +267,10 @@ anolisa adapter enable tokenless dsh \
 OpenCode 可使用相同的 Adapter 命令。对于没有 ANOLISA 组件记录的 npm 安装，随附生命周期
 脚本仍可作为替代方式。
 
+Command Code（`cmd`）当前还没有内置的 ANOLISA Driver，因此 `anolisa adapter scan` 不会列出它，
+上面的命令也会报告未知 Framework。请改用随包生命周期脚本注册它的 Mod，详见
+[Command Code（cmd）](framework-integration.md#command-code-cmd)。
+
 ### 可选：不接入 Agent 测试压缩
 
 需要在启用 Adapter 前单独确认 CLI 时，运行下面这组结果确定的检查：

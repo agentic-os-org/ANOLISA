@@ -273,6 +273,10 @@ Include every profile that should retain Tokenless each time.
 OpenCode is available through the same adapter command. The bundled lifecycle script remains an
 alternative for npm installations that have no ANOLISA component record.
 
+Command Code (`cmd`) has no built-in ANOLISA driver yet, so `anolisa adapter scan` does not list it
+and the command above reports an unknown framework. Register its mod with the bundled lifecycle
+script instead; see [Command Code (cmd)](framework-integration.md#command-code-cmd).
+
 ### Optional: test compression without an Agent
 
 Use this deterministic check when you want to confirm the standalone CLI

@@ -49,6 +49,14 @@ const FILE_TOOLS = new Set([
   'notebook_read',
 ])
 
+/**
+ * Shell-family tool names this seam classifies as command output.
+ *
+ * Mirrors `layer_2_shell.tools` in the shared
+ * `common/hooks/tool_categories.json`; `tests/test-dsh-adapter.sh` walks that
+ * list and asserts every name reaches Core as `content_origin: command_output`
+ * here, so a new host's shell tool name has to be added to both.
+ */
 const COMMAND_TOOLS = new Set([
   'bash',
   'pwsh',
@@ -61,6 +69,7 @@ const COMMAND_TOOLS = new Set([
   'get_terminal_output',
   'execute_command',
   'process',
+  'shell_command',
 ])
 
 const INTERRUPTED_CODES = new Set(['ABORTED', 'ABORTED_BEFORE_DISPATCH'])

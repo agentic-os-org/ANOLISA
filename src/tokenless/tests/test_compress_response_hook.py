@@ -499,7 +499,7 @@ class TestReplacementProtocol(unittest.TestCase):
 
     def test_non_cosh_results_keep_wrapper_named_business_fields(self):
         """Replacement hosts keep fields that only resemble Cosh wrappers."""
-        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode"):
+        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode", "cmd"):
             for field in ("llmContent", "returnDisplay"):
                 for serialized in (False, True):
                     with self.subTest(
@@ -536,7 +536,7 @@ class TestReplacementProtocol(unittest.TestCase):
     def test_cosh_runtime_overrides_declared_replacement_host(self):
         payload = {"message": "response details " * 30}
         wrapper = {"llmContent": payload, "returnDisplay": "display-only text"}
-        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode"):
+        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode", "cmd"):
             for serialized in (False, True):
                 with self.subTest(agent=agent_id, serialized=serialized):
                     result = _run_hook(
@@ -563,7 +563,7 @@ class TestReplacementProtocol(unittest.TestCase):
     def test_cosh_runtime_preserves_wrapped_error_for_declared_replacement_host(self):
         failure = {"stderr": "sh: rg: command not found", "exitCode": 127}
         wrapper = {"llmContent": failure, "returnDisplay": "command failed"}
-        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode"):
+        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode", "cmd"):
             for serialized in (False, True):
                 with self.subTest(agent=agent_id, serialized=serialized):
                     result = _run_hook(
@@ -1279,6 +1279,7 @@ class TestGrepEnvelopeUnwrap(unittest.TestCase):
             ("claude-code", "files_with_matches", {}),
             ("qoder-cli", "content", {}),
             ("opencode", "content", {}),
+            ("cmd", "content", {}),
             *[("claude-code", "content", {flag: 2})
               for flag in ("-A", "-B", "-C", "context")],
         ]

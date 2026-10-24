@@ -34,6 +34,7 @@ mkdir -p \
     "$ADAPTERS/claude-code/hooks" \
     "$ADAPTERS/codex/.codex-plugin" \
     "$ADAPTERS/opencode/scripts" \
+    "$ADAPTERS/cmd/scripts" \
     "$ADAPTERS/agentscope/build/lib/tokenless_agentscope" \
     "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info" \
     "$ADAPTERS/qwencode/hooks" \
@@ -127,6 +128,10 @@ printf 'plugin = None\n' > "$ADAPTERS/qwenpaw/plugin.py"
 printf 'export const Tokenless = {};\n' > "$ADAPTERS/opencode/plugin.js"
 for action in detect install uninstall; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$ADAPTERS/opencode/scripts/$action.sh"
+done
+printf 'export default function tokenless() {}\n' > "$ADAPTERS/cmd/tokenless.ts"
+for action in detect install uninstall; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$ADAPTERS/cmd/scripts/$action.sh"
 done
 printf 'anolisa-tokenless @ https://github.com/alibaba/anolisa/releases/download/tokenless/v%s/anolisa_tokenless-%s-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; sys_platform == "linux"\n' \
     "$VERSION" "$WHEEL_VERSION" > "$ADAPTERS/qwenpaw/requirements.txt"
@@ -340,7 +345,11 @@ for relative in \
     adapters/opencode/plugin.js \
     adapters/opencode/scripts/detect.sh \
     adapters/opencode/scripts/install.sh \
-    adapters/opencode/scripts/uninstall.sh; do
+    adapters/opencode/scripts/uninstall.sh \
+    adapters/cmd/tokenless.ts \
+    adapters/cmd/scripts/detect.sh \
+    adapters/cmd/scripts/install.sh \
+    adapters/cmd/scripts/uninstall.sh; do
     test -f "$EXTRACTED/$relative"
 done
 test -f "$EXTRACTED/adapters/dsh/package.json"
@@ -365,11 +374,17 @@ test "$(stat -c '%a' "$EXTRACTED/adapters/manifest.json")" = 644
 test "$(stat -c '%a' "$EXTRACTED/adapters/common/hooks/run-hook.sh")" = 755
 test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/plugin.js")" = 644
 test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/scripts/install.sh")" = 755
+test "$(stat -c '%a' "$EXTRACTED/adapters/cmd/tokenless.ts")" = 644
+test "$(stat -c '%a' "$EXTRACTED/adapters/cmd/scripts/install.sh")" = 755
 
 grep -Fq 'source = "bin/tokenless"' "$ROOT/.anolisa/component.toml.in"
 grep -Fq 'source = "extensions/tokenless"' "$ROOT/.anolisa/component.toml.in"
 test "$(grep -o '@VERSION@' "$ROOT/.anolisa/component.toml.in" | wc -l)" = 1
 grep -Fq 'framework = "opencode"' "$ROOT/.anolisa/component.toml.in"
+grep -Fq 'framework = "cmd"' "$ROOT/.anolisa/component.toml.in"
+CMD_CONTRACT="$(sed -n '/^framework = "cmd"$/,$p' "$ROOT/.anolisa/component.toml.in")"
+grep -Fq 'when = "post_enable"' <<< "$CMD_CONTRACT"
+grep -Fq 'when = "post_disable"' <<< "$CMD_CONTRACT"
 OPENCODE_CONTRACT="$(sed -n '/^framework = "opencode"$/,/^\[\[adapters\]\]$/p' "$ROOT/.anolisa/component.toml.in")"
 grep -Fq 'when = "post_enable"' <<< "$OPENCODE_CONTRACT"
 grep -Fq 'when = "post_disable"' <<< "$OPENCODE_CONTRACT"

@@ -37,7 +37,7 @@ Output contract per agent:
     replacement remain passthrough (roadmap §7). Environment attribution is
     still injected: it is additive by design.
 
-For claude-code, qoder-cli, qwenwork, and opencode, ``llmContent`` and
+For claude-code, qoder-cli, qwenwork, opencode, and cmd, ``llmContent`` and
 ``returnDisplay`` are ordinary business fields: the complete response reaches
 Core. Cosh and legacy diagnostic-only hosts retain their wrapper extraction.
 
@@ -103,12 +103,17 @@ _CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
 _QODER_AGENT_ID = "qoder-cli"
 _QWENWORK_AGENT_ID = "qwenwork"
 _OPENCODE_AGENT_ID = "opencode"
+# Command Code's afterToolCall returns `content`, which replaces the tool
+# result the model sees outright — a true PostToolUse replacement, so no
+# version gate is needed the way Claude Code's updatedToolOutput needs one.
+_CMD_AGENT_ID = "cmd"
 _REPLACE_AGENT_IDS = frozenset(
     {
         _CLAUDE_AGENT_ID,
         _QODER_AGENT_ID,
         _QWENWORK_AGENT_ID,
         _OPENCODE_AGENT_ID,
+        _CMD_AGENT_ID,
     }
 )
 

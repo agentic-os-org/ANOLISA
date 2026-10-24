@@ -66,6 +66,7 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         opencode-install opencode-uninstall \
         qwencode-install qwencode-uninstall \
         qwenpaw-install qwenpaw-uninstall \
+        cmd-install cmd-uninstall \
         setup help \
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         python-wheel test-python-runtime agentscope-wheel \
@@ -465,6 +466,9 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	node tests/test-opencode-plugin.mjs
 	@echo "==> Testing QwenPaw adapter installer..."
 	bash tests/test-qwenpaw-adapter-install.sh
+	@echo "==> Testing Command Code adapter..."
+	bash tests/test-cmd-adapter-install.sh
+	node tests/test-cmd-mod.mjs
 	# Run after npm packaging has restored its stale-version fixture.
 	$(MAKE) test-qwenwork-install
 
@@ -631,9 +635,9 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
-adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install opencode-install qwencode-install qwenpaw-install
+adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install opencode-install qwencode-install qwenpaw-install cmd-install
 
-adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall opencode-uninstall qwencode-uninstall qwenpaw-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall opencode-uninstall qwencode-uninstall qwenpaw-uninstall cmd-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
@@ -770,6 +774,21 @@ qwenpaw-uninstall:
 	@echo "==> Uninstalling QwenPaw plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/uninstall.sh
 
+# --- Command Code (cmd) ---
+# cmd discovers user-scope mods as loose files under ~/.commandcode/mods and
+# compiles them with jiti, so registration is a symlink to the shipped mod,
+# exactly like the OpenCode local plugin above.
+CMD_ADAPTER_DIR = $(SHARE_DIR)/cmd
+
+cmd-install:
+	@echo "==> Installing Command Code mod..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=cmd bash $(CMD_ADAPTER_DIR)/scripts/detect.sh || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=cmd bash $(CMD_ADAPTER_DIR)/scripts/install.sh
+
+cmd-uninstall:
+	@echo "==> Uninstalling Command Code mod..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=cmd bash $(CMD_ADAPTER_DIR)/scripts/uninstall.sh
+
 # One-step setup: build + install + all adapters
 setup: install adapter-install
 	@echo ""
@@ -784,7 +803,7 @@ setup: install adapter-install
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
-	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, opencode, qwencode, qwenpaw"
+	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, opencode, qwencode, qwenpaw, cmd"
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
@@ -867,7 +886,7 @@ help:
 	@echo "  agentscope-wheel  Build the AgentScope integration wheel"
 	@echo "  test-agentscope-integration  Test the integration with supported AgentScope versions"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+opencode+qwencode+qwenpaw)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+opencode+qwencode+qwenpaw+cmd)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-extension-install  Install cosh extension"
 	@echo "  cosh-extension-uninstall Uninstall cosh extension"
@@ -890,6 +909,8 @@ help:
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  qwenpaw-install   Install QwenPaw plugin via qwenpaw CLI"
 	@echo "  qwenpaw-uninstall Uninstall QwenPaw plugin"
+	@echo "  cmd-install       Register the Command Code mod"
+	@echo "  cmd-uninstall     Unregister the Command Code mod"
 	@echo "  setup             Full setup: build + install + register adapters"
 	@echo "  npm-package       Build and package the current host"
 	@echo "  npm-package-all   Package target/npm-prebuilt target directories"

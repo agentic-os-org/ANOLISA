@@ -151,6 +151,7 @@ _FALLBACK_SHELL_TOOLS = [
     "get_terminal_output",
     "execute_command",
     "process",
+    "shell_command",
 ]
 
 
