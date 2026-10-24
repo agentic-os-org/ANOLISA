@@ -7,7 +7,7 @@ import {
   documentSidebar, footerLinks, insertNavigation, loadNavigation, navbarItems,
   navigationTranslations, userGuideSidebar, websiteSidebars,
 } from './navigation.mjs';
-import {loadDocumentRedirects, publicDocumentPath} from './document-routes.mjs';
+import {loadDocumentRedirects, publicDocumentPath, redirectDestination} from './document-routes.mjs';
 import redirectPlugin from '../plugins/document-redirects.mjs';
 
 test('navigation requires bilingual sources and descriptions and prevents duplicate component entries', async (t) => {
@@ -169,4 +169,11 @@ test('old routes redirect directly to flat destinations with locale, prefix, and
     assert.ok(aw.includes(`${prefix}docs/user-guide/aw/`));
     assert.ok(aw.includes('name="robots" content="noindex"'));
   }
+});
+
+test('redirect destinations preserve external HTTPS URLs regardless of scheme case', () => {
+  assert.equal(
+    redirectDestination('HTTPS://example.com/{locale}/guide', 'zh'),
+    'HTTPS://example.com/zh/guide',
+  );
 });
