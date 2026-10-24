@@ -130,15 +130,26 @@ def phase_grade(trace_file: str, task_yaml: str, judge_config: dict,
     except OSError:
         pass
 
-    # Read scores from trace file's grading_result event (authoritative source)
+    # Read scores from trace file's grading_result event (authoritative source).
+    # One malformed or blank line must not discard the grading_result event
+    # below it: a single decode failure used to abort the whole loop and the
+    # trial was recorded as a clean 0.0 FAIL even though grading succeeded.
+    # Trace bodies carry non-ASCII task text, so the file is UTF-8 regardless
+    # of the invoking locale.
     scores = {
         "completion": 0.0, "robustness": 0.0, "communication": 0.0,
         "safety": 0.0, "task_score": 0.0, "passed": False,
     }
     try:
-        with open(trace_file) as f:
+        with open(trace_file, encoding="utf-8") as f:
             for line in f:
-                event = json.loads(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if event.get("type") == "grading_result":
                     s = event.get("scores", {})
                     scores["completion"] = s.get("completion", 0.0)
