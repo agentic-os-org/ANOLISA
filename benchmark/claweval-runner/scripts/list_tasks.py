@@ -57,8 +57,35 @@ def _load_yaml_simple(path: Path) -> dict:
     return result
 
 
-def scan_tasks(prefix_filter: str | None = None,
-               difficulty_filter: str | None = None) -> list[dict]:
+def _tag_value(value: str) -> str:
+    tag = value.strip()
+    if not tag:
+        raise argparse.ArgumentTypeError("tag must not be empty")
+    return tag
+
+
+def _matches_tag(path: Path, tag: str) -> bool:
+    try:
+        import yaml
+    except ImportError:
+        raise RuntimeError("Tag filtering requires PyYAML; install the ce-runner dependencies") from None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        print(f"WARNING: cannot read tags from {path}: {error}", file=sys.stderr)
+        return False
+    tags = data.get("tags", []) if isinstance(data, dict) else []
+    return isinstance(tags, list) and tag in [
+        value for value in tags if isinstance(value, str)
+    ]
+
+
+def scan_tasks(
+    prefix_filter: str | None = None,
+    difficulty_filter: str | None = None,
+    *,
+    tag_filter: str | None = None,
+) -> list[dict]:
     """Scan task directories and return list of task info dicts."""
     if not TASKS_DIR.exists():
         print(f"ERROR: tasks directory not found: {TASKS_DIR}", file=sys.stderr)
@@ -81,6 +108,8 @@ def scan_tasks(prefix_filter: str | None = None,
         if prefix_filter and prefix != prefix_filter.upper():
             continue
         if difficulty_filter and difficulty != difficulty_filter:
+            continue
+        if tag_filter is not None and not _matches_tag(task_yaml, tag_filter):
             continue
 
         tasks.append({
@@ -146,10 +175,16 @@ def main():
     parser.add_argument("--difficulty",
                         choices=["simple", "easy", "medium", "hard", "expert"],
                         help="Filter by difficulty")
+    parser.add_argument("--tag", type=_tag_value,
+                        help="Filter by exact case-sensitive YAML tag list membership")
 
     args = parser.parse_args()
 
-    tasks = scan_tasks(prefix_filter=args.prefix, difficulty_filter=args.difficulty)
+    try:
+        tasks = scan_tasks(prefix_filter=args.prefix, difficulty_filter=args.difficulty,
+                           tag_filter=args.tag)
+    except RuntimeError as error:
+        parser.error(str(error))
     if not tasks:
         print("No tasks found matching the filters.")
         return
