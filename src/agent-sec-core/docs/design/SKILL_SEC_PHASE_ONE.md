@@ -436,6 +436,8 @@ source consistency, findings and bounded review messages separate.
 
 Publication writes the minimal schema-1 `activation.json` and directory xattr consumed by SkillFS.
 It exposes a verified snapshot, a safe pending-review stub, or a null target for an explicit block.
+The pending stub preserves the directory name as a YAML string, escaping characters that YAML
+treats as line breaks or rejects when literal; its description and review instructions remain fixed.
 `contractWritten`, `activationXattr.written` and `activationPending` distinguish committed business
 state from incomplete publication. An xattr failure never undoes a signed decision; activation or
 startup reconcile retries it. This is publication evidence, not proof of an observed FUSE effect.

@@ -365,7 +365,8 @@ Service 已提供 `decide`、`clear_decision`、`show`、`activate` 和 `rollbac
 `show` 只读，分别呈现 latest/active、源目录一致性、findings 和有长度限制的审核说明。
 
 发布写入 SkillFS 使用的最小 schema-1 `activation.json` 与目录 xattr；目标是已验证快照、
-安全的待审核占位目录，或显式 block 对应的 null。`contractWritten`、
+安全的待审核占位目录，或显式 block 对应的 null。占位内容将目录名保留为 YAML 字符串，
+转义 YAML 会作为换行处理或拒绝的字面字符；description 和审核说明固定不变。`contractWritten`、
 `activationXattr.written`、`activationPending` 区分业务提交与发布完成。xattr 失败不会撤销
 已签名决策；activate 或启动 reconcile 可重试。发布成功不等于已证明真实 FUSE 暴露效果。
 
