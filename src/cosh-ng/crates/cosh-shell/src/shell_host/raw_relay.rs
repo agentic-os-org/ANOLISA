@@ -108,6 +108,7 @@ where
     output.write_all(b"\x1b[>4;1m")?;
     output.flush()?;
     sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
+    parser.set_terminal_columns(usize::from(last_winsize.ws_col));
     loop {
         if restore_terminal_after_interrupted_command(
             terminal.as_raw_fd(),
@@ -520,6 +521,7 @@ where
         )?;
         if activity.resize {
             sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
+            parser.set_terminal_columns(usize::from(last_winsize.ws_col));
         }
     }
 }
