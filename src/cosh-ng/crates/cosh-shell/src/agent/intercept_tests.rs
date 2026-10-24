@@ -888,3 +888,20 @@ fn insight_intercept_ai_off_preserves_health_ghost_routing() {
         AgentContextBinding::StartupHealthFollowUp
     );
 }
+
+
+#[test]
+fn path_prompt_notice_starts_on_new_line() {
+    let mut state = InlineState::default();
+    let mut request = AgentRequest::new("你可以用read_file工具读一下/test.md", RequestOrigin::User);
+    request.cwd = Some("/workspace".to_string());
+    request.user_input = Some("你可以用read_file工具读一下/test.md".to_string());
+    let event = path_prompt_event("你可以用read_file工具读一下/test.md", false);
+    let mut output = Vec::new();
+    render_path_prompt_notice(&event, &request, &state, &mut output).expect("render notice");
+    let s = String::from_utf8(output).expect("utf8");
+    assert!(s.starts_with('
+'), "notice must start on a new line");
+    // Top border should not be glued to the echoed input
+    assert!(!s.contains("你可以用read_file工具读一下/test.md╭"));
+}
