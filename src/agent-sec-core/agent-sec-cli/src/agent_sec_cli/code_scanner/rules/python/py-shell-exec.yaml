@@ -1,0 +1,22 @@
+rule_id: py-shell-exec
+cwe_id: CWE-78
+desc_en: >-
+  Code hands a command to the shell through os.system(), os.popen() or
+  subprocess and the command performs a destructive or remote-code
+  operation such as recursive deletion, disk wiping, or piping a
+  download into a shell interpreter.
+desc_zh: >-
+  代码通过 os.system()、os.popen() 或 subprocess 调用 Shell，且命令包含递归删除、
+  磁盘擦写或“下载后直接执行”等破坏性操作。
+regex: |-
+  \b(?:os\.(?:system|popen)|subprocess\.(?:run|call|check_call|check_output|Popen))\s*\(
+  [\s\S]{0,160}?
+  (?:\brm\b[\s\S]{0,24}?(?:-[A-Za-z]*[rR][A-Za-z]*\b|--recursive\b)
+  |\bmkfs(?:\.[A-Za-z0-9]+)?\b
+  |\bwipefs\b
+  |\bshred\b
+  |\bdd\b[\s\S]{0,48}?\bof=\s*/dev/
+  |:\(\)\s*\{
+  |\b(?:shutdown|reboot|poweroff|halt)\b
+  |\b(?:curl|wget)\b[\s\S]{0,96}?\|\s*(?:sudo\s+)?(?:ba|z|k)?sh\b)
+severity: warn
