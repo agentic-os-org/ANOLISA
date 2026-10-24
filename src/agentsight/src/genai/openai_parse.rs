@@ -896,8 +896,8 @@ impl GenAIBuilder {
     /// Mirrors the analyzer's aggregation: text deltas → one Text part per
     /// block, thinking deltas → Reasoning, tool_use blocks (including the
     /// provider-side `server_tool_use` / `mcp_tool_use` spellings) → ToolCall
-    /// with the concatenated `input_json_delta` fragments, all in block-index
-    /// order.
+    /// with the concatenated `input_json_delta` fragments, and the server-tool
+    /// result blocks → ToolCallResponse, all in block-index order.
     /// Block indices are capped like `MAX_TOOL_CALL_SLOTS` so a hostile index
     /// cannot turn one JSON field into an unbounded map. Returns `None` when
     /// no Anthropic event shape is present (caller falls back).
@@ -911,6 +911,10 @@ impl GenAIBuilder {
                 id: String,
                 name: String,
                 args_json: String,
+            },
+            ToolResult {
+                id: String,
+                response: serde_json::Value,
             },
         }
 
@@ -973,6 +977,50 @@ impl GenAIBuilder {
                                 .unwrap_or_default()
                                 .to_string(),
                         ),
+                        // The server-tool results (`web_search_tool_result`,
+                        // `web_fetch_tool_result`, the code-execution results,
+                        // `tool_search_tool_result`, `mcp_tool_result`) are
+                        // the same block as a plain `tool_result`: the
+                        // provider ran the tool on its side and streams the
+                        // finished block on the start event, with no deltas
+                        // after it. The catch-all used to fold it into the
+                        // text accumulator, whose empty buffer the emit loop
+                        // dropped — a drained search turn kept the call but
+                        // lost the result the answer was built from. The
+                        // wrapping mirrors `anthropic_content_block_to_part`.
+                        Some(
+                            "tool_result"
+                            | "web_search_tool_result"
+                            | "web_fetch_tool_result"
+                            | "code_execution_tool_result"
+                            | "bash_code_execution_tool_result"
+                            | "text_editor_code_execution_tool_result"
+                            | "tool_search_tool_result"
+                            | "mcp_tool_result",
+                        ) => {
+                            let response = match (
+                                content_block.get("content").cloned(),
+                                content_block.get("is_error").and_then(|v| v.as_bool()),
+                            ) {
+                                (Some(value), Some(is_error)) => serde_json::json!({
+                                    "content": value,
+                                    "is_error": is_error,
+                                }),
+                                (Some(value), None) => value,
+                                (None, Some(is_error)) => {
+                                    serde_json::json!({ "is_error": is_error })
+                                }
+                                (None, None) => serde_json::Value::Null,
+                            };
+                            Block::ToolResult {
+                                id: content_block
+                                    .get("tool_use_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                response,
+                            }
+                        }
                         // Text and any future block kind default to a text
                         // accumulator, seeded from the start block so a gateway
                         // that sends the finished text there and no deltas keeps
@@ -1081,6 +1129,12 @@ impl GenAIBuilder {
                         id: if id.is_empty() { None } else { Some(id) },
                         name,
                         arguments,
+                    });
+                }
+                Block::ToolResult { id, response } => {
+                    parts.push(MessagePart::ToolCallResponse {
+                        id: if id.is_empty() { None } else { Some(id) },
+                        response,
                     });
                 }
                 _ => {}
@@ -2496,6 +2550,179 @@ mod tests {
             "the drain merger and the typed parser must report the same call"
         );
         assert_eq!(drain_calls.len(), 1, "the call must not be duplicated");
+    }
+
+    /// The result block of the same turn: `web_search_tool_result` arrives
+    /// complete on its start event with no deltas after it, so the catch-all
+    /// used to fold it into the text accumulator whose empty buffer the emit
+    /// loop dropped — a drained search turn kept the call but lost the result
+    /// the answer was built from. The wrapping mirrors
+    /// `anthropic_content_block_to_part`, so the persisted part is the same
+    /// the live path produces.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_keeps_the_server_tool_result() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_ws","model":"claude-sonnet-4-5","usage":{"input_tokens":10}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"rust 2026\"}"}},
+            {"type":"content_block_stop","index":0},
+            {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com/rust","title":"Rust","text":"A systems language."}]}},
+            {"type":"content_block_stop","index":1},
+            {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Here is what I found."}},
+            {"type":"content_block_stop","index":2},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a stream carrying a search turn must yield output");
+        assert_eq!(finish.as_deref(), Some("end_turn"));
+        assert_eq!(parts.len(), 3, "every block must survive: {parts:?}");
+        assert!(
+            matches!(&parts[0], MessagePart::ToolCall { id, name, .. }
+                if id.as_deref() == Some("srvtoolu_1") && name == "web_search"),
+            "the call must come first: {parts:?}"
+        );
+        match &parts[1] {
+            MessagePart::ToolCallResponse { id, response } => {
+                assert_eq!(id.as_deref(), Some("srvtoolu_1"));
+                assert_eq!(
+                    response,
+                    &serde_json::json!([
+                        {"type": "web_search_result", "url": "https://example.com/rust",
+                         "title": "Rust", "text": "A systems language."}
+                    ]),
+                    "the result payload must reach the part unchanged"
+                );
+            }
+            other => panic!("the result must be a response part, got {other:?}"),
+        }
+        assert!(
+            matches!(&parts[2], MessagePart::Text { content } if content == "Here is what I found."),
+            "the answer text must keep its own part: {parts:?}"
+        );
+    }
+
+    /// A failed server-side search streams the error payload inside the
+    /// result block; the payload itself must reach the part unchanged so the
+    /// tool-failure readers see what the provider reported.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_keeps_a_failed_server_tool_result() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_ws_err","model":"claude-sonnet-4-5","usage":{"input_tokens":10}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_err","content":[{"type":"web_search_tool_error","error_code":"too_many_requests","error_text":"rate limited"}]}},
+            {"type":"content_block_stop","index":0},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the stream is Anthropic-shaped");
+        assert!(
+            parts.iter().any(|p| matches!(
+                p,
+                MessagePart::ToolCallResponse { id, response }
+                    if id.as_deref() == Some("srvtoolu_err")
+                        && response.get(0).and_then(|b| b.get("type")).and_then(|t| t.as_str())
+                            == Some("web_search_tool_error")
+            )),
+            "the error payload must reach the part: {parts:?}"
+        );
+    }
+
+    /// Parity with the typed parser on a full search turn: call, result and
+    /// answer text must come out the same from the drain merger and the live
+    /// aggregation, in the same order.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_matches_the_typed_parser_on_a_search_turn() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_parity","model":"claude-sonnet-4-5","usage":{"input_tokens":10}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"rust 2026\"}"}},
+            {"type":"content_block_stop","index":0},
+            {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com/rust"}]}},
+            {"type":"content_block_stop","index":1},
+            {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Here is what I found."}},
+            {"type":"content_block_stop","index":2},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+        ]"#;
+
+        fn describe_part(part: &MessagePart) -> (String, String, serde_json::Value) {
+            match part {
+                MessagePart::Text { content } => {
+                    ("text".to_string(), content.clone(), serde_json::Value::Null)
+                }
+                MessagePart::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => (
+                    format!("call {}", id.as_deref().unwrap_or_default()),
+                    name.clone(),
+                    arguments.clone().unwrap_or(serde_json::Value::Null),
+                ),
+                MessagePart::ToolCallResponse { id, response } => (
+                    format!("result {}", id.as_deref().unwrap_or_default()),
+                    String::new(),
+                    response.clone(),
+                ),
+                MessagePart::Reasoning { content } => (
+                    "reasoning".to_string(),
+                    content.clone(),
+                    serde_json::Value::Null,
+                ),
+            }
+        }
+
+        let events: serde_json::Value = serde_json::from_str(body).expect("events parse");
+        let resp = crate::analyzer::message::AnthropicParser::parse_response(&events)
+            .expect("the typed parser reads the same stream");
+        let live_parts: Vec<_> = resp
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                crate::analyzer::message::AnthropicContentBlock::Text { text, .. }
+                    if !text.is_empty() =>
+                {
+                    Some(MessagePart::Text {
+                        content: text.clone(),
+                    })
+                }
+                crate::analyzer::message::AnthropicContentBlock::ToolUse { id, name, input } => {
+                    Some(MessagePart::ToolCall {
+                        id: Some(id.clone()),
+                        name: name.clone(),
+                        arguments: Some(input.clone()),
+                    })
+                }
+                crate::analyzer::message::AnthropicContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    let response = match (content.clone(), *is_error) {
+                        (Some(value), Some(flag)) => {
+                            serde_json::json!({"content": value, "is_error": flag})
+                        }
+                        (Some(value), None) => value,
+                        (None, Some(flag)) => serde_json::json!({"is_error": flag}),
+                        (None, None) => serde_json::Value::Null,
+                    };
+                    Some(MessagePart::ToolCallResponse {
+                        id: Some(tool_use_id.clone()),
+                        response,
+                    })
+                }
+                _ => None,
+            })
+            .map(|part| describe_part(&part))
+            .collect::<Vec<_>>();
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the drain merger reads the same stream");
+        let drain_parts: Vec<_> = parts.iter().map(describe_part).collect();
+        assert_eq!(
+            live_parts, drain_parts,
+            "the drain merger and the typed parser must report the same turn"
+        );
+        assert_eq!(drain_parts.len(), 3, "call, result and text, exactly once");
     }
 
     /// A replayed conversation keeps the assistant's provider-side calls and
