@@ -343,6 +343,15 @@ test-claude-code-detect:
 # Keep the worker protocol suite as a prerequisite so test-integration and
 # its aggregate callers cannot omit it. It is stdlib-only: the subprocess
 # fixture supplies Headroom stubs on PYTHONPATH, without a Headroom venv.
+#
+# tests/test_hook_utils_categories.py guards the import of the shared
+# hook_utils: tool_categories.json is read at module import time, so a shape
+# the loader cannot consume -- a JSON null, a non-string "tools" entry, a null
+# "thresholds" mapping, a directory sitting at the JSON path -- used to abort
+# every lifecycle hook importing the module instead of falling back to the
+# built-in safe categories. The suite is stdlib-only: it copies hook_utils.py
+# into a mktemp sandbox beside a generated JSON and imports it in a fresh
+# interpreter, so it needs no build output and finishes in about a second.
 test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts \
                   test-qwenwork-hooks test-headroom-pipeline-worker
 	@echo "==> Testing hook integration (Python)..."
@@ -352,6 +361,7 @@ test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup tes
 	python3 tests/test_compress_schema_hook.py
 	python3 tests/test_hook_payload_shapes.py
 	python3 tests/test_hermes_plugin_import.py
+	python3 tests/test_hook_utils_categories.py
 	python3 tests/test_agentscope_middleware.py
 	python3 tests/test_agentscope_v1.py
 	python3 tests/test_cosh_extension_matcher.py
