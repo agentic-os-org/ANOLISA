@@ -110,6 +110,25 @@ class TestBuildSessionReport:
         assert rpt.security_verdicts == {}
         assert "session_id" in rpt.security_hint
 
+    def test_malformed_metrics_are_ignored_without_crashing(self):
+        reader = MagicMock()
+        reader.list_sessions.return_value = [_fake_session()]
+        reader.list_runs.return_value = [_fake_run()]
+        reader.list_events.return_value = [
+            _fake_event("after_llm_call", {"request_payload_bytes": "not-a-number"}),
+            _fake_event("after_llm_call", {"response_stream_bytes": -50}),
+            _fake_event("after_llm_call", {"request_payload_bytes": [1, 2]}),
+            _fake_event("before_tool_call", {"tool_name": ["not", "hashable"]}),
+            _fake_event("before_tool_call", ["not", "a", "mapping"]),
+        ]
+
+        rpt = build_session_report("sess-1", reader)
+
+        assert rpt.llm_calls == 3
+        assert rpt.request_bytes == 0
+        assert rpt.response_bytes == 0
+        assert rpt.tool_breakdown == {"unknown": 2}
+
 
 class TestFormatText:
     def test_basic_format(self):
