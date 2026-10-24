@@ -10,11 +10,20 @@ COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 AGENT="${ANOLISA_TARGET:-qwencode}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this detector with exit 1 -- the same status it otherwise reports for "not
+# installed but installable", so the crash would reach the caller as a verdict
+# instead of as an error. Resolve HOME once and derive every user-scope path
+# from it; an empty value skips those probes rather than guessing a path
+# under /.
+HOME_DIR="${HOME:-}"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+
 PLUGIN_ID="tokenless"
 PLUGIN_SRC="$ADAPTER_DIR/qwencode"
 
 QWEN_BIN="${QWEN_BIN:-}"
-export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+export PATH="${USER_LOCAL_BIN}/usr/local/bin:$PATH"
 
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
@@ -40,8 +49,10 @@ fi
 # Informational only: Qwen Code stores global settings, extensions, and
 # session data under ~/.qwen/ (upstream default).  Absence is not a
 # prerequisite failure — the directory is created on first run.
-if [ -d "$HOME/.qwen" ]; then
-    field "qwen config dir"     "present ($HOME/.qwen)"
+if [ -z "$HOME_DIR" ]; then
+    field "qwen config dir"     "unknown (HOME is unset)"
+elif [ -d "$HOME_DIR/.qwen" ]; then
+    field "qwen config dir"     "present ($HOME_DIR/.qwen)"
 else
     field "qwen config dir"     "missing (created on first Qwen Code run)"
 fi
@@ -96,7 +107,7 @@ fi
 SHARED_HOOKS_DIR=""
 for d in /usr/local/share/anolisa/adapters/tokenless/common/hooks \
          /usr/share/anolisa/adapters/tokenless/common/hooks \
-         "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"; do
+         "${HOME_DIR:+$HOME_DIR/.local/share/anolisa/adapters/tokenless/common/hooks}"; do
     if [ -d "$d" ]; then SHARED_HOOKS_DIR="$d"; break; fi
 done
 if [ -n "$SHARED_HOOKS_DIR" ]; then

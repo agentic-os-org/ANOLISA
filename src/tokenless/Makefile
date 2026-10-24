@@ -307,6 +307,31 @@ test-hooks: test-hook-scripts
 	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
 
+# Declared separately from the .PHONY list at the top of this file on purpose:
+# that list is extended by other components' targets as well, and a shared line
+# is a merge conflict waiting to happen.
+.PHONY: test-detect-scripts
+
+# The adapter detectors run under `set -u`, and each of them derives its
+# user-scope paths from HOME: the ~/.local/bin PATH prefix, the agent's own
+# config or state directory, and the ~/.local/share hook fallback. A host that
+# invokes detection without HOME (a minimal runner, a service manager, `env -i`)
+# therefore aborted the detector on an unbound variable -- with exit 1, which is
+# also the status these scripts document as "not installed but installable", so
+# the crash reached the caller dressed as a verdict. This suite pins the
+# contract: HOME-less detection must land on the same status as detection with
+# an empty HOME, must not print bash's unbound-variable diagnostic, and must
+# still report a real user-scope directory when HOME is set. Plain bash over
+# the checked-out adapter tree with every agent CLI pinned to a path that does
+# not exist -- no cargo build output, node, jq, rtk, python3 or network, and no
+# host agent is ever executed -- so it costs well under a second. It rides on
+# `test-integration` for the same reason test-hook-scripts does: that is the
+# target the Test tokenless job already calls, so the suite reaches CI with no
+# workflow edit and no new setup.
+test-detect-scripts:
+	@echo "==> Testing tokenless adapter detectors (no external dependencies)..."
+	bash tests/test-detect-unset-home.sh
+
 test-claude-code-detect:
 	@echo "==> Testing claude-code detect.sh first-run retry..."
 	bash tests/test-claude-code-detect-retry.sh
@@ -344,7 +369,8 @@ test-claude-code-detect:
 # its aggregate callers cannot omit it. It is stdlib-only: the subprocess
 # fixture supplies Headroom stubs on PYTHONPATH, without a Headroom venv.
 test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts \
-                  test-qwenwork-hooks test-headroom-pipeline-worker
+                  test-qwenwork-hooks test-headroom-pipeline-worker \
+                  test-detect-scripts
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_codex_response_diagnostics.py
 	python3 tests/test_codex_rewrite_hook.py
