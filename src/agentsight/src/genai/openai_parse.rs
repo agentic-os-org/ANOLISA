@@ -269,13 +269,27 @@ impl GenAIBuilder {
                 .or_else(|| parameters.and_then(|params| params.get(key)))
         };
 
+        // Gemini nests every sampling parameter under `generationConfig` with a
+        // camelCase key, so the two spellings `param` probes never carry one.
+        // Reading only the output cap left the recorded request's temperature,
+        // top_p, top_k, seed and the two penalties unset, and those are what
+        // `gen_ai.request.*` telemetry and the stored columns report.
+        let generation_config = obj.get("generationConfig").and_then(|v| v.as_object());
+        let generation = |key: &str| {
+            generation_config
+                .and_then(|config| config.get(key))
+                .filter(|value| !value.is_null())
+        };
+
         let tools = param("tools")
             .and_then(|v| v.as_array())
             .map(|arr| arr.to_vec());
 
         Some(LLMRequest {
             messages,
-            temperature: param("temperature").and_then(|v| v.as_f64()),
+            temperature: param("temperature")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("temperature").and_then(|v| v.as_f64())),
             // The output cap has three spellings: the legacy chat
             // `max_tokens`, the newer chat `max_completion_tokens` (the only
             // one the o-series accepts), and the Responses API
@@ -291,24 +305,31 @@ impl GenAIBuilder {
             max_tokens: ["max_tokens", "max_completion_tokens", "max_output_tokens"]
                 .iter()
                 .find_map(|key| param(key).and_then(|v| v.as_u64()))
-                .or_else(|| {
-                    obj.get("generationConfig")
-                        .and_then(|cfg| cfg.get("maxOutputTokens"))
-                        .and_then(|v| v.as_u64())
-                })
+                .or_else(|| generation("maxOutputTokens").and_then(|v| v.as_u64()))
                 .map(|v| v as u32),
-            frequency_penalty: param("frequency_penalty").and_then(|v| v.as_f64()),
-            presence_penalty: param("presence_penalty").and_then(|v| v.as_f64()),
-            top_p: param("top_p").and_then(|v| v.as_f64()),
-            top_k: param("top_k").and_then(|v| v.as_f64()),
-            seed: param("seed").and_then(|v| v.as_i64()),
-            stop_sequences: param("stop").and_then(|v| {
-                v.as_array().map(|arr| {
+            frequency_penalty: param("frequency_penalty")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("frequencyPenalty").and_then(|v| v.as_f64())),
+            presence_penalty: param("presence_penalty")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("presencePenalty").and_then(|v| v.as_f64())),
+            top_p: param("top_p")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("topP").and_then(|v| v.as_f64())),
+            top_k: param("top_k")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("topK").and_then(|v| v.as_f64())),
+            seed: param("seed")
+                .and_then(|v| v.as_i64())
+                .or_else(|| generation("seed").and_then(|v| v.as_i64())),
+            stop_sequences: param("stop")
+                .and_then(|v| v.as_array())
+                .or_else(|| generation("stopSequences").and_then(|v| v.as_array()))
+                .map(|arr| {
                     arr.iter()
                         .filter_map(|s| s.as_str().map(String::from))
                         .collect()
-                })
-            }),
+                }),
             stream: obj.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
             tools,
             raw_body: None,
@@ -1979,6 +2000,62 @@ mod tests {
         }"#;
         let req = GenAIBuilder::parse_request_body(body).expect("body parses");
         assert_eq!(req.max_tokens, None);
+    }
+
+    /// Gemini spells every sampling control under `generationConfig` with a
+    /// camelCase key, and `param` probes only the top level and the DashScope
+    /// `parameters` object. The output cap was added to the reach of that
+    /// helper, but the rest of the block still fell through: a Gemini request
+    /// recorded no temperature, top_p, top_k, seed or penalty value, so the
+    /// `gen_ai.request.*` telemetry and the stored columns reported defaults
+    /// for a call that had set them.
+    #[test]
+    fn test_parse_request_body_gemini_generation_config_sampling() {
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "topP": 0.9,
+                "topK": 40,
+                "seed": 42,
+                "frequencyPenalty": 0.1,
+                "presencePenalty": 0.2,
+                "stopSequences": ["END", "STOP"]
+            }
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("gemini body parses");
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.top_p, Some(0.9));
+        assert_eq!(req.top_k, Some(40.0));
+        assert_eq!(req.seed, Some(42));
+        assert_eq!(req.frequency_penalty, Some(0.1));
+        assert_eq!(req.presence_penalty, Some(0.2));
+        assert_eq!(
+            req.stop_sequences,
+            Some(vec!["END".to_string(), "STOP".to_string()])
+        );
+    }
+
+    /// The top-level spelling still wins over `generationConfig`, and an
+    /// explicit null in the block is not a value: neither may shadow the
+    /// spelling a caller actually set.
+    #[test]
+    fn test_gemini_generation_config_does_not_shadow_the_top_level() {
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "temperature": 0.5,
+            "top_p": 0.6,
+            "stop": ["TOP"],
+            "generationConfig": {
+                "temperature": null,
+                "topP": 0.9,
+                "stopSequences": ["CONFIG"]
+            }
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
+        assert_eq!(req.temperature, Some(0.5));
+        assert_eq!(req.top_p, Some(0.6));
+        assert_eq!(req.stop_sequences, Some(vec!["TOP".to_string()]));
     }
 
     #[test]
