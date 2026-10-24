@@ -76,7 +76,7 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
 # other components' targets as well, and a shared line is a merge conflict
 # waiting to happen.
 .PHONY: test-install-methods test-install-script test-install-docs \
-        test-npm-postinstall test-npm-postinstall-strict
+        test-codex-detect-home test-npm-postinstall test-npm-postinstall-strict
 
 .PHONY: qwenwork-install qwenwork-uninstall test-qwenwork \
         test-qwenwork-install test-qwenwork-hooks
@@ -549,7 +549,8 @@ test-toon-cleanup:
 # that describe it. Offline: curl, npm and cargo are stubbed by the test.
 # test-npm-postinstall runs the real npm/scripts/postinstall.js and skips when no
 # interpreter can run it.
-test-install-methods: test-npm-postinstall test-install-script test-install-docs
+test-install-methods: test-npm-postinstall test-install-script test-install-docs \
+        test-codex-detect-home
 
 # Joined to the `test` aggregate by a second, prerequisite-only rule instead of by
 # editing its own line: that line is extended by several components at once and is
@@ -564,6 +565,10 @@ test-install-script:
 test-install-docs:
 	@echo "==> Testing install-method documentation consistency..."
 	@bash tests/test-install-docs.sh
+
+test-codex-detect-home:
+	@echo "==> Testing Codex detect.sh HOME-unset fail-open..."
+	@bash tests/test-codex-detect-home.sh
 
 # The npm package postinstall shares ~/.local/share/anolisa/adapters/tokenless
 # with the anolisa CLI, so it has to identify the current owner before replacing
