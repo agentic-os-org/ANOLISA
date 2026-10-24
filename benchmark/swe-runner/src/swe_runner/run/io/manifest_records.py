@@ -72,6 +72,17 @@ def text_record(text: str) -> dict[str, int | str]:
     }
 
 
+def _file_digest_and_size(path: Path) -> tuple[str, int]:
+    """Hash raw file bytes with bounded buffers and explicit handle ownership."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(128 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
 def file_record(path: Path | str | None) -> dict[str, Any]:
     if path is None:
         return {"path": None, "exists": False}
@@ -84,11 +95,11 @@ def file_record(path: Path | str | None) -> dict[str, Any]:
     if not file_path.is_file():
         return record
 
-    data = file_path.read_bytes()
+    digest, size = _file_digest_and_size(file_path)
     record.update(
         {
-            "sha256": sha256_bytes(data),
-            "bytes": len(data),
+            "sha256": digest,
+            "bytes": size,
         }
     )
     return record
@@ -111,12 +122,12 @@ def directory_tree_record(path: Path | str | None) -> dict[str, Any]:
         if not child.is_file():
             continue
         relative_path = child.relative_to(root).as_posix()
-        file_data = child.read_bytes()
+        digest, size = _file_digest_and_size(child)
         entries.append(
             {
                 "path": relative_path,
-                "sha256": sha256_bytes(file_data),
-                "bytes": len(file_data),
+                "sha256": digest,
+                "bytes": size,
             }
         )
 
