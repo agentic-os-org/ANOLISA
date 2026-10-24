@@ -15,9 +15,58 @@ use std::sync::LazyLock;
 // `split_whitespace().last()` is fragile: tools like `curl` print
 // "curl 8.1.2 (x86_64-linux-gnu)" where `.last()` gives the arch suffix,
 // and `jq-1.6` has no whitespace around the version. A targeted regex
-// anchored on digit groups avoids these false matches.
+// anchored on digit groups avoids these false matches. The patch group is
+// optional: common tools report only `major.minor` (jq "jq-1.6", GNU Make
+// "GNU Make 4.3", gzip "gzip 1.10", and an rtk build reporting "rtk 0.36")
+// — a strict three-group pattern extracts nothing for those and every
+// comparison degrades to "0.0.0", falsely reporting VersionLow.
 static VERSION_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+(?:\.\d+)?)").unwrap());
+
+/// Extract the installed version from `--version` output.
+///
+/// Returns the first version-like token (at least `major.minor`), or
+/// `"0.0.0"` when the output carries no version at all. Used by
+/// `check_dep`; `select_rtk_path` has its own rtk-anchored extractor
+/// (`rtk_version_from`) so the release-build rtk gate does not misread
+/// a distractor version printed by an unrelated banner line.
+fn installed_version_from(output: &str) -> String {
+    VERSION_RE
+        .find(output)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "0.0.0".to_string())
+}
+
+/// Version `rtk` reports for itself: "rtk 0.43.0", "rtk/0.43.0",
+/// "rtk version 0.43.0", "rtk v0.43.0".
+static RTK_VERSION_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\brtk[\s/_-]*(?:version[\s:]*)?v?(\d+\.\d+(?:\.\d+)?)").unwrap()
+});
+
+/// Version rtk reports for itself, or a nameless version banner. stderr
+/// can never supply a version, matching `rtk_version_probe` in
+/// benchmark/l1-compressor/run-benchmarks.sh: a diagnostic line such as
+/// "rtk: warning: config schema 2.1 unsupported" must not be
+/// false-accepted as the installed version - on either stream.
+fn rtk_version_from(stdout: &str, stderr: &str) -> Option<String> {
+    let named = |text: &str| {
+        RTK_VERSION_RE
+            .captures(text)
+            .and_then(|captures| captures.get(1))
+            .map(|m| m.as_str().to_owned())
+    };
+    named(stdout).or_else(|| named(stderr)).or_else(|| {
+        // A nameless banner carries the version as the first thing it
+        // prints ("0.43.0", "0.43.0 (x86_64-unknown-linux-gnu)"). A
+        // diagnostic line also contains a dotted number, but never at
+        // the start, so the fallback cannot false-accept it.
+        let trimmed = stdout.trim_start();
+        VERSION_RE
+            .find(trimmed)
+            .filter(|m| m.start() == 0)
+            .map(|m| m.as_str().to_owned())
+    })
+}
 
 fn tool_ready_hard_bypassed() -> bool {
     // Release builds always bypass Tool Ready. Unit tests retain a test-only
@@ -674,16 +723,10 @@ fn select_rtk_candidates(candidates: Vec<PathBuf>) -> Option<String> {
         if !output.status.success() {
             return None;
         }
-        let version_text = format!(
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let version = VERSION_RE
-            .captures(&version_text)
-            .and_then(|captures| captures.get(1))?
-            .as_str();
-        version_ge(version, "0.35.0").then(|| path.to_string_lossy().into_owned())
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let version = rtk_version_from(&stdout, &stderr)?;
+        version_ge(&version, "0.35.0").then(|| path.to_string_lossy().into_owned())
     })
 }
 
@@ -696,16 +739,7 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
                 let required_version = extract_required_version(version);
                 let version_output = Command::new(&path).arg("--version").output();
                 let installed_version = match version_output {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        // Use regex to find the first version-like token
-                        // (digits.digits.digits), not split_whitespace().last()
-                        // which fails for "curl 8.1.2 (x86_64...)" and "jq-1.6".
-                        VERSION_RE
-                            .find(&stdout)
-                            .map(|m| m.as_str().to_string())
-                            .unwrap_or_else(|| "0.0.0".to_string())
-                    }
+                    Ok(out) => installed_version_from(&String::from_utf8_lossy(&out.stdout)),
                     Err(_) => "0.0.0".to_string(),
                 };
 
