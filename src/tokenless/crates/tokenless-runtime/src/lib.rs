@@ -713,6 +713,12 @@ fn finish_schema_compression(
 /// still validated as JSON, so short invalid payloads fail instead of
 /// passing through.
 ///
+/// A view the bundled TOON decoder cannot read back is never returned: such
+/// a payload reports [`Disposition::NoSavings`] with `output` and
+/// `compressed_output` both holding the input. TOON views are not written to
+/// the stash, so an undecodable view would be unrecoverable once a caller
+/// substituted it for the payload.
+///
 /// # Errors
 ///
 /// Returns [`RuntimeError`] for oversized or invalid JSON input, and for
@@ -749,6 +755,30 @@ pub fn compress_toon(
         .trim_end()
         .to_string();
     let after_tokens = estimate_tokens(&compressed_output);
+    // The encoder can emit a tabular block its own decoder rejects: an
+    // array whose elements are all empty objects renders with an empty
+    // field list, which `decode_default` refuses to read. Decodability,
+    // not round-trip equality, is the bar here, because `compress-toon`
+    // is an explicit view request and the encoder prints some numbers in a
+    // narrower domain than JSON's (`1.0` reads back as `1`), so requiring
+    // equality would drop TOON coverage for every payload holding a float.
+    // The JSON domain's `toon_candidate` does require equality, since that
+    // path silently replaces tool results.
+    if !compressed_output.is_empty()
+        && toon_format::decode_default::<serde_json::Value>(&compressed_output).is_err()
+    {
+        return Ok(CompressResult {
+            output: input.to_string(),
+            compressed_output: input.to_string(),
+            disposition: Disposition::NoSavings,
+            before_tokens,
+            after_tokens: before_tokens,
+            stash_writes: None,
+            stash_errors: None,
+            unrecoverable_truncations: None,
+            stash_size: None,
+        });
+    }
     let disposition = if compressed_output.is_empty() || after_tokens >= before_tokens {
         Disposition::NoSavings
     } else if !compression_enabled {
@@ -2002,6 +2032,68 @@ mod tests {
         // The same contract holds with the gate disabled.
         let error = compress_toon("not json", true, 0).unwrap_err();
         assert!(matches!(error, RuntimeError::InvalidJson(_)));
+    }
+
+    #[test]
+    fn toon_refuses_a_view_its_own_decoder_rejects() {
+        // toon-format renders an array whose elements are all empty objects
+        // as a tabular block with an empty field list, and its decoder
+        // refuses that shape. Such a payload is ordinary API output (a
+        // filtered-empty result set next to a long sibling field), it clears
+        // the minimum-length gate, and the view looks smaller, so without a
+        // decodability check `compress_toon` would hand back text that
+        // `decompress-toon` cannot read -- unrecoverably, because TOON views
+        // are never written to the stash.
+        let value = serde_json::json!({
+            "items": [{}, {}],
+            "meta": { "pad": "p".repeat(600) },
+        });
+        let encoded = toon_format::encode_default(&value).unwrap();
+        assert!(
+            toon_format::decode_default::<serde_json::Value>(encoded.trim_end()).is_err(),
+            "precondition: the encoded view must be undecodable, got {encoded:?}"
+        );
+
+        let input = serde_json::to_string(&value).unwrap();
+        assert!(input.chars().count() > MIN_TOON_CHARS);
+        let result = compress_toon(&input, true, MIN_TOON_CHARS).unwrap();
+        assert_eq!(result.disposition, Disposition::NoSavings);
+        // Byte-exact stdout contract: the CLI prints `output`, and the stats
+        // record reads `compressed_output`, so both must stay the input
+        // instead of advertising a saving that never happened.
+        assert_eq!(result.output, input);
+        assert_eq!(result.compressed_output, input);
+        assert_eq!(result.before_tokens, result.after_tokens);
+
+        // Dry-run must not preview an undecodable view either: there is no
+        // encoding a caller could apply later.
+        let preview = compress_toon(&input, false, MIN_TOON_CHARS).unwrap();
+        assert_eq!(preview.disposition, Disposition::NoSavings);
+        assert_eq!(preview.output, input);
+        assert_eq!(preview.compressed_output, input);
+    }
+
+    #[test]
+    fn toon_keeps_a_decodable_view_that_narrows_numbers() {
+        // The guard checks decodability only. The encoder prints some
+        // numbers in a narrower domain than JSON's, so requiring a
+        // value-equal round trip here would strip TOON coverage from every
+        // payload holding a float; that stricter bar belongs to the JSON
+        // domain's `toon_candidate`, which replaces tool results silently.
+        let value = serde_json::json!({
+            "rows": (0..100)
+                .map(|index| serde_json::json!({ "name": "same", "value": index as f64 }))
+                .collect::<Vec<_>>(),
+        });
+        let encoded = toon_format::encode_default(&value).unwrap();
+        let candidate = encoded.trim_end();
+        assert!(toon_format::decode_default::<serde_json::Value>(candidate).is_ok());
+
+        let input = serde_json::to_string(&value).unwrap();
+        let result = compress_toon(&input, true, MIN_TOON_CHARS).unwrap();
+        assert!(result.applied());
+        assert_eq!(result.output, candidate);
+        assert!(result.after_tokens < result.before_tokens);
     }
 
     #[test]

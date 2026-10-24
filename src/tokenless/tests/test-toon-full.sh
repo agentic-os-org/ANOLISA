@@ -573,6 +573,28 @@ else
     fail "long payload was not encoded by default"
 fi
 
+# Undecodable TOON view. The encoder renders an array whose elements are all empty
+# objects as a tabular block with an empty field list (`items[2]{}:`), which its own
+# decoder rejects, and a TOON view is never written to the stash - so emitting one is
+# unrecoverable. compress-toon must refuse that view and echo the original bytes. The
+# assertion states the invariant rather than one encoder version's rendering, so a
+# toon-format that encodes this shape decodably keeps the case green: whatever comes
+# out is either the input verbatim or a view decompress-toon reads back unchanged.
+undecodable_pad=$(printf '%0600d' 0 | tr '0' 'p')
+undecodable="{\"items\":[{},{}],\"meta\":{\"pad\":\"$undecodable_pad\"}}"
+printf '%s' "$undecodable" > "$TMP_DIR/gate-undecodable.json"
+tokenless compress-toon < "$TMP_DIR/gate-undecodable.json" > "$TMP_DIR/gate-undecodable.out" 2>/dev/null
+assert_same "$?" "0" "undecodable TOON view - exit code"
+if cmp -s "$TMP_DIR/gate-undecodable.json" "$TMP_DIR/gate-undecodable.out"; then
+    pass "undecodable TOON view - refused, stdout is byte-identical to stdin"
+elif tokenless decompress-toon < "$TMP_DIR/gate-undecodable.out" 2>/dev/null |
+    jq -S . > "$TMP_DIR/gate-undecodable.roundtrip" &&
+    jq -S . < "$TMP_DIR/gate-undecodable.json" | cmp -s - "$TMP_DIR/gate-undecodable.roundtrip"; then
+    pass "undecodable TOON view - emitted view decodes back to the same document"
+else
+    fail "undecodable TOON view - compress-toon emitted a view decompress-toon cannot reproduce"
+fi
+
 # ========== Scenario 2: Cosh-NG ==========
 section "Scenario 2: Cosh-NG hooks"
 
