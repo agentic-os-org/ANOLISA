@@ -212,6 +212,12 @@ swe-runner run \
 
 `--use-skill` 和 `--per-case-prompt` 互斥。两者都通过用户指定目录匹配资源。
 
+Run settings 会展开 `output.output_dir`、`agent.skills_dir` 和
+`agent.prompts_dir` 中的 `~/` 等用户主目录前缀。`run` 命令的 `--output`、
+`--skills-dir` 和 `--prompts-dir` 也接受加引号的主目录路径，profile、日志、
+结果和 guidance 会使用相同的展开路径。相对路径仍以工作目录为基准，
+名称内部的 tilde 字符保持字面含义。
+
 #### Skill
 
 使用 `--use-skill` 时，runner 会查找：
