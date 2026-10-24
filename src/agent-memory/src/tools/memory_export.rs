@@ -80,7 +80,7 @@ impl Default for ExportFilter {
 
 /// Parse YAML-like frontmatter from a markdown string.
 /// Returns (frontmatter_map, body).
-fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
+pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     let mut fm = HashMap::new();
 
     // Shared fence rule: a closing fence that ends the file (no trailing
