@@ -263,13 +263,7 @@ fn decrypt_credential(encrypted: &str, salt_path: &Path) -> Option<String> {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
+    hex::decode(s).ok()
 }
 
 fn map_approval_mode(mode: &str) -> &str {
@@ -682,6 +676,51 @@ api_key = "sk-current"
         assert_eq!(provider.access_key_id.as_deref(), Some("legacy-ak"));
         assert_eq!(provider.access_key_secret.as_deref(), Some("legacy-sk"));
         assert!(provider.security_token.is_none());
+    }
+
+    #[test]
+    fn hex_decode_rejects_non_ascii_without_panicking() {
+        // Multi-byte UTF-8 with even byte length must not panic on char-boundary slicing.
+        assert_eq!(hex_decode("中文"), None);
+        assert_eq!(hex_decode("00中0"), None);
+        assert_eq!(hex_decode("abc"), None);
+        assert_eq!(hex_decode("zz"), None);
+        assert_eq!(hex_decode("0g"), None);
+        assert_eq!(hex_decode("00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(hex_decode(""), Some(vec![]));
+    }
+
+    #[test]
+    fn decrypt_credential_returns_none_for_multibyte_hex_field() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let salt_path = tmp.path().join(".encryption-salt");
+        std::fs::write(&salt_path, [0x42u8; 32]).unwrap();
+
+        let result = decrypt_credential("enc:中文:00112233445566778899aabbccddeeff:00", &salt_path);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn migration_survives_multibyte_encrypted_credential() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        let salt_path = tmp.path().join(".encryption-salt");
+
+        std::fs::write(&salt_path, [0x42u8; 32]).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{"security":{"auth":{"selectedType":"openai","apiKey":"enc:中文:00112233445566778899aabbccddeeff:00","baseUrl":"https://example.com/v1"}}}"#,
+        )
+        .unwrap();
+
+        try_migrate_from_dir(tmp.path());
+
+        let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
+        let provider = config.ai.providers.get("default").unwrap();
+        assert!(provider.api_key.is_none());
+        assert!(!content.contains("enc:"));
+        assert!(!content.contains("中文"));
     }
 
     fn hex_encode(bytes: &[u8]) -> String {
