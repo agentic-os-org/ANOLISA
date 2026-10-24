@@ -646,6 +646,12 @@ fn build_content_diff(before: Option<&str>, after: Option<&str>, context: usize)
             DiffNormalization::None,
         ),
     };
+    // The cap has to bound what the differ consumes, not just the stored
+    // bytes: pretty-printing inflates compact JSON (up to several times for
+    // dense documents), so re-check the normalized forms before diffing.
+    if before.len() > MAX_DIFF_INPUT_BYTES || after.len() > MAX_DIFF_INPUT_BYTES {
+        return omitted_diff(DiffOmittedReason::ContentTooLarge);
+    }
 
     let text_diff = TextDiff::from_lines(&before, &after);
     let context = context.min(MAX_DIFF_LINES);
