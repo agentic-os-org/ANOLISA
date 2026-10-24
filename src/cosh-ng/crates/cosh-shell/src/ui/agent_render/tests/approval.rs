@@ -1686,3 +1686,101 @@ fn approval_panel_generic_card_irrecoverable_warning_and_no_trust() {
     assert!(!text.contains("Always trust"), "{text}");
     assert!(text.contains("Allow once"), "{text}");
 }
+
+fn control_byte_model<'a>() -> ApprovalPanelModel<'a> {
+    ApprovalPanelModel {
+        id: "req-1",
+        kind: "tool request",
+        risk: "high",
+        reason: None,
+        subject: "Bash",
+        preview_label: "Command",
+        preview: "$ printf 'x\u{1b}[2Jy\u{1b}]0;evil\u{7}z'",
+        queue_position: 1,
+        queue_total: 1,
+        next_label: None,
+        selected_action: ApprovalPanelAction::Approve,
+        expanded: false,
+        turn_consent: false,
+        turn_extension: false,
+        deny_always_trust: true,
+        irrecoverable: false,
+        hook_warnings: Vec::new(),
+    }
+}
+
+/// The preview is model-authored text: a `\u001b` inside the tool-call
+/// JSON arrives as a real ESC byte, and the card is the surface the
+/// user reads to decide whether to approve the command. Control bytes
+/// must cross the card boundary as inert text, never as sequences the
+/// terminal executes — the same contract the tool *name* already
+/// carries (`display_tool_name`). The plain card additionally pushes
+/// its preview through the shared wrapped-row budget instead of the
+/// raw string, so a newline-bearing preview cannot emit more physical
+/// rows than the height the caller records for the next erase.
+#[test]
+fn plain_approval_card_generic_preview_is_sanitized_and_row_bounded() {
+    let renderer = RatatuiInlineRenderer::plain_with_width(80);
+    let mut model = control_byte_model();
+    model.preview = "$ printf 'one\u{1b}[2J' arg\n tail-one\n tail-two\n tail-three\n tail-four";
+    let mut written = Vec::new();
+    let height = renderer
+        .write_approval_panel(&mut written, model)
+        .expect("write plain approval panel");
+    let text = String::from_utf8(written).expect("plain card utf8");
+
+    // No active control byte crosses the plain card boundary.
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    // The visible command text still reads back as characters.
+    assert!(text.contains("printf"), "{text}");
+    // The preview is bounded to the collapsed row budget (3 rows), so the
+    // tail beyond the budget never reaches the terminal.
+    assert!(text.contains("tail-one"), "{text}");
+    assert!(!text.contains("tail-three"), "{text}");
+    // The reported height matches the physical rows written: a preview
+    // pushed verbatim would emit embedded-newline rows the erase on the
+    // next redraw cannot clear.
+    assert_eq!(text.lines().count(), height, "{text}");
+}
+
+/// Same contract through the styled card path: the card bytes fed to a
+/// terminal emulator must not execute the payload — an `ESC [2J` in the
+/// preview would clear rows that existed before the card was drawn.
+#[test]
+fn styled_approval_card_generic_preview_control_bytes_are_inert() {
+    let renderer = RatatuiInlineRenderer::with_width(100);
+    let mut written = Vec::new();
+    renderer
+        .write_approval_panel(&mut written, control_byte_model())
+        .expect("write styled approval panel");
+    // `with_width` renders without styling, so every ESC byte in the
+    // output is preview payload, never renderer-emitted styling.
+    let text = String::from_utf8(written).expect("styled card utf8");
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    assert!(text.contains("printf"), "{text}");
+
+    let mut parser = vt100::Parser::new(24, 100, 0);
+    parser.process(b"sentinel-before-card\r\n");
+    parser.process(text.as_bytes());
+    let screen = parser.screen().contents();
+    assert!(
+        screen.contains("sentinel-before-card"),
+        "card bytes cleared prior terminal content: {screen:?}"
+    );
+}
+
+/// The command-heading card (subject "tool Bash") shares the wrapped
+/// preview rows, so the sanitize contract covers it too.
+#[test]
+fn approval_panel_command_heading_preview_control_bytes_are_inert() {
+    let renderer = RatatuiInlineRenderer::with_width(100);
+    let mut model = control_byte_model();
+    model.subject = "tool Bash";
+    let text = renderer.approval_panel_lines(model).join("\n");
+
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    assert!(text.contains("printf"), "{text}");
+    assert!(text.contains("$ printf"), "{text}");
+}
