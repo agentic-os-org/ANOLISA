@@ -122,6 +122,11 @@ claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
 └── batch_summary.json     # 聚合汇总
 ```
 
+评分时先在目标文件旁完整写入 UTF-8 trace，再替换原文件。序列化、写入或
+替换失败时保留原 trace 并返回错误，便于重试评分，同时保留既有权限和符号
+链接目标。这保证本地文件系统上读者看到完整的旧文件或新文件，不保证断电
+持久性，也不协调多个评分进程同时写入。
+
 ## 架构:MCP 工具注入与防作弊隔离
 
 ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务专属工具。核心挑战在于确保 agent **只能**访问自己任务的工具,无法读取宿主机文件(如 `grader.py`)作弊。
