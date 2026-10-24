@@ -176,46 +176,18 @@ fn startup_hooks_enabled() -> bool {
         })
 }
 
-#[derive(Clone, Copy)]
-struct BootstrapPathProbe {
-    flags: &'static str,
-    source: &'static str,
-    io: BootstrapPathProbeIo,
-}
+// The bootstrap PATH probe tables live in `startup_probes.rs`; this change
+// split them out of this file when the login-probe supervision rework pushed
+// it over the 700-line layout threshold.
+#[path = "startup_probes.rs"]
+mod startup_probes;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BootstrapPathProbeIo {
-    Pipes,
-    Pty,
-}
-
-const BASH_NON_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[
-    BootstrapPathProbe {
-        flags: "-ic",
-        source: "Bash interactive startup",
-        io: BootstrapPathProbeIo::Pipes,
-    },
-    BootstrapPathProbe {
-        flags: "-lic",
-        source: "Bash interactive login startup",
-        io: BootstrapPathProbeIo::Pty,
-    },
-];
-const BASH_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
-    flags: "-lic",
-    source: "Bash interactive login startup",
-    io: BootstrapPathProbeIo::Pipes,
-}];
-const ZSH_NON_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
-    flags: "-ic",
-    source: "Zsh interactive startup",
-    io: BootstrapPathProbeIo::Pipes,
-}];
-const ZSH_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
-    flags: "-lic",
-    source: "Zsh interactive login startup",
-    io: BootstrapPathProbeIo::Pipes,
-}];
+#[cfg(test)]
+use startup_probes::LOGIN_PROBE_IO;
+use startup_probes::{
+    BootstrapPathProbe, BootstrapPathProbeIo, BASH_LOGIN_PATH_PROBES, BASH_NON_LOGIN_PATH_PROBES,
+    ZSH_LOGIN_PATH_PROBES, ZSH_NON_LOGIN_PATH_PROBES,
+};
 
 #[derive(Debug)]
 enum BootstrapPathProbeError {

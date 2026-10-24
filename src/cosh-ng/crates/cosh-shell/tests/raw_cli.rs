@@ -59,6 +59,9 @@ mod host_executed;
 mod i18n;
 #[path = "raw_cli/log_budget.rs"]
 mod log_budget;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/login_probe_containment.rs"]
+mod login_probe_containment;
 #[path = "raw_cli/memory_hook.rs"]
 mod memory_hook;
 #[path = "raw_cli/mode.rs"]
