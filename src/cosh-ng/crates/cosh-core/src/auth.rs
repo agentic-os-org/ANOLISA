@@ -1,3 +1,4 @@
+use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -518,9 +519,26 @@ pub(crate) fn remove_auth_provider(
     })
 }
 
+/// Matches an HTTP auth-failure status as a standalone token.
+///
+/// Word boundaries (not `contains`) are load-bearing: provider/transport
+/// errors embed byte counts, line/column numbers, ports, and durations, and
+/// `connection reset after 14032 bytes` or `expected value at line 3 column
+/// 401` must not be classified as a credential failure — a false positive
+/// here triggers the interactive re-auth flow, retries the turn, and records
+/// `auth_error` in the audit log.
+fn auth_error_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"(?i)(?:\b401\b|\b403\b|\bunauthorized\b)")
+            .unwrap_or_else(|_| unreachable!("static auth error pattern must compile"))
+    })
+}
+
 /// Check if an error string indicates an auth failure (401/403).
 pub fn is_auth_error(error: &str) -> bool {
-    error.contains("401") || error.contains("403") || error.contains("Unauthorized")
+    auth_error_pattern().is_match(error)
 }
 
 #[cfg(test)]
@@ -529,6 +547,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+use std::sync::OnceLock;
 
     use super::*;
 
@@ -1115,10 +1134,41 @@ mod tests {
     }
 
     #[test]
-    fn is_auth_error_detects_401() {
+    fn is_auth_error_detects_auth_failures() {
         assert!(is_auth_error("API error 401: invalid api key"));
         assert!(is_auth_error("HTTP 403 Forbidden"));
+        assert!(is_auth_error("401 Unauthorized"));
+        assert!(is_auth_error("status code 403"));
         assert!(is_auth_error("Unauthorized access"));
-        assert!(!is_auth_error("API error 500: internal server error"));
+        assert!(is_auth_error("request failed: UNAUTHORIZED"));
+    }
+
+    #[test]
+    fn is_auth_error_rejects_embedded_numbers_in_transport_errors() {
+        // Byte counts, column numbers, ports, frame sizes, durations: each
+        // contains "401"/"403" as a substring but is a transport failure,
+        // not a credential failure — a false positive triggers the
+        // interactive re-auth flow and mislabels the audit event.
+        for error in [
+            "error decoding response body: expected value at line 3 column 401",
+            "connection reset after 14032 bytes",
+            "tcp connect error: connect() to 10.0.0.7:4013 failed",
+            "stream error: frame exceeded 3401 bytes",
+            "request completed in 403ms but response body was empty",
+            "HTTP header size 8401 bytes exceeds limit",
+        ] {
+            assert!(
+                !is_auth_error(error),
+                "transport error misclassified as auth: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_auth_error_rejects_unrelated_errors_and_lookalikes() {
+        assert!(!is_auth_error("connection refused"));
+        assert!(!is_auth_error("timeout after 30s"));
+        // `authorization` must not match the `unauthorized` token.
+        assert!(!is_auth_error("missing authorization header"));
     }
 }
