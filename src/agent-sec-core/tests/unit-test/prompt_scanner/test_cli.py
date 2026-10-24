@@ -637,3 +637,28 @@ def test_scan_prompt_invokes_middleware_and_writes_event():
     assert event.category == "prompt_scan"
     assert event.event_type == "prompt_scan"
     assert event.details["result"]["verdict"] == "deny"
+
+
+def test_scan_prompt_multi_turn_rejects_non_object_payload(tmp_path, monkeypatch):
+    """Non-object JSON in multi_turn mode must fail cleanly without calling invoke."""
+    from agent_sec_cli.prompt_scanner import cli as scanner_cli
+    from click.testing import CliRunner
+    import json
+
+    called = []
+    monkeypatch.setattr(
+        scanner_cli,
+        "invoke",
+        lambda *a, **k: called.append((a, k)) or type("R", (), {"exit_code": 0, "stdout": "{}", "data": {}})(),
+    )
+    runner = CliRunner()
+    for raw in ['[]', '"hello"', '123', 'null']:
+        result = runner.invoke(
+            scanner_cli.scanner_app,
+            ["--mode", "multi_turn"],
+            input=raw,
+        )
+        assert result.exit_code == 1
+        out = (result.stdout or "") + (result.stderr or "")
+        assert "payload must be a JSON object" in out
+    assert called == []
