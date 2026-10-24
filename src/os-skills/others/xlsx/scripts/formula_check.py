@@ -132,9 +132,17 @@ def extract_name_refs(formula: str) -> list[str]:
     This is approximate. False positives are possible; false negatives are rare.
     """
     names = []
-    # Remove quoted sheet references first to avoid false matches
-    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula)
-    formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
+    # Remove sheet references before scanning for name candidates. A sheet
+    # name only ever appears in a formula followed by "!", so strip the full
+    # reference — 3D ranges (Sheet1:Sheet2!A1), quoted names ('Q1 Data'!A1,
+    # with '' escaping an apostrophe) and plain prefixes (Sheet1!A1) — along
+    # with whatever the "!" introduces, case-insensitively: the reference can
+    # be an A1 cell (B7), a range (A1:B2) or a sheet-scoped name (myrate).
+    formula_clean = re.sub(
+        r"(?:'[^']*'|[A-Za-z_][A-Za-z0-9_.]*):(?:'[^']*'|[A-Za-z_][A-Za-z0-9_.]*)![A-Za-z0-9_$.:]+",
+        "", formula)
+    formula_clean = re.sub(r"'[^']*'![A-Za-z0-9_$.:]+", "", formula_clean)
+    formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Za-z0-9_$.:]+", "", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):
         candidate = m.group(1)
