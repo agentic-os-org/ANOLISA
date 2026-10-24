@@ -845,7 +845,7 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py --aw target/de
 工厂要求 `setting_sources=[]`、无 `settings` 覆盖、无 CLI plugins。`extra_args`
 仅允许 `strict-mcp-config: None`；SDK 原生 `strict_mcp_config` 也保留。模型和认证
 配置不变。通过 settings sources 发现项目 skills 的应用，需要先明确接入设计才能
-使用该首版受限 Bridge。每个前台 worker 只允许创建一个 client。
+使用该首版受限 Bridge。直接任务 worker 模式每进程只允许一个 client；多个任务客户端使用下文显式常驻入口。
 
 当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
@@ -973,3 +973,64 @@ Worker 1.1.74 的 `UpdateGoal` 只能完成或
 request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
 记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
 并发提交量；策略更新不会清空关联历史。
+
+## Pi 和 Claude SDK 常驻宿主
+
+镜像安装相互匹配的 AW、Provider 和固定版本 SDK。使用
+[共用配置示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.resident-sdk.yaml)，
+替换部署路径后选择目标：
+
+```bash
+aw run --config /etc/aw/aw.yaml --agent claude
+aw run --config /etc/aw/aw.yaml --agent pi
+```
+
+Claude target argv 使用应用的 Python 解释器，后接 `-m aw_claude -- -m application`。
+前台 Gunicorn 可使用 `-m aw_claude -- -m gunicorn -c conf/gunicorn.py main:app`，客户端
+在 fork 后的 worker 内创建。公共工厂接入方式：
+
+```python
+from aw_claude import create_client
+
+client = create_client(options)
+try:
+    await client.connect()
+    await client.query(prompt)
+    async for message in client.receive_response():
+        yield message
+finally:
+    await client.disconnect()
+```
+
+每次 query 使用新客户端，通过 resume/session-store 选项保留业务会话历史。多个客户端可以
+并发，分别使用自己的 cwd/env。`receive_response()` 和 `receive_messages()` 都在交付
+`ResultMessage` 时记录完成；缺少该消息的 EOF 会报错。保留 `finally` 中的 `disconnect()`，
+确保未完成的 query 仍执行 interrupt。MCP 公共工厂接点属于独立交付，常驻生命周期本身
+尚未增加 MCP 输出压缩。
+
+常驻 Pi 和 Claude host 会在发布 ready 前拒绝启用 AgentSight evidence 的配置。
+常驻 host 可设置 evidence `mode: off`；旧的任务模式继续支持 evidence。
+
+Pi 保留已有 SDK session 工厂，增加常驻入口：
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd /* application model/tools/options */ });
+}
+export async function runWorker({ withSession }) {
+  await serveRequests(async (request) => {
+    return withSession({ cwd: request.workspace, environment: request.environment },
+      async (session) => session.prompt(request.prompt));
+  });
+}
+```
+
+serveRequests 为业务服务，在工厂返回前配置业务回调。任务完成即关闭 session，同一 session
+并发 prompt 会被拒绝；其他路径也必须经过公共工厂。
+
+示例组合自定义 Hook、sec-core Bash 扫描及 Tokenless PreTool/PostTool。需要单独启动
+sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要明确的安全语义。常驻模式
+在回调错误时停止任务，包括 on_error: report；正常策略拒绝沿用原生语义。Claude 中断无法
+确认时会终止 AW 的自有前台进程组，部署需配置监督器重启。发送退出信号前先排空请求，
+外层 launcher 在两秒后强制回收。Schema/BeforeModel、Retrieve 的后续接点和授权依赖见
+[常驻合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/resident-sdk.md)。

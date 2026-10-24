@@ -2,6 +2,9 @@
 
 [English](../../en/adapters/claude-sdk-adapter.md)
 
+显式常驻模式见[常驻 SDK 生命周期](resident-sdk.md)。
+下文任务 worker 模式保留原有生命周期与失败策略。
+
 `claude-sdk` Adapter 启动一个前台 Python worker，使用 Claude Agent SDK 0.2.88
 及其 bundled Claude Code CLI 2.1.161。Python script 或 `-m` module 在公共工厂中
 显式使用 `aw_claude.create_client(options)`。AW 通过私有启动目录和 `PYTHONPATH`

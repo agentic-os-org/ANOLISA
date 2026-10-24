@@ -990,7 +990,7 @@ CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
 `strict_mcp_config` option is also preserved. Model/authentication options are
 unchanged. Applications which discover project skills through settings sources
 need an explicit integration design before using this restricted first bridge.
-Only one client can be created in each foreground worker.
+The direct task-worker mode permits one client per worker. Use the resident entrypoint below for multiple task clients.
 
 The `claude-sdk` adapter supports this restricted foreground worker factory;
 `aw agent connect` does not provide persistent installation for it, and all `--native-*`
@@ -1148,3 +1148,72 @@ claim set. Completed request claims are released; Hook correlation entries are
 retained until instance release. These are not a count of supported lifetime
 turns. Bound instance lifetime and concurrent submissions; policy updates do not
 reset correlation history.
+
+## Resident Pi and Claude SDK hosts
+
+Install matching AW, Providers and pinned SDK packages in the image. Use the
+[shared configuration example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.resident-sdk.yaml),
+replace its paths and select the target:
+
+```bash
+aw run --config /etc/aw/aw.yaml --agent claude
+aw run --config /etc/aw/aw.yaml --agent pi
+```
+
+For Claude, set the target argv to the application's Python interpreter followed
+by `-m aw_claude -- -m application`. A foreground Gunicorn host can use
+`-m aw_claude -- -m gunicorn -c conf/gunicorn.py main:app`; create task clients
+inside workers after fork. In the common client factory:
+
+```python
+from aw_claude import create_client
+
+client = create_client(options)
+try:
+    await client.connect()
+    await client.query(prompt)
+    async for message in client.receive_response():
+        yield message
+finally:
+    await client.disconnect()
+```
+
+Each query uses a fresh client. Resume/session-store options preserve application
+conversation history. Multiple clients can run concurrently with separate cwd/env.
+Both `receive_response()` and `receive_messages()` record completion when they
+deliver `ResultMessage`. EOF without that message raises an error; keep
+`disconnect()` in `finally` so unfinished queries still receive an interrupt.
+Use the existing tool factories until the separate managed MCP integration is
+available; resident lifecycle alone does not add MCP output compression.
+
+Resident Pi and Claude hosts reject enabled AgentSight evidence before publishing
+readiness. Set evidence `mode: off` for resident hosts; legacy task mode continues
+to support evidence.
+
+For Pi, export the existing SDK session factory and a resident host entrypoint:
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd /* application model/tools/options */ });
+}
+export async function runWorker({ withSession }) {
+  await serveRequests(async (request) => {
+    return withSession({ cwd: request.workspace, environment: request.environment },
+      async (session) => session.prompt(request.prompt));
+  });
+}
+```
+
+`serveRequests` is the application's server. Install business callbacks before
+returning from the factory. Close sessions at task completion; concurrent prompts
+on one session are rejected. Avoid creating unmanaged SDK clients elsewhere.
+
+The example composes custom Hooks, sec-core Bash scanning and Tokenless PreTool/
+PostTool. Start the sec-core daemon separately and supply a real custom Hook.
+Opaque MCP tools need explicit security semantics. Resident mode stops tasks on
+callback errors even for `on_error: report`; policy denial remains a normal native
+denial. A failed Claude interrupt terminates AW's owned foreground process group,
+so configure supervisor restart. Drain requests before sending termination: the
+outer launcher forces group cleanup after two seconds. Schema/BeforeModel and
+Retrieve require the later native seams and authorization work listed in the
+[resident contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/resident-sdk.md).

@@ -297,3 +297,5 @@ SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意
 
 [策略热更新设计](policy-reload.md) 说明生命周期、进程关联、固定入口、人工验收及
 后续 attach/steer 范围。
+
+受管根 binding 在没有任务 scope 时可使用 observation。任务 scope 及正在准备或持有 scope 的根拒绝 observation；已开启 observation 的根拒绝创建 scope。

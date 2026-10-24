@@ -221,6 +221,270 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-lifecycle",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-lifecycle",
+            "--scenario",
+            "lifecycle"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-lifecycle/result.json",
+              "values": {
+                "tasks": 26,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-cancel",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-cancel",
+            "--scenario",
+            "cancel"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-cancel/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-startup",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-startup",
+            "--scenario",
+            "startup"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-startup/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "validation-error",
+                  "initialize-error-concurrent-close",
+                  "initialize-cancel",
+                  "acknowledge-cancel",
+                  "acknowledge-expired"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-stop-failure",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-stop-failure",
+            "--scenario",
+            "stop-failure"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-stop-failure/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-messages",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-messages",
+            "--scenario",
+            "messages"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-messages/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "response-complete",
+                  "messages-complete",
+                  "response-eof",
+                  "messages-eof"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-eof-stop-failure",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-eof-stop-failure",
+            "--scenario",
+            "eof-stop-failure"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-eof-stop-failure/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "tasks": 1
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-observation",
+            "--scenario",
+            "observation"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "rejected_before_ready": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation-off",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-observation-off",
+            "--scenario",
+            "startup",
+            "--evidence-mode",
+            "off"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation-off/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "validation-error",
+                  "initialize-error-concurrent-close",
+                  "initialize-cancel",
+                  "acknowledge-cancel",
+                  "acknowledge-expired"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -418,6 +682,230 @@
                   "json-selected-output",
                   "rtk-retry-rescanned-denied",
                   "rtk-retry-allowed-post-neutral"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-lifecycle",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-lifecycle",
+            "--scenario",
+            "lifecycle",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-lifecycle/result.json",
+              "values": {
+                "tasks": 26,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-startup",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-startup",
+            "--scenario",
+            "startup",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-startup/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "acknowledge-expired",
+                  "worker-reuse"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-cancel",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-cancel",
+            "--scenario",
+            "cancel",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-cancel/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel-before-tool",
+                  "cancel-after-tool",
+                  "cancel-executing-tool"
+                ],
+                "values": {
+                  "passed": true,
+                  "model_requests": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-close-timeout",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-close-timeout",
+            "--scenario",
+            "close-timeout",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-close-timeout/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel-tool-timeout"
+                ],
+                "values": {
+                  "passed": true,
+                  "model_requests": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-observation",
+            "--scenario",
+            "observation",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "rejected_before_ready": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation-off",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-observation-off",
+            "--scenario",
+            "startup",
+            "--npm",
+            "{npm}",
+            "--evidence-mode",
+            "off"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation-off/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "acknowledge-expired",
+                  "worker-reuse"
                 ],
                 "values": {
                   "passed": true

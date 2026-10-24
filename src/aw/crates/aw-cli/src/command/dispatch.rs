@@ -134,6 +134,17 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ("close-event", value.close_event),
             ]),
         ),
+        Command::Scope(value) => crate::runtime(
+            "scope",
+            &options([
+                ("adapter", Some(value.bridge.adapter)),
+                ("binding", Some(value.bridge.binding)),
+                ("action", Some(value.action)),
+                ("event", value.event),
+                ("step", value.step),
+                ("on-error", value.on_error),
+            ]),
+        ),
         Command::Bridge(value) => crate::runtime(
             "bridge",
             &options([

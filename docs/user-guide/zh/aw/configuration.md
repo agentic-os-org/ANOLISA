@@ -188,3 +188,5 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 简单规则可以从 stdin 读取工具事件，向 stdout 输出 JSON `true` 或 `false`。
 配置决定命中时观察还是阻断。执行故障由 `on_error` 处理，安全检查通常选 `block`。
 按[布尔规则教程](../../../developer-guide/zh/aw/integration.md)准备脚本并验证允许和阻断两种情况。
+
+Pi / Claude 常驻目标沿用同一配置格式，按 [SDK worker 说明](../../../developer-guide/zh/aw/native-agents.md#pi-和-claude-sdk-常驻宿主) 选择常驻入口及公共工厂。

@@ -2,6 +2,9 @@
 
 [中文版](../../zh/adapters/pi-adapter.md)
 
+Explicit resident mode is described in [Resident SDK lifecycle](resident-sdk.md).
+The task-worker mode below retains its original one-worker lifecycle and failure policy.
+
 The Pi adapter supports the public Coding Agent/Core SDKs
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-agent-core` 0.84.2,
 with Node.js >=22.19.0 on Linux. Its entrypoint is `sdk`: one AW-owned foreground

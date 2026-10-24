@@ -51,12 +51,17 @@ if (process.env.AW_PI_PROBE === "1") {
   const app = await import(pathToFileURL(application).href);
   if (
     typeof app.createSession !== "function" ||
-    typeof app.run !== "function"
+    (typeof app.run !== "function" && typeof app.runWorker !== "function")
   ) {
     throw new Error(
       "Pi application must export createSession({sdk,args}) and run(session,{args})",
     );
   }
+  if (typeof app.runWorker === "function") {
+    if (typeof app.run === "function") throw new Error("Choose runWorker or run, not both");
+    const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
+    await runWorker(app, sdk, core, args);
+  } else {
   const installations = new Map();
   // All new/resume/fork/import replacements must use this common application factory.
   const createSession = async (options = {}) => {
@@ -87,4 +92,6 @@ if (process.env.AW_PI_PROBE === "1") {
       session.dispose();
     }
   }
+}
+
 }

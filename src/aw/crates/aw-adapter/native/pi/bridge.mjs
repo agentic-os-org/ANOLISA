@@ -1,10 +1,10 @@
 /** Compose AW with Pi's installed callbacks, preserving native permission and result semantics. */
-import { spawn } from "node:child_process";
+import { run } from "./transport.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 
-function configuration() {
+export function configuration() {
   const config = JSON.parse(readFileSync(process.env.AW_NATIVE_CONFIG, "utf8"));
   for (const key of ["executable", "binding", "ready_path", "ready_token"]) {
     if (typeof config[key] !== "string" || !config[key])
@@ -53,96 +53,41 @@ async function invoke(config, hook, payload, signal) {
   const input = Buffer.from(JSON.stringify(payload));
   if (input.length > 1024 * 1024) throw new Error("native_input_limit");
   if (signal?.aborted) throw new Error("callback_aborted");
-  return await new Promise((resolve, reject) => {
-    const child = spawn(
-      config.executable,
-      [
-        "hook",
-        "--adapter",
-        "pi",
-        "--binding",
-        config.binding,
-        "--event",
-        hook.event,
-        "--step",
-        hook.step,
-        "--on-error",
-        hook.on_error,
-      ],
-      { stdio: ["pipe", "pipe", "pipe"], detached: true },
-    );
-    let failure;
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
-    const stop = (error) => {
-      failure ??= error;
-      if (child.pid) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch (error) {
-          if (error.code !== "ESRCH") failure = error;
-        }
-      }
-    };
-    const abort = () => stop(new Error("callback_aborted"));
-    const timer = setTimeout(
-      () => stop(new Error("callback_timeout")),
-      hook.budget_ms + 3000,
-    );
-    signal?.addEventListener("abort", abort, { once: true });
-    child.on("error", stop);
-    child.stdin.on("error", stop);
-    child.stdout.on("data", (data) => {
-      if (stdout.length + data.length > 1024 * 1024)
-        stop(new Error("callback_stdout_limit"));
-      else stdout = Buffer.concat([stdout, data]);
-    });
-    child.stderr.on("data", (data) => {
-      if (stderr.length + data.length > 65536)
-        stop(new Error("callback_stderr_limit"));
-      else stderr = Buffer.concat([stderr, data]);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      if (stderr.length) process.stderr.write(stderr);
-      if (failure) return reject(failure);
-      if (code !== 0) return reject(new Error(`callback_exit_${code}`));
-      try {
-        const directive = stdout.length
-          ? JSON.parse(stdout.toString("utf8"))
-          : {};
-        if (
-          !directive ||
-          typeof directive !== "object" ||
-          Array.isArray(directive) ||
-          Object.keys(directive).some(
-            (key) => !["block", "reason", "aw_replacement"].includes(key),
-          ) ||
-          (directive.block !== undefined &&
-            typeof directive.block !== "boolean") ||
-          (directive.reason !== undefined &&
-            typeof directive.reason !== "string") ||
-          (hook.event === "tool.after" && directive.block === true)
-        ) {
-          throw new Error("unsupported_pi_directive");
-        }
-        if (Object.hasOwn(directive, "aw_replacement")) {
-          if (
-            hook.event !== "tool.after" ||
-            hook.step !== config.replacement_step
-          ) {
-            throw new Error("unauthorized_pi_replacement");
-          }
-          validateReplacement(payload.tool_response, directive.aw_replacement);
-        }
-        resolve(directive);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    child.stdin.end(input);
-  });
+  const response = config.scope
+    ? await config.scope.invoke(hook, payload, signal)
+    : await run(config.executable, ["hook", "--adapter", "pi", "--binding", config.binding,
+        "--event", hook.event, "--step", hook.step, "--on-error", hook.on_error],
+        input, hook.budget_ms + 3000, signal);
+  const { code, stdout } = response;
+  if (code !== 0) throw new Error(`callback_exit_${code}`);
+  const directive = stdout.length
+    ? JSON.parse(stdout.toString("utf8"))
+    : {};
+  if (
+    !directive ||
+    typeof directive !== "object" ||
+    Array.isArray(directive) ||
+    Object.keys(directive).some(
+      (key) => !["block", "reason", "aw_replacement"].includes(key),
+    ) ||
+    (directive.block !== undefined &&
+      typeof directive.block !== "boolean") ||
+    (directive.reason !== undefined &&
+      typeof directive.reason !== "string") ||
+    (hook.event === "tool.after" && directive.block === true)
+  ) {
+    throw new Error("unsupported_pi_directive");
+  }
+  if (Object.hasOwn(directive, "aw_replacement")) {
+    if (
+      hook.event !== "tool.after" ||
+      hook.step !== config.replacement_step
+    ) {
+      throw new Error("unauthorized_pi_replacement");
+    }
+    validateReplacement(payload.tool_response, directive.aw_replacement);
+  }
+  return directive;
 }
 
 // A projection may change one model-visible text slot, never the native result envelope.
@@ -176,8 +121,8 @@ function validateReplacement(result, replacement) {
 }
 
 /** Install after createAgentSession returns; resolve durable session identity at each preparation. */
-export function installSessionBridge(session) {
-  const config = configuration();
+export function installSessionBridge(session, scope = null) {
+  const config = { ...configuration(), scope };
   const agent = session.agent;
   if (!agent || typeof session.sessionManager?.getSessionId !== "function") {
     throw new Error("AW requires a Pi Coding AgentSession");
@@ -208,6 +153,11 @@ export function installSessionBridge(session) {
         process.stderr.write(
           `AW ${hook.event} step ${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`,
         );
+        if (config.scope) {
+          config.scope.failed = true;
+          agent.abort();
+          throw new Error("AW managed task stopped after a callback failure");
+        }
         if (hook.event === "tool.before" && hook.on_error === "block") {
           return {
             block: true,
@@ -219,7 +169,8 @@ export function installSessionBridge(session) {
     }
     return undefined;
   };
-  const before = async function (context, signal) {
+  let before = async function (context, signal) {
+    config.scope?.check();
     const original = await previousBefore?.call(agent, context, signal);
     if (original?.block) return original;
     const call = identifier(context.toolCall.id, "tool call id");
@@ -248,7 +199,8 @@ export function installSessionBridge(session) {
     active.set(call, identity);
     return original;
   };
-  const after = async function (context, signal) {
+  let after = async function (context, signal) {
+    config.scope?.check();
     const original = await previousAfter?.call(agent, context, signal);
     const result = { ...context.result };
     for (const key of ["content", "details", "usage", "terminate"]) {
@@ -256,6 +208,11 @@ export function installSessionBridge(session) {
     }
     const isError = original?.isError ?? context.isError;
     const identity = active.get(context.toolCall.id);
+    if (!identity && config.scope) {
+      config.scope.failed = true;
+      agent.abort();
+      throw new Error("AW managed completion lacks preparation identity");
+    }
     if (!identity) {
       process.stderr.write(
         "AW tool.after skipped: completed call lacks preparation identity\n",
@@ -288,6 +245,14 @@ export function installSessionBridge(session) {
     }
     return original;
   };
+  if (config.scope) {
+    const guarded = (callback) => async (context, signal) => {
+      try { return await callback(context, signal); }
+      catch (error) { config.scope.failed = true; agent.abort(); throw error; }
+    };
+    before = guarded(before);
+    after = guarded(after);
+  }
   let managed = true;
   // ponytail: descriptors last for this Agent; rebind with a fresh factory result.
   for (const [key, callback] of [
@@ -317,6 +282,23 @@ export function installSessionBridge(session) {
     ready() {
       if (agent.beforeToolCall !== before || agent.afterToolCall !== after)
         throw new Error("Pi callbacks replaced before readiness");
+      publishReady(config);
+    },
+    dispose() {
+      managed = false;
+      if (agent.beforeToolCall === before)
+        agent.beforeToolCall = previousBefore;
+      if (agent.afterToolCall === after) agent.afterToolCall = previousAfter;
+      delete agent[installed];
+      active.clear();
+      unsubscribe();
+    },
+  };
+}
+const installed = Symbol("aw.pi.installed");
+
+
+export function publishReady(config = configuration()) {
       const temporary = `${config.ready_path}.${process.pid}.tmp`;
       try {
         writeFileSync(
@@ -338,16 +320,4 @@ export function installSessionBridge(session) {
           if (error.code !== "ENOENT") throw error;
         }
       }
-    },
-    dispose() {
-      managed = false;
-      if (agent.beforeToolCall === before)
-        agent.beforeToolCall = previousBefore;
-      if (agent.afterToolCall === after) agent.afterToolCall = previousAfter;
-      delete agent[installed];
-      active.clear();
-      unsubscribe();
-    },
-  };
 }
-const installed = Symbol("aw.pi.installed");

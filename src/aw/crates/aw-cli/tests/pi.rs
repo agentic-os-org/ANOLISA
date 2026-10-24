@@ -65,6 +65,56 @@ fn foreground_factory_installs_both_hooks_and_releases_binding() {
     assert!(fixture.root.join("side-effect").exists());
     service.released(&fixture);
 }
+
+#[test]
+fn resident_observation_is_rejected_before_ready_but_off_is_allowed() {
+    for mode in ["auto", "off"] {
+        let fixture = Fixture::new();
+        let mut document = setup(&fixture);
+        document["spec"]["agents"]["pi"]["evidence"] = json!({
+            "source_id":"fixture", "endpoint":"http://127.0.0.1:1", "mode":mode,
+            "query_timeout_ms":100,
+            "query_bytes":1048576,"max_items":32,"max_bytes":262144,
+        });
+        fs::write(fixture.root.join("app.mjs"),
+            "import {writeFileSync} from 'node:fs'; import {join} from 'node:path';\nexport async function createSession(){throw new Error('factory must stay lazy');}\nexport async function runWorker(){writeFileSync(join(process.env.FAKE_ROOT,'worker-started'),'started');}\n").unwrap();
+        let service = Service::start(&fixture, &document);
+        let output = fixture.run(launch(&fixture));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if mode == "auto" {
+            assert!(!output.status.success());
+            assert!(
+                stderr.contains("AW resident Pi does not support AgentSight evidence"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("native hooks ready"));
+            assert!(!fixture.root.join("worker-started").exists());
+        } else {
+            assert!(output.status.success(), "{stderr}");
+            assert!(fixture.root.join("worker-started").exists());
+        }
+        service.released(&fixture);
+    }
+}
+
+#[test]
+fn legacy_pi_observation_remains_supported() {
+    let fixture = Fixture::new();
+    let mut document = setup(&fixture);
+    document["spec"]["agents"]["pi"]["evidence"] = json!({
+        "source_id":"fixture", "endpoint":"http://127.0.0.1:1", "query_timeout_ms":100,
+        "query_bytes":1048576,"max_items":32,"max_bytes":262144,
+    });
+    let service = Service::start(&fixture, &document);
+    let output = fixture.run(launch(&fixture));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.root.join("side-effect").exists());
+    service.released(&fixture);
+}
 #[test]
 fn policy_denial_and_native_mutation_skip_execution_and_after() {
     for variable in ["PI_DENY", "PI_MUTATE"] {

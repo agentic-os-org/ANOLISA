@@ -185,3 +185,5 @@ nightly account Secret; QwenPaw uses a local deterministic model. See
 [CI coverage](CONTRIBUTING.md#daily-ci-and-nightly-integration) for the full boundary.
 
 - [Development environment and tests](CONTRIBUTING.md)
+
+[Resident Pi and Claude SDK hosts](docs/design/en/adapters/resident-sdk.md) use one configuration and separate `--agent` targets, with task-owned bindings and strict callback failure handling.

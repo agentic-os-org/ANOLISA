@@ -462,6 +462,34 @@
     "sdk-scope-ack-audit-failure": {
       "target": "aw-service/lib/aw_service",
       "test": "runtime::scopes::tests::failed_acknowledgement_audit_cancels_committed_task"
+    },
+    "sdk-scope-transport": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles"
+    },
+    "sdk-scope-expired-close": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::expired_sdk_handoff_can_close_without_reviving_callbacks"
+    },
+    "sdk-scope-process-cli": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers"
+    },
+    "sdk-scope-observation-root": {
+      "target": "aw-cli/test/evidence",
+      "test": "scopes::owned_roots_allow_observation_and_reject_task_admission"
+    },
+    "sdk-scope-observation-child": {
+      "target": "aw-cli/test/evidence",
+      "test": "scopes::preparing_and_active_task_scopes_exclude_observation"
+    },
+    "pi-resident-observation": {
+      "target": "aw-cli/test/pi",
+      "test": "resident_observation_is_rejected_before_ready_but_off_is_allowed"
+    },
+    "pi-legacy-observation": {
+      "target": "aw-cli/test/pi",
+      "test": "legacy_pi_observation_remains_supported"
     }
   },
   "agents": {
@@ -516,7 +544,12 @@
       },
       "lifecycle": [
         "claude-sdk-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli",
+        "sdk-scope-observation-root",
+        "sdk-scope-observation-child"
       ],
       "security": [
         "security-retry"
@@ -606,7 +639,14 @@
       },
       "lifecycle": [
         "pi-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli",
+        "sdk-scope-observation-root",
+        "sdk-scope-observation-child",
+        "pi-resident-observation",
+        "pi-legacy-observation"
       ],
       "security": [
         "security-retry"

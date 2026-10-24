@@ -2,6 +2,9 @@
 
 [中文版](../../zh/adapters/claude-sdk-adapter.md)
 
+Explicit resident mode is described in [Resident SDK lifecycle](resident-sdk.md).
+The task-worker mode below retains its original one-worker lifecycle and failure policy.
+
 The `claude-sdk` Adapter launches one foreground Python worker with Claude Agent
 SDK 0.2.88 and its bundled Claude Code CLI 2.1.161. The Python script or `-m`
 module explicitly uses `aw_claude.create_client(options)` in its public factory.

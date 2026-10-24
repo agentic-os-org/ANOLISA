@@ -328,7 +328,8 @@ class NativeTests(GateFixture):
                         elif mode == "renamed":
                             rows[0][spec["key"]] = "unexpected-case"
                         elif mode == "duplicate":
-                            rows[0] = rows[1]
+                            # Single-case reports need an extra row to form a duplicate.
+                            rows[:] = [rows[0]] * max(2, len(rows))
                         elif spec.get("values"):
                             rows[0][next(iter(spec["values"]))] = False
                         else:

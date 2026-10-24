@@ -385,3 +385,5 @@ claimed across updates; evidence is built from the owning Host snapshot.
 
 The [policy reload design](policy-reload.md) defines the lifecycle, process
 association, pinned entrypoints, manual acceptance and later attach/steer scope.
+
+Owned roots may use observation while no scopes exist. Task scopes and roots with preparing or active scopes reject observation; active root observation rejects opening a scope.
