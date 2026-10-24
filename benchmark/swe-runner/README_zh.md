@@ -166,7 +166,7 @@ swe-runner run \
 
 过滤按以下顺序执行：
 
-1. `--instance-id`
+1. `--instance-id` 或 `--instances-file`
 2. `--filter`
 3. `--slice`
 
@@ -185,6 +185,23 @@ swe-runner run \
   --agent cosh \
   --instance-id django__django-11999,matplotlib__matplotlib-18869
 ```
+
+需要复用筛选集合时，可将实例 ID 按一行一个保存为 UTF-8 文件：
+
+```text
+# reviewed subset
+django__django-11999
+matplotlib__matplotlib-18869
+```
+
+```bash
+swe-runner run --agent cosh --instances-file selected-instances.txt
+```
+
+文件允许空行、以 `#` 开头的整行注释及 UTF-8 BOM；重复 ID 只保留第一次。
+`--instances-file` 与 `--instance-id` 互斥，空文件或无法读取的文件会在执行前
+报错。文件只读取一次，解析出的 ID 保存到 run settings。匹配实例保持数据集
+顺序，再应用 `--filter` 和 `--slice`；所选数据集中不存在的 ID 不匹配任何实例。
 
 ### 续跑与重跑
 
@@ -295,6 +312,7 @@ swe-runner run \
 | `--slice` | 无 | 实例切片，如 `0:10`、`10:`、`:5` |
 | `--filter` | 无 | 实例 ID 正则过滤 |
 | `--instance-id, -i` | 无 | 指定实例 ID，多个用逗号分隔 |
+| `--instances-file` | 无 | UTF-8 ID 文件，一行一个，与 `--instance-id` 互斥 |
 | `--workers, -w` | `1` | 并发 worker 数 |
 | `--docker-pull-registry` | 无 | Docker pull 时使用的 registry host |
 | `--use-skill` | `false` | 从 `--skills-dir` 读取 skill 资源 |
