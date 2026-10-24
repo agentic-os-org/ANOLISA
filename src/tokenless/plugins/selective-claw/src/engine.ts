@@ -168,12 +168,10 @@ export class SelectiveContextEngine implements ContextEngine {
     this.activeSessionId = params.sessionId;
     this.touchSession(params.sessionId);
 
-    let records: MessageRecord[];
-    if (params.messages && params.messages.length > 0) {
-      records = this.reconcileMessages(params.sessionId, params.messages);
-    } else {
-      records = this.store.getMessages(params.sessionId);
-    }
+    const archive = this.store.getMessages(params.sessionId);
+    const records = params.messages && params.messages.length > 0
+      ? this.reconcileMessages(params.sessionId, params.messages, archive)
+      : archive;
 
     let messages: AgentMessage[];
     if (params.messages && params.messages.length > 0) {
@@ -194,7 +192,7 @@ export class SelectiveContextEngine implements ContextEngine {
     const turns = this.deriveTurns(messages);
     this.cacheTurnMessages(params.sessionId, turns);
 
-    const bindings = this.bindSummaryTurns(params.sessionId, turns, records);
+    const bindings = this.bindSummaryTurns(turns, records, archive);
     const summaries = await this.generateMissingSummaries(params.sessionId, turns, bindings);
 
     const result = this.assembler.assemble({
@@ -224,11 +222,10 @@ export class SelectiveContextEngine implements ContextEngine {
     this.activeSessionId = params.sessionId;
     this.touchSession(params.sessionId);
 
-    if (params.messages && params.messages.length > 0) {
-      this.reconcileMessages(params.sessionId, params.messages);
-    }
-
     const stored = this.store.getMessages(params.sessionId);
+    if (params.messages && params.messages.length > 0) {
+      this.reconcileMessages(params.sessionId, params.messages, stored);
+    }
     if (stored.length === 0) return;
 
     const messages = stored.map((message) => this.restoreMessage(message));
@@ -236,7 +233,7 @@ export class SelectiveContextEngine implements ContextEngine {
     this.cacheTurnMessages(params.sessionId, turns);
 
     if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
-      const bindings = this.bindSummaryTurns(params.sessionId, turns, stored);
+      const bindings = this.bindSummaryTurns(turns, stored, stored);
       await this.generateMissingSummaries(params.sessionId, turns, bindings);
     }
   }
@@ -286,8 +283,7 @@ export class SelectiveContextEngine implements ContextEngine {
     return { found: result.length, turns: result };
   }
 
-  private reconcileMessages(sessionId: string, messages: AgentMessage[]): MessageRecord[] {
-    const records = this.store.getMessages(sessionId);
+  private reconcileMessages(sessionId: string, messages: AgentMessage[], records: MessageRecord[]): MessageRecord[] {
     const stored = records.map((message) => ({
       role: message.role,
       content: message.content,
@@ -311,16 +307,20 @@ export class SelectiveContextEngine implements ContextEngine {
 
     const overlap = suffixOverlap(stored.slice(matchLen), incoming.slice(matchLen));
     const toImport = messages.slice(matchLen + overlap);
-    this.importMessages(sessionId, toImport);
-    const imported = this.store.getMessages(sessionId).slice(stored.length);
-    return [
+    const imported = this.importMessages(sessionId, toImport);
+    const matched = [
       ...records.slice(0, matchLen),
       ...records.slice(records.length - overlap),
+    ];
+    records.push(...imported);
+    return [
+      ...matched,
       ...imported,
     ];
   }
 
-  private importMessages(sessionId: string, messages: AgentMessage[]): void {
+  private importMessages(sessionId: string, messages: AgentMessage[]): MessageRecord[] {
+    const imported: MessageRecord[] = [];
     let seq = this.store.getNextSeq(sessionId);
     let turnSeq = this.store.getMaxTurnSeq(sessionId);
 
@@ -334,7 +334,7 @@ export class SelectiveContextEngine implements ContextEngine {
         turnSeq = 1;
       }
 
-      this.store.createMessage({
+      imported.push(this.store.createMessage({
         sessionId,
         seq,
         turnSeq,
@@ -342,18 +342,19 @@ export class SelectiveContextEngine implements ContextEngine {
         content,
         tokenCount: estimateTokens(content),
         rawMessage: JSON.stringify(msg),
-      });
+      }));
       seq++;
     }
+    return imported;
   }
 
   private bindSummaryTurns(
-    sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
     records: MessageRecord[],
+    archive: MessageRecord[],
   ): Map<number, number> {
     const archived = new Map<number, MessageRecord[]>();
-    for (const record of this.store.getMessages(sessionId)) {
+    for (const record of archive) {
       const group = archived.get(record.turnSeq) ?? [];
       group.push(record);
       archived.set(record.turnSeq, group);
