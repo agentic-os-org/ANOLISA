@@ -46,6 +46,9 @@ impl Adapter for ClaudeSdk {
         Ok(Box::new(Prepared { input }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if native.get("aw_source").is_some() {
+            return super::claude_mcp::normalize(binding, event, native);
+        }
         super::sdk_tools::normalize_tools(binding, event, native, "claude-sdk")
     }
 
@@ -81,6 +84,10 @@ impl PreparedLaunch for Prepared {
         context.files.write(
             "aw_resident.py",
             include_bytes!("../../native/claude-sdk/aw_resident.py"),
+        )?;
+        context.files.write(
+            "aw_mcp.py",
+            include_bytes!("../../native/claude-sdk/aw_mcp.py"),
         )?;
         let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
         let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "hooks": hooks}))?)?;

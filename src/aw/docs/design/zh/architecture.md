@@ -165,3 +165,5 @@ Query 才能使用该 daemon。工具分发复用现有 CLI callback → service
 [策略更新契约](runtime/policy-reload.md#qoder-sdk-请求准入)。
 
 [常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi / Claude 的每客户端任务准入、回调路由、fail-close 与释放边界。
+
+[Claude 受管 MCP handler](adapters/claude-mcp.md) 使用明确来源、任务所属调用身份和可靠成功状态，复用现有 Provider 链路采纳结果。

@@ -490,6 +490,10 @@
     "pi-legacy-observation": {
       "target": "aw-cli/test/pi",
       "test": "legacy_pi_observation_remains_supported"
+    },
+    "claude-managed-mcp": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::claude_mcp::tests::mcp_source_keeps_scope_identity_and_only_successful_plain_text_is_replaceable"
     }
   },
   "agents": {
@@ -549,13 +553,15 @@
         "sdk-scope-expired-close",
         "sdk-scope-process-cli",
         "sdk-scope-observation-root",
-        "sdk-scope-observation-child"
+        "sdk-scope-observation-child",
+        "claude-managed-mcp"
       ],
       "security": [
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "claude-managed-mcp"
       ]
     },
     "hermes": {

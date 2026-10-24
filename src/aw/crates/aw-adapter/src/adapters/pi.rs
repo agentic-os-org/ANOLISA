@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf, time::Duration};
 
 const VERSION: &str = "0.84.2";
+use super::sdk_tools::invocation_uuid;
+
 pub(crate) struct Pi;
 struct Prepared {
     input: LaunchInput,
@@ -217,15 +219,6 @@ fn routes(
 
 // Model-issued tool IDs may recur in later turns; only this per-preparation UUID
 // binds AW before/after without changing the durable SDK session identity.
-fn invocation_uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, byte)| match i {
-            8 | 13 | 18 | 23 => byte == b'-',
-            14 => byte == b'4',
-            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
-            _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
-        })
-}
 
 #[cfg(test)]
 mod tests {
