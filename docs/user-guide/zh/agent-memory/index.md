@@ -233,6 +233,12 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 
 ### Tier B — 结构化检索（6 个）
 
+关键词搜索时，向 `memory_search` 传入普通文本，例如
+`{"query":"config.toml","mode":"bm25"}`。带点的文件名、域名和版本号均可作为
+搜索词。`AND`、`NOT` 和 `OR` 按字面文本处理：搜索 `NOT NULL` 查找的是这些文字。
+多个搜索词用空格分隔即可，无需插入 `OR`。多个搜索词优先要求全部匹配；没有匹配项时，现有回退策略可返回
+部分词匹配的结果。短搜索词（包括双字中文词）仍使用子串搜索回退。
+
 | 工具 | 必填 | 可选 | 返回 |
 |------|------|------|------|
 | `memory_search` | `query` | `top_k`（默认 5）、`mode`（bm25/vector/hybrid）、`category` | `{path, score, snippet, suspicious}` 数组 |
