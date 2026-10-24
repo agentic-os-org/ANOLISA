@@ -316,6 +316,14 @@ def create_client(options: ClaudeAgentOptions) -> Any:
     return _create_task_client(options)
 
 
+def create_sdk_mcp_server(name: str, version: str = "1.0.0", tools: Any = None) -> Any:
+    """Create an explicitly managed in-process MCP server for a resident task client."""
+    if os.environ.get("AW_CLAUDE_RESIDENT") != "1":
+        raise RuntimeError("Managed MCP requires the AW resident entrypoint")
+    from aw_mcp import create_sdk_mcp_server as factory
+    return factory(name, version, tools)
+
+
 if __name__ == "__main__":
     from aw_resident import main
     main()

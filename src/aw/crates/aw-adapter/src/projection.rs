@@ -136,6 +136,9 @@ fn openclaw_result_failed(value: &Value) -> bool {
 
 /// Select the supported native text slot without modifying its envelope.
 pub fn project(adapter: &str, native: &Value) -> Option<Value> {
+    if adapter == "claude-sdk" && native.get("aw_source").is_some() {
+        return crate::adapters::claude_mcp::project(native);
+    }
     let value = decoded_result(adapter, native);
     let (_, text) = text_slot(adapter, &value)?;
     let (name, input) = tool(adapter, native);
@@ -200,6 +203,9 @@ pub fn project(adapter: &str, native: &Value) -> Option<Value> {
 pub fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
     if text.is_empty() || text.len() > aw_provider::MAX_MESSAGE_BYTES {
         return Err("replacement text must be nonempty and bounded".into());
+    }
+    if adapter == "claude-sdk" && native.get("aw_source").is_some() {
+        return crate::adapters::claude_mcp::reply(native, text);
     }
     let mut value = decoded_result(adapter, native);
     let (pointer, _) =
