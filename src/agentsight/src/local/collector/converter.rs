@@ -60,7 +60,14 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         || content.contains("$patch")
         || content.contains("$set")
     {
-        let events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
+        let mut events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
+        // Legacy (<= 0.38) files are one pretty-printed document: the JSONL
+        // pass comes back empty and only the whole-file fallback absorbs it.
+        if events.is_empty() {
+            if let Some(doc) = agentsight_trajectory_collector::gemini::legacy_document(content) {
+                events.push(doc);
+            }
+        }
         if agentsight_trajectory_collector::gemini::is_gemini_chat(&events) {
             return agentsight_trajectory_collector::gemini::convert_gemini_events(
                 &events,
@@ -524,6 +531,38 @@ mod tests {
         assert_eq!(traj.steps[0].source, StepSource::User);
         assert_eq!(traj.steps[0].message, "hi");
         assert_eq!(traj.steps[1].source, StepSource::Agent);
+        assert_eq!(traj.steps[1].message, "hello");
+    }
+
+    #[test]
+    fn legacy_gemini_document_delegates_to_gemini_converter() {
+        // <= 0.38 wrote `JSON.stringify(conversation, null, 2)`: no line
+        // parses as JSONL, so the viewer needs the whole-file fallback.
+        let content = concat!(
+            "{\n",
+            "  \"sessionId\": \"g-legacy\",\n",
+            "  \"projectHash\": \"h\",\n",
+            "  \"messages\": [\n",
+            "    {\n",
+            "      \"id\": \"m1\",\n",
+            "      \"timestamp\": \"2026-08-03T09:00:01.000Z\",\n",
+            "      \"type\": \"user\",\n",
+            "      \"content\": \"hi\"\n",
+            "    },\n",
+            "    {\n",
+            "      \"id\": \"m2\",\n",
+            "      \"timestamp\": \"2026-08-03T09:00:02.000Z\",\n",
+            "      \"type\": \"gemini\",\n",
+            "      \"content\": \"hello\"\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "gemini-cli");
+        assert_eq!(traj.session_id.as_deref(), Some("g-legacy"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].message, "hi");
         assert_eq!(traj.steps[1].message, "hello");
     }
 

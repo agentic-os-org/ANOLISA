@@ -34,6 +34,12 @@ Anything else works too — add a rule, as described in
 - **Codex CLI** statically links its TLS library, so AgentSight falls back to byte-pattern matching
   and a per-version offset table. A brand-new Codex release may need a refreshed entry in
   `codex_offsets`.
+- **Gemini CLI** trajectories are collected from the session files under
+  `~/.gemini/tmp/<project>/chats/session-*.jsonl`, no configuration needed. Project names come from
+  each project directory's `.project_root` marker. The collector replays the CLI's correction records
+  (`$rewindTo`, `$patch`, `$set`) before converting, so a collected trajectory matches the
+  conversation the CLI itself would resume; sub-agent transcripts nested under the parent session id
+  are collected as sub-agent trajectories.
 - **Hermes** trajectories are also available without eBPF. The trajectory collector opens
   `$HERMES_HOME/state.db` read-only, converts active messages, reasoning, tool calls, tool results,
   and session Token totals to ATIF v1.7, and follows committed SQLite WAL updates. When `scan_dirs`

@@ -31,6 +31,10 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
   确实连上了 gateway。
 - **Codex CLI** 静态链接 TLS 库，AgentSight 会退化到字节模式匹配加逐版本 offset 表。刚发布的 Codex
   版本可能需要更新 `codex_offsets` 条目。
+- **Gemini CLI** 轨迹直接从 `~/.gemini/tmp/<project>/chats/session-*.jsonl` 会话文件采集，无需配置。
+  项目名取自各项目目录下的 `.project_root` 标记文件。采集器在转换前会重放 CLI 的修正记录
+  （`$rewindTo`、`$patch`、`$set`），因此采集到的轨迹与 CLI 恢复会话时看到的对话一致；嵌套在父
+  会话 ID 下的子 Agent 转录会作为子 Agent 轨迹采集。
 - **Hermes** 无需 eBPF 也能采集轨迹。轨迹采集器以只读方式打开 `$HERMES_HOME/state.db`，把有效消息、
   推理内容、工具调用、工具结果和会话 Token 汇总转换为 ATIF v1.7，并持续读取 SQLite WAL 中已提交的
   更新。设置 `scan_dirs` 后，需显式包含 Hermes home 目录或 `state.db` 路径。
