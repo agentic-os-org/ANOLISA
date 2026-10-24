@@ -231,6 +231,8 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_promote` | `session_path`、`store_path` | — | 把会话 scratch 文件原子移入持久化仓 |
 | `mem_session_log` | — | — | 当前会话 JSONL |
 
+`mem_edit` 和设置了 `overwrite=true` 的 `mem_write` 会先写好完整的新内容，再替换目标文件；替换前的写入失败会保留原内容。操作需要父目录可写，并保留普通文件权限、所有者和扩展属性；替换时会清除 set-ID 位和文件 capabilities。其他硬链接和已打开的文件句柄仍指向原内容。如果错误明确提示替换已完成但目录同步失败，请先读取文件再决定是否重试，此时新内容已经可见。
+
 ### Tier B — 结构化检索（6 个）
 
 | 工具 | 必填 | 可选 | 返回 |

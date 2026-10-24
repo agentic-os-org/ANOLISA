@@ -243,6 +243,8 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `mem_promote` | `session_path`, `store_path` | — | atomically move session scratch file into the persistent store |
 | `mem_session_log` | — | — | current session JSONL |
 
+`mem_edit` and `mem_write` with `overwrite=true` prepare a complete replacement before publishing it. A write failure before publication leaves the original content intact. These operations require a writable parent directory and preserve ordinary file permissions, ownership and extended attributes; set-ID bits and file capabilities are cleared on replacement. Other hard links and already-open handles retain the previous contents. If an error explicitly says the replacement was published but directory sync failed, read the file before retrying; its new content is already visible.
+
 ### Tier B — structured retrieval (6)
 
 | Tool | Required | Optional | Returns |

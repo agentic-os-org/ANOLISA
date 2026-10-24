@@ -71,7 +71,7 @@ pub fn write(svc: &MemoryService, path: &str, content: &str, overwrite: bool) ->
     }
 
     let result = if overwrite {
-        safe_fs::write(svc.mount.root_fd.as_fd(), rel_path, content.as_bytes())
+        safe_fs::write_atomic(svc.mount.root_fd.as_fd(), rel_path, content.as_bytes())
     } else {
         safe_fs::write_create_new(svc.mount.root_fd.as_fd(), rel_path, content.as_bytes())
     };
