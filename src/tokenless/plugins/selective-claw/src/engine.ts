@@ -17,6 +17,7 @@ import { Assembler } from "./assembler.js";
 import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
+const MAX_CONCURRENT_SUMMARIES = 4;
 
 type ReconcileMessage = { role: string; content: string; toolIdentity: string | null };
 
@@ -77,6 +78,8 @@ export class SelectiveContextEngine implements ContextEngine {
   private migrated = false;
   private config: SelectiveClawConfig;
   private summarizeFn: SummarizeFn | null = null;
+  private activeSummaries = 0;
+  private summaryWaiters: Array<() => void> = [];
 
   constructor(
     private db: DatabaseSync,
@@ -400,7 +403,7 @@ export class SelectiveContextEngine implements ContextEngine {
         const text = turn.messages
           .map((message) => `${message.role}: ${this.extractContent(message)}`)
           .join("\n");
-        return summarizeFn(text).then((summary) => ({ turnSeq: turn.turnSeq, summary }));
+        return this.summarizeBounded(text, summarizeFn).then((summary) => ({ turnSeq: turn.turnSeq, summary }));
       }),
     );
 
@@ -418,6 +421,21 @@ export class SelectiveContextEngine implements ContextEngine {
       }
     }
     return summaries;
+  }
+
+  private async summarizeBounded(text: string, summarize: SummarizeFn): Promise<string> {
+    if (this.activeSummaries >= MAX_CONCURRENT_SUMMARIES) {
+      await new Promise<void>((resolve) => this.summaryWaiters.push(resolve));
+    } else {
+      this.activeSummaries++;
+    }
+    try {
+      return await summarize(text);
+    } finally {
+      const next = this.summaryWaiters.shift();
+      if (next) next();
+      else this.activeSummaries--;
+    }
   }
 
   private cacheTurnMessages(
