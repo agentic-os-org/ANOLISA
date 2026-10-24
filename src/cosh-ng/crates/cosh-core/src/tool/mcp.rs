@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, timeout_at, Duration, Instant};
 
 use crate::cli::{McpArgs, McpCommand};
-use crate::config::{CoreConfig, McpServerConfig};
+use crate::config::{expand_env_vars, CoreConfig, McpServerConfig};
 use crate::state::{self, MCP_SERVERS_STATE};
 
 use super::{Tool, ToolContext, ToolKind, ToolRegistry, ToolResult};
@@ -1048,20 +1048,6 @@ fn configure_child_environment(
     Ok(())
 }
 
-fn expand_env_vars(value: &str) -> String {
-    let mut expanded = value.to_string();
-    while let Some(start) = expanded.find("${") {
-        let Some(end_offset) = expanded[start..].find('}') else {
-            break;
-        };
-        let end = start + end_offset;
-        let variable = &expanded[start + 2..end];
-        let replacement = std::env::var(variable).unwrap_or_default();
-        expanded.replace_range(start..=end, &replacement);
-    }
-    expanded
-}
-
 fn format_tool_result(result: &Value) -> ToolResult {
     let is_error = result
         .get("isError")
@@ -1788,5 +1774,13 @@ done
             "file:///tmp/provided-workspace"
         );
         assert_eq!(roots[0]["name"].as_str().unwrap(), "provided-workspace");
+    }
+
+    #[test]
+    fn expand_env_vars_uses_shared_single_pass_implementation() {
+        std::env::set_var("COSH_TEST_MCP_SMOKE", "${COSH_TEST_MCP_SMOKE}");
+        let result = expand_env_vars("cmd-${COSH_TEST_MCP_SMOKE}");
+        assert_eq!(result, "cmd-${COSH_TEST_MCP_SMOKE}");
+        std::env::remove_var("COSH_TEST_MCP_SMOKE");
     }
 }
