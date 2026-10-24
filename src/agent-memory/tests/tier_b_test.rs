@@ -155,6 +155,35 @@ fn search_returns_chinese_hits() {
     assert_eq!(hits[0].path, "zh.md");
 }
 
+#[test]
+fn search_malformed_agent_scope_param_errors() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/a.md", "peanuts are legumes", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2));
+
+    // The explicit MCP parameter is passed straight through to
+    // `search_scoped`, so a value that is not one of the three documented
+    // spellings must error there instead of silently degrading to shared
+    // (unscoped) search over every agent's memories.
+    for bad in ["isolated", "filter", "isolatd:alpha"] {
+        let err = svc
+            .memory_search("peanuts", 5, None, None, Some(bad))
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidArgument(_)),
+            "expected InvalidArgument for {bad:?}, got {err:?}"
+        );
+    }
+
+    // `shared` is the documented spelling for "no filtering".
+    let hits = svc
+        .memory_search("peanuts", 5, None, None, Some("shared"))
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "notes/a.md");
+}
+
 // ---------- memory_observe ----------
 
 #[test]
