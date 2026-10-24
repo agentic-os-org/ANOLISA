@@ -158,7 +158,10 @@ def redacted_json_file(path: Path | str | None) -> dict[str, Any] | None:
     try:
         parsed: Any = json.loads(file_path.read_text(encoding="utf-8"))
         redacted = _redact_sensitive(parsed)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # ValueError covers both a JSON syntax error and a config file that is
+        # not UTF-8 (UnicodeDecodeError); an unreadable agent config must not
+        # abort input-manifest generation for the whole run.
         logger.warning("INPUT_MANIFEST_JSON_REDACTION_FAILED file=%s", file_path)
         return None
     if not isinstance(redacted, dict):
