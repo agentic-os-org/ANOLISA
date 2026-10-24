@@ -14,6 +14,11 @@ use specs::READONLY_SPECS;
 
 pub use specs::PathMode;
 
+// Shared with the readonly pipeline validator so the pipeline's `ps`
+// stage admits exactly the argument shapes the broker/compound paths
+// allow — one source of truth for environment-revealing flags.
+pub(crate) use validators::is_readonly_ps;
+
 // ── Evaluator ──
 
 pub fn is_readonly_command(tokens: &[String]) -> bool {
