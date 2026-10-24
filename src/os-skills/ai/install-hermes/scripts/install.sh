@@ -1052,8 +1052,12 @@ setup_path() {
 
     # Create a user-facing shim for the hermes command.
     mkdir -p "$command_link_dir"
-    ln -sf "$HERMES_BIN" "$command_link_dir/hermes"
-    log_success "Symlinked hermes → $command_link_display_dir/hermes"
+    if [ "$HERMES_BIN" -ef "$command_link_dir/hermes" ]; then
+        log_info "hermes is already available at $command_link_display_dir/hermes"
+    else
+        ln -sf "$HERMES_BIN" "$command_link_dir/hermes"
+        log_success "Symlinked hermes → $command_link_display_dir/hermes"
+    fi
 
     if [ "$DISTRO" = "termux" ]; then
         export PATH="$command_link_dir:$PATH"
