@@ -854,6 +854,67 @@ fn run_command_compress_toon_from_file() {
     assert!(result.is_ok());
 }
 
+// TOON spec v4.4 (toon-format 0.7) adds two encoded forms the CLI has to
+// carry end to end: nested field groups and keyed tabular maps. Encoding must
+// accept the JSON shapes that produce them, and `decompress-toon` must read
+// the resulting documents back.
+#[test]
+fn run_command_compress_toon_spec_v44_shapes() {
+    let _guard = TempDbGuard::new();
+
+    let dir = tempfile::tempdir().unwrap();
+    for (name, payload) in [
+        (
+            "nested.json",
+            r#"{"users":[{"id":1,"profile":{"name":"u1","active":true}},{"id":2,"profile":{"name":"u2","active":false}}]}"#,
+        ),
+        (
+            "keyed.json",
+            r#"{"users":{"u1":{"name":"u1","active":true},"u2":{"name":"u2","active":false}}}"#,
+        ),
+        ("empties.json", r#"{"items":[{},{}]}"#),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, payload).unwrap();
+        let result = run_command(Commands::CompressToon {
+            file: Some(path.to_str().unwrap().to_string()),
+            agent_id: Some("agent".to_string()),
+            session_id: Some("sess".to_string()),
+            tool_use_id: Some("tool".to_string()),
+            min_toon_chars: 0,
+        });
+        assert!(result.is_ok(), "{name}: {result:?}");
+    }
+}
+
+#[test]
+fn run_command_decompress_toon_spec_v44_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, document) in [
+        (
+            "nested.toon",
+            "users[2]{id,profile{name,active}}:\n  1,u1,true\n  2,u2,false",
+        ),
+        (
+            "keyed.toon",
+            "users[2:]{name,active}:\n  u1: u1,true\n  u2: u2,false",
+        ),
+        ("empties.toon", "items[2]:\n  -\n  -"),
+        // A document a 0.5.0 producer could have left on disk.
+        (
+            "legacy.toon",
+            "users[2]:\n  - id: 1\n    profile:\n      name: u1\n  - id: 2\n    profile:\n      name: u2",
+        ),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, document).unwrap();
+        let result = run_command(Commands::DecompressToon {
+            file: Some(path.to_str().unwrap().to_string()),
+        });
+        assert!(result.is_ok(), "{name}: {result:?}");
+    }
+}
+
 #[test]
 fn run_command_decompress_toon_from_file() {
     let dir = tempfile::tempdir().unwrap();

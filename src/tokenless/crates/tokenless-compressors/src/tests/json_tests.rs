@@ -1334,3 +1334,90 @@ fn record_reduction_keeps_retained_numbers_exact() {
         assert_eq!(row["detail"]["value"].to_string(), literal);
     }
 }
+
+fn nested_records(count: usize) -> Vec<Value> {
+    (0..count)
+        .map(|index| {
+            serde_json::json!({
+                "id": index,
+                "profile": {
+                    "name": format!("user-{index}"),
+                    "active": index % 2 == 0
+                }
+            })
+        })
+        .collect()
+}
+
+// TOON spec v4.4 (toon-format 0.7) encodes a nested record group once in the
+// array header instead of expanding every record. Under 0.5.0 this shape
+// encoded *larger* than compact JSON, so the candidate lost the size gate and
+// the payload was reduced to a head/tail sample instead.
+#[test]
+fn toon_is_selected_for_nested_record_groups() {
+    let store = InMemoryStore::new();
+    let value = serde_json::json!({ "users": nested_records(40) });
+    let input = serde_json::to_string(&value).unwrap();
+    let outcome = JsonCompressor::default()
+        .compress(&input, &toon_context(Some(&store)))
+        .unwrap();
+
+    assert_eq!(outcome.operations, [JsonOperation::Toon]);
+    assert!(outcome.stash_writes.is_empty());
+    assert_eq!(store.len(), 0);
+    assert!(
+        outcome.output.starts_with("users[40]{id,profile{name,active}}:"),
+        "unexpected candidate: {}",
+        outcome.output
+    );
+    // The candidate only replaces the JSON tree after a full round-trip, so
+    // the emitted text still decodes to exactly that tree.
+    let decoded: Value = toon_format::decode_default(&outcome.output).unwrap();
+    assert_eq!(decoded, value);
+}
+
+// Keyed resource maps take the other new v4.4 form: a tabular body whose rows
+// carry the key. 0.5.0 expanded every entry into an indented block.
+#[test]
+fn toon_is_selected_for_keyed_record_maps() {
+    let store = InMemoryStore::new();
+    let mut users = serde_json::Map::new();
+    for (index, record) in nested_records(40).into_iter().enumerate() {
+        users.insert(format!("u{index}"), record["profile"].clone());
+    }
+    let value = serde_json::json!({ "users": Value::Object(users) });
+    let input = serde_json::to_string(&value).unwrap();
+    let outcome = JsonCompressor::default()
+        .compress(&input, &toon_context(Some(&store)))
+        .unwrap();
+
+    assert_eq!(outcome.operations, [JsonOperation::Toon]);
+    assert!(outcome.stash_writes.is_empty());
+    assert!(
+        outcome.output.starts_with("users[40:]{name,active}:"),
+        "unexpected candidate: {}",
+        outcome.output
+    );
+    let decoded: Value = toon_format::decode_default(&outcome.output).unwrap();
+    assert_eq!(decoded, value);
+}
+
+// TOON has no signed zero: `-0.0` encodes as `0` and decodes as the integer
+// 0, so the value-equality guard must reject the candidate even though it is
+// far smaller than the JSON. Neither 0.5.0 nor 0.7.0 can carry it; this pins
+// the fallback rather than the encoding.
+#[test]
+fn toon_falls_back_to_json_when_a_number_leaves_the_toon_domain() {
+    let store = InMemoryStore::new();
+    let mut users = nested_records(10);
+    users[3]["profile"]["ratio"] = serde_json::from_str("-0.0").unwrap();
+    let input = serde_json::to_string(&serde_json::json!({ "users": users })).unwrap();
+    let outcome = JsonCompressor::default()
+        .compress(&input, &toon_context(Some(&store)))
+        .unwrap();
+
+    assert!(!outcome.operations.contains(&JsonOperation::Toon));
+    assert!(outcome.stash_writes.is_empty());
+    assert_eq!(outcome.output, input);
+    assert!(outcome.output.contains("-0.0"));
+}

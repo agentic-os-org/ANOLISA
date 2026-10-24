@@ -189,7 +189,7 @@ Protocol v2 调用 Core，由 Core
 消费该状态，使 RTK 输出绕过二次压缩。缺少稳定 Tool Call ID 时保持原命令不变；宿主未发送
 PostTool 事件时遗留的状态会在后续 PreTool 调用中按 24 小时 TTL 和 1024 个文件上限清理。
 
-**TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。
+**TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。自 toon-format 0.7.0（TOON spec v4.4）起，嵌套 Record 数组与按 ID 建键的对象映射也进入可节省范围，编码形式与版本兼容性见 §9.4。
 
 ### 路径 3：Hermes Agent 插件（`transform_tool_result` hook）
 
@@ -463,10 +463,11 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 | Qoder 插件配置 | `adapters/tokenless/qoder/hooks/hooks.json` |
 | Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
 | Codex 响应诊断 Hook | `adapters/tokenless/codex/scripts/response-diagnostics` |
-| TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
+| TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.7.0（TOON spec v4.4） |
 | JSON 压缩测试 | `crates/tokenless-compressors/src/tests/json_tests.rs` |
 | Build Log 压缩测试与 Fixture | `crates/tokenless-compressors/src/tests/build_log_tests.rs`、`crates/tokenless-compressors/tests/fixtures/build_logs/` |
 | PostTool 集成测试 | `crates/tokenless-runtime/src/entry.rs` |
+| TOON spec v4.4 回归测试 | `benchmark/l1-compressor/tests/l1_toon_spec_v44.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |
 | 全量测试套件 | `tests/run-all-tests.sh` |
 
@@ -551,3 +552,70 @@ tokenless stats summary
 Schema 压缩不经过本表的响应压缩或 TOON 流程。当前仓库参考 fixture 上的独立 Schema
 压缩结果为 47.3%；该数字不是生产范围或任意 Schema
 的保证值，实际结果取决于输入结构、description 长度和可移除字段。
+
+### 9.4 TOON 编码形式与版本兼容性（spec v4.4）
+
+Tokenless 静态链接 crates.io 的 `toon-format`，当前为 v0.7.0，实现 TOON spec v4.4。
+0.5.0 → 0.7.0 改变了若干编码形式，其中两种新形式是本次升级的收益来源：
+
+| 数据形状 | 0.5.0 输出 | 0.7.0 输出 |
+| --- | --- | --- |
+| 扁平 Record 数组 | `users[2]{id,name}:` + CSV 行 | 与 0.5.0 相同 |
+| 嵌套 Record 数组 | 每条记录展开为缩进块，**大于**紧凑 JSON | `users[2]{id,profile{name,active}}:` + CSV 行 |
+| 按 ID 建键的对象映射 | 每个条目展开为缩进块，**大于**紧凑 JSON | `users[2:]{name,active}:` + `键: 值,...` 行 |
+| 空对象数组 `[{},{}]` | `items[2]{}:`（**任何版本都无法解码**） | `items[2]:` + 两个 `-` 空行 |
+| 空数组 `[]` | `items[0]:` | `items: []` |
+| 非 ASCII 键 | 不加引号 | 加引号（`"键名":`） |
+| 无需引号的字符串数组元素 | 加引号 | 不加引号 |
+
+嵌套与按 ID 建键两种形状在 0.5.0 下编码结果大于紧凑 JSON，永远通不过 `toon_candidate`
+的尺寸门槛，实际退化为 JSON；0.7.0 下它们才真正参与竞争。
+
+**精度限制未变**：TOON 仍无法承载 `1e-400`、`-0.0`、`1.0e3` 这类值，超出 `u64` 范围的整数
+字面量也只以 serde_json 已解析成的 `f64` 形式保留。两条 TOON 入口都必须先证明数值保真，才允许
+TOON 取代 JSON，但证明方式不同：PostTool JSON 域按 R8 全程携带扫描到的源字面量，直接入口只有
+一份 plain `serde_json` 解析结果，字面量在能拿来比较之前就已经丢了，因此它还需要一道编码前的
+文本扫描。两道校验都与 TOON 版本无关。
+
+| 入口 | 保真校验 | 不过校验时 |
+| --- | --- | --- |
+| PostTool JSON 域（`compress-response` / 各 Adapter hook） | R8 的 `ExactValue` 携带源字面量，`toon_candidate()` 要求解码结果在结构、字符串、数值类型与精确十进制值上都与原文档一致 | 保留已压缩的精确 JSON 候选，数字按原拼写输出 |
+| 直接 `compress-toon`（CLI、Python/Node SDK 共用 `tokenless-runtime` 的 `compress_toon()`） | 先用 `numbers_are_exact()`（由 `tokenless-compressors` 导出）扫描原始文本，再对编码结果跑 `decode(encode(v)) == v` 往返校验 | 以 `passthrough` 逐字节原样输出输入 JSON，stderr 提示 `TOON cannot retain this payload's numbers exactly` |
+
+直接入口的闸门是本次升级补上的：0.5.0 下按 ID 建键与嵌套两种形状编不出比 JSON 更短的文本，
+带这类数值的载荷根本进不了 TOON；0.7.0 让它们跨过尺寸门槛后，缺闸门就等于把 `1e-400` 静默
+写成整数 `0`、把 `-0.0` 写成 `0`、把 `1e3` 写成整数 `1000`。
+JSON 域的完整字面量保留已由 R8 落地，与本节互补：R8 保证 JSON 输出保真，这里的闸门保证 TOON
+只在自己也保真时才被采纳。
+
+**版本兼容性**：`toon-format` 随二进制静态链接，同一个 `tokenless` 进程内编码与解码始终同版本，
+PostTool 自动压缩路径不存在混版问题。混版只出现在 `compress-toon` 的输出被保存后交给另一版本的
+`decompress-toon` 时，实测结论如下：
+
+| 方向 | 结果 |
+| --- | --- |
+| 0.7.0 解码 0.5.0 产出的文档 | 上表中**除 `[{},{}]` 以外**的形状均可解码，且语义与原文档一致 |
+| 0.5.0 解码 0.7.0 产出的文档 | 扁平数组、标量、非 ASCII 键与点号键可解码；**嵌套字段组与按键表格两种新头部被拒绝**（`Expected delimiter or '}', found LeftBrace` / `Expected ']', found Colon`） |
+
+**`[{},{}]` 是上表的例外，且升级不会修好它**：0.5.0 把空对象数组编码成 `items[2]{}:`，
+0.7.0 的解码器对这份文本仍报 `Empty field name in field list`（本 PR 新增的
+`legacy_empty_field_list_document_is_still_rejected` 把这一行为锁进回归测试）。0.7.0 修的是
+**编码侧**——它现在产出 `items[2]:` + 两个 `-` 空行，可被两个版本解码；升级前由 0.5.0 落盘的
+`items[2]{}:` 属于任何版本都读不回来的文本，依赖旧留存文本的下游必须按解码失败处理，不能假设
+"旧版留存文本都可恢复"。
+
+因此**回滚含义是单向的**：把二进制退回 0.5.0 基线后，此前由 0.7.0 生成并留存到外部的
+嵌套/按键 TOON 文本将无法解码。Tokenless 自身不回读解码 TOON 文本——Stash 保存的是被裁剪掉的
+原始 JSON，统计库中的 after 文本只用于计量——所以常规回滚不受影响；只有把 `compress-toon`
+输出落盘并在回滚后再解码的下游流程需要提前处理。
+`benchmark/l1-compressor/tests/l1_toon_spec_v44.rs` 以升级前实测捕获的 0.5.0 文档为固定样本，
+把"新版本必须仍能读旧文档"与"新头部语法不得漂移"两条约束锁进回归测试。
+
+**Adapter / Hook 契约**：各 Adapter 声明的是 `compress-toon` 能力名，不绑定 TOON spec 版本，
+本次升级无需修改任何 manifest 或 hook 脚本。Common Hook 的 Protocol v2 golden 中
+`post_tool/bash_array_truncation/cosh-ng` 一项随编码形式变化重新基线化：字符串数组元素不再加
+引号，输出由 4808 字符降至 4536 字符，解码后的 JSON 与旧 golden 完全一致。
+
+**编码开销**：spec v4.4 的编码器要先读完整个子树才能选定形式，因此 100 行均匀表格的编码耗时
+上升约 13%、嵌套形状约 9%；解码全面变快，仓库参考响应 fixture 的编码 + 解码往返耗时下降约 25%。
+详见 §9.3 与 `benchmark/l1-compressor`（`cargo bench --bench l1_toon_latency`）。

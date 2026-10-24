@@ -349,6 +349,64 @@ fn rejected(source: &str, input: &str) -> Result<JsonOutcome, JsonError> {
     }
 }
 
+/// Reports whether every numeric literal in `input` keeps its exact decimal
+/// value across a `serde_json` parse.
+///
+/// Syntax is already validated by `serde_json`. Number tokens outside strings
+/// are inspected before any encoding can discard their original spelling.
+///
+/// TOON's numeric domain is narrower than JSON's, so every TOON entry point
+/// must prove numeric fidelity before it may replace exact JSON, and the two
+/// entries prove it differently. The PostTool JSON domain works structurally:
+/// `ExactValue` retains each source literal through the whole pipeline, and
+/// `toon_candidate` accepts a candidate only when decoding restores that
+/// literal. The Runtime's direct `compress-toon` entry parses with plain
+/// `serde_json`, which has already dropped a literal it cannot hold before
+/// anything could be compared, so it gates on this predicate before encoding.
+/// Sharing one implementation keeps the two entries from drifting apart.
+#[must_use]
+pub fn numbers_are_exact(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    index += 1;
+                }
+                let literal = &input[start..index];
+                let Ok(number) = serde_json::from_str::<serde_json::Number>(literal) else {
+                    return false;
+                };
+                let Some(expected) = exact::decimal_value(literal) else {
+                    return false;
+                };
+                if exact::decimal_value(&number.to_string()).as_ref() != Some(&expected) {
+                    return false;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    true
+}
+
 /// Builds the TOON candidate for an already-compacted exact document.
 ///
 /// TOON's numeric domain is narrower than JSON's — `toon-format` stores

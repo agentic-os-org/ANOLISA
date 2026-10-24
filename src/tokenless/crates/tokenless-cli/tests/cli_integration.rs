@@ -2774,6 +2774,191 @@ fn compress_toon_min_chars_zero_encodes_short_payload() {
     assert_eq!(emitted, "a: short", "expected TOON object encoding");
 }
 
+/// 40 uniform records keyed by ID. TOON spec v4.4 encodes this shape as a
+/// keyed tabular map, which is shorter than compact JSON; 0.5.0 expanded every
+/// entry into an indented block and never reached the encoder.
+fn keyed_record_map(ratio: &str) -> String {
+    let entries = (0..40)
+        .map(|index| {
+            let ratio = if index == 3 { ratio } else { "0.5" };
+            format!(r#""u{index}":{{"name":"user{index}","active":true,"ratio":{ratio}}}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"users":{{{entries}}}}}"#)
+}
+
+/// TOON's numeric domain is narrower than JSON's. Spec v4.4 brought keyed
+/// object maps inside the size gate, so the direct `compress-toon` entry has to
+/// apply the same fidelity gate the PostTool JSON domain applies instead of
+/// silently writing `1e-400` as the integer `0`.
+#[test]
+fn compress_toon_keeps_original_json_when_numbers_would_not_survive() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    // Control: the same shape without an offending literal is still encoded,
+    // so the passthroughs below are the numeric gate and not a size accident.
+    let clean = keyed_record_map("0.5");
+    let output = run_compress_toon(&fixture, &clean, "1", "toon-numeric-clean", &[]);
+    assert!(
+        output.status.success(),
+        "compress-toon failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let encoded = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        encoded.starts_with("users[40:]{name,active,ratio}:"),
+        "expected a keyed tabular map, got {encoded:?}"
+    );
+
+    // `1e-400` is caught by the literal scan; `-0.0` and `1e3` survive the
+    // scan and are caught by the decode round trip, which sees the lost sign
+    // and the float-to-integer type change.
+    for ratio in ["1e-400", "-0.0", "1e3"] {
+        let input = keyed_record_map(ratio);
+        let output = run_compress_toon(&fixture, &input, "1", "toon-numeric-lossy", &[]);
+        assert!(
+            output.status.success(),
+            "compress-toon failed for ratio {ratio}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let emitted = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            emitted, input,
+            "ratio {ratio} must pass through byte-for-byte"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot retain") && stderr.contains("skipping encoding"),
+            "expected the numeric skip note for ratio {ratio}, got {stderr:?}"
+        );
+    }
+
+    // A declined payload books no savings, same as the length gate.
+    let stats_db = fixture.data_dir.join("stats.db");
+    if stats_db.exists() {
+        let recorder = StatsRecorder::new(stats_db).unwrap();
+        let records = recorder
+            .records_by_session("toon-numeric-lossy", None)
+            .unwrap();
+        assert!(records.is_empty());
+    }
+}
+
+/// Every advisory note on the `compress-toon` path is emitted after the payload
+/// and through a write whose failure is discarded. `eprintln!` panics when the
+/// write fails, so stderr redirected to a full filesystem used to turn a
+/// documented "exit 0, original JSON on stdout" passthrough into exit code 101
+/// with an empty stdout.
+#[test]
+fn compress_toon_passthrough_survives_an_unwritable_stderr() {
+    // `/dev/full` accepts the write and then reports ENOSPC, which is what a
+    // full log filesystem looks like to the process. Nothing portable
+    // reproduces it, so hosts without the device skip the case.
+    let dev_full = std::path::Path::new("/dev/full");
+    if !dev_full.exists() {
+        return;
+    }
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    // One case per advisory note. Each payload is a documented passthrough, so
+    // stdout has to reproduce it byte for byte whatever stderr does.
+    struct Case {
+        label: &'static str,
+        input: String,
+        args: &'static [&'static str],
+        compression_enabled: &'static str,
+    }
+    let cases = [
+        Case {
+            label: "numeric gate",
+            input: keyed_record_map("1e3"),
+            args: &[],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "length gate",
+            input: r#"{"a":"short"}"#.to_owned(),
+            args: &[],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "no savings",
+            input: "{}".to_owned(),
+            args: &["--min-toon-chars", "0"],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "dry run",
+            input: keyed_record_map("0.5"),
+            args: &[],
+            compression_enabled: "0",
+        },
+    ];
+
+    for case in cases {
+        let stderr = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dev_full)
+            .unwrap();
+        let output = fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", case.compression_enabled)
+            .env("TOKENLESS_STATS_ENABLED", "1")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args([
+                "compress-toon",
+                "--agent-id",
+                "integration-agent",
+                "--session-id",
+                "toon-unwritable-stderr",
+            ])
+            .args(case.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::from(stderr))
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(case.input.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: an unwritable stderr must not fail compress-toon, got {:?}",
+            case.label,
+            output.status
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            case.input,
+            "{}: the payload must still reach stdout byte for byte",
+            case.label
+        );
+    }
+
+    // Control: with a writable stderr the notes are still there, so the cases
+    // above prove the write is tolerated and not that it was dropped.
+    let numeric = keyed_record_map("1e3");
+    let output = run_compress_toon(&fixture, &numeric, "1", "toon-writable-stderr", &[]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot retain"),
+        "the advisory note must still be printed when stderr is writable"
+    );
+}
+
 #[test]
 fn html_extraction_is_env_gated_and_recovers_the_original_page() {
     let temp = tempfile::tempdir().unwrap();

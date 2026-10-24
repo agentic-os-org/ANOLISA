@@ -56,7 +56,7 @@ clap (v4.5)
   Source: https://crates.io/crates/clap
   Licensed under the MIT License
 
-toon-format (v0.5)
+toon-format (v0.7)
   Source: https://crates.io/crates/toon-format
   Copyright (c) 2025-PRESENT Shreyas S Bhat
   Copyright (c) 2025-PRESENT Johann Schopplich

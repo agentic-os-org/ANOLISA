@@ -437,10 +437,14 @@ scenario "1.4 large JSON compression"
 
 # Build a larger JSON (an API-response shaped payload) that exceeds the default gate, so
 # this case goes through the default arguments.
+#
+# `value` deliberately avoids integral floats: TOON writes 79.0 as `79`, which decodes
+# as an integer, so the numeric fidelity gate (1.8) would decline the whole payload
+# instead of encoding it. The fixture measures tabular savings, not that gate.
 python3 -c "
 import json, sys
 data = {
-    'results': [{'id': i, 'name': f'Item_{i}', 'value': i * 3.14, 'active': i % 2 == 0, 'tags': [f'tag_{j}' for j in range(5)]} for i in range(50)],
+    'results': [{'id': i, 'name': f'Item_{i}', 'value': i + 0.5, 'active': i % 2 == 0, 'tags': [f'tag_{j}' for j in range(5)]} for i in range(50)],
     'meta': {'total': 50, 'page': 1, 'per_page': 50},
     'debug_info': {'query_time': 0.123, 'cache_hit': False}
 }
@@ -477,9 +481,17 @@ result=$(printf '%s' '{"pi":3.14159,"neg":-42}' | tokenless compress-toon "${TOO
 assert_contains "$result" "pi: 3.14159" "float encodes"
 assert_contains "$result" "neg: -42" "negative number encodes"
 
-# Empty array
+# Empty array. TOON spec v4.4 (toon-format 0.7) renders an empty array inline
+# as `key: []`; 0.5 used the counted header form `key[0]:`. Assert the current
+# rendering and that it still decodes back to an empty array.
 result=$(printf '%s' '{"items":[],"keep":1}' | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
-assert_contains "$result" "items[0]" "empty array encodes"
+assert_contains "$result" "items: []" "empty array encodes"
+roundtrip=$(printf '%s' "$result" | tokenless decompress-toon 2>/dev/null)
+if printf '%s' "$roundtrip" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['items']==[] and d['keep']==1" 2>/dev/null; then
+    pass "empty array round-trips"
+else
+    fail "empty array does not round-trip"
+fi
 
 scenario "1.6 file input/output"
 
@@ -564,6 +576,36 @@ assert_passthrough_bytes "no-savings payload with --min-toon-chars 0, no trailin
 assert_passthrough_bytes "no-savings payload with --min-toon-chars 0, trailing newline" \
     "$TMP_DIR/gate-no-savings-newline.json" "0"
 
+# Over the gate but out of TOON's numeric domain: the payload passes through byte for
+# byte as well. TOON writes 1e-400 as the integer 0 and -0.0 as 0, so encoding it would
+# silently corrupt the document. The PostTool JSON path has always declined such
+# payloads (docs/response-compression.md, "精度限制未变"); the direct entry now agrees.
+lossy_rows=""
+for i in $(seq 0 39); do
+    ratio="0.5"
+    if [ "$i" -eq 3 ]; then ratio="1e-400"; fi
+    if [ -n "$lossy_rows" ]; then lossy_rows="$lossy_rows,"; fi
+    lossy_rows="$lossy_rows\"u$i\":{\"name\":\"user$i\",\"active\":true,\"ratio\":$ratio}"
+done
+printf '%s' "{\"users\":{$lossy_rows}}" > "$TMP_DIR/gate-lossy.json"
+printf '%s\n' "$(cat "$TMP_DIR/gate-lossy.json")" > "$TMP_DIR/gate-lossy-newline.json"
+lossy_json=$(cat "$TMP_DIR/gate-lossy.json")
+if [ "${#lossy_json}" -ge 500 ]; then
+    pass "numeric-gate fixture (${#lossy_json} chars >= 500) clears the length gate"
+else
+    fail "numeric-gate fixture is too short to reach the numeric gate (${#lossy_json} chars)"
+fi
+assert_passthrough_bytes "payload holding 1e-400, no trailing newline" \
+    "$TMP_DIR/gate-lossy.json" ""
+assert_passthrough_bytes "payload holding 1e-400, trailing newline" \
+    "$TMP_DIR/gate-lossy-newline.json" ""
+
+# The same payload with an exactly representable ratio is still encoded, so the two
+# passthroughs above are the numeric gate and not a size or shape accident.
+sed 's/1e-400/0.5/' "$TMP_DIR/gate-lossy.json" > "$TMP_DIR/gate-exact.json"
+exact_out=$(tokenless compress-toon < "$TMP_DIR/gate-exact.json" 2>/dev/null)
+assert_contains "$exact_out" "users[40:]" "the same shape without 1e-400 still encodes"
+
 # Over the gate: the default arguments encode (the fixture is the large JSON from 1.4).
 long_json=$(cat "$TMP_DIR/large_test.json")
 long_out=$(printf '%s' "$long_json" | tokenless compress-toon 2>/dev/null)
@@ -571,6 +613,34 @@ if [ "${#long_json}" -ge 500 ] && [ -n "$long_out" ] && [ "$long_out" != "$long_
     pass "long payload (${#long_json} chars >= 500) encodes by default"
 else
     fail "long payload was not encoded by default"
+fi
+
+# An advisory note must never cost the caller its payload. Every passthrough above
+# prints one on stderr; if that write can fail the process, a full log filesystem turns
+# a documented "exit 0, original JSON on stdout" run into a non-zero exit with an empty
+# stdout. /dev/full accepts the write and then reports ENOSPC, which is the portable way
+# to provoke it.
+if [ -e /dev/full ]; then
+    devfull_failed=0
+    # "<file>|<extra args>": the no-savings fixture only reaches its note with the gate off.
+    for probe in "gate-lossy.json|" "gate-short.json|" "gate-no-savings.json|--min-toon-chars 0"; do
+        probe_file="${probe%%|*}"
+        probe_args="${probe##*|}"
+        # Word splitting is the point here: the empty variant must expand to nothing.
+        # shellcheck disable=SC2086
+        tokenless compress-toon $probe_args < "$TMP_DIR/$probe_file" \
+            > "$TMP_DIR/$probe_file.devfull" 2>/dev/full
+        probe_rc=$?
+        if [ "$probe_rc" -ne 0 ] || ! cmp -s "$TMP_DIR/$probe_file" "$TMP_DIR/$probe_file.devfull"; then
+            fail "unwritable stderr changed the outcome for $probe_file (exit $probe_rc)"
+            devfull_failed=1
+        fi
+    done
+    if [ "$devfull_failed" -eq 0 ]; then
+        pass "passthrough keeps exit 0 and byte-identical stdout when stderr is unwritable"
+    fi
+else
+    skip "/dev/full unavailable, unwritable-stderr probe skipped"
 fi
 
 # ========== Scenario 2: Cosh-NG ==========

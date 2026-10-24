@@ -170,7 +170,10 @@ The value-preserving implementation at commit `daf42d758` (PR #8814) produces
 the following reference snapshot. The fixture bytes are unchanged from the
 Tokenless 0.8.2 snapshot at `a30575361`. The compact response is now a preservation
 control: all 20,813 bytes survive, so JSON-only savings are 0.0%, down from 36.3%
-when diagnostic fields were deleted. A separate rate regression test pretty-prints
+when diagnostic fields were deleted. The snapshot also carries the `toon-format`
+0.7.0 upgrade (TOON spec v4.4), which lifts only the TOON rows: encoding the
+uncompressed canonical response saves 17.6% instead of 17.0%, and the full stack
+19.5% instead of 18.8%. A separate rate regression test pretty-prints
 the same values and verifies actual compaction without omissions; focused suites
 cover record reduction and string, array, and depth bounds.
 
@@ -178,7 +181,7 @@ cover record reduction and string, array, and depth bounds.
 |---|---|---:|
 | `canonical.response.savings_pct` | Response compression on the canonical response | 0.0% |
 | `canonical.schema.savings_pct` | Schema compression on the canonical schema | 47.3% |
-| `canonical.response.toon_only_savings_pct` | TOON encoding of the uncompressed canonical response | 17.0% |
+| `canonical.response.toon_only_savings_pct` | TOON encoding of the uncompressed canonical response | 17.6% |
 | `canonical.schema.toon_only_savings_pct` | TOON encoding of the uncompressed canonical schema | -2.3% |
 
 The same report measures mixed-workload stacking configurations over both
@@ -191,9 +194,9 @@ rates above:
 | `response_only` | Response compression | 0.0% |
 | `schema_only` | Schema compression | 3.0% |
 | `schema_response` | Schema + response stacked | 3.0% |
-| `response_toon` | Response compression + TOON | 15.9% |
-| `toon_only` | TOON encoding of the raw payloads | 15.8% |
-| `full_stack` | Schema + response + TOON | 18.8% |
+| `response_toon` | Response compression + TOON | 16.5% |
+| `toon_only` | TOON encoding of the raw payloads | 16.3% |
+| `full_stack` | Schema + response + TOON | 19.5% |
 
 The TOON stacking rows are measured ungated (the benchmark encodes
 unconditionally); the deployed runtime adopts TOON only when it reduces the

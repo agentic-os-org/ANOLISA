@@ -23,7 +23,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
-| TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
+| TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
 
@@ -250,7 +250,9 @@ tokenless compress-schema -f request.json
 
 `compress-toon` 将 JSON 编码为 TOON 格式（`decompress-toon` 解码回
 JSON）。短于 500 字符的负载默认原样透传（与 Adapter Hook 应用的最小
-长度一致）；传入 `--min-toon-chars 0` 可强制编码：
+长度一致）；传入 `--min-toon-chars 0` 可强制编码。含有 TOON 无法精确
+承载的数值（`1e-400`、`-0.0`、`1e3`，或超出 `f64` 精度的小数）的负载
+同样原样透传，与 PostTool 自动路径的闸门一致：
 
 ```bash
 # TOON 编码（短负载，本次调用关闭最小长度门槛）
@@ -703,7 +705,7 @@ python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970
 
 ## 前置依赖
 
-- **Rust** toolchain >= 1.89 — RTK（edition 2024）及 toon-format 所需
+- **Rust** toolchain >= 1.89 — RTK（edition 2024）所需
 - **just** — 用于下载并应用 RTK Patch
 - **Git** — 用于通过 justfile 下载 RTK 源码
 - **CPython 3.11+ 开发环境与 uv** — 仅构建 Python Wheel 或显式包含全部

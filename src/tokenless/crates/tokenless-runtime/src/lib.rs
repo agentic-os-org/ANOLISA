@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
-use tokenless_compressors::JsonCompressionConfig;
+use tokenless_compressors::{JsonCompressionConfig, numbers_are_exact};
 use tokenless_protocol::{
     Attribution as ProtocolAttribution, BeforeModelRequest, BeforeModelResponse, ContentOrigin,
     OutputOptimization, PostToolCapabilities, PostToolRequest, PostToolResponse, PreToolRequest,
@@ -703,7 +703,7 @@ fn finish_schema_compression(
 }
 
 /// Encode JSON as TOON and apply the shared minimum-length gate,
-/// no-savings, and dry-run policies.
+/// numeric fidelity gate, no-savings, and dry-run policies.
 ///
 /// Payloads with fewer than `min_toon_chars` characters pass through
 /// unchanged as [`Disposition::Passthrough`] because TOON savings on small
@@ -712,6 +712,11 @@ fn finish_schema_compression(
 /// yields token savings, restoring the pre-gate behavior. The input is
 /// still validated as JSON, so short invalid payloads fail instead of
 /// passing through.
+///
+/// A payload whose numbers TOON cannot carry also passes through unchanged
+/// as [`Disposition::Passthrough`], mirroring the two guards the PostTool
+/// JSON domain applies before TOON may replace exact JSON. Size alone never
+/// authorizes a lossy encoding.
 ///
 /// # Errors
 ///
@@ -732,22 +737,34 @@ pub fn compress_toon(
     // Character count, not byte length: the adapter hooks measure the same
     // threshold in Unicode code points, so CJK payloads gate identically.
     if input.chars().count() < min_toon_chars {
-        return Ok(CompressResult {
-            output: input.to_string(),
-            compressed_output: input.to_string(),
-            disposition: Disposition::Passthrough,
-            before_tokens,
-            after_tokens: before_tokens,
-            stash_writes: None,
-            stash_errors: None,
-            unrecoverable_truncations: None,
-            stash_size: None,
-        });
+        return Ok(toon_passthrough(input, before_tokens));
+    }
+    // Numeric fidelity gate, first half: decline the payload before encoding
+    // when a source literal cannot survive a `serde_json` round trip
+    // (`1e-400` underflows, `1.234567890123456789` rounds). This is the very
+    // predicate the PostTool JSON domain applies, shared through
+    // `tokenless_compressors` so the two TOON entries cannot drift apart.
+    // TOON spec v4.4 made keyed object maps and nested record arrays short
+    // enough to win the size comparison, so such payloads now reach this
+    // entry where 0.5.0 left them as JSON.
+    if !numbers_are_exact(input) {
+        return Ok(toon_passthrough(input, before_tokens));
     }
     let compressed_output = toon_format::encode_default(&value)
         .map_err(|error| RuntimeError::ToonEncode(error.to_string()))?
         .trim_end()
         .to_string();
+    // Numeric fidelity gate, second half: a candidate that does not decode
+    // back to the parsed value drops something TOON cannot represent
+    // (`-0.0` loses its sign, `1e3` returns as an integer), so the original
+    // JSON is emitted instead. An empty candidate stays on the no-savings
+    // branch below, which already reports it without claiming an encoding.
+    if !compressed_output.is_empty()
+        && !toon_format::decode_default::<serde_json::Value>(&compressed_output)
+            .is_ok_and(|decoded| decoded == value)
+    {
+        return Ok(toon_passthrough(input, before_tokens));
+    }
     let after_tokens = estimate_tokens(&compressed_output);
     let disposition = if compressed_output.is_empty() || after_tokens >= before_tokens {
         Disposition::NoSavings
@@ -772,6 +789,25 @@ pub fn compress_toon(
         unrecoverable_truncations: None,
         stash_size: None,
     })
+}
+
+/// Original-text result for a TOON attempt the policy declined to encode.
+///
+/// Both the minimum-length gate and the numeric fidelity gate report
+/// [`Disposition::Passthrough`]; callers that need to tell them apart
+/// compare the payload length against the same `min_toon_chars`.
+fn toon_passthrough(input: &str, before_tokens: usize) -> CompressResult {
+    CompressResult {
+        output: input.to_string(),
+        compressed_output: input.to_string(),
+        disposition: Disposition::Passthrough,
+        before_tokens,
+        after_tokens: before_tokens,
+        stash_writes: None,
+        stash_errors: None,
+        unrecoverable_truncations: None,
+        stash_size: None,
+    }
 }
 
 fn validate_input_size(input: &str) -> Result<(), RuntimeError> {
@@ -2002,6 +2038,79 @@ mod tests {
         // The same contract holds with the gate disabled.
         let error = compress_toon("not json", true, 0).unwrap_err();
         assert!(matches!(error, RuntimeError::InvalidJson(_)));
+    }
+
+    /// 40 uniform records keyed by ID: the shape TOON spec v4.4 encodes as a
+    /// keyed tabular map, short enough to win the size comparison where 0.5.0
+    /// expanded every entry into an indented block longer than compact JSON.
+    fn keyed_records(ratio: &str) -> String {
+        let entries = (0..40)
+            .map(|index| {
+                let ratio = if index == 3 { ratio } else { "0.5" };
+                format!(r#""u{index}":{{"name":"user{index}","active":true,"ratio":{ratio}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"users":{{{entries}}}}}"#)
+    }
+
+    #[test]
+    fn toon_declines_numbers_it_cannot_retain() {
+        // The control proves this shape really does reach TOON, so every
+        // rejection below is the numeric gate rather than a size accident.
+        let clean = keyed_records("0.5");
+        assert!(clean.chars().count() >= MIN_TOON_CHARS);
+        let control = compress_toon(&clean, true, MIN_TOON_CHARS).unwrap();
+        assert!(control.applied());
+        assert!(control.after_tokens < control.before_tokens);
+
+        // `1e-400` underflows, `1.234567890123456789` rounds and
+        // `18446744073709551617` exceeds `u64`, so the literal scan rejects
+        // all three. `-0.0` and `1e3` survive the scan and are caught only by
+        // the decode round trip: TOON writes them as `0` and `1000`, losing
+        // the sign and the float type.
+        for ratio in [
+            "1e-400",
+            "-0.0",
+            "1e3",
+            "1.234567890123456789",
+            "18446744073709551617",
+        ] {
+            let input = keyed_records(ratio);
+            let result = compress_toon(&input, true, MIN_TOON_CHARS).unwrap();
+            assert_eq!(
+                result.disposition,
+                Disposition::Passthrough,
+                "ratio {ratio} must not be encoded"
+            );
+            assert_eq!(result.output, input, "ratio {ratio} must survive verbatim");
+            assert_eq!(
+                result.compressed_output, input,
+                "ratio {ratio} must not report a candidate"
+            );
+            assert_eq!(result.before_tokens, result.after_tokens, "ratio {ratio}");
+        }
+    }
+
+    #[test]
+    fn toon_numeric_gate_also_governs_dry_run() {
+        // Dry run predicts what an enabled run would emit, so a payload the
+        // gate declines must not be booked as a predicted saving either.
+        let input = keyed_records("1e-400");
+        let result = compress_toon(&input, false, MIN_TOON_CHARS).unwrap();
+        assert_eq!(result.disposition, Disposition::Passthrough);
+        assert_eq!(result.output, input);
+        assert_eq!(result.compressed_output, input);
+    }
+
+    #[test]
+    fn toon_numeric_gate_ignores_the_length_override() {
+        // `min_toon_chars = 0` opts out of the length gate only. A caller
+        // asking for short payloads to be encoded still gets exact numbers.
+        let input = r#"{"a":[1e-400,1e-400,1e-400]}"#;
+        let result = compress_toon(input, true, 0).unwrap();
+        assert_eq!(result.disposition, Disposition::Passthrough);
+        assert_eq!(result.output, input);
     }
 
     #[test]

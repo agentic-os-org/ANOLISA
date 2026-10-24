@@ -166,15 +166,17 @@ cargo run --release --bin compression_rate -- --json
 默认压缩配置。fixture 由 `python/gen_fixtures.py` 生成，不含随机数、逐字节可复现。
 保留值的实现（commit `daf42d758`，PR #8814）产生以下参考快照。fixture 字节与
 Tokenless 0.8.2（`a30575361`）的快照保持一致。紧凑响应现在用于验证内容保留：全部
-20,813 字节原样保留，JSON 单独节省率从删除诊断字段时的 36.3% 降为 0.0%。另一个
-压缩率回归用例将同一组值格式化后输入，验证真正的格式压缩且无遗漏；专项测试覆盖
-记录缩减以及字符串、数组和深度限制。
+20,813 字节原样保留，JSON 单独节省率从删除诊断字段时的 36.3% 降为 0.0%。该快照同时
+包含 `toon-format` 0.7.0（TOON spec v4.4）升级，只有 TOON 相关行上升：对未压缩的
+canonical 响应做 TOON 编码的节省率从 17.0% 升到 17.6%，full_stack 从 18.8% 升到
+19.5%。另一个压缩率回归用例将同一组值格式化后输入，验证真正的格式压缩且无遗漏；
+专项测试覆盖记录缩减以及字符串、数组和深度限制。
 
 | JSON 字段 | 独立测试阶段与输入 | 节省率 |
 |---|---|---:|
 | `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 0.0% |
 | `canonical.schema.savings_pct` | 对 canonical Schema 执行 Schema 压缩 | 47.3% |
-| `canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.0% |
+| `canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.6% |
 | `canonical.schema.toon_only_savings_pct` | 对未压缩的 canonical Schema 执行 TOON 编码 | -2.3% |
 
 同一份报告还会在两个 canonical fixture 上度量混合负载的叠加配置（`stacking.configs`），
@@ -185,9 +187,9 @@ Tokenless 0.8.2（`a30575361`）的快照保持一致。紧凑响应现在用于
 | `response_only` | 仅响应压缩 | 0.0% |
 | `schema_only` | 仅 Schema 压缩 | 3.0% |
 | `schema_response` | Schema + 响应叠加 | 3.0% |
-| `response_toon` | 响应压缩 + TOON | 15.9% |
-| `toon_only` | 对原始 Payload 仅做 TOON 编码 | 15.8% |
-| `full_stack` | Schema + 响应 + TOON | 18.8% |
+| `response_toon` | 响应压缩 + TOON | 16.5% |
+| `toon_only` | 对原始 Payload 仅做 TOON 编码 | 16.3% |
+| `full_stack` | Schema + 响应 + TOON | 19.5% |
 
 含 TOON 的叠加行是不做门控的度量（benchmark 无条件执行 TOON 编码）；部署中的
 Runtime 只在 TOON 能减少估算 Token 数时才采用它，因此部署结果与这些行可能略有

@@ -1200,29 +1200,41 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     };
                     (error.to_string(), code)
                 })?;
-            match result.disposition {
-                Disposition::Passthrough => {
-                    warn_soft(&format!(
-                        "tokenless: payload under the {min_toon_chars}-character TOON minimum ({} chars), skipping encoding and outputting original JSON",
-                        input.chars().count()
-                    ));
-                }
-                Disposition::NoSavings => {
-                    warn_soft(&format!(
-                        "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
-                        result.before_tokens, result.after_tokens
-                    ));
-                }
-                _ => {}
-            }
-
-            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
             // Byte-exact stdout: the documented detection contract compares
             // stdout with the input payload, so passthrough and no-savings
             // runs must reproduce the input verbatim. `println!` would append
             // a LF (added for inputs without one, doubled for inputs with
             // one) and break that comparison.
             write_stdout_raw(&result.output)?;
+
+            // Every advisory note is emitted only after the payload is on
+            // stdout and only through `warn_soft`, so a caller that redirects
+            // stderr somewhere unwritable — `/dev/full`, a full log
+            // filesystem — still gets the original JSON and exit code 0.
+            // Documented contract: the note is informational only.
+            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
+            match result.disposition {
+                Disposition::Passthrough => {
+                    // The Runtime reports one disposition for both reasons it
+                    // declines to encode. Length is the only other gate that
+                    // can fire here, so it also tells the two apart.
+                    if input.chars().count() < min_toon_chars {
+                        warn_soft(&format!(
+                            "tokenless: payload under the {min_toon_chars}-character TOON minimum ({} chars), skipping encoding and outputting original JSON",
+                            input.chars().count()
+                        ));
+                    } else {
+                        warn_soft(
+                            "tokenless: TOON cannot retain this payload's numbers exactly, skipping encoding and outputting original JSON",
+                        );
+                    }
+                }
+                Disposition::NoSavings => warn_soft(&format!(
+                    "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
+                    result.before_tokens, result.after_tokens
+                )),
+                _ => {}
+            }
 
             // Recorded `after` = the predicted TOON result (or original when
             // TOON did not reduce size), so dry-run captures the prediction.
