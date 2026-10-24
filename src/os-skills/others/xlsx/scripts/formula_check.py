@@ -91,8 +91,12 @@ def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
         rid = rel.get("Id", "")
         target = rel.get("Target", "")
         if "worksheets" in target:
-            # Target may be relative: "worksheets/sheet1.xml" -> "xl/worksheets/sheet1.xml"
-            if not target.startswith("xl/"):
+            # Absolute targets (the openpyxl form) are package-rooted; relative
+            # targets resolve against xl/, where the rels file lives. Same
+            # convention as style_audit and the row/column edit scripts.
+            if target.startswith("/"):
+                target = target.lstrip("/")
+            elif not target.startswith("xl/"):
                 target = "xl/" + target
             mapping[rid] = target
     return mapping
