@@ -3200,12 +3200,25 @@ fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer
         match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
             Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
             Err(_) => {
-                // Fallback: raw message count
-                messages
+                // Fallback: raw message count plus the tool definitions. The
+                // Ok path renders the definitions through the template (the
+                // case drain_fallback_counts_dashscope_native_parameter_tools
+                // pins), so an estimate without them under-counts every
+                // tool-carrying request by exactly the definitions the failed
+                // render never reached.
+                let mut count = messages
                     .iter()
                     .filter_map(|m| serde_json::to_string(m).ok())
                     .map(|s| tokenizer.count(&s).unwrap_or(0))
-                    .sum()
+                    .sum();
+                if let Some(tools) = tools_json.as_ref() {
+                    count += tools
+                        .iter()
+                        .filter_map(|t| serde_json::to_string(t).ok())
+                        .map(|s| tokenizer.count(&s).unwrap_or(0))
+                        .sum::<usize>();
+                }
+                count
             }
         };
     if count > 0 { Some(count as i64) } else { None }
