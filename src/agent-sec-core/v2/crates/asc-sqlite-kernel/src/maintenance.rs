@@ -141,6 +141,11 @@ fn read_last_maintenance(marker_path: &Path) -> Option<f64> {
 }
 
 /// Writes the marker atomically via a pid-suffixed temp file, as v1 does.
+///
+/// A failure after the temporary exists removes it again. The gate outcome
+/// is unchanged - the marker is not advanced, so the caller retries - but
+/// the retry must not strand another private file next to the database on
+/// every attempt, and nothing else reclaims this class of leftover.
 fn mark_complete(marker_path: &Path, now: f64) -> Result<(), KernelError> {
     let file_name = marker_path
         .file_name()
@@ -148,11 +153,18 @@ fn mark_complete(marker_path: &Path, now: f64) -> Result<(), KernelError> {
         .unwrap_or_default();
     let tmp_path = marker_path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
 
-    fs::write(&tmp_path, format!("{now:.6}\n"))
-        .map_err(|err| KernelError::io("write", &tmp_path, err))?;
-    let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
-    fs::rename(&tmp_path, marker_path).map_err(|err| KernelError::io("rename", &tmp_path, err))?;
-    Ok(())
+    let result = (|| {
+        fs::write(&tmp_path, format!("{now:.6}\n"))
+            .map_err(|err| KernelError::io("write", &tmp_path, err))?;
+        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+        fs::rename(&tmp_path, marker_path).map_err(|err| KernelError::io("rename", &tmp_path, err))
+    })();
+    if result.is_err() {
+        // Best effort, like the permission tightening above: the failure that
+        // stranded the temporary may also refuse to remove it.
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 /// Why a non-blocking lock attempt could not be taken.
@@ -439,6 +451,35 @@ mod tests {
             Some(1000.0),
             always_ok
         ));
+    }
+
+    #[test]
+    fn a_failed_marker_write_leaves_no_temporary_behind() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        fs::create_dir(maintenance_marker_path(&db)).expect("block the marker path");
+
+        assert!(matches!(
+            run_sqlite_maintenance_detailed(&db, Some(3600.0), Some(1000.0), always_ok),
+            MaintenanceOutcome::Failed(_)
+        ));
+
+        // The temp write itself succeeded, so the rename is what failed; the
+        // temporary must not survive the failure that reported it. The gate
+        // stays open, so every retry would otherwise strand another private
+        // file next to the database, and nothing reclaims that class.
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .expect("read the database directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                name.starts_with("events.db.maintenance.") && name.strip_suffix(".tmp").is_some()
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed marker write must not strand its temporary: {leftovers:?}"
+        );
     }
 
     #[test]
