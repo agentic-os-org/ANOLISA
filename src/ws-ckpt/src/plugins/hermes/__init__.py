@@ -27,7 +27,7 @@ from .tools import TOOLS, check_ws_ckpt_available
 # Module-level state
 # ---------------------------------------------------------------------------
 
-_last_user_message: str = ""
+_pending_user_messages: dict[str, str] = {}
 _msg_lock = threading.Lock()
 
 
@@ -38,6 +38,8 @@ _msg_lock = threading.Lock()
 
 def _on_session_start(session_id: str = "", model: str = "", **_: Any) -> None:
     """Handle on_session_start — init the workspace then create a baseline checkpoint."""
+    with _msg_lock:
+        _pending_user_messages.pop(session_id, None)
     manager = get_manager()
 
     # Sync cron schedules — independent of autoCheckpoint
@@ -111,9 +113,8 @@ def _on_pre_llm_call(
     **_: Any,
 ) -> None:
     """Capture the latest user message for use in on_session_end."""
-    global _last_user_message
     with _msg_lock:
-        _last_user_message = user_message
+        _pending_user_messages[session_id] = user_message
 
 
 def _on_session_end(
@@ -123,6 +124,9 @@ def _on_session_end(
     **_: Any,
 ) -> None:
     """Handle on_session_end — create a checkpoint after the turn."""
+    # Even skipped checkpoints end the captured prompt's lifetime.
+    with _msg_lock:
+        raw_message = _pending_user_messages.pop(session_id, "")
     manager = get_manager()
 
     if manager.skip_next_auto_checkpoint:
@@ -131,10 +135,6 @@ def _on_session_end(
 
     if not manager.config.auto_checkpoint:
         return
-
-    # Retrieve the user message captured by pre_llm_call
-    with _msg_lock:
-        raw_message = _last_user_message
 
     if isinstance(raw_message, str) and raw_message:
         truncated_message = raw_message[:MSG_TRUNCATE_LEN]
