@@ -37,6 +37,14 @@ impl std::fmt::Display for FactCategory {
     }
 }
 
+/// Frontmatter `source` value stamped on every consolidation-produced fact.
+///
+/// This is the name the sovereignty and summary tooling classifies on, and the
+/// source the consent gate in `MemoryService::consolidate` checks before
+/// running, so it must stay in sync with `is_source_allowed` and
+/// `memory_summary`'s `auto_created` arm.
+pub const AUTO_CONSOLIDATION_SOURCE: &str = "auto-consolidation";
+
 /// A single consolidated fact — the L1 atomic memory unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidatedFact {
@@ -107,6 +115,15 @@ impl ConsolidatedFact {
         out.push_str(&format!("session_id: {}\n", self.session_id));
         out.push_str(&format!("category: {}\n", self.category));
         out.push_str(&format!("title: {}\n", sanitize_hint(&self.title)));
+        // Provenance: `source` says which subsystem created the memory, and
+        // `source_tool` which tool produced the evidence. Every consumer of the
+        // sovereignty view keys off `source` — `memory_summary` classifies by
+        // it, `memory_auto_created` filters on `source.starts_with("auto-")`,
+        // `mem_export --source` matches it, and the consent gate in
+        // `MemoryService::consolidate` is named after it — so a fact written
+        // without the field was invisible to all of them. Mirrors
+        // `memory_observe`'s `source: manual-observe`.
+        out.push_str(&format!("source: {AUTO_CONSOLIDATION_SOURCE}\n"));
         out.push_str(&format!("source_tool: {}\n", self.source_tool));
         if !self.related_paths.is_empty() {
             out.push_str("related_paths:\n");
@@ -190,6 +207,31 @@ mod tests {
         assert!(md.contains("source_tool: mem_edit"));
         assert!(md.contains("x.rs"));
         assert!(md.contains("Details here"));
+    }
+
+    #[test]
+    fn fact_markdown_stamps_the_auto_consolidation_source() {
+        let f = ConsolidatedFact::new(
+            "sid",
+            FactCategory::Lesson,
+            "Error occurred".into(),
+            "Details here".into(),
+            "mem_edit".into(),
+            vec![],
+            0.7,
+        );
+        let md = f.to_markdown();
+
+        // `source` (which subsystem created the memory) and `source_tool`
+        // (which tool produced the evidence) are distinct fields. The flat
+        // frontmatter readers split on the first ": ", so pin the exact line
+        // rather than a substring that `source_tool:` would also satisfy.
+        let source_line = md
+            .lines()
+            .find(|l| l.starts_with("source: "))
+            .expect("consolidation facts must carry a source stamp");
+        assert_eq!(source_line, format!("source: {AUTO_CONSOLIDATION_SOURCE}"));
+        assert!(md.contains("source_tool: mem_edit"));
     }
 
     #[test]
