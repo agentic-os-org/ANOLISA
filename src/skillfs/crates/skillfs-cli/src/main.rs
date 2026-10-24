@@ -3849,4 +3849,20 @@ mod tests {
         assert_eq!(escape_ctl("技能 skills"), "技能 skills");
         assert_eq!(escape_ctl(""), "");
     }
+
+    #[test]
+    fn text_escapers_cover_c1_controls() {
+        let controls: String = (0x80..=0x9f).filter_map(char::from_u32).collect();
+        for escaped in [escape_ctl(&controls), escape_ctl_stderr(&controls)] {
+            assert!(!escaped.chars().any(char::is_control));
+            assert!(escaped.contains("\\x85"));
+            assert!(escaped.contains("\\x9b"));
+            assert!(escaped.contains("\\x9d"));
+        }
+        assert_eq!(escape_ctl("caf\u{e9}\u{85}note"), "caf\u{e9}\\x85note");
+        assert_eq!(
+            escape_ctl_stderr("caf\u{e9}\u{85}note"),
+            "caf\u{e9}\\x85note"
+        );
+    }
 }
