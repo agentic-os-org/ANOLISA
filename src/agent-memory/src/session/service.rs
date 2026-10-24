@@ -248,23 +248,53 @@ impl SessionLogService {
     /// `MAX_SESSION_LOG_BYTES`. When the log exceeds the cap, the most
     /// recent entries are returned (tail truncation) so the model can see
     /// what it has done most recently.
+    ///
+    /// A trailing fragment that was never newline-terminated is dropped, so
+    /// a writer killed mid-append cannot make the records it already
+    /// completed unreadable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Io`] when the log cannot be read, and
+    /// [`MemoryError::Other`] when the bytes between two record boundaries
+    /// are not valid UTF-8.
     pub fn read_log(&self) -> Result<String> {
         // Hold the write-side lock while reading so we get a consistent
         // snapshot (no half-written lines) — not to prevent concurrent
-        // corruption, which O_APPEND already guarantees.
+        // corruption, which O_APPEND already guarantees. The lock cannot
+        // cover a writer that died mid-append, which is what
+        // `drop_torn_tail` below is for.
         let _g = self.log_file.lock().unwrap_or_else(|e| e.into_inner());
         let raw = std::fs::read(&self.log_path)?;
-        if raw.len() <= Self::MAX_SESSION_LOG_BYTES as usize {
-            return String::from_utf8(raw).map_err(|e| MemoryError::Other(e.to_string()));
-        }
-        // Return the tail: find a line boundary near the end of the cap.
         let cap = Self::MAX_SESSION_LOG_BYTES as usize;
-        let start = raw[raw.len() - cap..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map(|p| raw.len() - cap + p + 1)
-            .unwrap_or(raw.len() - cap);
-        String::from_utf8(raw[start..].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
+        // Return the tail: find a line boundary near the end of the cap.
+        let start = if raw.len() > cap {
+            raw[raw.len() - cap..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| raw.len() - cap + p + 1)
+                .unwrap_or(raw.len() - cap)
+        } else {
+            0
+        };
+        let window = Self::drop_torn_tail(&raw[start..]);
+        String::from_utf8(window.to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
+    }
+
+    /// Cut a log window at its last `\n`, dropping any trailing fragment.
+    ///
+    /// [`Self::append_log`] writes every record as one line ending in `\n`,
+    /// so bytes after the final newline are a record that was never
+    /// completed — the state a crash or SIGKILL mid-append leaves behind.
+    /// Such a fragment can stop inside a multi-byte UTF-8 character, which
+    /// would fail the decode for the whole window; an unterminated line is
+    /// not a record any reader could have parsed, so dropping it loses
+    /// nothing that was ever durable. Empty when no line was completed.
+    fn drop_torn_tail(window: &[u8]) -> &[u8] {
+        match window.iter().rposition(|&b| b == b'\n') {
+            Some(newline) => &window[..=newline],
+            None => &[],
+        }
     }
 
     /// Copy a file from `<scratch>/<src_in_scratch>` to `<mount.root>/<dst_in_store>`.
