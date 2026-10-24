@@ -351,13 +351,11 @@ def fault_outcome(
 ) -> dict[str, Any]:
     """Evaluate malformed-input counts, liveness, and normal-traffic quality."""
     path = run_path.parent / "measurement" / "fault-results.json"
-    if not path.exists():
-        return {
-            "verdict": "INCONCLUSIVE",
-            "missing": ["fault-results.json"],
-            "failed": [],
-        }
-    value = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Interrupted writes are missing evidence, just like an absent file.
+        value = None
     if not isinstance(value, dict):
         return {
             "verdict": "INCONCLUSIVE",
