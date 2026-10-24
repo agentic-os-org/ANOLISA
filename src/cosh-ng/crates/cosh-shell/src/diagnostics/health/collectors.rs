@@ -493,6 +493,7 @@ pub(crate) fn collect_host(builder: &mut HealthReportBuilder) {
             );
         }
     }
+    super::kernel_confinement::record_confinement_facts(builder, started.elapsed().as_millis());
     match fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|content| parse_proc_uptime_seconds(&content))

@@ -116,4 +116,5 @@ collect_message_ids!([
     auth_ecs_ids,
     startup_upgrade_ids,
     bug_report_ids,
+    health_confinement_ids,
 ],);

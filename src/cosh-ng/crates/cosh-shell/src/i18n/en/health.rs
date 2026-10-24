@@ -163,6 +163,15 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthTryReasonServiceState => "configured service state is unexpected",
         MessageId::HealthTryReasonHighLoad => "load is elevated across recent windows",
         MessageId::HealthTryReasonMissingCoreCheck => "a core health check is unavailable",
+        MessageId::HealthFindingWorkspaceConfinementUnsupported => {
+            "agent file tools need Linux {required}+ (openat2)"
+        }
+        MessageId::HealthInsightWorkspaceConfinementUnsupported => {
+            "kernel {kernel} has no openat2 (Linux {required}+), so cosh-core exits before agent file tools can run"
+        }
+        MessageId::HealthRemediationWorkspaceConfinement => {
+            "run cosh on a host with Linux {required} or newer (this kernel: {kernel}); openat2(2) is what confines agent file access to the workspace, and without it cosh-core refuses to start the workspace-confined read and write tools"
+        }
         _ => return None,
     })
 }

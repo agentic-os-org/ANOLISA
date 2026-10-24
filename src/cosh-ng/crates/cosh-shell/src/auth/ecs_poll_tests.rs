@@ -950,6 +950,9 @@ fn cancelled_and_reaped_probe_stays_idle_despite_overdue_checks() {
 #[test]
 fn ecs_refresh_message_is_bilingual() {
     use crate::config::Language;
+    // Tail ownership moved to the appended #3413 health-confinement segment, so
+    // this keeps the ECS messages pinned to their own segment position; the
+    // current tail is asserted in the i18n discriminant test.
     let id = MessageId::AuthEcsRefreshing;
     assert_eq!(id as usize, MessageId::AuthEcsCancelHint as usize + 1);
     assert_eq!(
