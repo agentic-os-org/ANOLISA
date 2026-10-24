@@ -297,8 +297,12 @@ def convert_session_to_trace(
 
         result_body = tc_info.get("result", "")
         is_error = tc_info.get("is_error", False)
-        # If mcporter returned an error, mark as error
-        if "Error:" in result_body or "unknown" in result_body.lower():
+        # mcporter prints failures as "Error: ..." lines (including its
+        # "Error: unknown tool ..." form), so that marker alone identifies an
+        # error. Matching the bare word "unknown" instead would flip a
+        # successful call whose body merely contains it (for example
+        # "from": "unknown@example.com") to HTTP 500.
+        if "Error:" in result_body:
             is_error = True
 
         return {
