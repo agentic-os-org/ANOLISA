@@ -5,12 +5,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
-from generate_release_notes import version_key
+from generate_release_notes import changelog_entry, release_links, version_key
 
 GITHUB = Path(__file__).resolve().parents[1]
 WORKFLOW = GITHUB / "workflows/release.yaml"
@@ -44,6 +45,59 @@ class VersionPrecedenceTest(unittest.TestCase):
         for version in ("1.0", "01.0.0", "1.0.0-01", "1.0.0-rc..1", "1.0.0+"):
             with self.subTest(version=version):
                 self.assertIsNone(version_key(version))
+
+
+class CommentBlocksTest(unittest.TestCase):
+    def test_commented_template_does_not_duplicate_version(self) -> None:
+        for indent in range(4):
+            with self.subTest(indent=indent):
+                source = (
+                    " " * indent + "<!--\n## 1.2.3\n- Template.\n-->\n\n"
+                    "## 1.2.3\n\n- Actual release.\n"
+                )
+                self.assertEqual(changelog_entry(source, "1.2.3"), "- Actual release.")
+
+    def test_commented_heading_does_not_truncate_entry(self) -> None:
+        body = "- Before.\n\n<!--\n## 1.2.2\n- Hidden.\n-->\n\n- After."
+        source = f"## 1.2.3\n\n{body}\n\n## 1.2.2\n\n- Old.\n"
+        self.assertEqual(changelog_entry(source, "1.2.3"), body)
+
+    def test_fence_inside_comment_does_not_hide_following_version(self) -> None:
+        source = "<!--\n```markdown\n## 1.2.3\n-->\n## 1.2.3\n\n- Actual release.\n"
+        self.assertEqual(changelog_entry(source, "1.2.3"), "- Actual release.")
+
+    def test_comment_inside_fence_does_not_hide_following_version(self) -> None:
+        for fence in ("```", "~~~~"):
+            with self.subTest(fence=fence):
+                source = (
+                    f"{fence}markdown\n<!--\n## 1.2.3\n{fence}\n" "## 1.2.3\n\n- Actual release.\n"
+                )
+                self.assertEqual(changelog_entry(source, "1.2.3"), "- Actual release.")
+
+    def test_commented_reference_definition_is_not_copied(self) -> None:
+        source = (
+            "## 1.2.3\n\n- Read [guide].\n\n## 1.2.2\n\n- Old.\n\n"
+            "[guide]: docs/guide.md\n<!--\n[guide]: docs/obsolete.md\n-->\n"
+        )
+        self.assertEqual(
+            changelog_entry(source, "1.2.3"),
+            "- Read [guide].\n\n[guide]: docs/guide.md",
+        )
+
+    def test_comment_links_stay_literal_and_do_not_classify_images(self) -> None:
+        comment = "<!--\n![guide]\n[example](old.md)\n-->\n<!-- same line -->\n"
+        body = comment + "[guide]: docs/guide.md\n[more](more.md)\n"
+        base = "https://github.com/example/anolisa"
+        self.assertEqual(
+            release_links(body, "src/example/CHANGELOG.md", "abc123", base),
+            comment
+            + f"[guide]: {base}/blob/abc123/src/example/docs/guide.md\n"
+            + f"[more]({base}/blob/abc123/src/example/more.md)\n",
+        )
+
+    def test_unclosed_comment_does_not_expose_version(self) -> None:
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            changelog_entry("<!--\n## 1.2.3\n\n- Hidden.\n", "1.2.3")
 
 
 class ReleaseNotesTest(unittest.TestCase):
@@ -240,6 +294,36 @@ class ReleaseNotesTest(unittest.TestCase):
         result, _ = self.publish()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(body, self.notes())
+
+    def test_tagged_comment_blocks_preserve_complete_notes(self) -> None:
+        body = "- Before.\n\n<!--\n## 1.2.2\n[example](old.md)\n-->\n\n- After."
+        self.changelog(
+            "<!--\n## 1.2.3\n- Template.\n-->\n\n" f"## 1.2.3\n\n{body}\n\n## 1.2.2\n\n- Old.\n"
+        )
+        self.git("tag", "sec-core/v1.2.3")
+        result = subprocess.run(
+            [
+                sys.executable,
+                ".github/scripts/generate_release_notes.py",
+                "--tag",
+                "sec-core/v1.2.3",
+                "--prefix",
+                "sec-core/v",
+                "--repository",
+                "example/anolisa",
+                "--output",
+                str(self.root / "release-notes.md"),
+            ],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(body, self.notes())
+        self.assertNotIn("- Template.", self.notes())
+        self.assertNotIn("- Old.", self.notes())
 
     def test_tag_contents_win_over_checkout_and_uncommitted_edits(self) -> None:
         self.release(body="- Tagged explanation.")
