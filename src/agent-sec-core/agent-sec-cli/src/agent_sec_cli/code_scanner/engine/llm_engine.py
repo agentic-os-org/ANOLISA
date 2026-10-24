@@ -108,6 +108,32 @@ SYSTEM_PROMPT = (
 _JSON_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
 
+def _balanced_len(text: str, start: int) -> int:
+    """Return the length of the balanced {...} object starting at *start*."""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i - start + 1
+    return 0
+
+
 def _extract_verdict(content: str) -> tuple[Optional[str], str]:
     """Best-effort parse of model output -> (verdict, reason).
 
@@ -120,6 +146,18 @@ def _extract_verdict(content: str) -> tuple[Optional[str], str]:
     candidates: List[str] = []
     if text.startswith("{") and text.endswith("}"):
         candidates.append(text)
+    # Nested objects (models adding "details": {...} fields) never match
+    # the flat regex above — the outermost balanced object at each "{" is a
+    # candidate too, so fenced nested output keeps its verdict and reason.
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch == "{":
+            try:
+                obj, _ = decoder.raw_decode(text, i)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and "verdict" in obj:
+                candidates.append(text[i : i + _balanced_len(text, i)])
     candidates.extend(_JSON_RE.findall(text))
     for cand in candidates:
         try:
