@@ -167,3 +167,103 @@ fn concurrent_writes_serialize_into_history() {
         "expected at least one new commit beyond baseline {baseline}, got {after}",
     );
 }
+
+// ── Regression: every mutating tool bumps HEAD ──────────────────────────────
+//
+// `auto_commit_for` gates on `git_repo::WRITE_TOOLS`. The tools below write
+// tracked content but were missing from that list, so their output reached
+// disk uncommitted: `mem_log` never showed it, `mem_revert` still answered
+// from the pre-write HEAD, and the next listed tool's `commit_all` swept the
+// pending changes into a commit named after an unrelated path.
+
+/// Commit summaries currently in the mount's history, newest first.
+fn summaries(svc: &MemoryService) -> Vec<String> {
+    svc.mem_log(100, None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.summary)
+        .collect()
+}
+
+fn assert_committed(svc: &MemoryService, tool: &str) {
+    let log = summaries(svc);
+    assert!(
+        log.iter()
+            .any(|s| s == tool || s.starts_with(&format!("{tool} "))),
+        "expected a commit attributed to {tool}, got {log:?}"
+    );
+}
+
+#[test]
+fn mem_import_bumps_head() {
+    use agent_memory::tools::memory_export::{ExportFilter, memory_export};
+    use agent_memory::tools::memory_import::{ImportStrategy, memory_import};
+
+    let (_tmp, svc) = setup(true, true);
+    svc.write("notes/keep.md", "portable memory", false)
+        .unwrap();
+    let archive = memory_export(&svc, &ExportFilter::default()).unwrap();
+
+    svc.remove("notes/keep.md", false).unwrap();
+    assert!(!svc.mount.root.join("notes/keep.md").exists());
+
+    memory_import(&svc, &archive, ImportStrategy::Merge, false).unwrap();
+    assert_eq!(svc.read("notes/keep.md").unwrap(), "portable memory");
+    assert_committed(&svc, "mem_import");
+}
+
+#[test]
+fn task_save_and_close_bump_head() {
+    use agent_memory::tools::memory_task::{memory_task_close, memory_task_save};
+
+    let (_tmp, svc) = setup(true, true);
+    memory_task_save(
+        &svc,
+        "ship the git gate",
+        Some("in-progress"),
+        Some(40),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("task-git-1"),
+    )
+    .unwrap();
+    assert!(svc.mount.root.join("tasks/task-git-1.md").exists());
+    assert_committed(&svc, "memory_task_save");
+
+    memory_task_close(&svc, "task-git-1", Some("landed")).unwrap();
+    assert_committed(&svc, "memory_task_close");
+}
+
+#[test]
+fn index_refresh_bumps_head() {
+    let (_tmp, svc) = setup(true, true);
+    svc.write("notes/indexed.md", "# Indexed\n\nbody", false)
+        .unwrap();
+
+    let n = agent_memory::tools::memory_index::refresh_index(&svc).unwrap();
+    assert!(n > 0, "expected MEMORY.md to list the new note");
+    assert!(svc.mount.root.join("MEMORY.md").exists());
+    assert_committed(&svc, "mem_index_refresh");
+}
+
+#[test]
+fn consolidated_facts_bump_head() {
+    let (_tmp, svc) = setup(true, true);
+    // Three writes under one directory are what the working-context rule
+    // needs to extract a fact, so consolidation really writes to `facts/`.
+    for name in ["config.md", "errors.md", "solution.md"] {
+        svc.write(&format!("notes/project-a/{name}"), "work log", false)
+            .unwrap();
+    }
+
+    let written = svc.consolidate();
+    assert!(
+        written > 0,
+        "expected consolidation to write at least one fact"
+    );
+    assert!(svc.mount.root.join("facts").is_dir());
+    assert_committed(&svc, "consolidate");
+}
