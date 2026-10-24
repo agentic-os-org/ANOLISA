@@ -68,3 +68,8 @@ uses per-Query registration with the existing Adapter and service contracts.
 [Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.
 
 [Managed Claude MCP handlers](adapters/claude-mcp.md) add an explicit handler source, task-owned invocation identity and success-aware result adoption through the existing Provider path.
+
+Resident SDK model responses now enter an Adapter-owned identity producer before native
+dispatch; the service owns sequence admission and active-state retirement.
+[Long-session ownership and limits](adapters/resident-sdk.md) also cover callback drain,
+MCP dispatch and the pinned Claude transport.

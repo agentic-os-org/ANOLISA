@@ -37,21 +37,34 @@ def options(root: Path, name: str) -> ClaudeAgentOptions:
     directory = root / name
     directory.mkdir()
     return ClaudeAgentOptions(
-        cwd=str(directory), setting_sources=[], tools=[],
-        env={"CLAUDE_CONFIG_DIR": str(directory / "profile"),
-             "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_API_KEY": "local-fixture",
-             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
+        cwd=str(directory),
+        setting_sources=[],
+        tools=[],
+        env={
+            "CLAUDE_CONFIG_DIR": str(directory / "profile"),
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:1",
+            "ANTHROPIC_API_KEY": "local-fixture",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        },
     )
 
 
 def record_process(client: ClaudeSDKClient) -> int:
     # Private SDK inspection is confined to native process-cleanup evidence.
-    pid = client._transport._process.pid
+    pid = client._transport.delegate._process.pid
     directory = Path(client.options.cwd)
-    (directory / "sdk-process.json").write_text(json.dumps({
-        "pid": pid, "owner": os.getpid(), "cwd": str(directory), "ports": [],
-        "lifetime_seconds": 8, "stop": f"kill -TERM -- {pid}",
-    }))
+    (directory / "sdk-process.json").write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "owner": os.getpid(),
+                "cwd": str(directory),
+                "ports": [],
+                "lifetime_seconds": 8,
+                "stop": f"kill -TERM -- {pid}",
+            }
+        )
+    )
     return pid
 
 
@@ -61,15 +74,24 @@ def assert_released(client: Any, root: Path, config: dict[str, Any]) -> None:
     assert client._aw_bridge.scope.release_error is None
     assert client not in aw_resident._active
     assert not aw_resident._poisoned
-    status = json.loads(subprocess.check_output([
-        config["executable"], "status", "--config", str(root / "aw.json"),
-    ], timeout=5))["result"]
+    status = json.loads(
+        subprocess.check_output(
+            [
+                config["executable"],
+                "status",
+                "--config",
+                str(root / "aw.json"),
+            ],
+            timeout=5,
+        )
+    )["result"]
     assert status["bindings"] == 1 and status["events"] == 0, status
 
 
 async def recover(client: Any, root: Path, config: dict[str, Any], name: str) -> None:
     assert_released(client, root, config)
     replacement = create_client(options(root, name + "-recovery"))
+
     async def connect_and_close() -> None:
         try:
             await replacement.connect()
@@ -77,13 +99,17 @@ async def recover(client: Any, root: Path, config: dict[str, Any], name: str) ->
         finally:
             await replacement.disconnect()
         assert not Path(f"/proc/{pid}").exists()
+
     await bounded(connect_and_close())
     assert_released(replacement, root, config)
 
 
 async def validation_error(root: Path, config: dict[str, Any]) -> None:
-    async def permission(name: str, arguments: dict[str, Any], context: Any) -> PermissionResultAllow:
+    async def permission(
+        name: str, arguments: dict[str, Any], context: Any
+    ) -> PermissionResultAllow:
         return PermissionResultAllow()
+
     settings = options(root, "validation-error")
     settings.can_use_tool = permission
     client = create_client(settings)
@@ -171,7 +197,10 @@ async def initialization(root: Path, config: dict[str, Any], cancel: bool) -> No
         native_closes.append(sdk_client)
         await original_disconnect(sdk_client)
 
-    with patch.object(Query, "initialize", initialize), patch.object(ClaudeSDKClient, "disconnect", disconnect):
+    with patch.object(Query, "initialize", initialize), patch.object(
+        ClaudeSDKClient, "disconnect", disconnect
+    ):
+
         async def exercise() -> None:
             connecting = asyncio.create_task(client.connect())
             closing = None
@@ -184,7 +213,9 @@ async def initialization(root: Path, config: dict[str, Any], cancel: bool) -> No
                     await asyncio.sleep(0)
                     assert not closing.done(), "A different task bypassed the lifecycle lock"
                     finish.set()
-                results = await asyncio.gather(connecting, *([closing] if closing else []), return_exceptions=True)
+                results = await asyncio.gather(
+                    connecting, *([closing] if closing else []), return_exceptions=True
+                )
                 expected = asyncio.CancelledError if cancel else RuntimeError
                 assert isinstance(results[0], expected), results
                 if not cancel:
@@ -195,6 +226,7 @@ async def initialization(root: Path, config: dict[str, Any], cancel: bool) -> No
                 for task in (connecting, closing):
                     if task is not None and not task.done():
                         await bounded(task)
+
         await bounded(exercise())
     assert native_closes == [client], native_closes
     assert pids and all(not Path(f"/proc/{pid}").exists() for pid in pids)
@@ -206,8 +238,9 @@ async def acknowledge_cancel(root: Path, config: dict[str, Any]) -> None:
     original = aw_scope.command
     acknowledged = False
 
-    async def command(configuration: dict[str, Any], action: str, value: Any,
-                      *args: Any, **kwargs: Any) -> tuple[int, bytes]:
+    async def command(
+        configuration: dict[str, Any], action: str, value: Any, *args: Any, **kwargs: Any
+    ) -> tuple[int, bytes]:
         nonlocal acknowledged
         response = await original(configuration, action, value, *args, **kwargs)
         if action == "acknowledge":
@@ -228,15 +261,24 @@ async def acknowledge_expired(root: Path, config: dict[str, Any]) -> None:
     client = create_client(options(root, "acknowledge-expired"))
     original = aw_scope.command
 
-    async def command(configuration: dict[str, Any], action: str, value: Any,
-                      *args: Any, **kwargs: Any) -> tuple[int, bytes]:
+    async def command(
+        configuration: dict[str, Any], action: str, value: Any, *args: Any, **kwargs: Any
+    ) -> tuple[int, bytes]:
         if action == "acknowledge":
             # Let actual service maintenance reclaim the unacknowledged handle.
             deadline = time.monotonic() + 7
             while True:
-                status = json.loads(subprocess.check_output([
-                    config["executable"], "status", "--config", str(root / "aw.json"),
-                ], timeout=3))["result"]
+                status = json.loads(
+                    subprocess.check_output(
+                        [
+                            config["executable"],
+                            "status",
+                            "--config",
+                            str(root / "aw.json"),
+                        ],
+                        timeout=3,
+                    )
+                )["result"]
                 if status["bindings"] == 1:
                     assert status["events"] == 0, status
                     break

@@ -176,3 +176,6 @@ Qoder CLI 和 QwenPaw App/API 各自通过临时容器中的真实 sec-core 验�
 [Pi / Claude 常驻宿主](docs/design/zh/adapters/resident-sdk.md) 使用一份配置和不同 `--agent`，按任务绑定并严格处理回调失败。
 
 [Claude MCP 公共工厂](docs/design/zh/adapters/claude-mcp.md) 保留业务 handler，在 SDK 序列化前采纳 Tokenless 输出，明确任务/调用身份并严格处理故障。
+
+Pi/Claude 常驻客户端回收已完成调用明细，支持连续 execution。spec.daemon.limits 配置并发资源，
+详见[配置参考](../../docs/user-guide/zh/aw/configuration.md#服务并发预算)。

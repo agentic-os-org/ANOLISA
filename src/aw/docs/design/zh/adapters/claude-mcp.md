@@ -24,7 +24,7 @@ async with create_client(options) as client:
         consume(message)
 ```
 
-应用通过[常驻入口](resident-sdk.md)启动。每个任务创建新的 server/client 配置。server 只允许
+应用通过[常驻入口](resident-sdk.md)启动。每个客户端独立认领 server 配置，可连续处理多轮 execution。server 只允许
 认领一次，即便复制了公开配置 dict，也通过 SDK server instance 的弱引用注册表检查重复认领，
 在连接前拒绝。客户端在认领前复制 server 映射及各配置字典，保留原 SDK instance 和业务闭包；
 调用方后续修改原字典无法替换客户端使用的 instance。
@@ -68,8 +68,10 @@ sequenceDiagram
 tool.after。重试是新的调用，重新经过原生权限与 AW before 检查。业务参数改写仍受公共工厂
 原有约束。
 
-公开 handler 只收到参数，没有原生 tool_use_id。AW 每次生成 UUID v4，并以任务 binding ID
-作为关联 session，不按名称、参数或返回顺序推断原生身份。`aw_source: claude-sdk-mcp/v1`
+公开 handler 只收到参数，没有原生 tool_use_id。AW 在模型响应中投射全新 UUID v4，
+在原生调度前登记工具名和输入。固定传输从 MCP 控制帧读取 _meta.claudecode/toolUseId，
+把 execution 内的调度票据传入 handler。未知、重复、变更输入和已回收调用在业务执行前停止。
+任务 binding ID 继续作为关联 session。`aw_source: claude-sdk-mcp/v1`
 标记明确来源；归一化核对 scope 与 binding，拒绝附加伪造的原生身份字段。持久事件元数据记录
 correlation_source，不保存工具参数或原始结果。工具原生前缀来自 mcp_servers 的注册 key，
 与 server 内部显示名相互独立。
@@ -109,7 +111,7 @@ SDK，启动进入常驻宿主；所有客户端创建路径都需经过该公�
 重启由业务与部署层负责。
 
 Schema/BeforeModel 还需要 resume/compaction 后实际送给模型的 tools/context、新准入事件
-和效果及原生采纳接点；Claude 当前公开 Hook 缺少完整请求。Retrieve 需要在生成可恢复输出
+和效果及原生采纳接点；受管模型转发层已提供请求位置，事件/效果准入、安全变换和 Schema 实际采纳仍需实现。Retrieve 需要在生成可恢复输出
 前注册工具、校验模型可见 marker、隔离租户/任务存储、设置过期与配额、逐字节返回原文，并
 避免再次压缩。依赖保留在[完整 Tokenless 交付表](resident-sdk.md#交付拆分和完整-tokenless-依赖)
 及跟踪 [#8952](https://github.com/agentic-os-org/ANOLISA/issues/8952)。

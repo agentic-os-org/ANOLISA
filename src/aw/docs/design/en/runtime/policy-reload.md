@@ -160,7 +160,7 @@ switch. Original callback correlations remain claimed across revisions, so old
 callbacks cannot acquire a fresh execution budget. Event evidence uses the
 owning Host's revision and policy constraints, not the bootstrap configuration.
 
-The wire protocol is `aw-service/v1alpha6`. Old daemons and bindings fail explicit
+The wire protocol is `aw-service/v1alpha7`. Old daemons and bindings fail explicit
 version/generation checks. Process association is independent of optional
 observation; it records root PID, start ticks, UID and PID namespace, corroborates
 bridge ancestry and rechecks lifetime before activation. Audit stores association

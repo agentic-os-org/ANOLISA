@@ -336,7 +336,7 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 
 ## 升级服务
 
-本版本使用本地协议 `aw-service/v1alpha6`。旧版 daemon 会在 Agent 绑定和回调前
+本版本使用本地协议 `aw-service/v1alpha7`。旧版 daemon 会在 Agent 绑定和回调前
 被拒绝，返回 `protocol_version`。替换可执行文件前，先退出其 Agent 会话，再用
 **旧版** `aw stop --config FILE`（或 `--socket ABSOLUTE_PATH`）停止每个旧服务；
 随后一起更新 CLI 和 daemon，再次启动。不要删除仍在使用的 socket 或审计历史。
@@ -969,7 +969,7 @@ Worker 1.1.74 的 `UpdateGoal` 只能完成或
 若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
 丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
 
-长寿命 SDK 实例同样受现有服务容量限制：每实例最多保留 1024 条 Hook 关联记录，
+上文 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
 request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
 记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
 并发提交量；策略更新不会清空关联历史。
@@ -1002,12 +1002,12 @@ finally:
     await client.disconnect()
 ```
 
-每次 query 使用新客户端，通过 resume/session-store 选项保留业务会话历史。多个客户端可以
-并发，分别使用自己的 cwd/env。`receive_response()` 和 `receive_messages()` 都在交付
-`ResultMessage` 时记录完成；缺少该消息的 EOF 会报错。保留 `finally` 中的 `disconnect()`，
-确保未完成的 query 仍执行 interrupt。
+每轮响应和回调排空后可在同一客户端继续 query，保留会话；resume/session-store 继续可用。
+并发工作使用独立客户端，分别使用自己的 cwd/env。每次 query 接受字符串或单消息的有限 AsyncIterable，多消息输入在发送前被拒绝；连续轮次逐次 query。
+`receive_response()` 和 `receive_messages()` 都在回调排空后交付 `ResultMessage`；
+缺少该消息的 EOF 会报错。保留 `finally` 中的 `disconnect()`，确保未完成的 query 执行 interrupt。
 
-进程内 MCP 同时从 `aw_claude` 导入 `create_sdk_mcp_server`，每任务创建新 server，
+进程内 MCP 同时从 `aw_claude` 导入 `create_sdk_mcp_server`，每客户端创建新 server，
 保留 SDK tool 定义和业务闭包。[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md) 说明成功单文本替换、可靠错误状态及明确关联。
 
 常驻 Pi 和 Claude host 会在发布 ready 前拒绝启用 AgentSight evidence 的配置。
@@ -1037,5 +1037,5 @@ sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要�
 并设置目标的 `shutdown_grace_ms` 为应用剩余清理留出时间。外层 launcher 从首次转发
 退出信号到开始强制清理，默认给予两秒宽限期。
 作用范围和限制见[退出宽限期](../../../user-guide/zh/aw/configuration.md#设置-agent-退出宽限期)。
-Schema/BeforeModel、Retrieve 的后续接点和授权依赖见
+Schema/BeforeModel、Retrieve 的请求/效果准入和授权依赖见
 [常驻合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/resident-sdk.md)。

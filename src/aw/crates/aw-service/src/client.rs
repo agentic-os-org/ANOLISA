@@ -153,7 +153,12 @@ mod tests {
     #[test]
     fn discovery_rejects_daemons_without_idle_unbind_semantics() {
         use std::os::unix::fs::PermissionsExt;
-        for version in ["aw-service/v1alpha4", "aw-service/v1alpha5", VERSION] {
+        for version in [
+            "aw-service/v1alpha4",
+            "aw-service/v1alpha5",
+            "aw-service/v1alpha6",
+            VERSION,
+        ] {
             let directory = tempfile::tempdir_in("/tmp").unwrap();
             std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
                 .unwrap();
@@ -191,7 +196,7 @@ mod tests {
                     .unwrap();
                 });
                 let result = Client::connect(state.join("aw.sock"), deadline);
-                if version == "aw-service/v1alpha4" || version == "aw-service/v1alpha5" {
+                if version != VERSION {
                     assert!(
                         matches!(result, Err(crate::Error::Rejected(code)) if code == "protocol_version")
                     );

@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha6";
+pub const VERSION: &str = "aw-service/v1alpha7";
 
 /// Bootstrap configuration and daemon lifetime to which mutable requests bind.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -192,6 +192,34 @@ pub enum Operation {
         /// Prepared task binding; callbacks remain closed until acknowledgement.
         instance_id: String,
     },
+
+    /// Enable producer-sequenced reclamation on a fresh owned binding.
+    EnableInvocations {
+        /// Owned binding whose adapter supplies stable producer identities.
+        instance_id: String,
+    },
+    /// Reserve one invocation before forwarding it to native dispatch.
+    RegisterInvocation {
+        /// Binding generation is carried by the outer request identity.
+        instance_id: String,
+        /// Strictly increasing producer sequence, starting at one.
+        sequence: u64,
+        /// Stable native identity reused by every callback phase.
+        call_id: String,
+        /// Native tool name before dialect normalization.
+        tool_name: String,
+        /// Immutable tool input observed at the producer.
+        input: Value,
+    },
+    /// Cancel and drain both phases before reclaiming their details.
+    FinishInvocation {
+        /// Binding which owns the invocation.
+        instance_id: String,
+        /// Sequence returned by the owning producer.
+        sequence: u64,
+        /// Stable identity paired with the sequence.
+        call_id: String,
+    },
     /// Opt an AW-launched instance into stable bridge policy updates before spawning.
     EnableReload {
         /// Prepared instance whose Adapter supports the stable bridge.
@@ -280,8 +308,9 @@ pub enum Operation {
     /// and observer-only middleware trace; the first native bytes are retained.
     /// OpenClaw binds compression and native completion to one original snapshot;
     /// its pinned completion view supplies native metadata without renewing claims.
-    /// Closed correlations remain claimed until unbind; they cannot start a new budget.
-    /// At most 1024 correlations are retained per instance; exhaustion is explicit.
+    /// Sequenced bindings require a producer registration and reclaim both phases
+    /// after FinishInvocation drains them. Unknown or retired identities fail closed.
+    /// Legacy bindings retain at most 1024 claims until unbind; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.
         instance_id: String,
@@ -293,7 +322,8 @@ pub enum Operation {
     /// Cancel one native correlation, wait for cleanup and forbid later opens.
     ///
     /// Closing before an in-flight open wins must also prevent that open from
-    /// creating an abandoned event. Repeated closes are idempotent.
+    /// creating an abandoned event. Repeated closes are idempotent while the
+    /// invocation is retained; sequenced bindings reject closes after retirement.
     CloseHookEvent {
         /// Owning binding instance.
         instance_id: String,

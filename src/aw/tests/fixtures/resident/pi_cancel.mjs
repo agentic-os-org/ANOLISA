@@ -13,8 +13,8 @@ async function bounded(operation, milliseconds = 8000) {
   } finally { clearTimeout(timer); }
 }
 
-async function cancel({ createSession, root, evidence }, after) {
-  const name = after ? "cancel-after-tool" : "cancel-before-tool";
+async function cancel({ createSession, root, evidence }, after, direct = false) {
+  const name = `${direct ? "abort" : "cancel"}-${after ? "after" : "before"}-tool`;
   const cwd = join(root, name);
   mkdirSync(cwd);
   const { session, close } = await createSession({ cwd, index: 0,
@@ -37,7 +37,7 @@ async function cancel({ createSession, root, evidence }, after) {
   let closing;
   try {
     await bounded(entered);
-    closing = close();
+    closing = direct ? session.abort() : close();
     assert(session.agent.signal.aborted, "close did not abort the native SDK");
     resume();
     const result = await bounded(prompting);
@@ -129,6 +129,12 @@ export async function run(options) {
   if (!process.env.AW_TEST_PI_CANCEL_CASE
       || process.env.AW_TEST_PI_CANCEL_CASE === "cancel-executing-tool")
     results.push(await executing(options, false));
+  for (const after of [false, true]) {
+    const selected = process.env.AW_TEST_PI_CANCEL_CASE;
+    if (!selected || selected === (after ? "abort-after-tool" : "abort-before-tool"))
+      results.push(await cancel(options, after, true));
+  }
+  assert(results.length, "No Pi cancellation case matched");
   await options.recover();
   return results;
 }

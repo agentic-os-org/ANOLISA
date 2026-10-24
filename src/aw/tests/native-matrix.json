@@ -149,13 +149,15 @@
       "mode": "automated",
       "versions": {
         "claude-agent-sdk": "0.2.88",
-        "mcp": "1.26.0"
+        "mcp": "1.26.0",
+        "httpx": "0.28.1"
       },
       "requirements": [
         "claude-agent-sdk==0.2.88",
-        "mcp==1.26.0"
+        "mcp==1.26.0",
+        "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -583,6 +585,249 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-long",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "long",
+            "--output",
+            "{output}/resident-long",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 1900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-long/result.json",
+              "values": {
+                "tasks": 1,
+                "calls": 1280,
+                "executions": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "status/resources/usage/invocations": 0,
+                "status/resources/usage/correlations": 0,
+                "mcp_calls": 640,
+                "native_calls": 640
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-drain",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "drain",
+            "--output",
+            "{output}/resident-drain"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-drain/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "cases": [
+                  "cancelled-callback-finally-drained",
+                  "result-withheld-until-drain",
+                  "query-rejected-during-drain",
+                  "same-client-stream-input-reuse",
+                  "multi-input-rejected-before-send",
+                  "idle-relay-peer-does-not-delay-disconnect"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-drain-timeout",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "drain-timeout",
+            "--output",
+            "{output}/resident-drain-timeout"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-drain-timeout/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "cases": [
+                  "undrained-callback-terminates-owned-group"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "model-relay-contract",
+          "argv": [
+            "{python}",
+            "tests/fixtures/model_relay_contract.py"
+          ],
+          "timeout_seconds": 60,
+          "report": "unittest",
+          "tests": 20
+        },
+        {
+          "name": "dispatch-contract",
+          "argv": [
+            "{python}",
+            "tests/fixtures/dispatch_contract.py"
+          ],
+          "timeout_seconds": 60,
+          "report": "unittest",
+          "tests": 4
+        },
+        {
+          "name": "resident-store",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "store",
+            "--output",
+            "{output}/resident-store"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-store/result.json",
+              "values": {
+                "tasks": 2,
+                "executions": 4,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "cases": [
+                  "store-mirror",
+                  "store-resume",
+                  "materialized-cleanup"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-native-denial",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "denial",
+            "--output",
+            "{output}/resident-native-denial"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-native-denial/result.json",
+              "values": {
+                "tasks": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "native-hook-deny",
+                  "permission-deny",
+                  "mcp-native-deny",
+                  "native-input-validation",
+                  "native-permission-rule"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-model-boundaries",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "boundaries",
+            "--output",
+            "{output}/resident-model-boundaries"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-model-boundaries/result.json",
+              "values": {
+                "tasks": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "interrupt-text-stream",
+                  "interrupt-tool-stream",
+                  "number-integral-float",
+                  "number-exponent",
+                  "number-large-integer"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -687,7 +932,7 @@
       "mode": "automated",
       "versions": {},
       "npm_fixture": "crates/aw-cli/tests/fixtures/pi",
-      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures.",
+      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup.",
       "cases": [
         {
           "name": "public-factory",
@@ -819,6 +1064,44 @@
           ]
         },
         {
+          "name": "resident-long",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--scenario",
+            "long",
+            "--output",
+            "{output}/resident-long",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 1900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-long/result.json",
+              "values": {
+                "tasks": 1,
+                "calls": 1280,
+                "executions": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "status/resources/usage/invocations": 0,
+                "status/resources/usage/correlations": 0
+              }
+            }
+          ]
+        },
+        {
           "name": "resident-startup",
           "argv": [
             "{python}",
@@ -849,6 +1132,7 @@
                 "key": "case",
                 "names": [
                   "acknowledge-expired",
+                  "invalid-native-stream-rejected",
                   "worker-reuse"
                 ],
                 "values": {
@@ -890,11 +1174,54 @@
                 "names": [
                   "cancel-before-tool",
                   "cancel-after-tool",
-                  "cancel-executing-tool"
+                  "cancel-executing-tool",
+                  "abort-before-tool",
+                  "abort-after-tool"
                 ],
                 "values": {
                   "passed": true,
                   "model_requests": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-drain",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-drain",
+            "--scenario",
+            "drain",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 90,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-drain/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "drain-success",
+                  "drain-reject",
+                  "drain-timeout"
+                ],
+                "values": {
+                  "passed": true
                 }
               }
             }
@@ -1003,6 +1330,7 @@
                 "key": "case",
                 "names": [
                   "acknowledge-expired",
+                  "invalid-native-stream-rejected",
                   "worker-reuse"
                 ],
                 "values": {

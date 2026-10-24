@@ -25,8 +25,8 @@ async with create_client(options) as client:
         consume(message)
 ```
 
-Start this application with the [resident entrypoint](resident-sdk.md). A new task
-creates new server/client configurations. The server is claimed once, including
+Start this application with the [resident entrypoint](resident-sdk.md). Each client
+claims its own server configuration and may process many sequential executions. The server is claimed once, including
 when its public configuration dict is copied; the registry follows the SDK server
 instance through a weak reference. A duplicate claim fails before SDK connection.
 The client snapshots the server mapping and each configuration dictionary before
@@ -80,10 +80,12 @@ a synthetic `tool.after` for a denied business call. A retry is a new invocation
 through permissions and AW before checks. Application argument rewrites remain
 subject to the existing factory restrictions.
 
-The public handler signature has arguments but no native `tool_use_id`. AW creates
-a UUID v4 per invocation and uses the task binding ID as its correlation session.
-It does not infer native identity from tool names, arguments or completion order.
-`aw_source: claude-sdk-mcp/v1` identifies this explicit source. Normalization
+The public handler signature has arguments but no native `tool_use_id`. AW projects
+a fresh UUID v4 in the model response and registers its name/input before native
+dispatch. The pinned transport reads `_meta.claudecode/toolUseId` from the MCP
+control frame and carries an execution-scoped dispatch ticket into the handler.
+Unknown, duplicate, changed-input and retired calls stop before business execution.
+The task binding ID remains the correlation session. `aw_source: claude-sdk-mcp/v1` identifies this explicit source. Normalization
 checks the scope against the binding and rejects invented native identity fields.
 Durable event metadata retains `correlation_source`; it contains no tool arguments
 or raw results. The SDK server registration key determines the native tool prefix,
@@ -137,7 +139,8 @@ draining and supervisor restart remain application/deployment responsibilities.
 
 Schema/BeforeModel still requires the exact model-visible tools/context after
 resume and compaction, a newly admitted event/effect, and a native adoption seam.
-The current Claude public Hooks do not expose that complete request. Retrieve
+The managed model relay supplies that request location; event/effect admission, safe
+transformation and model-visible Schema adoption remain to be implemented. Retrieve
 requires a registered tool before recoverable output is emitted, authenticated
 model-visible markers, tenant/task storage, TTL/quota, exact original-byte return
 and bypass of recompression. These dependencies remain in the

@@ -40,9 +40,13 @@ spec = importlib.util.spec_from_file_location("aw_mcp", Path(sys.argv.pop(1)))
 mcp = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mcp
 spec.loader.exec_module(mcp)
+sys.path.insert(0, str(Path(spec.origin).parent))
+from aw_invocations import Invocations, dispatch
 
 
 class Scope:
+    invocation_limit = 8
+
     def __init__(self, deny=False, hold=False):
         self.handle = {"binding": {"instance_id": "task"}}
         self.deny, self.hold = deny, hold
@@ -50,6 +54,12 @@ class Scope:
         self.entered, self.release = asyncio.Event(), asyncio.Event()
 
     def check(self):
+        pass
+
+    async def register(self, sequence, call_id, name, arguments):
+        pass
+
+    async def finish(self, sequence, call_id):
         pass
 
     async def invoke(self, hook, payload):
@@ -65,11 +75,32 @@ class Scope:
 
 def claim(tool, scope):
     managed = mcp.create_sdk_mcp_server("business", tools=[tool])
-    bridge = SimpleNamespace(scope=scope, failure=None, config={"hooks": [
+    bridge = SimpleNamespace(scope=scope, failure=None, mcp_servers=set(), config={"hooks": [
         {"event": name, "replace_result": False} for name in ("tool.before", "tool.after")
     ]})
+
+    async def stop():
+        bridge.failure = "stopped"
+
+    bridge.stop_task = stop
+    bridge.failure_reply = lambda *args: setattr(bridge, "failure", "failed")
+    bridge.invocations = Invocations(bridge)
     managed.claim("local", bridge)
-    return managed, managed["instance"].tools[0].handler
+
+    async def invoke(arguments):
+        ledger = bridge.invocations
+        ledger.begin()
+        entry = ledger.produce("mcp__local__touch")
+        await ledger.register(entry, arguments)
+        ticket = ledger.reserve("native-request", entry.call_id, "before")
+        token = dispatch.set(ticket)
+        try:
+            return await managed["instance"].tools[0].handler(arguments)
+        finally:
+            dispatch.reset(token)
+            await ledger.drain()
+
+    return managed, invoke
 
 
 class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
@@ -101,16 +132,16 @@ class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def test_batch_failure_preserves_fresh_server_and_existing_owner(self):
         fresh = mcp.create_sdk_mcp_server("fresh")
         owned = mcp.create_sdk_mcp_server("owned")
-        owner = SimpleNamespace(mcp_names=set())
+        owner = SimpleNamespace(mcp_names=set(), mcp_servers=set())
         mcp.claim_servers({"owned": owned}, owner)
-        failed = SimpleNamespace(mcp_names=set())
+        failed = SimpleNamespace(mcp_names=set(), mcp_servers=set())
         with self.assertRaises(ValueError):
             mcp.claim_servers({"fresh": fresh, "owned": dict(owned)}, failed)
         self.assertFalse(fresh.claimed)
         self.assertIsNone(fresh.bridge)
         self.assertIs(owned.bridge, owner)
         self.assertEqual(failed.mcp_names, set())
-        retry = SimpleNamespace(mcp_names=set())
+        retry = SimpleNamespace(mcp_names=set(), mcp_servers=set())
         self.assertEqual(mcp.claim_servers({"fresh": fresh}, retry), [fresh])
         self.assertIs(fresh.bridge, retry)
 
@@ -118,7 +149,7 @@ class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
         for alias in ("second", "ambiguous__key", "invalid key"):
             with self.subTest(alias=alias):
                 fresh = mcp.create_sdk_mcp_server("fresh")
-                bridge = SimpleNamespace(mcp_names=set())
+                bridge = SimpleNamespace(mcp_names=set(), mcp_servers=set())
                 with self.assertRaises(ValueError):
                     mcp.claim_servers({"first": fresh, alias: dict(fresh)}, bridge)
                 self.assertFalse(fresh.claimed)
@@ -143,6 +174,32 @@ class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
         self.assertTrue(result["is_error"])
         self.assertEqual([event["tool_name"] for event in scope.events], ["touch"])
+
+    async def test_changed_dispatch_input_stops_before_policy_or_business(self):
+        calls = []
+
+        async def business(arguments):
+            calls.append(arguments)
+            return {"content": [{"type": "text", "text": "business"}]}
+
+        scope = Scope()
+        managed, _ = claim(SdkMcpTool("touch", "Business closure", {}, business), scope)
+        bridge = managed.bridge
+        ledger = bridge.invocations
+        ledger.begin()
+        entry = ledger.produce("mcp__local__touch")
+        await ledger.register(entry, {"value": "original"})
+        token = dispatch.set(ledger.reserve("native-request", entry.call_id, "before"))
+        try:
+            with self.assertRaisesRegex(bridge_module.CallbackFailure, "changed invocation"):
+                await managed["instance"].tools[0].handler({"value": "changed"})
+            self.assertEqual(calls, [])
+            self.assertEqual(scope.events, [])
+            self.assertEqual(bridge.failure, "stopped")
+        finally:
+            dispatch.reset(token)
+            await ledger.drain()
+            managed.release()
 
     async def test_original_handler_assignment_keeps_the_registered_closure(self):
         calls = []

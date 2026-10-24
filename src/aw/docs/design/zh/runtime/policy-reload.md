@@ -106,7 +106,7 @@ AW 事件数或工具数为零不代表完整请求空闲；模型等待仍为 b
 原始回调关联声明跨版本保留，旧回调不能重新取得预算。事件证据使用所属 Host 的版本及
 策略约束，不再使用服务启动配置。
 
-本地协议为 `aw-service/v1alpha6`，旧 daemon/binding 通过版本和服务代次检查显式拒绝。
+本地协议为 `aw-service/v1alpha7`，旧 daemon/binding 通过版本和服务代次检查显式拒绝。
 进程关联不依赖可选观测，记录 root PID、启动 ticks、UID、PID namespace，交叉确认桥接
 进程祖先，并在激活前重新检查生命周期。审计保留关联与切换，不记录 Provider 配置值。
 

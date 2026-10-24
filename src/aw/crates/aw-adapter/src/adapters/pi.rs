@@ -143,6 +143,10 @@ impl PreparedLaunch for Prepared {
                 include_bytes!("../../native/pi/transport.mjs").as_slice(),
             ),
             (
+                "producer.mjs",
+                include_bytes!("../../native/pi/producer.mjs").as_slice(),
+            ),
+            (
                 "scope.mjs",
                 include_bytes!("../../native/pi/scope.mjs").as_slice(),
             ),

@@ -380,3 +380,36 @@ record can leave an unrecorded service binding. The owning supervisor must retir
 the affected service and its private state in that case. This is separate from
 normal cancellation/failed-install rollback; this Preview has no crash-recovery
 journal or automatic garbage collector.
+
+## Concurrent service budgets
+
+Resident Pi/Claude clients retain their conversation across executions and reclaim
+completed Hook state. Configure resource admission independently of historical calls:
+
+```yaml
+spec:
+  daemon:
+    limits:
+      bindings: 64
+      events: 128
+      calls: 64
+      connections: 128
+      invocations_per_binding: 256
+```
+
+These are defaults; omitted fields keep their default. Each accepts an integer
+from 1 through 4096. `bindings` includes hosts and preparing, idle or draining
+clients; `events` counts live Hook events, `calls` active Provider invocations,
+`connections` all live service connections including control RPCs, and
+`invocations_per_binding` active model-produced tool calls for one resident client.
+Once the shared connection limit is reached, sixteen additional slots admit only
+control/cleanup requests. Overload rejects new admission; completed
+work returns capacity. Lifetime tool count has no configurable quota in resident
+Pi/Claude mode. Legacy entrypoints keep their retained-correlation limits.
+
+Use `aw status --config aw.yaml` to inspect `resources.limits`, `resources.usage`,
+`peak_invocations_per_binding`, `admission_rejections` and `rejection_reasons`.
+Select concurrency from actual load measurements; audit disk and SDK history need
+separate retention. Apply daemon limits by draining clients and restarting the
+service. Upgrade or roll back CLI/daemon together after drain and stop: wire
+v1alpha7 rejects older live sessions. Configuration/Provider versions are unchanged.

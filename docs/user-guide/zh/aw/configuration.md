@@ -310,3 +310,31 @@ Qoder 回滚同样等待原生移除确认。取消或安装失败后若无法�
 本地暂存文件；成功收到 Bind 回复后、记录持久化前中断，也可能留下未记录的服务绑定。
 这种情况下，应由所属 supervisor 退出受影响的服务并清理其私有状态。
 正常取消或安装失败仍执行回滚；本 Preview 尚无崩溃恢复日志或自动垃圾回收器。
+
+## 服务并发预算
+
+Pi/Claude 常驻客户端跨 execution 保留会话，已完成 Hook 状态会回收。资源准入独立于历史调用数：
+
+```yaml
+spec:
+  daemon:
+    limits:
+      bindings: 64
+      events: 128
+      calls: 64
+      connections: 128
+      invocations_per_binding: 256
+```
+
+以上为默认值，省略字段保留默认，各字段接受 1..4096 整数。bindings 包含宿主及准备中、空闲、
+排空中的客户端；events 为 live Hook event；calls 为活动 Provider 调用；connections 为全部
+活动服务连接，包含控制 RPC；invocations_per_binding 为单个常驻客户端活动的模型工具调用数。
+共享连接额度用满后，额外 16 条连接只接纳控制/清理请求。过载拒绝新准入，已完成工作释放容量。
+Pi/Claude 常驻模式没有累计工具次数配额，
+旧入口保留原累计关联限制。
+
+aw status --config aw.yaml 的 resources.limits、resources.usage、peak_invocations_per_binding、
+admission_rejections 和 rejection_reasons 展示容量、用量、峰值与拒绝原因。根据实际负载选择
+并发数，审计磁盘和 SDK 历史另设保留策略。修改 daemon limits 后先排空客户端再重启服务。
+CLI/daemon 升级或回退同样先排空、停止后一起更换：wire v1alpha7 拒绝旧活动会话，配置和 Provider
+协议版本保持不变。

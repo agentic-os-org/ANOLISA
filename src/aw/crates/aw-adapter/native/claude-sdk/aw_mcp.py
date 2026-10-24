@@ -1,11 +1,11 @@
 """Bind public SDK MCP handlers to one client without guessing native tool-use IDs."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
 import re
 from typing import Any
-from uuid import uuid4
 import weakref
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server as sdk_server
@@ -17,7 +17,9 @@ _servers = weakref.WeakKeyDictionary()
 
 def identifier(value: str) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is None:
-        raise ValueError("AW MCP names require 1..128 ASCII letters, digits, underscores or hyphens")
+        raise ValueError(
+            "AW MCP names require 1..128 ASCII letters, digits, underscores or hyphens"
+        )
     return value
 
 
@@ -39,8 +41,10 @@ class ManagedServer(dict):
         self._names = tuple(names)
         wrapped = []
         for tool in tools:
+
             async def handler(arguments: dict[str, Any], tool: SdkMcpTool[Any] = tool) -> Any:
                 return await self.invoke(tool, arguments)
+
             wrapped.append(replace(tool, handler=handler))
         super().__init__(sdk_server(name, version, wrapped))
         _servers[self["instance"]] = weakref.ref(self)
@@ -65,6 +69,7 @@ class ManagedServer(dict):
         if self.claimed:
             raise ValueError("Create a fresh AW MCP server for each task client")
         self._claim = _Claim(identifier(key), bridge)
+        bridge.mcp_servers.add(self._claim.key)
         return {f"mcp__{self._claim.key}__{name}" for name in self._names}
 
     def release(self) -> None:
@@ -100,8 +105,12 @@ class ManagedServer(dict):
                 if payload["is_error"] or "structuredContent" in original:
                     raise CallbackFailure("MCP result is not eligible for replacement")
                 blocks = result.get("content") if isinstance(result, dict) else None
-                if (not isinstance(blocks, list) or len(blocks) != 1
-                        or blocks[0].get("type") != "text" or not isinstance(blocks[0].get("text"), str)):
+                if (
+                    not isinstance(blocks, list)
+                    or len(blocks) != 1
+                    or blocks[0].get("type") != "text"
+                    or not isinstance(blocks[0].get("text"), str)
+                ):
                     raise CallbackFailure("MCP replacement requires one text block")
                 compared = _copy_json(result)
                 compared["content"][0]["text"] = original["content"][0]["text"]
@@ -120,34 +129,84 @@ class ManagedServer(dict):
         if bridge is None:
             raise CallbackFailure("MCP server must belong to a connected AW task client")
         bridge.scope.check()
-        payload = {"aw_source": SOURCE, "event": "tool.before",
-                   "scope_id": bridge.scope.handle["binding"]["instance_id"],
-                   "invocation_id": str(uuid4()), "server": claim.key,
-                   "tool_name": tool.name, "tool_input": _copy_json(arguments)}
+        async with bridge.invocations.callback() as ticket:
+            entry = None
+            try:
+                entry = bridge.invocations.claim(
+                    ticket.call_id, f"mcp__{claim.key}__{tool.name}", arguments, "before"
+                )
+                return await self.execute(entry, claim, tool, arguments)
+            except Exception:
+                if entry is None or entry.phase != "adopted":
+                    bridge.failure_reply("tool.after", {})
+                    await bridge.stop_task()
+                raise
+
+    async def execute(
+        self, entry: Any, claim: _Claim, tool: SdkMcpTool[Any], arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        bridge = claim.bridge
+        payload = {
+            "aw_source": SOURCE,
+            "event": "tool.before",
+            "scope_id": bridge.scope.handle["binding"]["instance_id"],
+            "invocation_id": entry.call_id,
+            "server": claim.key,
+            "tool_name": tool.name,
+            "tool_input": _copy_json(arguments),
+        }
         denial = await self.steps(payload)
         if denial is not None:
+            await bridge.invocations.finish(entry)
             return denial
+        entry.phase = "allowed"
         try:
             result = await tool.handler(_copy_json(arguments))
         except Exception as error:
-            await self.steps({**payload, "event": "tool.after", "is_error": True,
-                              "tool_result": {"content": [{"type": "text", "text": str(error)}], "is_error": True}})
+            bridge.invocations.claim(entry.call_id, entry.name, arguments, "after")
+            await self.steps(
+                {
+                    **payload,
+                    "event": "tool.after",
+                    "is_error": True,
+                    "tool_result": {
+                        "content": [{"type": "text", "text": str(error)}],
+                        "is_error": True,
+                    },
+                }
+            )
+            await bridge.invocations.finish(entry)
             raise
         try:
             snapshot = _copy_json(result)
-            if not isinstance(snapshot, dict) or "isError" in snapshot or type(snapshot.get("is_error", False)) is not bool:
+            if (
+                not isinstance(snapshot, dict)
+                or "isError" in snapshot
+                or type(snapshot.get("is_error", False)) is not bool
+            ):
                 raise CallbackFailure("SDK MCP results require the public boolean is_error field")
         except Exception:
             bridge.failure_reply("tool.after", {})
             await bridge.stop_task()
-            raise CallbackFailure("AW stopped the MCP task after an invalid handler result") from None
-        replacement = await self.steps({**payload, "event": "tool.after",
-                                        "tool_result": snapshot, "is_error": snapshot.get("is_error", False)})
+            raise CallbackFailure(
+                "AW stopped the MCP task after an invalid handler result"
+            ) from None
+        bridge.invocations.claim(entry.call_id, entry.name, arguments, "after")
+        replacement = await self.steps(
+            {
+                **payload,
+                "event": "tool.after",
+                "tool_result": snapshot,
+                "is_error": snapshot.get("is_error", False),
+            }
+        )
+        await bridge.invocations.finish(entry)
         return replacement if replacement is not None else snapshot
 
 
-def create_sdk_mcp_server(name: str, version: str = "1.0.0",
-                          tools: list[SdkMcpTool[Any]] | None = None) -> ManagedServer:
+def create_sdk_mcp_server(
+    name: str, version: str = "1.0.0", tools: list[SdkMcpTool[Any]] | None = None
+) -> ManagedServer:
     """Keep the SDK tool catalog and closures; attach the server in create_client options."""
     return ManagedServer(identifier(name), version, list(tools or []))
 
@@ -156,8 +215,10 @@ def snapshot_servers(servers: Any) -> Any:
     """Freeze server selection while retaining the SDK instances and business closures."""
     if not isinstance(servers, dict):
         return servers
-    return {name: dict(server) if isinstance(server, dict) else server
-            for name, server in servers.items()}
+    return {
+        name: dict(server) if isinstance(server, dict) else server
+        for name, server in servers.items()
+    }
 
 
 def claim_servers(servers: Any, bridge: Any) -> list[ManagedServer]:
@@ -165,13 +226,19 @@ def claim_servers(servers: Any, bridge: Any) -> list[ManagedServer]:
     seen = set()
     if isinstance(servers, dict):
         # Delimiter-bearing server keys can alias another server's tool namespace.
-        managed_present = any(isinstance(value, dict) and value.get("type") == "sdk"
-                              and _servers.get(value.get("instance")) is not None for value in servers.values())
+        managed_present = any(
+            isinstance(value, dict)
+            and value.get("type") == "sdk"
+            and _servers.get(value.get("instance")) is not None
+            for value in servers.values()
+        )
         if managed_present:
             for key in servers:
                 identifier(key)
                 if "__" in key:
-                    raise ValueError("Managed MCP configurations forbid ambiguous server keys containing __")
+                    raise ValueError(
+                        "Managed MCP configurations forbid ambiguous server keys containing __"
+                    )
         for key, server in servers.items():
             if isinstance(server, dict) and server.get("type") == "sdk":
                 reference = _servers.get(server.get("instance"))

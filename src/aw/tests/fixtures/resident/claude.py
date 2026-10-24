@@ -1,4 +1,5 @@
 """Real resident SDK/CLI tasks, isolated local model endpoints and native Hooks."""
+
 import asyncio
 import importlib.util
 import json
@@ -24,6 +25,7 @@ async def task(index, mode, consumer="response"):
     spec.loader.exec_module(fixture)
     fixture.ROOT, fixture.MODE, fixture.BASH = directory, "bash-compress", True
     fixture.ORIGINAL = f"private-result-{index}"
+
     class Handler(fixture.Handler):
         def reply(self, data, kind):
             (directory / "requests.json").write_text(json.dumps(fixture.REQUESTS))
@@ -32,10 +34,16 @@ async def task(index, mode, consumer="response"):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    (directory / "endpoint.json").write_text(json.dumps({
-        "pid": os.getpid(), "port": server.server_port, "lifetime": "one task",
-        "stop": "server.shutdown(); server.server_close(); thread.join()",
-    }))
+    (directory / "endpoint.json").write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "port": server.server_port,
+                "lifetime": "one task",
+                "stop": "server.shutdown(); server.server_close(); thread.join()",
+            }
+        )
+    )
     native = []
 
     async def hook(payload, call_id, context):
@@ -43,35 +51,51 @@ async def task(index, mode, consumer="response"):
         return {}
 
     options = ClaudeAgentOptions(
-        model="claude-sonnet-4-6", cwd=str(directory), tools=["Bash"], allowed_tools=["Bash"],
-        setting_sources=[], max_turns=2,
+        model="claude-sonnet-4-6",
+        cwd=str(directory),
+        tools=["Bash"],
+        allowed_tools=["Bash"],
+        setting_sources=[],
+        max_turns=2,
         hooks={name: [HookMatcher(hooks=[hook])] for name in ("PreToolUse", "PostToolUse")},
-        env={"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-             "ANTHROPIC_API_KEY": "local-fixture", "AW_TEST_MODE": mode,
-             "AW_TEST_TENANT": str(index), "CLAUDE_CONFIG_DIR": str(directory / "profile"),
-             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
+        env={
+            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+            "ANTHROPIC_API_KEY": "local-fixture",
+            "AW_TEST_MODE": mode,
+            "AW_TEST_TENANT": str(index),
+            "CLAUDE_CONFIG_DIR": str(directory / "profile"),
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        },
     )
     client = create_client(options)
     failed = False
     try:
         async with client:
-            cli_pid = client._transport._process.pid  # Test-only process evidence; production uses public SDK methods.
-            (directory / "sdk-process.json").write_text(json.dumps({"pid": cli_pid, "owner": os.getpid()}))
-            await client.query("Run the fixture tool")
-            try:
-                stream = client.receive_messages() if consumer == "messages" else client.receive_response()
-                async with aclosing(stream) as messages:
-                    async for message in messages:
-                        if isinstance(message, ResultMessage) and consumer == "messages":
-                            break
-            except Exception:
-                failed = True
-            try:
-                await client.query("reuse must fail")
-            except RuntimeError:
-                pass
-            else:
-                raise AssertionError("task client accepted another query")
+            cli_pid = (
+                client._transport.delegate._process.pid
+            )  # Test-only process evidence; production uses public SDK methods.
+            (directory / "sdk-process.json").write_text(
+                json.dumps({"pid": cli_pid, "owner": os.getpid()})
+            )
+            turns = 1 if mode.endswith("error") else 2
+            for turn in range(turns):
+                await client.query("Run the fixture tool")
+                try:
+                    stream = client.receive_messages() if consumer == "messages" else client.receive_response()
+                    async with aclosing(stream) as messages:
+                        async for message in messages:
+                            if isinstance(message, ResultMessage) and consumer == "messages":
+                                break
+                except Exception:
+                    failed = True
+                assert client._transport.delegate._process.pid == cli_pid
+            if mode.endswith("error"):
+                try:
+                    await client.query("failed client must remain stopped")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("failed client accepted another query")
         await client.disconnect()
         try:
             await client.connect()
@@ -81,7 +105,9 @@ async def task(index, mode, consumer="response"):
             raise AssertionError("closed task reconnected")
         requests = [value for value in fixture.REQUESTS if "messages" in value]
         (directory / "requests.json").write_text(json.dumps(requests))
-        events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
+        events = [
+            json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()
+        ]
         assert all(item["tenant"] == str(index) for item in events)
         assert len({item["event"]["agent"]["instance_id"] for item in events}) == 1
         assert (directory / "effect").exists() == (mode in {"allow", "after-error"}), mode
@@ -90,11 +116,17 @@ async def task(index, mode, consumer="response"):
             assert len(requests) == 1, (mode, "model continued after Hook failure", len(requests))
             assert fixture.ORIGINAL not in json.dumps(requests)
         else:
-            assert len(requests) == 2, (mode, len(requests))
-        assert native.count("PreToolUse") == 1, native
-        assert native.count("PostToolUse") == (mode in {"allow", "after-error"}), native
-        RESULTS.append({"mode": mode, "task": index, "passed": True,
-                        "instance": events[0]["event"]["agent"]["instance_id"]})
+            assert len(requests) == 2 * turns, (mode, len(requests))
+        assert native.count("PreToolUse") == turns, native
+        assert native.count("PostToolUse") == turns * (mode in {"allow", "after-error"}), native
+        RESULTS.append(
+            {
+                "mode": mode,
+                "task": index,
+                "passed": True,
+                "instance": events[0]["event"]["agent"]["instance_id"],
+            }
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -115,14 +147,37 @@ async def main():
         else:
             await run(ROOT, config, task)
         return
+    if scenario == "denial":
+        from claude_denial import run
+
+        await run(ROOT, SOURCE)
+        return
+    if scenario == "store":
+        from claude_store import run
+
+        await run(ROOT, SOURCE)
+        return
+    if scenario == "boundaries":
+        from claude_boundaries import run
+
+        await run(ROOT, SOURCE)
+        return
+    if scenario in {"drain", "drain-timeout"}:
+        from claude_drain import run
+
+        await run(ROOT, SOURCE)
+        return
     if scenario == "startup":
         from claude_startup import run
+
         await run(ROOT, config)
         return
     if scenario == "stop-failure":
         from claude_agent_sdk import ClaudeSDKClient
+
         async def broken_interrupt(self):
             raise RuntimeError("injected interrupt control failure")
+
         ClaudeSDKClient.interrupt = broken_interrupt
         await task(0, "before-error")
         raise AssertionError("unacknowledged interruption did not terminate the host")

@@ -40,6 +40,16 @@ export async function run({ createSession, recover, root, config }) {
   assert(!existsSync(join(cwd, "agent")), "SDK factory ran before admission");
   await expired.close();
   const results = [{ case: "acknowledge-expired", passed: true }];
+  const invalid = join(root, "invalid-stream");
+  mkdirSync(invalid);
+  await assert.rejects(createSession({ cwd: invalid, index: 0, invalidStream: true,
+    environment: { AW_TEST_MODE: "allow", AW_TEST_TENANT: "invalid-stream" } }),
+  /Pi requires its public model stream function/);
+  const status = JSON.parse(execFileSync(config.executable,
+    ["status", "--config", join(root, "aw.json")], { encoding: "utf8", timeout: 3000 })).result;
+  assert.equal(status.bindings, 1);
+  assert.equal(status.events, 0);
+  results.push({ case: "invalid-native-stream-rejected", passed: true });
   await recover();
   results.push({ case: "worker-reuse", passed: true });
   return results;

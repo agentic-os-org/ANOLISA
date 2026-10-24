@@ -60,22 +60,34 @@ export async function runWorker(app, sdk, core, args) {
           || realpathSync(session.sessionManager.getCwd()) !== cwd || active.has(session))
         throw new Error("Pi factory must return a fresh SDK session with the admitted cwd");
       if (poisoned) throw new Error("AW worker requires restart after failed task cleanup");
+      const nativeStream = session.agent.streamFunction;
+      if (typeof nativeStream !== "function") throw new Error("Pi requires its public model stream function");
       const bridge = installSessionBridge(session, scope);
-      const stream = session.agent.streamFunction;
-      if (typeof stream !== "function") throw new Error("Pi requires its public model stream function");
+      const stream = bridge.model(nativeStream);
       // The SDK may schedule a final turn after abort; gate before any model transport.
       Object.defineProperty(session.agent, "streamFunction", {
         configurable: false, enumerable: true,
-        value: (...arguments_) => { scope.check(); return stream(...arguments_); }, writable: false,
+        value: (...arguments_) => { scope.checkExecution(); return stream(...arguments_); }, writable: false,
       });
+      const abort = session.abort.bind(session);
+      Object.defineProperty(session, "abort", { value: (...arguments_) => {
+        // Public abort has the same final-turn hazard as managed close.
+        scope.failed = true;
+        return abort(...arguments_);
+      }, configurable: false, writable: false });
       const prompt = session.prompt.bind(session);
       let prompting = false;
       Object.defineProperty(session, "prompt", { value: async (...arguments_) => {
         scope.check();
         if (prompting) throw new Error("One AW Pi session permits one active prompt");
+        scope.begin();
         prompting = true;
-        try { const value = await prompt(...arguments_); scope.check(); return value; }
-        finally { prompting = false; }
+        try { const value = await prompt(...arguments_); scope.checkExecution(); return value; }
+        finally {
+          try { await bridge.drain(); }
+          catch (error) { scope.failed = true; session.agent.abort(); throw error; }
+          finally { prompting = false; }
+        }
       }, configurable: false, writable: false });
       active.set(session, { scope, bridge, closing: null });
       return { ...result, close: () => closeSession(session) };

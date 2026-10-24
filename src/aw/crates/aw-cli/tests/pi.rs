@@ -305,3 +305,35 @@ fn bridge_accepts_only_authorized_text_and_preserves_native_overrides() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn model_producer_rejects_replayed_changed_and_overloaded_calls() {
+    let fixture = Fixture::new();
+    let mut command = Command::new("node");
+    command
+        .args(["--test", "--test-reporter=tap"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/pi_producer.mjs"));
+    let output = fixture.run(command);
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && report.contains("# pass 6") && report.contains("# fail 0"),
+        "{report}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn execution_drain_fences_registration_and_transport_failures() {
+    let fixture = Fixture::new();
+    let mut command = Command::new("node");
+    command
+        .args(["--test", "--test-reporter=tap"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/pi_scope.mjs"));
+    let output = fixture.run(command);
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && report.contains("# pass 5") && report.contains("# fail 0"),
+        "{report}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

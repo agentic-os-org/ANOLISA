@@ -622,6 +622,58 @@
     "claude-managed-mcp-ownership": {
       "target": "aw-cli/test/claude_sdk",
       "test": "managed_mcp_freezes_registered_tools_and_checked_results"
+    },
+    "invocation-long-history": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::invocations::tests::old_active_call_survives_unbounded_later_retirement"
+    },
+    "invocation-overload-unit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::invocations::tests::overload_consumes_sequence_and_changed_identity_remains_rejected"
+    },
+    "invocation-retirement": {
+      "target": "aw-cli/test/service",
+      "test": "invocations::producer_calls_reclaim_both_phases_and_reject_late_or_changed_callbacks"
+    },
+    "invocation-overload": {
+      "target": "aw-cli/test/service",
+      "test": "invocations::invocation_overload_is_observable_and_recovers_without_replaying_old_calls"
+    },
+    "invocation-configuration": {
+      "target": "aw-config/test/configuration",
+      "test": "daemon_limits_accept_concurrent_budgets_and_reject_invalid_values"
+    },
+    "claude-producer-drain": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "model_producer_identity_and_callback_drain_contracts"
+    },
+    "pi-producer": {
+      "target": "aw-cli/test/pi",
+      "test": "model_producer_rejects_replayed_changed_and_overloaded_calls"
+    },
+    "invocation-control-reserve": {
+      "target": "aw-cli/test/service",
+      "test": "invocations::saturated_connections_reserve_capacity_for_invocation_drain_and_status"
+    },
+    "invocation-numbers": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::invocations::tests::numeric_spellings_match_without_accepting_changed_values_or_types"
+    },
+    "invocation-enable-race": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::hooks::tests::legacy_hook_admission_atomically_excludes_protocol_enable"
+    },
+    "invocation-legacy-used": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::hooks::tests::completed_uncorrelated_event_cannot_switch_protocol"
+    },
+    "invocation-retire-close-race": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::hooks::tests::late_close_during_second_phase_drain_leaves_no_retired_lease"
+    },
+    "pi-execution-drain": {
+      "target": "aw-cli/test/pi",
+      "test": "execution_drain_fences_registration_and_transport_failures"
     }
   },
   "agents": {
@@ -686,7 +738,18 @@
         "sdk-scope-process-cli",
         "sdk-scope-observation-root",
         "sdk-scope-observation-child",
-        "claude-managed-mcp"
+        "claude-managed-mcp",
+        "invocation-long-history",
+        "invocation-overload-unit",
+        "invocation-retirement",
+        "invocation-overload",
+        "invocation-configuration",
+        "claude-producer-drain",
+        "invocation-control-reserve",
+        "invocation-numbers",
+        "invocation-enable-race",
+        "invocation-legacy-used",
+        "invocation-retire-close-race"
       ],
       "security": [
         "security-retry"
@@ -784,7 +847,18 @@
         "sdk-scope-observation-root",
         "sdk-scope-observation-child",
         "pi-resident-observation",
-        "pi-legacy-observation"
+        "pi-legacy-observation",
+        "invocation-long-history",
+        "invocation-overload-unit",
+        "invocation-retirement",
+        "invocation-overload",
+        "invocation-configuration",
+        "pi-producer",
+        "invocation-control-reserve",
+        "invocation-numbers",
+        "invocation-enable-race",
+        "invocation-legacy-used",
+        "invocation-retire-close-race"
       ],
       "security": [
         "security-retry"

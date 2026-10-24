@@ -28,7 +28,8 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha6`。第 5 版 task-scope daemon 缺少 `unbind` 的完整原生请求空闲检查，
+`aw-service/v1alpha7`。第 6 版 daemon 缺少调用生产者登记和回收，连接发现阶段即拒绝。
+第 5 版 task-scope daemon 缺少 `unbind` 的完整原生请求空闲检查，
 连接发现阶段即拒绝。该协议与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
@@ -120,18 +121,19 @@ worker 可以是 launcher 自身或其后代；fork worker 在 fork 后创建独
 清理超时保留 draining 状态并返回错误，
 维护循环继续进行有界回收。
 
-服务上限仍为 16 个 binding，包含根与任务；容量不足时在创建 SDK client 前拒绝准入。
-单任务最多保留 1,024 个 Hook 关联，直到任务释放。新任务获得新 binding；已完成关联
-保留其重放阻断能力。准备中、已准入但空闲、正在排空的任务都占绑定槽；一个根绑定
-最多留下 15 个任务槽，由连接同一服务的全部 worker 共享。关联上限累计计算事件、
-session 和 call 身份，PreTool 与 PostTool 分别计数；两者都启用时单任务最多容纳
-512 对完整工具调用，打开失败也消耗关联。关闭事件不会重置重放保护记录。
-常驻服务发布到生产前，需要按实际部署验证这些固定上限的容量。
-任务释放回收内存；持久元数据的磁盘保留由运维管理，磁盘或审计
-故障会停止准入。这组 API 交付服务端基础，Pi / Claude 常驻工厂由后续改动接入。
+并发预算通过 spec.daemon.limits 配置：默认 64 个 binding（含根）、128 个 live event、
+64 个 Provider call、128 条连接、每 binding 256 个活动 invocation，各字段范围为 1..4096。
+status 展示用量、峰值和拒绝原因。准备中、空闲和排空中的 binding 都占容量。
+Pi/Claude 常驻生产接点按严格递增序号登记 invocation。协议启用和旧事件准入共享同一把锁，
+接纳过旧模式工作的 binding 在其结束后也不能切换协议。FinishInvocation 拒绝新 open、排空
+worker，并针对迟到 close 原子回收身份与两阶段关联。未知/已回收 callback 被拒绝，
+高水位拒绝旧注册，慢调用保持活动。
+此类 binding 没有累计关联配额；旧模式保留 1,024 个关联边界。
+模型身份和回调排空见[长期会话](../adapters/resident-sdk.md)。审计磁盘与 SDK 历史需要独立
+保留策略，磁盘/审计故障停止准入；服务代次和 owner 校验继续保留。
 
 升级时先排空旧会话并停止旧 daemon，再同时更新 CLI 和 daemon 到
-`aw-service/v1alpha6`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
+`aw-service/v1alpha7`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
 
 ## 共享事件生命周期
 
@@ -187,9 +189,9 @@ Linux `CLOCK_MONOTONIC` 截止时间覆盖连接建立和消息传输，一次�
 通过有界通道将请求交给 scoped worker。共享期限和调用声明保留在这一个 Event 中，
 注册表无需同时存放所有者与借用它的 Event，也不需要自引用结构。
 
-当前资源上限为 16 个绑定槽、32 个打开的事件、每个绑定 64 个准入步骤、64 个并发
-步骤调用和 64 条活跃连接。超过限制会明确拒绝或返回传输失败，不会隐式排队重试。
-这些是服务准入限制，不是新增配置字段。
+并发限制通过 spec.daemon.limits 配置，默认值和用量见上文。每个 binding 跨事件合计最多 64 个配置步骤。
+全部活动连接（含控制 RPC）占用共享连接额度；额度用满后，额外 16 条连接只接纳控制/清理操作。
+过载明确失败，不隐式重试或重新开执行预算。
 
 ## 审计与结果不确定的调用
 

@@ -158,7 +158,7 @@ class NativeTests(GateFixture):
     def test_missing_entrypoint_and_empty_suites_fail(self) -> None:
         from unittest.mock import patch
 
-        for mode in ("missing", "empty", "manual", "unpinned", "deadline"):
+        for mode in ("missing", "empty", "manual", "unpinned", "deadline", "excessive-timeout"):
             manifest = copy.deepcopy(self.manifest)
             row = manifest["agents"]["agentscope"]
             if mode == "missing":
@@ -170,7 +170,7 @@ class NativeTests(GateFixture):
             elif mode == "unpinned":
                 row["requirements"] = ["agentscope>=2"]
             else:
-                row["cases"][0]["timeout_seconds"] = 0
+                row["cases"][0]["timeout_seconds"] = 2401 if mode == "excessive-timeout" else 0
             original = Path.read_text
 
             def read(path: Path, *args: object, **kwargs: object) -> str:

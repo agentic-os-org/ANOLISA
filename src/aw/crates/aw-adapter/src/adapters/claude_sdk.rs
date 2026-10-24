@@ -89,6 +89,22 @@ impl PreparedLaunch for Prepared {
             "aw_mcp.py",
             include_bytes!("../../native/claude-sdk/aw_mcp.py"),
         )?;
+        context.files.write(
+            "aw_invocations.py",
+            include_bytes!("../../native/claude-sdk/aw_invocations.py"),
+        )?;
+        context.files.write(
+            "aw_model.py",
+            include_bytes!("../../native/claude-sdk/aw_model.py"),
+        )?;
+        context.files.write(
+            "aw_model_stream.py",
+            include_bytes!("../../native/claude-sdk/aw_model_stream.py"),
+        )?;
+        context.files.write(
+            "aw_transport.py",
+            include_bytes!("../../native/claude-sdk/aw_transport.py"),
+        )?;
         let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
         let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "hooks": hooks}))?)?;
         let mut command = self.input.command.clone();

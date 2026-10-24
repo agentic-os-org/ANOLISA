@@ -13,7 +13,7 @@ const settings = {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 };
 
-export async function createSession({ sdk, cwd, index, execute }) {
+export async function createSession({ sdk, cwd, index, execute, invalidStream }) {
   const agentDir = join(cwd, "agent");
   mkdirSync(agentDir);
   const settingsManager = sdk.SettingsManager.inMemory({ defaultThinkingLevel: "off" });
@@ -53,6 +53,7 @@ export async function createSession({ sdk, cwd, index, execute }) {
     stream.end();
     return stream;
   };
+  if (invalidStream) result.session.agent.streamFunction = null;
   return result;
 }
 
@@ -87,8 +88,9 @@ export async function runWorker({ createSession }) {
     await assert.rejects(session.prompt("closed task"), /closed/);
   };
   const scenario = process.env.AW_TEST_SCENARIO ?? "lifecycle";
-  if (scenario === "startup" || scenario === "cancel" || scenario === "close-timeout") {
-    const { run } = await import(scenario === "startup" ? "./pi_startup.mjs" : "./pi_cancel.mjs");
+  if (["startup", "cancel", "close-timeout", "drain"].includes(scenario)) {
+    const { run } = await import(scenario === "startup" ? "./pi_startup.mjs"
+      : scenario === "drain" ? "./pi_drain.mjs" : "./pi_cancel.mjs");
     const result = await run({ createSession, recover: () => task(1, "allow"), root, config, evidence });
     writeFileSync(join(root, "result.json"), JSON.stringify({
       cases: Array.isArray(result) ? result : [result], passed: true }));
