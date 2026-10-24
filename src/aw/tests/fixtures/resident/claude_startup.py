@@ -12,7 +12,7 @@ from unittest.mock import patch
 import anyio
 import aw_resident
 import aw_scope
-from aw_claude import create_client
+from aw_claude import create_client, create_sdk_mcp_server
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, PermissionResultAllow
 from claude_agent_sdk._internal.query import Query
 
@@ -94,6 +94,64 @@ async def validation_error(root: Path, config: dict[str, Any]) -> None:
     else:
         raise AssertionError("Native SDK validation error was lost")
     await recover(client, root, config, "validation-error")
+
+
+async def mcp_constructor_claims(root: Path, config: dict[str, Any], mode: str) -> None:
+    fresh = create_sdk_mcp_server("fresh")
+    settings = options(root, "mcp-" + mode)
+    settings.mcp_servers = {"local": fresh}
+    owner = None
+    try:
+        if mode == "owned-server":
+            owned = create_sdk_mcp_server("owned")
+            owner_settings = options(root, "mcp-existing-owner")
+            owner_settings.mcp_servers = {"owned": owned}
+            owner = create_client(owner_settings)
+            settings.mcp_servers["owned"] = dict(owned)
+        elif mode == "duplicate-alias":
+            settings.mcp_servers["alias"] = dict(fresh)
+        if mode == "sdk-error":
+            with patch.object(ClaudeSDKClient, "__init__", side_effect=RuntimeError("injected SDK constructor failure")):
+                try:
+                    create_client(settings)
+                except RuntimeError as error:
+                    assert str(error) == "injected SDK constructor failure"
+                else:
+                    raise AssertionError("SDK constructor failure was lost")
+        else:
+            try:
+                create_client(settings)
+            except ValueError as error:
+                assert "fresh AW MCP server" in str(error)
+            else:
+                raise AssertionError("Invalid MCP ownership was admitted")
+        assert not fresh.claimed and fresh.bridge is None
+        if owner is not None:
+            assert owned.bridge is owner._aw_bridge
+            assert owner._aw_mcp == [owned]
+        settings.mcp_servers = {"local": fresh}
+        retry = create_client(settings)
+        assert fresh.bridge is retry._aw_bridge
+        async def connect_and_close() -> None:
+            try:
+                await retry.connect()
+                pid = record_process(retry)
+            finally:
+                await retry.disconnect()
+            assert not Path(f"/proc/{pid}").exists()
+        await bounded(connect_and_close())
+        assert_released(retry, root, config)
+        assert fresh.claimed and fresh.bridge is None
+        try:
+            create_client(settings)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Closed MCP server was reused")
+    finally:
+        if owner is not None:
+            await bounded(owner.disconnect())
+            assert_released(owner, root, config)
 
 
 async def initialization(root: Path, config: dict[str, Any], cancel: bool) -> None:
@@ -199,6 +257,9 @@ async def acknowledge_expired(root: Path, config: dict[str, Any]) -> None:
 async def run(root: Path, config: dict[str, Any]) -> None:
     cases = {
         "validation-error": lambda: validation_error(root, config),
+        "mcp-owned-server": lambda: mcp_constructor_claims(root, config, "owned-server"),
+        "mcp-duplicate-alias": lambda: mcp_constructor_claims(root, config, "duplicate-alias"),
+        "mcp-sdk-error": lambda: mcp_constructor_claims(root, config, "sdk-error"),
         "initialize-error-concurrent-close": lambda: initialization(root, config, False),
         "initialize-cancel": lambda: initialization(root, config, True),
         "acknowledge-cancel": lambda: acknowledge_cancel(root, config),

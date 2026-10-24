@@ -860,7 +860,7 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
 PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一
 最终 `replace_result` 前，看到原始结果；stderr 与其余原生字段保留。失败/report
-保留原始结果。MCP tools 仍可观察，但原生回调不能可靠报告业务错误状态，因此不压缩。
+保留原始结果。该原生回调路径的 MCP tools 仍可观察，缺少可靠业务错误状态；使用下文受管 MCP 工厂获得结果压缩接点。
 
 构建 AW、其 Tokenless Provider 与当前 Tokenless Protocol v2 CLI 后，扩展原生验收
 （PATH 中需要 RTK）：
@@ -1005,8 +1005,10 @@ finally:
 每次 query 使用新客户端，通过 resume/session-store 选项保留业务会话历史。多个客户端可以
 并发，分别使用自己的 cwd/env。`receive_response()` 和 `receive_messages()` 都在交付
 `ResultMessage` 时记录完成；缺少该消息的 EOF 会报错。保留 `finally` 中的 `disconnect()`，
-确保未完成的 query 仍执行 interrupt。MCP 公共工厂接点属于独立交付，常驻生命周期本身
-尚未增加 MCP 输出压缩。
+确保未完成的 query 仍执行 interrupt。
+
+进程内 MCP 同时从 `aw_claude` 导入 `create_sdk_mcp_server`，每任务创建新 server，
+保留 SDK tool 定义和业务闭包。[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md) 说明成功单文本替换、可靠错误状态及明确关联。
 
 常驻 Pi 和 Claude host 会在发布 ready 前拒绝启用 AgentSight evidence 的配置。
 常驻 host 可设置 evidence `mode: off`；旧的任务模式继续支持 evidence。

@@ -677,7 +677,11 @@ fn event_metadata(value: &Value) -> Result<Value> {
     {
         return Err(rejected("event_metadata_limit"));
     }
-    Ok(json!({"name": fields[0], "session_id": fields[1], "tool": {
+    let mut metadata = json!({"name": fields[0], "session_id": fields[1], "tool": {
         "name": fields[2], "native_name": fields[3], "call_id": fields[4],
-    }}))
+    }});
+    if let Some(source) = aw_adapter::callback::correlation_source(value) {
+        metadata["correlation_source"] = json!(source);
+    }
+    Ok(metadata)
 }

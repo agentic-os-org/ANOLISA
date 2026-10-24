@@ -108,3 +108,5 @@ CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
 unchanged. Applications which discover project skills through settings sources
 need an explicit integration design before using this restricted first bridge.
 Only one client can be created in each foreground worker.
+
+The explicit resident [MCP handler factory](claude-mcp.md) additionally supports reliable MCP success/error classification and single-text replacement. It uses Adapter-owned correlation and suppresses duplicate AW native callbacks for claimed tools.

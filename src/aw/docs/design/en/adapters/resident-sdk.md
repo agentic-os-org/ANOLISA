@@ -113,9 +113,9 @@ resident policy rollover need a separate admitted lifecycle contract.
 
 | Slice | Acceptance boundary | Dependency |
 | --- | --- | --- |
-| Owned service scopes | Lost handoff, independent context, death, cancellation, bounded release | Service wire v1alpha5 |
+| Owned service scopes | Lost handoff, independent context, death, cancellation, bounded release | Service wire v1alpha6 |
 | Resident factories | Repeated/concurrent clients, native Hook denial/failure, model visibility, cleanup | Owned scopes |
-| Managed Claude MCP factory | Wrap public handler before returning successful text, preserve PreTool/PostTool and business closures | Resident scopes; explicit MCP source and result adoption |
+| [Managed Claude MCP factory](claude-mcp.md) | Wrap public handler before returning successful text, preserve PreTool/PostTool and business closures | Resident scopes; explicit MCP source and result adoption |
 | Schema / BeforeModel | Compress the actual model-visible tools/context after resume/compaction; preserve tool-call routing | New admitted event/effect and native model request seam; current Claude public Hooks do not expose the complete request |
 | Retrieve | Register the recovery tool before issuing recoverable lossy output; authenticate visible markers before reading original bytes | Task/tenant storage, expiry/quota, byte-exact retrieval and bypass of recompression |
 

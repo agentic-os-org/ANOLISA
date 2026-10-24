@@ -307,6 +307,9 @@
                 "key": "case",
                 "names": [
                   "validation-error",
+                  "mcp-owned-server",
+                  "mcp-duplicate-alias",
+                  "mcp-sdk-error",
                   "initialize-error-concurrent-close",
                   "initialize-cancel",
                   "acknowledge-cancel",
@@ -474,6 +477,9 @@
                 "key": "case",
                 "names": [
                   "validation-error",
+                  "mcp-owned-server",
+                  "mcp-duplicate-alias",
+                  "mcp-sdk-error",
                   "initialize-error-concurrent-close",
                   "initialize-cancel",
                   "acknowledge-cancel",
@@ -482,6 +488,98 @@
                 "values": {
                   "passed": true
                 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "managed-mcp",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "mcp",
+            "--output",
+            "{output}/managed-mcp",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/managed-mcp/result.json",
+              "values": {
+                "tasks": 18,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "mode",
+                "names": [
+                  "allow",
+                  "deny",
+                  "before-error",
+                  "after-error",
+                  "error",
+                  "multi",
+                  "structured",
+                  "exception",
+                  "parallel",
+                  "mutation-outer",
+                  "mutation-instance",
+                  "mutation-clear",
+                  "mutation-cross-client",
+                  "result-mutation",
+                  "result-control",
+                  "mutation-tool-name",
+                  "mutation-tool-handler",
+                  "mutation-server-key"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "managed-mcp-failure",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "mcp-failure",
+            "--output",
+            "{output}/managed-mcp-failure",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/managed-mcp-failure/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "scenario": "mcp-failure"
               }
             }
           ]

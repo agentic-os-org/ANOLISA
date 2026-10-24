@@ -10,6 +10,24 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, time::Instant
 use support::{Fixture, Service, TIMEOUT};
 
 #[test]
+fn managed_mcp_freezes_registered_tools_and_checked_results() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .args(["-B"])
+        .arg(root.join("tests/fixtures/claude-sdk/mcp_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk/aw_mcp.py"));
+    let output = fixture.run(command);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Ran 6 tests"));
+}
+
+#[test]
 fn claude_hook_cli_preserves_deny_success_failure_identity_and_audit() {
     let fixture = Fixture::new();
     let mut document = fixture.document();

@@ -195,3 +195,5 @@ nightly account Secret; QwenPaw uses a local deterministic model. See
 - [Development environment and tests](CONTRIBUTING.md)
 
 [Resident Pi and Claude SDK hosts](docs/design/en/adapters/resident-sdk.md) use one configuration and separate `--agent` targets, with task-owned bindings and strict callback failure handling.
+
+The [managed Claude MCP factory](docs/design/en/adapters/claude-mcp.md) preserves business handlers and adopts Tokenless output before SDK serialization, with explicit task/call identity and strict failure handling.

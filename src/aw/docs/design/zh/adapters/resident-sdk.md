@@ -88,9 +88,9 @@ SDK 清理期限为 12 秒，scope 释放传输期限为六秒。ACK 过期后�
 
 | 交付 | 独立验收边界 | 依赖 |
 | --- | --- | --- |
-| 服务端受管 scope | 丢失交接、上下文隔离、死亡、取消和有界释放 | service wire v1alpha5 |
+| 服务端受管 scope | 丢失交接、上下文隔离、死亡、取消和有界释放 | service wire v1alpha6 |
 | 常驻工厂 | 重复和并发客户端、真实 Hook 阻断与故障、模型可见性、清理 | 受管 scope |
-| Claude MCP 公共工厂 | 在公开 handler 返回成功文本前介入，保留 PreTool/PostTool 和业务闭包 | 常驻 scope、明确 MCP 来源与结果采纳 |
+| [Claude MCP 公共工厂](claude-mcp.md) | 在公开 handler 返回成功文本前介入，保留 PreTool/PostTool 和业务闭包 | 常驻 scope、明确 MCP 来源与结果采纳 |
 | Schema / BeforeModel | 压缩 resume/compaction 后实际送往模型的 tools/context，保留调用路由 | 新准入事件和效果；Claude 当前公开 Hook 缺少完整模型请求接点 |
 | Retrieve | 先注册恢复工具，再生成可恢复的有损结果；读取原文前鉴权模型可见 marker | 任务与租户存储隔离、过期、配额、逐字恢复、禁止再次压缩 |
 

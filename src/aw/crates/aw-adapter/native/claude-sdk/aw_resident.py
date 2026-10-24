@@ -38,6 +38,7 @@ class ResidentBridge(Bridge):
         super().__init__()
         self.scope = Scope(self.config)
         self.failure: str | None = None
+        self.mcp_names: set[str] = set()
         self.stop = None
         self.stopped = False
         self.stop_future: asyncio.Task[None] | None = None
@@ -58,6 +59,10 @@ class ResidentBridge(Bridge):
             self.scope.check()
             if self.failure or (tool_use_id is not None and payload.get("tool_use_id") != tool_use_id):
                 raise CallbackFailure("task identity or lifecycle failure")
+            # Managed handlers own both AW phases; preserve caller/native Hooks
+            # while avoiding a second invocation with incomplete MCP error data.
+            if payload.get("tool_name") in self.mcp_names:
+                return {}
             reply = await super().callback(payload, tool_use_id, context)
         except Exception:
             reply = self.failure_reply(event, {})
@@ -103,8 +108,12 @@ class ManagedClient(ClaudeSDKClient):
         self._aw_receiving = False
         self._aw_lock = asyncio.Lock()
         self._aw_connect_task: asyncio.Task[Any] | None = None
-        composed = self._aw_bridge.options(replace(options, cwd=self._aw_cwd, env=dict(options.env)))
+        from aw_mcp import claim_servers, snapshot_servers
+        composed = self._aw_bridge.options(replace(
+            options, cwd=self._aw_cwd, env=dict(options.env),
+            mcp_servers=snapshot_servers(options.mcp_servers)))
         super().__init__(options=composed)
+        self._aw_mcp = claim_servers(composed.mcp_servers, self._aw_bridge)
 
     def _aw_check(self) -> None:
         if self._aw_pid != os.getpid():
@@ -194,7 +203,11 @@ class ManagedClient(ClaudeSDKClient):
                     async with asyncio.timeout(12):
                         await super().disconnect()
                 finally:
-                    await self._aw_bridge.scope.close()
+                    try:
+                        await self._aw_bridge.scope.close()
+                    finally:
+                        for server in self._aw_mcp:
+                            server.release()
         except BaseException:
             _poisoned = True
             raise

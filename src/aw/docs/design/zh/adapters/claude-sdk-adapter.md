@@ -88,3 +88,5 @@ SDK 使用的 `Server.list_tools` 方法。
 仅允许 `strict-mcp-config: None`；SDK 原生 `strict_mcp_config` 也保留。模型和认证
 配置不变。通过 settings sources 发现项目 skills 的应用，需要先明确接入设计才能
 使用该首版受限 Bridge。每个前台 worker 只允许创建一个 client。
+
+显式常驻 [MCP handler 工厂](claude-mcp.md) 进一步支持可靠 MCP 成功状态分类及单文本替换，使用 Adapter 所属调用关联，并抑制已认领工具重复的 AW 原生回调。

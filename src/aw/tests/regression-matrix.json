@@ -614,6 +614,14 @@
     "service-idle-unbind-version": {
       "target": "aw-service/lib/aw_service",
       "test": "client::tests::discovery_rejects_daemons_without_idle_unbind_semantics"
+    },
+    "claude-managed-mcp": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::claude_mcp::tests::mcp_source_keeps_scope_identity_and_only_successful_plain_text_is_replaceable"
+    },
+    "claude-managed-mcp-ownership": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "managed_mcp_freezes_registered_tools_and_checked_results"
     }
   },
   "agents": {
@@ -651,18 +659,22 @@
       "events": {
         "tool.before": {
           "observe": [
-            "security-retry"
+            "security-retry",
+            "claude-managed-mcp-ownership"
           ],
           "block": [
-            "security-retry"
+            "security-retry",
+            "claude-managed-mcp-ownership"
           ]
         },
         "tool.after": {
           "observe": [
-            "final-replacement"
+            "final-replacement",
+            "claude-managed-mcp-ownership"
           ],
           "replace_result": [
-            "final-replacement"
+            "final-replacement",
+            "claude-managed-mcp-ownership"
           ]
         }
       },
@@ -673,13 +685,15 @@
         "sdk-scope-expired-close",
         "sdk-scope-process-cli",
         "sdk-scope-observation-root",
-        "sdk-scope-observation-child"
+        "sdk-scope-observation-child",
+        "claude-managed-mcp"
       ],
       "security": [
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "claude-managed-mcp"
       ]
     },
     "hermes": {

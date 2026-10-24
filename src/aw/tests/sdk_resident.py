@@ -35,8 +35,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--npm", type=Path)
     parser.add_argument("--scenario", choices=["lifecycle", "stop-failure", "cancel", "startup",
-                        "messages", "eof-stop-failure", "close-timeout", "observation"], default="lifecycle")
+                        "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure"], default="lifecycle")
     parser.add_argument("--evidence-mode", choices=["auto", "off"])
+    parser.add_argument("--tokenless", type=Path)
+    parser.add_argument("--tokenless-provider", type=Path)
     args = parser.parse_args()
     aw, output = args.aw.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -76,8 +78,19 @@ def main():
             "mode": args.evidence_mode or "auto", "query_timeout_ms": 100,
             "query_bytes": 1048576, "max_items": 32, "max_bytes": 262144,
         }
+    if args.scenario in {"mcp", "mcp-failure"}:
+        assert args.agent == "claude" and args.tokenless and args.tokenless_provider
+        document["spec"]["providers"]["custom"]["timeout_ms"] = 4000
+        document["spec"]["agents"]["claude"]["argv"][-1] = str(fixture / "mcp.py")
+        document["spec"]["providers"]["tokenless"] = {
+            "protocol": "aw-provider/v1alpha1", "transport": {"type": "stdio", "location": "agent",
+            "argv": [str(args.tokenless_provider.resolve()), "--cli", str(args.tokenless.resolve()) if args.scenario == "mcp" else "/bin/false", "--data-dir", str(state_parent / "tokenless")]},
+            "timeout_ms": 2000, "max_output_bytes": 1048576, "config": {"version": 1}}
+        for event, operation, effects in (("tool.before", "pre_tool", ["block"]), ("tool.after", "post_tool", ["replace_result"])):
+            document["spec"]["events"][event]["steps"].append({"id": "tokenless", "provider": "tokenless",
+                "operation": operation, "effects": effects, "on_error": "block" if event == "tool.before" else "report"})
     config.write_text(json.dumps(document))
-    env = {**os.environ, "AW_TEST_ROOT": str(output), "AW_TEST_SCENARIO": args.scenario, "PYTHONDONTWRITEBYTECODE": "1",
+    env = {**os.environ, "AW_TEST_ROOT": str(output), "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0", "AW_TEST_SCENARIO": args.scenario, "PYTHONDONTWRITEBYTECODE": "1",
            "CLAUDE_CONFIG_DIR": str(output / "host-profile"), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
            "AW_TEST_CLAUDE_FIXTURE": str(fixture.parents[2] / "crates/aw-cli/tests/fixtures/claude-sdk/native_worker.py")}
     command = [str(aw), "run", "--config", str(config), "--agent", args.agent]
@@ -118,8 +131,19 @@ def main():
             (output / "result.json").write_text(json.dumps({"rejected_before_ready": True, "passed": True}))
         status = json.loads(subprocess.check_output([str(aw), "status", "--config", str(config)], env=env, timeout=10))["result"]
         assert status["bindings"] == status["events"] == 0, status
+        if args.scenario in {"mcp", "mcp-failure"}:
+            events = []
+            for journal in (state_parent / "s/journal").glob("*.jsonl"):
+                data = journal.read_text()
+                assert "stable fixture data" not in data
+                for line in data.splitlines():
+                    event = json.loads(line)["record"].get("plan", {}).get("event")
+                    if event is not None:
+                        events.append(event)
+            assert events and all(event["correlation_source"] == "claude-sdk-mcp/v1" for event in events)
         result = json.loads((output / "result.json").read_text())
         result["status"] = status
+        result["scenario"] = args.scenario
         (output / "result.json").write_text(json.dumps(result))
     finally:
         try:

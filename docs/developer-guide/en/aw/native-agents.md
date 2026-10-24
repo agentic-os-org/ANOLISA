@@ -1010,7 +1010,7 @@ the new call passes all policies and native permissions again. PostTool replaces
 only completed, non-image, non-interrupted Bash stdout. Put completion observers
 and custom steps before the single final `replace_result` step. They see the
 original result; stderr and other native fields are retained. Failure/report keeps
-the original result. MCP tools remain observable but are not compressed because
+the original result. MCP tools on this native callback path remain observable but are not compressed because
 the native callback does not expose reliable business-error status.
 
 After building AW, its Tokenless Provider and the current Tokenless Protocol v2
@@ -1183,8 +1183,10 @@ conversation history. Multiple clients can run concurrently with separate cwd/en
 Both `receive_response()` and `receive_messages()` record completion when they
 deliver `ResultMessage`. EOF without that message raises an error; keep
 `disconnect()` in `finally` so unfinished queries still receive an interrupt.
-Use the existing tool factories until the separate managed MCP integration is
-available; resident lifecycle alone does not add MCP output compression.
+
+For in-process MCP tools, also import `create_sdk_mcp_server` from `aw_claude` and
+create a fresh server for each task. Keep SDK `tool` definitions and business closures.
+The [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md) covers single successful text replacement, reliable errors and explicit correlation.
 
 Resident Pi and Claude hosts reject enabled AgentSight evidence before publishing
 readiness. Set evidence `mode: off` for resident hosts; legacy task mode continues

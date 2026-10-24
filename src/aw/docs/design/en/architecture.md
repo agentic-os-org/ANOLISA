@@ -202,6 +202,8 @@ transports lifecycle frames through the existing bridge RPC. See the
 
 [Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.
 
+[Managed Claude MCP handlers](adapters/claude-mcp.md) add an explicit handler source, task-owned invocation identity and success-aware result adoption through the existing Provider path.
+
 ## Caller-owned native attachment
 
 `aw install --pid` reuses the existing configuration and Adapter preparation,
