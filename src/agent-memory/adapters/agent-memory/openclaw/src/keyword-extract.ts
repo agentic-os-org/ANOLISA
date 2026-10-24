@@ -100,6 +100,8 @@ export function extractKeywords(text: string): string {
  * CJK text lacks word boundaries (spaces), so a long CJK sentence
  * cannot be meaningfully split into "keywords".  Instead, we extract
  * overlapping trigrams (3 consecutive CJK characters) from the text.
+ * Trigrams never cross non-CJK separators: each is a literal substring
+ * of the original prompt, rather than a term made by removing separators.
  * Each trigram is >= 3 characters, so the BM25 backend's trigram
  * tokenizer can match them directly without falling into the
  * `search_like()` AND path.
@@ -108,20 +110,20 @@ export function extractKeywords(text: string): string {
  * space-separated query candidates.
  */
 export function extractCjkTrigrams(text: string): string[] {
-  // Keep only CJK Unified Ideographs (U+4E00..U+9FFF), Hiragana
+  // Keep contiguous CJK Unified Ideographs (U+4E00..U+9FFF), Hiragana
   // (U+3040..U+309F), Katakana (U+30A0..U+30FF), and CJK
   // Compatibility (U+F900..U+FAFF).
-  const cjkChars = text.replace(/[^\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uf900-\ufaff]/g, "");
-  if (cjkChars.length < 3) return [];
+  const runs = text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uf900-\ufaff]+/g) ?? [];
 
-  // Extract overlapping trigrams from the CJK character sequence.
   const trigrams: string[] = [];
   const seen = new Set<string>();
-  for (let i = 0; i < cjkChars.length - 2; i++) {
-    const trigram = cjkChars[i] + cjkChars[i + 1] + cjkChars[i + 2];
-    if (!seen.has(trigram)) {
-      seen.add(trigram);
-      trigrams.push(trigram);
+  for (const cjkChars of runs) {
+    for (let i = 0; i < cjkChars.length - 2; i++) {
+      const trigram = cjkChars[i] + cjkChars[i + 1] + cjkChars[i + 2];
+      if (!seen.has(trigram)) {
+        seen.add(trigram);
+        trigrams.push(trigram);
+      }
     }
   }
   return trigrams;
