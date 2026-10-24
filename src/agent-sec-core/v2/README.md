@@ -1,7 +1,8 @@
 # AgentSecCore V2 Policy, SkillSec and daemon
 
 SkillSec supplies scanning, system-key integrity, versions and activation through the Rust
-`skill-ledger` CLI and a root daemon. See the [core guide](../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
+`skillsec` CLI (`skill-ledger` remains a compatibility alias) and a root daemon. See the
+[core guide](../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
 and [migration/acceptance boundaries](../docs/design/SKILL_SEC_PHASE_ONE.md).
 Agent Hook migration is separate; the core never calls Python Ledger.
 

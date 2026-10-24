@@ -45,7 +45,11 @@ CLI command and integration capability surface through Rust implementations.
 
 ## V2 SkillSec and Policy CLI
 
-The Rust V2 core adds **SkillSec** behind the existing `skill-ledger` command: local scanners,
+Use `agent-sec-cli skillsec status` or `agent-sec-cli skillsec --help`. The previous
+`skill-ledger` command remains a compatibility alias with identical behavior. Existing Hook
+capability IDs, environment variables and stored data are unchanged.
+
+The Rust V2 core exposes **SkillSec** through `agent-sec-cli skillsec`: local scanners,
 system-key signing, version history, decisions, rollback and SkillFS activation share one root
 daemon. All local users may manage all Skills within the enabled defaults, administrator-configured
 directories or authenticated SkillFS mounts. Default system directories and standard Skill directories

@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn aggregate_commands_leave_discovery_to_daemon_and_keep_explicit_init_roots() {
         for args in [vec!["init"], vec!["scan", "--all"], vec!["check", "--all"]] {
-            let argv: Vec<_> = [vec!["agent-sec-cli", "skill-ledger"], args].concat();
+            let argv: Vec<_> = [vec!["agent-sec-cli", "skillsec"], args].concat();
             assert_eq!(
                 Cli::parse_from(argv).unwrap().request().unwrap().params["skillDirs"],
                 json!([])
@@ -384,7 +384,7 @@ mod tests {
         }
         let request = Cli::parse_from([
             "agent-sec-cli",
-            "skill-ledger",
+            "skillsec",
             "init",
             "--skill-dir",
             "/explicit/skill",
@@ -402,7 +402,7 @@ mod tests {
         let prepare = || {
             Cli::parse_from([
                 "agent-sec-cli",
-                "skill-ledger",
+                "skillsec",
                 "export",
                 "/skill",
                 "--output",
@@ -433,8 +433,7 @@ mod tests {
 
     #[test]
     fn cli_prepares_current_commands_and_rejects_retired_or_conflicting_inputs() {
-        let cli =
-            Cli::parse_from(["agent-sec-cli", "skill-ledger", "init", "--no-baseline"]).unwrap();
+        let cli = Cli::parse_from(["agent-sec-cli", "skillsec", "init", "--no-baseline"]).unwrap();
         let request = cli.request().unwrap();
         assert_eq!(request.params["baseline"], false);
         assert_eq!(request.params["skillDirs"], json!([]));
@@ -445,12 +444,12 @@ mod tests {
             vec!["check", "/skill", "--all"],
             vec!["decide", "/skill", "--action", "allow", "--clear"],
         ] {
-            let argv: Vec<_> = [vec!["agent-sec-cli", "skill-ledger"], arguments].concat();
+            let argv: Vec<_> = [vec!["agent-sec-cli", "skillsec"], arguments].concat();
             assert!(Cli::parse_from(argv).map_or(true, |cli| cli.request().is_err()));
         }
         let cli = Cli::parse_from([
             "agent-sec-cli",
-            "skill-ledger",
+            "skillsec",
             "scan",
             "/skill",
             "--scanners",
