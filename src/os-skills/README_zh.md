@@ -37,6 +37,7 @@
 ### 开发运维
 - **github** — GitHub 工作流与集成
 - **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）
+- **redis-admin** — Redis/Valkey 实例管理（运行时与延迟诊断、内存与淘汰治理、基于有界 SCAN 的大 key 排查、持久化与 fork 健康、只读复制检查）
 - **sysom-agentsight** — 系统诊断工具
 - **sysom-diagnosis** — SysOM 诊断与调优
 
