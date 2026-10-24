@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -17,12 +18,53 @@ pub struct OpenAICompatProvider {
     cancelled: Arc<AtomicBool>,
     profile: Box<dyn ProviderProfile>,
     explicit_cache: bool,
+    /// HTTP client built once per provider and reused across `generate` calls.
+    ///
+    /// Caches the build result because the builder is fallible while the
+    /// public constructors are not: a build failure surfaces from `generate`
+    /// instead of poisoning construction, and pooling survives across turns.
+    client: OnceLock<Result<reqwest::Client, String>>,
 }
 
 /// Request fields `build_request_body` constructs below. `extra_params` may
 /// extend a request but must not replace these. Module scope so the drift test
 /// can name the list instead of restating it.
 const OWNED_REQUEST_FIELDS: [&str; 5] = ["model", "messages", "stream", "stream_options", "tools"];
+
+/// Connect deadline for OpenAI-compatible endpoints.
+///
+/// Bounds connection setup so an unreachable endpoint surfaces as a prompt
+/// error instead of stalling on the protocol stack's own timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Inactivity deadline for the streaming response.
+///
+/// A *total* request timeout is the wrong instrument: the response is a
+/// Server-Sent Events stream whose length belongs to the model, so a deadline
+/// would truncate healthy long completions. A read timeout applies per read
+/// and resets after each successful one, so it bounds a server that accepts
+/// the connection and then goes silent while leaving a steadily streaming
+/// response untouched.
+///
+/// Deliberately generous: the largest legitimate gap is time-to-first-token
+/// while the model is queued; the goal is to turn an unbounded hang into a
+/// bounded failure rather than to police latency.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Build the shared HTTP client with both deadlines bound.
+///
+/// Both bounds are parameters so a test can assert the stalled-connection
+/// behaviour without waiting the production read timeout.
+fn build_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|err| format!("failed to build HTTP client: {err}"))
+}
 
 impl OpenAICompatProvider {
     pub fn new(
@@ -37,6 +79,7 @@ impl OpenAICompatProvider {
             cancelled: Arc::new(AtomicBool::new(false)),
             profile,
             explicit_cache,
+            client: OnceLock::new(),
         }
     }
 
@@ -45,6 +88,14 @@ impl OpenAICompatProvider {
         // false from supports_cache_control(); the config flag is meaningless
         // for generic endpoints but kept for API symmetry.
         Self::new(base_url, api_key, Box::new(profile::GenericProfile), false)
+    }
+
+    /// The provider's shared HTTP client, built on first use.
+    fn http_client(&self) -> Result<&reqwest::Client, String> {
+        self.client
+            .get_or_init(|| build_client(CONNECT_TIMEOUT, READ_TIMEOUT))
+            .as_ref()
+            .map_err(|err| err.clone())
     }
 
     fn cache_control_enabled(&self) -> bool {
@@ -187,7 +238,7 @@ impl ContentGenerator for OpenAICompatProvider {
         let body = self.build_request_body(messages, tools, config)?;
         let url = format!("{}/chat/completions", self.base_url);
 
-        let client = reqwest::Client::new();
+        let client = self.http_client()?;
         let auth_value = self.profile.auth_header_value(&self.api_key);
         let mut request = client
             .post(&url)
@@ -2714,6 +2765,178 @@ mod tests {
         assert!(
             err.contains("API error 400 Bad Request: 中文错误"),
             "GBK error body must be decoded using the declared charset: {err}"
+        );
+    }
+
+    // ─── #8254: request deadlines ───
+    //
+    // A server that accepts the connection and then goes silent must fail the
+    // turn within the provider's deadlines instead of leaving it pending
+    // forever, while a steadily streaming response must run past the idle
+    // deadline untouched.
+
+    /// Build a provider whose shared client uses short test deadlines.
+    fn provider_with_client(
+        address: std::net::SocketAddr,
+        client: reqwest::Client,
+    ) -> OpenAICompatProvider {
+        let provider = OpenAICompatProvider::new_generic(&format!("http://{address}/v1"), "test");
+        provider
+            .client
+            .set(Ok(client))
+            .expect("fresh provider has no client yet");
+        provider
+    }
+
+    // `current_thread` keeps this test's runtime from adding worker threads to
+    // the suite's already-heavy thread count; all tasks here are cooperative.
+    #[tokio::test(flavor = "current_thread")]
+    async fn silent_server_fails_within_deadlines() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Accept the request, then go silent: never write a response.
+            let mut sink = vec![0u8; 8192];
+            loop {
+                match socket.read(&mut sink).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let client = build_client(Duration::from_millis(200), Duration::from_millis(200)).unwrap();
+        let provider = provider_with_client(address, client);
+        let config = GenerateConfig::default();
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), provider.generate(&[], &[], &config))
+                .await
+                .expect("generate must not hang against a silent server");
+        let err = match result {
+            Ok(_) => panic!("a silent server must fail the request"),
+            Err(err) => err,
+        };
+        server.abort();
+        assert!(
+            err.contains("HTTP request failed"),
+            "expected a bounded request failure, got: {err}"
+        );
+    }
+
+    // `current_thread` keeps this test's runtime from adding worker threads to
+    // the suite's already-heavy thread count; all tasks here are cooperative.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_body_surfaces_stream_error_within_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let event = format!("data: {}\n\n", text_chunk("partial", None));
+            socket.write_all(event.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            // Headers and one event arrived; the body then stalls.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let client = build_client(Duration::from_millis(200), Duration::from_millis(300)).unwrap();
+        let provider = provider_with_client(address, client);
+        let config = GenerateConfig::default();
+        let mut stream = provider
+            .generate(&[], &[], &config)
+            .await
+            .expect("headers arrived, so the request itself succeeded");
+        let events = tokio::time::timeout(Duration::from_secs(5), async move {
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                let terminal = matches!(
+                    event,
+                    GenerateEvent::MessageEnd | GenerateEvent::Error(_) | GenerateEvent::Cancelled
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            events
+        })
+        .await
+        .expect("a stalled body must not hang the stream forever");
+        server.abort();
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "partial"),
+            "the delivered event must still parse: {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(GenerateEvent::Error(message)) if message.contains("stream error")
+            ),
+            "the stalled read must surface as a stream error: {events:?}"
+        );
+    }
+
+    // `current_thread` keeps this test's runtime from adding worker threads to
+    // the suite's already-heavy thread count; all tasks here are cooperative.
+    #[tokio::test(flavor = "current_thread")]
+    async fn steady_stream_completes_beyond_the_idle_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            // Stream continuously for longer than the read deadline: every gap
+            // stays under it, the total run exceeds it.
+            for _ in 0..8 {
+                let event = format!("data: {}\n\n", text_chunk("tick", None));
+                socket.write_all(event.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+            let final_event = format!("data: {}\n\n", text_chunk("done", Some("stop")));
+            socket.write_all(final_event.as_bytes()).await.unwrap();
+        });
+        let client = build_client(Duration::from_millis(200), Duration::from_millis(400)).unwrap();
+        let provider = provider_with_client(address, client);
+        let config = GenerateConfig::default();
+        let mut stream = provider.generate(&[], &[], &config).await.unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(5), async move {
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                let terminal = matches!(
+                    event,
+                    GenerateEvent::MessageEnd | GenerateEvent::Error(_) | GenerateEvent::Cancelled
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            events
+        })
+        .await
+        .expect("a steadily streaming response must complete despite the idle deadline");
+        server.abort();
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "steady stream must end in MessageEnd: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, GenerateEvent::Error(_))),
+            "no read-timeout error may fire between chunks: {events:?}"
         );
     }
 }
