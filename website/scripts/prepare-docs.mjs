@@ -176,15 +176,26 @@ function stripLocaleSwitchLinks(markdown) {
 }
 
 function makeMdxSafe(markdown) {
-  let inFence = false;
+  let fence = null;
   return markdown
     .split('\n')
     .map((line) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        inFence = !inFence;
+      const marker = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+      if (marker && !fence) {
+        fence = {character: marker[1][0], length: marker[1].length};
         return line;
       }
-      if (inFence) return line;
+      if (
+        marker &&
+        fence &&
+        marker[1][0] === fence.character &&
+        marker[1].length >= fence.length &&
+        /^\s*$/.test(marker[2])
+      ) {
+        fence = null;
+        return line;
+      }
+      if (fence) return line;
       return line
         .replace(/\\`/g, '&#96;')
         .split(/(`+[^`]*`+)/g)
