@@ -4,6 +4,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
+import { OPTIMIZATION_STRATEGIES } from '../utils/optimizationStrategies';
 import { downloadSavingsCsv } from '../utils/savingsCsv';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
@@ -102,15 +103,6 @@ type OptimizationCategory = 'tool_output' | 'mcp_response';
 const CATEGORY_CONFIG: Record<OptimizationCategory, { labelKey: MessageKey; color: string; bg: string }> = {
   tool_output: { labelKey: 'ts.toolOutput', color: 'text-orange-700', bg: 'bg-orange-100' },
   mcp_response: { labelKey: 'ts.mcpOutput', color: 'text-violet-700', bg: 'bg-violet-100' },
-};
-
-// ─── Strategy config ─────────────────────────────────────────────────────────
-
-const STRATEGY_CONFIG: Record<string, { labelKey: MessageKey; color: string; bg: string; pie: string; tooltipKey: MessageKey }> = {
-  'compress-schema':   { labelKey: 'ts.schemaCompression', color: 'text-blue-700',   bg: 'bg-blue-100',   pie: '#3b82f6', tooltipKey: 'ts.schemaCompressionTip' },
-  'compress-response': { labelKey: 'ts.responseCompression', color: 'text-violet-700', bg: 'bg-violet-100', pie: '#8b5cf6', tooltipKey: 'ts.responseCompressionTip' },
-  'rewrite-command':   { labelKey: 'ts.commandRewrite', color: 'text-orange-700', bg: 'bg-orange-100', pie: '#f59e0b', tooltipKey: 'ts.commandRewriteTip' },
-  'compress-toon':     { labelKey: 'ts.toonEncoding', color: 'text-teal-700',  bg: 'bg-teal-100',  pie: '#14b8a6', tooltipKey: 'ts.toonEncodingTip' },
 };
 
 // ─── Pie chart data ───────────────────────────────────────────────────────────
@@ -319,7 +311,7 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
   const locale = useLocaleTag();
   const [expanded, setExpanded] = useState(false);
   const cfg = CATEGORY_CONFIG[item.category];
-  const stratConfig = STRATEGY_CONFIG[item.strategy];
+  const stratConfig = OPTIMIZATION_STRATEGIES[item.strategy];
   const stratStyle = stratConfig ?? { color: 'text-gray-700', bg: 'bg-gray-100', pie: '#9ca3af' };
   const stratLabel = stratConfig ? t(stratConfig.labelKey) : (item.strategy_label || item.strategy);
   const stratTooltip = stratConfig ? t(stratConfig.tooltipKey) : '';
@@ -754,9 +746,9 @@ export const TokenSavingsPage: React.FC = () => {
                 const pieData = breakdown
                   .filter(b => b.compounded_saved > 0)
                   .map(b => ({
-                    name: (STRATEGY_CONFIG[b.strategy] ? t(STRATEGY_CONFIG[b.strategy].labelKey) : b.label),
+                    name: (OPTIMIZATION_STRATEGIES[b.strategy] ? t(OPTIMIZATION_STRATEGIES[b.strategy].labelKey) : b.label),
                     value: b.compounded_saved,
-                    color: (STRATEGY_CONFIG[b.strategy]?.pie ?? '#9ca3af'),
+                    color: (OPTIMIZATION_STRATEGIES[b.strategy]?.pie ?? '#9ca3af'),
                   }));
                 return (
                   <>
