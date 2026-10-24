@@ -2079,10 +2079,21 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
 /// `envoy` as the first name run, so a node running only the control plane
 /// reported Envoy, took the classifier's web class and the busy-poll pair
 /// meant for a request-path proxy.
+///
+/// `consul-k8s-control-plane` is the same shape for the other half of the
+/// Kubernetes integration: it is the control plane that configures the Consul
+/// servers (running elsewhere) and injects the sidecars, never the KV server
+/// itself, but its comm truncates to `consul-k8s-cont` and its first name run
+/// is `consul`. A control-plane-only node reported Consul and took the cache
+/// program. `consul-terraform-sync` is the same client-side shape: it
+/// reconciles Terraform resources against a Consul cluster running elsewhere,
+/// exactly like `consul-template` renders from one.
 const SERVICE_COMPANION_TOOLS: &[&str] = &[
     "consul-template",
     "consul-dataplane",
     "consul-esm",
+    "consul-k8s-control-plane",
+    "consul-terraform-sync",
     "grafana-agent",
     "envoy-gateway",
     "clickhouse-keeper",
@@ -4856,6 +4867,17 @@ mod tests {
             // The Kubernetes data-plane sidecar: a separate client-side
             // program that talks to Consul servers, not the KV server itself.
             ("consul-dataplane", "consul", "Consul"),
+            // The Kubernetes control plane of the same integration: it
+            // configures the Consul servers (which run elsewhere) and injects
+            // the sidecars, but never runs the KV server itself. Its comm
+            // truncates to `consul-k8s-cont`, whose first name run is
+            // `consul`, so a control-plane-only node reported Consul and
+            // took the cache program.
+            ("consul-k8s-control-plane", "consul", "Consul"),
+            // Terraform sync is a client of a Consul cluster running
+            // elsewhere: it reconciles Terraform resources against the
+            // cluster's catalog, exactly like consul-template renders from it.
+            ("consul-terraform-sync", "consul", "Consul"),
             ("grafana-agent", "grafana", "Grafana"),
             // Envoy Gateway's control plane: it provisions Envoy data planes
             // as separate Deployments and never runs the proxy itself, but
