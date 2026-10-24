@@ -198,6 +198,10 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+Interactive debug sessions release their acquired sandbox, MCP registration and
+mock services on exit, setup failure or interruption. Cleanup attempts continue
+if one operation fails; warnings identify resources that may need manual cleanup.
+
 ## Troubleshooting
 
 | Issue | Fix |

@@ -150,144 +150,154 @@ def run_debug(args):
         log(f"[ERROR] claw_eval not importable for sandbox mode: {e}")
         sys.exit(1)
 
+    ctx = None
+    services_attempted = False
     try:
-        image = sandbox_image or "claw-eval-agent:latest"
-        runner = SandboxRunner(SandboxConfig(image=image))
-        run_id = f"debug-{task_id}-{int(time.time())}-{os.getpid()}"
-        log(f"  [sandbox] Starting container claw-agent-{run_id}...")
-        handle = runner.start_container(run_id=run_id)
-        sandbox_url = handle.sandbox_url
-
-        task_def = TaskDefinition.from_yaml(task_yaml)
-        n_injected = runner.inject_files(handle, task_def, task_dir=task_dir)
-        expected = len(task_def.sandbox_files) if task_def.sandbox_files else 0
-        log(f"  Container:  claw-agent-{handle.run_id} → {sandbox_url}")
-        log(f"  Files:      {n_injected}/{expected} injected")
-        if expected and n_injected < expected:
-            log(f"  [WARN] only {n_injected}/{expected} files injected")
-    except Exception as e:
-        log(f"[ERROR] Sandbox container startup failed: {e}")
-        if runner is not None and handle is not None:
-            try:
-                runner.stop_container(handle)
-            except Exception:
-                pass
-        sys.exit(1)
-
-    # Phase 3: Configure MCP (sandbox_url=None → gateway-only registration)
-    agent_id, _injector, ctx = configure_tools(task_yaml, sandbox_url=sandbox_url)
-    log(f"  Agent ID:   {agent_id}")
-
-    # Phase 4: Start mock services
-    cleanup_mock_services()
-    reset_services(task_yaml)
-    start_mock_services(task_yaml, task_dir)
-    log("  Mock services: started")
-
-    # Phase 5: Restart gateway
-    if not restart_gateway(OPENCLAW_CONFIG, gateway_port):
-        log("[ERROR] Gateway restart timed out")
-        # Stop container first so MCP unregister doesn't race a dead bridge
-        if runner is not None and handle is not None:
-            try:
-                runner.stop_container(handle)
-            except Exception as e:
-                log(f"  [warn] stop_container during failure: {e}")
-        cleanup_config(context=ctx)
-        cleanup_mock_services()
-        sys.exit(1)
-    log("  Gateway:      restarted")
-
-    # Phase 6: Verify MCP tools (mock MCP only — sandbox MCP tools are fixed)
-    log("\n  Verifying MCP tool discovery...")
-    tools = verify_mcp_tools(task_yaml)
-    if tools is None:
-        log("  [WARN] Could not verify MCP tools")
-    elif tools:
-        log(f"  Found {len(tools)} mock MCP tools:")
-        for t in tools:
-            log(f"    ✓ mcp:{ctx.mcp_name}:{t}")
-    else:
-        log("  No mock MCP tools registered for this task (tools: [])")
-
-    if ctx.sandbox_mcp_name:
-        log(f"  Sandbox MCP tools (bridged to container):")
-        for t in ("Bash", "Read", "Write", "Edit", "Glob", "Grep"):
-            log(f"    ✓ mcp:{ctx.sandbox_mcp_name}:{t}")
-
-    # Phase 7: Print connection info
-    session_id = f"debug-{task_id}-{int(time.time())}-{os.getpid()}"
-    model_id = model_config.get("model_id", "")
-    prompt_text = task.get("prompt", {})
-    if isinstance(prompt_text, dict):
-        prompt_text = prompt_text.get("text", "")
-
-    print(f"\n{'=' * 60}")
-    print(f"  Debug Session Ready")
-    print(f"{'=' * 60}")
-    print(f"  Task:      {task_id}")
-    print(f"  Gateway:   http://127.0.0.1:{gateway_port}")
-    print(f"  Agent ID:  {agent_id}")
-    print(f"  Session:   {session_id}")
-    if model_id:
-        print(f"  Model:     {model_id}")
-    if sandbox_url:
-        print(f"  Sandbox:   {sandbox_url}")
-        if handle is not None:
-            print(f"  Container: claw-agent-{handle.run_id}")
-    print()
-    print(f"  Connect via CLI:")
-    print(f"    openclaw agent --session-id {session_id} --agent {agent_id}")
-    print()
-    if model_id:
-        print(f"  Or send messages via API:")
-        print(f"    curl -s -X POST http://127.0.0.1:{gateway_port}/v1/chat/completions \\")
-        print(f"      -H 'Content-Type: application/json' \\")
-        print(f"      -d '{{")
-        print(f"        \"model\": \"{model_id}\",")
-        print(f"        \"messages\": [{{\"role\": \"user\", \"content\": \"{prompt_text[:50]}\"}}]")
-        print(f"      }}'")
-        print()
-    if sandbox_url:
-        print(f"  Test container directly:")
-        print(f"    curl -s --noproxy 127.0.0.1 -X POST \\")
-        print(f"      -H 'Content-Type: application/json' \\")
-        print(f"      -d '{{\"command\": \"hostname\", \"timeout_seconds\": 5}}' \\")
-        print(f"      {sandbox_url}/exec")
-        print()
-    print(f"  Check sessions:")
-    print(f"    ls ~/.openclaw/agents/{agent_id}/sessions/")
-    print(f"{'=' * 60}")
-    print(f"  Press Ctrl+C to exit and cleanup")
-    print(f"{'=' * 60}\n")
-
-    # Wait for interrupt
-    stop_event = threading.Event()
-
-    def handler(sig, frame):
-        log("\n  Exiting debug mode...")
-        stop_event.set()
-
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
-
-    try:
-        while not stop_event.is_set():
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        pass
-
-    # Cleanup: stop container BEFORE config cleanup so MCP bridge teardown is clean
-    log("\n  Cleaning up...")
-    if runner is not None and handle is not None:
         try:
-            runner.stop_container(handle)
-            log("  Container: stopped")
+            image = sandbox_image or "claw-eval-agent:latest"
+            runner = SandboxRunner(SandboxConfig(image=image))
+            run_id = f"debug-{task_id}-{int(time.time())}-{os.getpid()}"
+            log(f"  [sandbox] Starting container claw-agent-{run_id}...")
+            handle = runner.start_container(run_id=run_id)
+            sandbox_url = handle.sandbox_url
+
+            task_def = TaskDefinition.from_yaml(task_yaml)
+            n_injected = runner.inject_files(handle, task_def, task_dir=task_dir)
+            expected = len(task_def.sandbox_files) if task_def.sandbox_files else 0
+            log(f"  Container:  claw-agent-{handle.run_id} → {sandbox_url}")
+            log(f"  Files:      {n_injected}/{expected} injected")
+            if expected and n_injected < expected:
+                log(f"  [WARN] only {n_injected}/{expected} files injected")
         except Exception as e:
-            log(f"  [warn] stop_container: {e}")
-    cleanup_config(context=ctx)
-    cleanup_mock_services()
-    log("  Done.")
+            log(f"[ERROR] Sandbox container startup failed: {e}")
+            sys.exit(1)
+
+        # Phase 3: Configure MCP (sandbox_url=None → gateway-only registration)
+        agent_id, _injector, ctx = configure_tools(task_yaml, sandbox_url=sandbox_url)
+        log(f"  Agent ID:   {agent_id}")
+
+        # Phase 4: Start mock services
+        cleanup_mock_services()
+        reset_services(task_yaml)
+        services_attempted = True
+        start_mock_services(task_yaml, task_dir)
+        log("  Mock services: started")
+
+        # Phase 5: Restart gateway
+        if not restart_gateway(OPENCLAW_CONFIG, gateway_port):
+            log("[ERROR] Gateway restart timed out")
+            sys.exit(1)
+        log("  Gateway:      restarted")
+
+        # Phase 6: Verify MCP tools (mock MCP only — sandbox MCP tools are fixed)
+        log("\n  Verifying MCP tool discovery...")
+        tools = verify_mcp_tools(task_yaml)
+        if tools is None:
+            log("  [WARN] Could not verify MCP tools")
+        elif tools:
+            log(f"  Found {len(tools)} mock MCP tools:")
+            for t in tools:
+                log(f"    ✓ mcp:{ctx.mcp_name}:{t}")
+        else:
+            log("  No mock MCP tools registered for this task (tools: [])")
+
+        if ctx.sandbox_mcp_name:
+            log(f"  Sandbox MCP tools (bridged to container):")
+            for t in ("Bash", "Read", "Write", "Edit", "Glob", "Grep"):
+                log(f"    ✓ mcp:{ctx.sandbox_mcp_name}:{t}")
+
+        # Phase 7: Print connection info
+        session_id = f"debug-{task_id}-{int(time.time())}-{os.getpid()}"
+        model_id = model_config.get("model_id", "")
+        prompt_text = task.get("prompt", {})
+        if isinstance(prompt_text, dict):
+            prompt_text = prompt_text.get("text", "")
+
+        print(f"\n{'=' * 60}")
+        print(f"  Debug Session Ready")
+        print(f"{'=' * 60}")
+        print(f"  Task:      {task_id}")
+        print(f"  Gateway:   http://127.0.0.1:{gateway_port}")
+        print(f"  Agent ID:  {agent_id}")
+        print(f"  Session:   {session_id}")
+        if model_id:
+            print(f"  Model:     {model_id}")
+        if sandbox_url:
+            print(f"  Sandbox:   {sandbox_url}")
+            if handle is not None:
+                print(f"  Container: claw-agent-{handle.run_id}")
+        print()
+        print(f"  Connect via CLI:")
+        print(f"    openclaw agent --session-id {session_id} --agent {agent_id}")
+        print()
+        if model_id:
+            print(f"  Or send messages via API:")
+            print(
+                f"    curl -s -X POST http://127.0.0.1:{gateway_port}/v1/chat/completions \\"
+            )
+            print(f"      -H 'Content-Type: application/json' \\")
+            print(f"      -d '{{")
+            print(f'        "model": "{model_id}",')
+            print(
+                f'        "messages": [{{"role": "user", "content": "{prompt_text[:50]}"}}]'
+            )
+            print(f"      }}'")
+            print()
+        if sandbox_url:
+            print(f"  Test container directly:")
+            print(f"    curl -s --noproxy 127.0.0.1 -X POST \\")
+            print(f"      -H 'Content-Type: application/json' \\")
+            print(f'      -d \'{{"command": "hostname", "timeout_seconds": 5}}\' \\')
+            print(f"      {sandbox_url}/exec")
+            print()
+        print(f"  Check sessions:")
+        print(f"    ls ~/.openclaw/agents/{agent_id}/sessions/")
+        print(f"{'=' * 60}")
+        print(f"  Press Ctrl+C to exit and cleanup")
+        print(f"{'=' * 60}\n")
+
+        # Wait for interrupt
+        stop_event = threading.Event()
+
+        def handler(sig, frame):
+            log("\n  Exiting debug mode...")
+            stop_event.set()
+
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+
+        try:
+            while not stop_event.is_set():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+
+    finally:
+        # Stop the container before removing the MCP bridge registration.
+        cleanup_actions = []
+        if runner is not None and handle is not None:
+            cleanup_actions.append(
+                ("stop_container", lambda: runner.stop_container(handle))
+            )
+        if ctx is not None:
+            cleanup_actions.append(
+                ("cleanup_config", lambda: cleanup_config(context=ctx))
+            )
+        if services_attempted:
+            cleanup_actions.append(("cleanup_mock_services", cleanup_mock_services))
+
+        cleanup_errors = []
+        for name, cleanup_action in cleanup_actions:
+            try:
+                cleanup_action()
+            except BaseException as error:
+                cleanup_errors.append((name, error))
+        # Report failures after every acquired resource has had a cleanup attempt.
+        for name, error in cleanup_errors:
+            log(f"  [warn] {name}: {error}")
+        for _, error in cleanup_errors:
+            if not isinstance(error, Exception):
+                raise error
 
 
 def main():
