@@ -86,16 +86,26 @@ enum Commands {
   return {root, paths, files};
 }
 
-function generate(root) {
+function generate(root, baseUrl = '/') {
   const result = spawnSync(process.execPath, [path.join(root, 'website/scripts/generate-agent-index.mjs')], {
     cwd: root,
     encoding: 'utf8',
     timeout: 30_000,
-    env: {...process.env, GITHUB_SHA: 'fixture-commit', SITE_URL: 'https://example.com', BASE_URL: '/'},
+    env: {...process.env, GITHUB_SHA: 'fixture-commit', SITE_URL: 'https://example.com', BASE_URL: baseUrl},
   });
   assert.ifError(result.error);
   return result;
 }
+
+test('normalizes a deployment base URL without a trailing slash', async (t) => {
+  const {root} = await createFixture(t, true);
+  const result = generate(root, '/preview');
+  assert.equal(result.status, 0, result.stderr);
+  const index = JSON.parse(
+    await readFile(path.join(root, 'website/.generated/static/agents/repo-index.json'), 'utf8'),
+  );
+  assert.equal(index.documentation[0].url, 'https://example.com/preview/docs/quickstart/');
+});
 
 for (const migrated of [false, true]) {
   test(`generates complete endpoints with ${migrated ? 'migrated' : 'legacy'} component paths`, async (t) => {
