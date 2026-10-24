@@ -7,7 +7,7 @@ Btrfs-based workspace snapshot system for AI Agents. ws-checkpoint is a runtime 
 ## Features
 
 - **Copy-on-write snapshots** — uses btrfs COW for efficient checkpoint and rollback; latency depends on the filesystem and workload
-- **Daemon architecture** — privileged operations run in a daemon; CLI clients need no root
+- **Daemon architecture** — privileged operations run in a daemon; non-root clients require an explicit trusted UID allowlist
 - **Unix Socket IPC** — bincode binary protocol for high-performance communication
 - **systemd integration** — RPM one-click deploy, auto-start on boot
 - **Snapshot listing** — table/json output formats
@@ -73,6 +73,11 @@ sudo systemctl start ws-ckpt
 ```
 
 ### Basic Usage
+
+Before upgrading a service used by non-root clients, configure
+`WS_CKPT_ALLOWED_UIDS` in the daemon environment. The default now accepts root
+only. Each allowed UID is trusted for every workspace and operation; this is
+not workspace ownership isolation. See the [access and connection policy](../../docs/user-guide/en/ws-ckpt/index.md#daemon-access-and-connection-policy).
 
 ```bash
 # Initialize a workspace

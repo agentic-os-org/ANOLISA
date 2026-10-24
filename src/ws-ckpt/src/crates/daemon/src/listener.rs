@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,9 +14,53 @@ use ws_ckpt_common::{
     decode_payload, encode_frame, ErrorCode, Request, Response, WsCkptError, MAX_FRAME_SIZE,
 };
 
+struct Admission {
+    allowed: HashSet<u32>,
+}
+
+impl Admission {
+    fn new(allowed: Option<&str>) -> anyhow::Result<Self> {
+        let mut uids = HashSet::from([0]);
+        if let Some(value) = allowed {
+            for entry in value.split(',') {
+                let uid = entry
+                    .trim()
+                    .parse::<u32>()
+                    .context("WS_CKPT_ALLOWED_UIDS must contain comma-separated numeric UIDs")?;
+                uids.insert(uid);
+            }
+        }
+        Ok(Self { allowed: uids })
+    }
+
+    fn authorize(&self, uid: u32) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.allowed.contains(&uid),
+            "IPC UID {uid} is not authorized"
+        );
+        Ok(())
+    }
+}
+
 pub async fn run_listener(
     state: Arc<DaemonState>,
     cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    // Invalid policy fails before touching the socket; root is always trusted.
+    let allowed = std::env::var("WS_CKPT_ALLOWED_UIDS")
+        .map(Some)
+        .or_else(|error| match error {
+            std::env::VarError::NotPresent => Ok(None),
+            error => Err(error),
+        })?;
+    let admission = Admission::new(allowed.as_deref())?;
+    run_listener_with_admission(state, cancel, admission).await
+}
+
+async fn run_listener_with_admission(
+    state: Arc<DaemonState>,
+    cancel: CancellationToken,
+    admission: Admission,
 ) -> anyhow::Result<()> {
     // 1. Clean up residual socket file
     let _ = std::fs::remove_file(&state.socket_path);
@@ -31,9 +76,14 @@ pub async fn run_listener(
     let listener = UnixListener::bind(&state.socket_path).context("Failed to bind Unix socket")?;
     info!("Listening on {:?}", state.socket_path);
 
-    // 4. Set socket permissions to 0o666
+    // Additional UIDs are trusted for every operation and workspace.
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&state.socket_path, std::fs::Permissions::from_mode(0o666))
+    let mode = if admission.allowed.len() == 1 {
+        0o600
+    } else {
+        0o666
+    };
+    std::fs::set_permissions(&state.socket_path, std::fs::Permissions::from_mode(mode))
         .context("Failed to set socket permissions")?;
 
     // 5. Accept loop
@@ -44,6 +94,12 @@ pub async fn run_listener(
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
+                        if let Err(error) = stream.peer_cred()
+                            .context("Cannot authenticate IPC peer")
+                            .and_then(|cred| admission.authorize(cred.uid())) {
+                            tracing::warn!(%error, "Unauthorized IPC connection rejected before reading request");
+                            continue;
+                        }
                         let state = Arc::clone(&state);
                         join_set.spawn(async move {
                             if let Err(e) = handle_connection(stream, state).await {
@@ -164,6 +220,75 @@ async fn handle_connection(
 mod tests {
     use super::*;
     use ws_ckpt_common::{DaemonConfig, SnapshotIndex, SnapshotMeta};
+
+    #[tokio::test]
+    #[ignore = "requires root and python3 to connect as two real Linux UIDs"]
+    async fn real_peer_uids_enforce_policy_before_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(nix::unistd::geteuid().as_raw(), 0);
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let config = DaemonConfig {
+            socket_path: socket.clone(),
+            ..DaemonConfig::default()
+        };
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            temp.path().join("data"),
+            temp.path().join("test.img"),
+        ));
+        let state = Arc::new(DaemonState::new(config, backend, temp.path().join("state")));
+        let cancel = CancellationToken::new();
+        let listener = tokio::spawn(run_listener_with_admission(
+            state,
+            cancel.clone(),
+            Admission::new(Some("65534")).unwrap(),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !socket.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let request = hex::encode(encode_frame(&Request::Config).unwrap());
+        for (uid, accepted) in [(65533, false), (65534, true)] {
+            let output = tokio::process::Command::new("python3")
+                .arg("-c")
+                .arg("import os,socket,sys\nu=int(sys.argv[1]);os.setgroups([]);os.setgid(u);os.setuid(u)\ns=socket.socket(socket.AF_UNIX);s.settimeout(2);s.connect(sys.argv[2])\ntry:\n s.sendall(bytes.fromhex(sys.argv[3]));print(s.recv(65536).hex())\nexcept (ConnectionResetError,BrokenPipeError):\n print('')")
+                .args([uid.to_string(), socket.display().to_string(), request.clone()])
+                .output().await.unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(!response.trim().is_empty(), accepted);
+        }
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), listener)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn policy_defaults_and_invalid_settings() {
+        for invalid in ["", "all", "-1", "1,", "4294967296"] {
+            assert!(Admission::new(Some(invalid)).is_err());
+        }
+        let root = Admission::new(None).unwrap();
+        assert!(root.authorize(0).is_ok());
+        assert!(root.authorize(1000).is_err());
+        let explicit = Admission::new(Some("1000, 1001,1000")).unwrap();
+        assert!(explicit.authorize(0).is_ok());
+        assert!(explicit.authorize(1000).is_ok());
+        assert!(explicit.authorize(1001).is_ok());
+        assert!(explicit.authorize(1002).is_err());
+    }
 
     async fn exchange(state: &Arc<DaemonState>, request: Request) -> Response {
         // Exercise the real connection handler without a daemon or background task.

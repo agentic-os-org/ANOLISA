@@ -2,6 +2,11 @@
 
 [English](README.md)
 
+升级由非 root 客户端使用的服务前，须在 daemon 环境中配置
+`WS_CKPT_ALLOWED_UIDS`。默认现在仅允许 root。获准 UID 可操作全部工作区，
+这不提供工作区所有权隔离。
+详见[接入与连接策略](../../docs/user-guide/zh/ws-ckpt/index.md#daemon-接入与连接策略)。
+
 基于 btrfs 文件系统的 AI 工作区快照管理系统，为 AI Agent 提供检查点和回滚能力；实际耗时取决于文件系统、工作负载和运行环境。
 
 ## 特性

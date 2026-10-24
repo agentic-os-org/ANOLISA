@@ -243,6 +243,25 @@ systemd 服务在失败后等待 10 秒重试，5 分钟内最多启动 4 次（
 
 ## 配置
 
+### Daemon 接入与连接策略
+
+daemon 默认仅允许 root（UID 0）。升级有非 root CLI 或 Agent 客户端的安装前，
+须在 daemon 环境中加入它们的 Linux 数字 UID，例如
+`WS_CKPT_ALLOWED_UIDS=1000,1001`（请替换示例 UID）。systemd 可通过服务 drop-in
+的 `[Service]` 段设置 `Environment="WS_CKPT_ALLOWED_UIDS=1000,1001"`，然后重新
+加载 systemd 并重启 `ws-ckpt`。此设置必须重启才生效，`ws-ckpt reload` 不会应用。
+空项、负数、非数字或超出范围的 UID 会阻止监听器启动。root 始终获准。
+
+此列表授予整个 daemon 的管理信任：每个获准 UID 均可对全部工作区发起 legacy
+和 guarded 请求，不提供工作区所有权或获准用户之间的隔离。daemon 在读取请求前
+检查内核提供的 Socket 凭据。仅允许 root 时 Socket 权限为 0600；添加其他 UID 后
+为 0666，但仍由相同的凭据检查执行白名单。Socket 父目录必须允许预期客户端遍历。
+不要向互不信任的用户授予接入权限。
+
+未授权连接会在读取请求前直接关闭，不返回协议响应；原因可查 daemon 日志。本阶段
+不改变帧解析、传输限制或操作执行。撤销本改动会恢复以前
+不受限制的 Socket 接入，回退前应评估信任边界。
+
 ### Daemon 配置
 
 daemon 配置文件位于 `/etc/ws-ckpt/config.toml`，为系统级 daemon 进程配置。

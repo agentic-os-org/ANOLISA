@@ -1085,6 +1085,13 @@ jobs:
           cd src/ws-ckpt/src
           cargo test --workspace
 
+      - name: Verify real peer UID admission
+        run: |
+          cd src/ws-ckpt/src
+          test_binary=$(cargo test -p ws-ckpt-daemon --lib --no-run --message-format=json |
+            python3 -c 'import json,sys; print(next(record["executable"] for line in sys.stdin if (record := json.loads(line)).get("executable")))')
+          sudo "$test_binary" real_peer_uids_enforce_policy_before_dispatch --ignored
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

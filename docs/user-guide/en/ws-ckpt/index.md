@@ -268,6 +268,31 @@ Inspect the cause with `sudo journalctl -u ws-ckpt -n 100 --no-pager`. After fix
 
 ## Configuration
 
+### Daemon access and connection policy
+
+The daemon accepts root (UID 0) by default. Before upgrading an installation
+with non-root CLI or agent clients, add their numeric Linux UIDs to the daemon
+environment as `WS_CKPT_ALLOWED_UIDS=1000,1001` (replace these example UIDs).
+For systemd, use a service drop-in with `[Service]` and
+`Environment="WS_CKPT_ALLOWED_UIDS=1000,1001"`, then reload systemd and restart
+`ws-ckpt`. Changing this setting requires a restart; `ws-ckpt reload` does not
+apply it. Empty, negative, nonnumeric or out-of-range entries prevent listener
+startup. Root is always allowed.
+
+This list grants daemon-wide administrative trust: every listed UID can use
+legacy and guarded requests against all workspaces. It does not provide
+per-workspace ownership or isolation between listed users. The daemon checks
+kernel socket credentials before reading any request. The socket is mode 0600
+for root-only use; with extra trusted UIDs it is 0666, with the same credential
+check enforcing the allowlist. Socket parent directories must be traversable
+by intended clients. Do not grant access to mutually untrusted users.
+
+Unauthorized connections close before reading a request, without a protocol
+response; check the daemon journal for the reason. This stage does not change
+frame parsing, transport limits or operation execution. Reverting this change
+restores the former unrestricted socket
+access, so assess the trust boundary before rollback.
+
 ### Daemon Configuration
 
 The daemon configuration file is located at `/etc/ws-ckpt/config.toml`. This is a system-level configuration for the ws-ckpt daemon process.
