@@ -97,7 +97,21 @@ async function componentDescription(sourcePath, fallback) {
   const readmePath = path.join(repoRoot, sourcePath, 'README.md');
   if (!(await exists(readmePath))) return fallback;
   const markdown = await readFile(readmePath, 'utf8');
-  const paragraphs = markdown
+  let fence;
+  const prose = markdown.split('\n').filter((line) => {
+    if (fence) {
+      const closing = line.match(/^ {0,3}(`+|~+)[ \t]*\r?$/)?.[1];
+      if (closing?.[0] === fence[0] && closing.length >= fence.length) fence = undefined;
+      return false;
+    }
+    const opening = line.match(/^ {0,3}(`{3,}|~{3,})/)?.[1];
+    if (opening) {
+      fence = opening;
+      return false;
+    }
+    return true;
+  }).join('\n');
+  const paragraphs = prose
     .replace(/^#.*$/m, '')
     .replace(/^\[[^\]]+\]\([^)]+\)\s*$/m, '')
     .trim()
