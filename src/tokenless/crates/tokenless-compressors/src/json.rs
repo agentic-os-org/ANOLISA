@@ -574,6 +574,15 @@ impl<'a> Session<'a> {
 
     fn compress_value<'doc>(&mut self, value: &ExactValue<'doc>, depth: usize) -> ExactValue<'doc> {
         if self.bounds_enabled && depth > self.config.max_depth {
+            // A scalar cannot nest further, so bounding it limits nothing: the
+            // marker is longer than the leaf it replaces, flips its JSON type to
+            // string, and stashes a payload worth nothing.
+            if matches!(
+                value,
+                ExactValue::Null | ExactValue::Bool(_) | ExactValue::Number(_)
+            ) {
+                return value.clone();
+            }
             self.truncations += 1;
             let type_name = value.type_name();
             // The stashed subtree is written by the exact serializer, so a

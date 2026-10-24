@@ -395,6 +395,97 @@ fn depth_truncation_stashes_the_exact_subtree() {
 }
 
 #[test]
+fn max_depth_keeps_scalar_leaves() {
+    let store = InMemoryStore::new();
+    let outcome = JsonCompressor::new(JsonCompressionConfig {
+        max_depth: 1,
+        ..JsonCompressionConfig::default()
+    })
+    .compress(
+        &serde_json::json!({
+            "big": {"deep": {"payload": "x".repeat(600)}},
+            "meta": {"keep": 1}
+        })
+        .to_string(),
+        &context(Some(&store)),
+    )
+    .unwrap();
+    let value = output_value(&outcome);
+    assert!(value["big"]["deep"]
+        .as_str()
+        .unwrap()
+        .starts_with("object truncated at depth 2"));
+    assert_eq!(value["meta"]["keep"], 1);
+}
+
+#[test]
+fn scalar_leaves_past_max_depth_are_neither_stashed_nor_counted() {
+    use tokenless_ccr::compute_key;
+
+    let store = InMemoryStore::new();
+    let items = serde_json::json!(["a".repeat(300), "b".repeat(300), "c".repeat(300)]);
+    let input = serde_json::to_string(&serde_json::json!({
+        "meta": {"count": 1, "flag": false, "missing": null, "items": items}
+    }))
+    .unwrap();
+    let outcome = JsonCompressor::new(JsonCompressionConfig {
+        max_depth: 1,
+        ..JsonCompressionConfig::default()
+    })
+    .compress(&input, &context(Some(&store)))
+    .unwrap();
+
+    let value = output_value(&outcome);
+    assert!(value["meta"]["count"].is_number());
+    assert_eq!(value["meta"]["count"], serde_json::json!(1));
+    assert_eq!(value["meta"]["flag"], serde_json::json!(false));
+    assert!(value["meta"]["missing"].is_null());
+    // Containers can still nest past the limit, so they keep their marker.
+    assert!(value["meta"]["items"]
+        .as_str()
+        .unwrap()
+        .starts_with("array truncated at depth 2"));
+
+    // The array is the only bounded value: one truncation and one Stash row,
+    // holding the array rather than a scalar leaf.
+    assert_eq!(outcome.metrics.truncations, 1);
+    assert_eq!(outcome.metrics.unrecoverable_truncations, 0);
+    assert_eq!(outcome.stash_writes.len(), 1);
+    assert_eq!(store.len(), 1);
+    let hash = extract_hash(&outcome.output).unwrap();
+    assert_eq!(
+        store.retrieve(hash).unwrap().as_deref(),
+        Some(serde_json::to_string(&items).unwrap().as_str())
+    );
+    for payload in ["1", "false", "null"] {
+        assert!(
+            store
+                .retrieve(&compute_key(payload.as_bytes()))
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn depth_bounding_that_only_meets_scalars_is_lossless() {
+    let store = InMemoryStore::new();
+    let input = r#"{"meta":{"count":1,"flag":false,"missing":null}}"#;
+    let outcome = JsonCompressor::new(JsonCompressionConfig {
+        max_depth: 1,
+        ..JsonCompressionConfig::default()
+    })
+    .compress(input, &context(Some(&store)))
+    .unwrap();
+
+    assert_eq!(outcome.output, input);
+    assert_eq!(outcome.metrics.truncations, 0);
+    assert_eq!(outcome.recoverability, Recoverability::Lossless);
+    assert!(outcome.stash_writes.is_empty());
+    assert_eq!(store.len(), 0);
+}
+
+#[test]
 fn stashed_array_tail_round_trips_exactly() {
     let store = InMemoryStore::new();
     let compressor = JsonCompressor::new(JsonCompressionConfig {
