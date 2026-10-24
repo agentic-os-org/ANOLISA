@@ -164,7 +164,12 @@ fn is_sudo_option_token(token: &str, skip_next_arg: &mut bool) -> bool {
     {
         return true;
     }
-    if token.len() > 2 && matches!(&token[..2], "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+    if token.len() > 2
+        && matches!(
+            &token.as_bytes()[..2],
+            b"-u" | b"-g" | b"-h" | b"-p" | b"-C" | b"-T"
+        )
+    {
         return true;
     }
     token
