@@ -130,13 +130,17 @@ echo "  active_model.json 已写入"
 # 3d: Markdown 文件 — 复制到 ~/.qwenpaw/
 for md_file in AGENTS.md SOUL.md PROFILE.md MEMORY.md BOOTSTRAP.md HEARTBEAT.md; do
   src="$SKILL_DIR/reference/$md_file"
-  if [ -f "$src" ]; then
-    cp "$src" "$QWENPAW_DIR/$md_file"
+  destination="$QWENPAW_DIR/$md_file"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    echo "  保留已有工作区文件: $md_file"
+  elif [ -f "$src" ]; then
+    cp "$src" "$destination"
+    echo "  初始化工作区文件: $md_file"
   else
     echo "  警告: 找不到 $src，跳过"
   fi
 done
-echo "  Markdown 文件已复制"
+echo "  Markdown 工作区文件已就绪"
 
 # ── 步骤 5: 验证文件完整性 ──────────────────────────────
 echo "[5/6] 验证文件完整性..."
