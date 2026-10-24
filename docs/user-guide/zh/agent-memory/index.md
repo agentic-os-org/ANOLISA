@@ -452,7 +452,7 @@ conflict_bm25_threshold = -2.0
 | `MEMORY_MAX_WRITE_BYTES` | 单次写入上限 | 16 MiB |
 | `MEMORY_MAX_APPEND_BYTES` | 单次追加上限 | 4 MiB |
 | `MEMORY_INDEX_ENABLED` | 启用 FTS5 索引 | true |
-| `MEMORY_INDEX_TIME_DECAY_LAMBDA` | 时间衰减系数（≥0） | 0.01 |
+| `MEMORY_INDEX_TIME_DECAY_LAMBDA` | 时间衰减系数（有限值，≥0） | 0.01 |
 | `MEMORY_INDEX_TIME_DECAY_ALPHA` | 时间权重占比（0–1） | 0.3 |
 | `MEMORY_INDEX_COLD_AFTER_DAYS` | 冷数据归档天数 | 30 |
 | `MEMORY_INDEX_EXCLUDE_COLD` | 搜索排除冷数据 | true |

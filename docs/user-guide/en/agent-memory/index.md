@@ -466,7 +466,7 @@ Every config key has a matching `MEMORY_*` env var. Priority: **env > config.tom
 | `MEMORY_MAX_WRITE_BYTES` | per-write cap | 16 MiB |
 | `MEMORY_MAX_APPEND_BYTES` | per-append cap | 4 MiB |
 | `MEMORY_INDEX_ENABLED` | enable FTS5 index | true |
-| `MEMORY_INDEX_TIME_DECAY_LAMBDA` | time decay (≥0) | 0.01 |
+| `MEMORY_INDEX_TIME_DECAY_LAMBDA` | time decay (finite, ≥0) | 0.01 |
 | `MEMORY_INDEX_TIME_DECAY_ALPHA` | time weight ratio (0–1) | 0.3 |
 | `MEMORY_INDEX_COLD_AFTER_DAYS` | cold archive days | 30 |
 | `MEMORY_INDEX_EXCLUDE_COLD` | exclude cold from search | true |
