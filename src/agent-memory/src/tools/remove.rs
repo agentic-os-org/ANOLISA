@@ -10,7 +10,9 @@ use crate::service::MemoryService;
 const TOOL: &str = "mem_remove";
 
 /// Delete a file or directory.
-/// - For directories, `recursive` MUST be true; otherwise `InvalidArgument`.
+/// - For non-empty directories, `recursive` MUST be true; otherwise
+///   `InvalidArgument`. An empty directory may be removed without it
+///   (there is nothing to recurse over).
 /// - The mount root and `.anolisa` meta dir cannot be targets (path resolver
 ///   already rejects the meta dir).
 pub fn remove(svc: &MemoryService, path: &str, recursive: bool) -> Result<()> {
@@ -47,16 +49,45 @@ pub fn remove(svc: &MemoryService, path: &str, recursive: bool) -> Result<()> {
 
     if meta.is_dir() {
         if !recursive {
-            let err = MemoryError::InvalidArgument(format!(
-                "'{rel}' is a directory; pass recursive=true to remove"
-            ));
-            svc.audit_log(AuditEntry::new(TOOL).path(rel).error(err.to_string()));
-            return Err(err);
+            // The tool contract says recursive=true is required only for
+            // NON-EMPTY directories, so probe emptiness before rejecting:
+            // deleting an empty dir has nothing to recurse over.
+            //
+            // This listing walks the absolute path rather than the openat2
+            // fd the recursive path anchors to — the hardening difference is
+            // immaterial here because the deletion that follows is
+            // `remove_dir` (rmdir(2)), which does not follow a trailing
+            // symlink and refuses to remove a non-empty directory, so a
+            // directory swapped between probe and removal can only make the
+            // call fail safely, never destroy anything it did not probe.
+            // Any other IO error while listing counts as non-empty — fail
+            // closed on the existing InvalidArgument path.
+            let is_empty = match std::fs::read_dir(&resolved) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // The directory vanished between the metadata probe and
+                    // the listing; report the same NotFound the precheck
+                    // would have produced.
+                    let err = MemoryError::NotFound(rel.clone());
+                    svc.audit_log(AuditEntry::new(TOOL).path(rel).error(err.to_string()));
+                    return Err(err);
+                }
+                Err(_) => false,
+            };
+            if !is_empty {
+                let err = MemoryError::InvalidArgument(format!(
+                    "'{rel}' is a directory; pass recursive=true to remove"
+                ));
+                svc.audit_log(AuditEntry::new(TOOL).path(rel).error(err.to_string()));
+                return Err(err);
+            }
+            std::fs::remove_dir(&resolved)?;
+        } else {
+            // Use sandboxed recursive delete that refuses to follow symlinks
+            // inside the directory — std::fs::remove_dir_all would follow them
+            // and could destroy targets outside the mount.
+            safe_fs::remove_dir_all_safe(svc.mount.root_fd.as_fd(), rel_path, &resolved)?;
         }
-        // Use sandboxed recursive delete that refuses to follow symlinks
-        // inside the directory — std::fs::remove_dir_all would follow them
-        // and could destroy targets outside the mount.
-        safe_fs::remove_dir_all_safe(svc.mount.root_fd.as_fd(), rel_path, &resolved)?;
     } else {
         std::fs::remove_file(&resolved)?;
     }
