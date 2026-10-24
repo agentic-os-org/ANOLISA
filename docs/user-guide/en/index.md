@@ -25,7 +25,7 @@ under Getting started.
 - [cosh (cosh-ng)](cosh-ng/index.md): An AI-native terminal that preserves your existing shell experience, with natural-language tasks, tools, and Skills.
 - [OS Skills](os-skills/index.md): An OS handbook for AI Agents, covering system administration, monitoring, security, DevOps automation, and more.
 
-## AW Unified Stack
+## AW Unified Stack Layer
 
 - [AW](aw/index.md): A unified architecture connecting Agent frameworks with extensible AI-native system software.
 

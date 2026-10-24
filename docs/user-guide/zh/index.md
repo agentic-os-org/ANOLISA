@@ -23,7 +23,7 @@
 - [cosh (cosh-ng)](cosh-ng/index.md)：保持现有 Shell 使用体验的 AI 原生终端，可通过自然语言完成任务，并调用工具与 Skills。
 - [OS Skills](os-skills/index.md)：面向 AI Agent 的 OS 使用说明书，覆盖系统管理、监控、安全和 DevOps 自动化等场景。
 
-## AW 统一栈
+## 统一接入层
 
 - [AW](aw/index.md)：以统一架构向上对接 Agent framework，向下衔接可扩展的 AI 原生系统软件。
 

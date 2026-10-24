@@ -188,7 +188,7 @@ groups:
           en: An OS handbook for AI Agents, covering system administration, monitoring, security, DevOps automation, and more.
           zh: 面向 AI Agent 的 OS 使用说明书，覆盖系统管理、监控、安全和 DevOps 自动化等场景。
   - id: aw-unified-stack
-    label: {en: AW Unified Stack, zh: AW 统一栈}
+    label: {en: AW Unified Stack Layer, zh: 统一接入层}
     items:
       - component: aw
         label: {en: AW, zh: AW}
