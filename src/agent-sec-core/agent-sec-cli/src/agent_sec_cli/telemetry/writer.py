@@ -139,7 +139,10 @@ class TelemetryWriter:
         """Write the complete payload, handling short writes."""
         remaining = payload
         while remaining:
-            written = os.write(fd, remaining)
+            try:
+                written = os.write(fd, remaining)
+            except InterruptedError:
+                continue
             if written <= 0:
                 raise OSError("os.write returned no bytes")
             remaining = remaining[written:]
