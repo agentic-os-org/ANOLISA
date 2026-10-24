@@ -107,7 +107,7 @@ ce-runner 支持三种任务前缀,对应不同执行模式:
 | `--sandbox-image` | `claw-eval-agent:latest` | sandbox 的 Docker 镜像 |
 | `--tasks-file` | — | 任务 ID 文件(每行一个) |
 | `--tasks-string` | — | 逗号分隔的精确任务名(与 --tasks-file 互斥) |
-| `--filter` | — | 对任务目录名做子串匹配 |
+| `--filter` | — | 对任务目录名做不区分大小写的子串匹配；忽略父目录路径 |
 | `--grade-parallel` | min(parallel,2) | LLM 裁判打分的并行 worker 数 |
 | `--chunk-size` | 4 | 每 chunk 的任务数(控制峰值内存;会自动提升到 --parallel) |
 | `--trace-prefix` | `openclaw` | trace 目录名前缀 |

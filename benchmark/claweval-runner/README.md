@@ -107,7 +107,7 @@ ce-runner supports three task prefixes with different execution modes:
 | `--sandbox-image` | `claw-eval-agent:latest` | Docker image for sandbox |
 | `--tasks-file` | — | File with task IDs (one per line) |
 | `--tasks-string` | — | Comma-separated exact task names (mutually exclusive with --tasks-file) |
-| `--filter` | — | Substring match on task directory name |
+| `--filter` | — | Case-insensitive substring match on task directory name; parent paths are ignored |
 | `--grade-parallel` | min(parallel,2) | Parallel workers for LLM judge grading |
 | `--chunk-size` | 4 | Tasks per chunk (controls peak memory; auto-raised to --parallel) |
 | `--trace-prefix` | `openclaw` | Prefix for trace directory name |
