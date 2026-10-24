@@ -95,9 +95,10 @@ function knownAlias(source, unresolvedPath) {
 async function rewriteLinks(markdown, source) {
   const sourceDirectory = path.posix.dirname(source);
   const replacements = [];
-  const linkPattern = /(!?)\[([^\]]*)\]\(([^)]+)\)/g;
+  const linkPattern = /(!?)\[([^\]]*)\]\(([^)\s]+)(?:\s+("[^"]*"|'[^']*'|\([^)]*\)))?\)/g;
   for (const match of markdown.matchAll(linkPattern)) {
     const rawTarget = match[3].trim();
+    const title = match[4] ? ` ${match[4]}` : '';
     if (/^(?:[a-z]+:|#|\/)/i.test(rawTarget)) continue;
     const [targetWithoutHash, hash = ''] = rawTarget.split('#', 2);
 
@@ -139,7 +140,7 @@ async function rewriteLinks(markdown, source) {
       replacement = `${repository}/${kind}/main/${resolved}${hash ? `#${hash}` : ''}`;
     }
     if (replacement) {
-      replacements.push({start: match.index, end: match.index + match[0].length, value: `${match[1]}[${match[2]}](${replacement})`});
+      replacements.push({start: match.index, end: match.index + match[0].length, value: `${match[1]}[${match[2]}](${replacement}${title})`});
     }
   }
   let output = markdown;
