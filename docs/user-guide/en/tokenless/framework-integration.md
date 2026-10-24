@@ -84,8 +84,12 @@ cannot replace the original model-visible output.
 
 Common Hooks and OpenClaw carry RTK ownership into the matching PostTool call. Hermes supports older
 host releases by blocking and suggesting a retry; its final-result hook recognizes the attributed
-RTK wrapper from the command Hermes actually executed. All three therefore bypass a second
-compression pass over RTK output.
+RTK wrapper, including optional execution-generation assignments, from the command Hermes actually executed. Core resumes PostTool only after complete
+receipts confirm unchanged output from a successful call, using the saved original command for
+file-origin checks. The host must return the exact registered execution command in PostTool `command`;
+missing or modified commands retain the bypass, as does changed or unconfirmed output. All three adapters declare
+`recovery: none` for RTK output before receipt lookup, so fallback accepts only lossless candidates;
+it does not enable Stash/retrieve recovery for these calls.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 

@@ -79,7 +79,11 @@ Cleanup。Runtime 最后仍只执行一次全局字符/Token 仲裁和一次 Sta
 为避免两个组件依次改写同一输出，PreTool 对明确的 Cargo、pytest、npm/Jest、Go 和 Make
 构建/测试命令直接返回 `passthrough` 与 `output_optimization: "none"`，不调用 RTK；其原生输出
 随后才可能进入 `BuildLogCompressor`。其他受支持命令仍由 RTK 处理，带
-`output_optimization: "rtk"` 的结果继续直接旁路 PostTool Pipeline。目前 PreTool 没有声明
+`output_optimization: "rtk"` 的结果默认旁路 PostTool Pipeline。只有同一调用的全部执行回执
+确认输出字节未变、工具执行成功，且 PostTool 的 `command` 与注册的执行命令完全一致时，
+Core 才恢复原命令并继续原有管线；Token 估算持平不代表
+内容未变。已有改写、回执缺失或过期、旧版 RTK 及状态失败均保留旁路。原命令用于保留本地
+HTML 等文件来源保护；命令匹配可防止重试失效操作失败时误用旧回执。目前 PreTool 没有声明
 宿主 PostTool 替换与恢复能力，因此这项命令所有权选择对所有宿主一致；无法应用 Build Log
 缩减的宿主可能暂时原样接收这些命令的输出。
 
@@ -105,7 +109,8 @@ Plugin 通过 { result } 替换单文本 Tool Result，保留其余元数据
 
 OpenClaw 的 PreTool 同样调用一次 `tokenless compress`，并把 Core 返回的
 `output_optimization: "rtk"` 按 Session 与 Tool Call ID 存入进程内、消费一次的 Ledger。
-匹配的 PostTool Request 携带该状态，Core 负责直接透传 RTK 输出。Ledger 按 24 小时 TTL、
+匹配的 PostTool Request 携带该状态，Core 根据执行回执判断是否继续处理字节未变的输出。
+OpenClaw 对 RTK 输出声明 `recovery: none`，回退仅接受无损候选。Ledger 按 24 小时 TTL、
 1024 条上限和 Session 结束事件清理。
 
 OpenClaw 不提供 Marker 授权恢复路径，因此需要恢复的 Lossy Candidate 以
@@ -186,7 +191,8 @@ Marker 会提示模型通过已有 Shell Tool 执行
 操作错误由 CLI 以退出码 1 返回，Hook 在进程边界上 fail-open。Common PreTool Hook 通过
 Protocol v2 调用 Core，由 Core
 执行 RTK；Adapter 按 Tool Call ID 暂存 `output_optimization: "rtk"`，并在对应 PostTool 调用中
-消费该状态，使 RTK 输出绕过二次压缩。缺少稳定 Tool Call ID 时保持原命令不变；宿主未发送
+消费该状态，由 Core 根据执行回执仲裁。Common Hook 对 RTK 输出已声明 `recovery: none`，
+即使确认输出未变，回退也仅接受无损候选。缺少稳定 Tool Call ID 时保持原命令不变；宿主未发送
 PostTool 事件时遗留的状态会在后续 PreTool 调用中按 24 小时 TTL 和 1024 个文件上限清理。
 
 **TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。

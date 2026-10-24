@@ -17,6 +17,7 @@ use tokenless_protocol::{
     ToolResultStatus, estimate_tokens,
 };
 use tokenless_schema::SchemaCompressor;
+use tokenless_stats::rtk_outcome::OutcomeStore;
 use tokenless_stats::{OperationType, StatsRecorder};
 
 use crate::post_tool::{self, PostToolPipeline, PostToolPipelineConfig};
@@ -118,7 +119,8 @@ pub fn dispatch_with_store(
                 Vec::new(),
             ),
             Request::PostTool(request) => {
-                let outcome = post_tool_with_store(request, options, stash_store)?;
+                let outcome =
+                    post_tool_with_outcomes(request, options, stash_store, &envelope.attribution)?;
                 let artifact_keys = outcome.response.stash_keys.clone();
                 (
                     Response::PostTool(outcome.response),
@@ -382,7 +384,44 @@ fn pre_tool_with_optional_rtk(
     let anchored = if request.tool_name.eq_ignore_ascii_case("PowerShell") {
         anchor_powershell_rtk(rewritten, rtk_path, attribution, data_dir)
     } else {
-        anchor_rtk_prefix(command, rewritten, rtk_path, attribution, data_dir)
+        anchor_rtk_prefix_with_outcomes(
+            command,
+            rewritten,
+            rtk_path,
+            attribution,
+            data_dir,
+            |expected, render| {
+                if attribution
+                    .session_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
+                    || attribution
+                        .tool_use_id
+                        .as_deref()
+                        .unwrap_or_default()
+                        .is_empty()
+                {
+                    return None;
+                }
+                match OutcomeStore::open(data_dir, true).and_then(|mut store| {
+                    store.begin(
+                        &attribution.agent_id,
+                        attribution.session_id.as_deref().unwrap_or_default(),
+                        attribution.tool_use_id.as_deref().unwrap_or_default(),
+                        expected,
+                        command,
+                        render,
+                    )
+                }) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        warn_rtk_outcome(&error);
+                        None
+                    }
+                }
+            },
+        )
     };
     let mut rewritten_arguments = arguments.clone();
     rewritten_arguments.insert(request.command_field.clone(), Value::String(anchored));
@@ -649,6 +688,7 @@ fn anchor_powershell_rtk(
     script
 }
 
+#[cfg(test)]
 fn anchor_rtk_prefix(
     original: &str,
     rewritten: &str,
@@ -656,14 +696,31 @@ fn anchor_rtk_prefix(
     attribution: &Attribution,
     data_dir: &Path,
 ) -> String {
+    anchor_rtk_prefix_with_outcomes(
+        original,
+        rewritten,
+        rtk_path,
+        attribution,
+        data_dir,
+        |_, _| None,
+    )
+}
+
+fn anchor_rtk_prefix_with_outcomes(
+    original: &str,
+    rewritten: &str,
+    rtk_path: &Path,
+    attribution: &Attribution,
+    data_dir: &Path,
+    begin: impl FnOnce(usize, &dyn Fn(&str) -> String) -> Option<String>,
+) -> String {
     let quoted_path = shell_quote(&rtk_path.to_string_lossy());
     let prefix = format!(
-        "env TOKENLESS_AGENT_ID={} TOKENLESS_SESSION_ID={} TOKENLESS_TOOL_USE_ID={} TOKENLESS_DATA_DIR={} {}",
+        "env TOKENLESS_AGENT_ID={} TOKENLESS_SESSION_ID={} TOKENLESS_TOOL_USE_ID={} TOKENLESS_DATA_DIR={} ",
         shell_quote(&attribution.agent_id),
         shell_quote(attribution.session_id.as_deref().unwrap_or_default()),
         shell_quote(attribution.tool_use_id.as_deref().unwrap_or_default()),
         shell_quote(&data_dir.to_string_lossy()),
-        quoted_path,
     );
     // RTK can preserve arbitrary configured transparent prefixes before its
     // wrapper. The first divergence in each rewritten segment locates the
@@ -699,15 +756,41 @@ fn anchor_rtk_prefix(
         }
     }
 
-    let mut anchored = String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
-    let mut copied_until = 0;
-    for offset in replacements {
-        anchored.push_str(&rewritten[copied_until..offset]);
-        anchored.push_str(&prefix);
-        copied_until = offset + 3;
-    }
-    anchored.push_str(&rewritten[copied_until..]);
-    anchored
+    // Opaque substitutions or existing RTK references may execute untracked wrappers.
+    let all_tracked = original_segments
+        .iter()
+        .all(|(_, tokens)| tokens.is_empty())
+        && !original.contains("rtk")
+        && !original.contains('`')
+        && !original.contains("$(")
+        && rewritten_segments
+            .iter()
+            .map(|(_, tokens)| tokens.len())
+            .sum::<usize>()
+            == replacements.len();
+    let render = |run: Option<&str>| {
+        let mut anchored =
+            String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
+        let mut copied_until = 0;
+        for (ordinal, offset) in replacements.iter().copied().enumerate() {
+            anchored.push_str(&rewritten[copied_until..offset]);
+            anchored.push_str(&prefix);
+            if let Some(run) = run {
+                anchored.push_str(&format!(
+                    "TOKENLESS_RTK_RUN_ID={} TOKENLESS_RTK_ORDINAL={ordinal} ",
+                    shell_quote(run)
+                ));
+            }
+            anchored.push_str(&quoted_path);
+            copied_until = offset + 3;
+        }
+        anchored.push_str(&rewritten[copied_until..]);
+        anchored
+    };
+    begin(if all_tracked { replacements.len() } else { 0 }, &|run| {
+        render(Some(run))
+    })
+    .unwrap_or_else(|| render(None))
 }
 
 fn bare_rtk_offsets_by_segment(command: &str) -> Vec<(usize, Vec<usize>)> {
@@ -812,6 +895,52 @@ pub(crate) struct PostToolOutcome {
     pub(crate) stash_writes: Option<usize>,
     pub(crate) stash_errors: Option<usize>,
     pub(crate) stash_size: Option<usize>,
+}
+
+fn warn_rtk_outcome(error: &tokenless_stats::rtk_outcome::OutcomeError) {
+    crate::warn_soft(&format!(
+        "tokenless: {error}; retaining RTK output ownership"
+    ));
+}
+
+pub(crate) fn post_tool_with_outcomes(
+    request: &PostToolRequest,
+    options: &EntryOptions,
+    stash_store: Option<&Arc<dyn StashStore>>,
+    attribution: &Attribution,
+) -> Result<PostToolOutcome, RuntimeError> {
+    let mut original_command = None;
+    if request.output_optimization == OutputOptimization::Rtk
+        && let Some(command) = request.command.as_deref()
+        && let Some(data_dir) = options.rtk_data_dir.as_deref()
+        && OutcomeStore::path(data_dir).exists()
+    {
+        match OutcomeStore::open(data_dir, false).and_then(|mut store| {
+            store.consume_unchanged(
+                &attribution.agent_id,
+                attribution.session_id.as_deref().unwrap_or_default(),
+                attribution.tool_use_id.as_deref().unwrap_or_default(),
+                command,
+            )
+        }) {
+            Ok(value) => original_command = value,
+            Err(error) => warn_rtk_outcome(&error),
+        }
+    }
+    let refined;
+    let request = if let Some(command) = original_command
+        && request.status == ToolResultStatus::Success
+    {
+        refined = PostToolRequest {
+            output_optimization: OutputOptimization::None,
+            command: Some(command),
+            ..request.clone()
+        };
+        &refined
+    } else {
+        request
+    };
+    post_tool_with_store(request, options, stash_store)
 }
 
 pub(crate) fn post_tool_with_store(
@@ -1035,9 +1164,9 @@ pub(crate) fn retrieve_authorized_with_store(
             attribution.tool_use_id.as_deref(),
         ) {
             // Fail-soft, and the warning itself must not be able to
-            // fail the retrieval: warn_stats discards its own write
+            // fail the retrieval: warn_soft discards its own write
             // errors.
-            crate::warn_stats(&format!(
+            crate::warn_soft(&format!(
                 "[tokenless-stats] WARNING: failed to record retrieve event: {e}"
             ));
         }
@@ -1902,6 +2031,43 @@ mod tests {
     }
 
     #[test]
+    fn rtk_receipts_cover_all_wrappers_or_keep_conservative_ownership() {
+        let attribution = Attribution::new("test");
+        let path = Path::new("/opt/tokenless/rtk");
+        let anchored = anchor_rtk_prefix_with_outcomes(
+            "git log && git show",
+            "rtk git log && rtk git show",
+            path,
+            &attribution,
+            Path::new("/tmp/state"),
+            |count, render| {
+                assert_eq!(count, 2);
+                Some(render("generation"))
+            },
+        );
+        assert!(anchored.contains("TOKENLESS_RTK_ORDINAL=0"));
+        assert!(anchored.contains("TOKENLESS_RTK_ORDINAL=1"));
+        for original in [
+            "rtk git log && git show",
+            "/usr/local/bin/rtk git log && git show",
+            "echo \"$(rtk git log)\" && git show",
+            "echo `git log` && git show",
+        ] {
+            anchor_rtk_prefix_with_outcomes(
+                original,
+                &original.replace("git show", "rtk git show"),
+                path,
+                &attribution,
+                Path::new("/tmp/state"),
+                |count, _| {
+                    assert_eq!(count, 0);
+                    None
+                },
+            );
+        }
+    }
+
+    #[test]
     fn pre_tool_no_op_does_not_require_rtk() {
         let requests = [
             PreToolRequest {
@@ -2693,6 +2859,109 @@ mod tests {
             };
             let outcome = post_tool_with_store(&request, &options(), None).unwrap();
             assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+            assert!(outcome.response.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
+    fn confirmed_unchanged_rtk_output_reenters_post_tool_once() {
+        let directory = tempdir().unwrap();
+        let mut options = options();
+        options.rtk_data_dir = Some(directory.path().to_path_buf());
+        let attribution = Attribution {
+            agent_id: "test".into(),
+            session_id: Some("session".into()),
+            tool_use_id: Some("call".into()),
+        };
+        let content = serde_json::to_string_pretty(
+            &(0..30)
+                .map(|index| serde_json::json!({"name": format!("item-{index}"), "value": index}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut request = post_tool_request(&content);
+        request.output_optimization = OutputOptimization::Rtk;
+        let mut store = OutcomeStore::open(directory.path(), true).unwrap();
+        for changed in [true, false] {
+            let run = store
+                .begin("test", "session", "call", 1, "git log", str::to_owned)
+                .unwrap()
+                .unwrap();
+            store.record(&run, 0, changed).unwrap();
+            request.command = Some(run);
+            let outcome = post_tool_with_outcomes(&request, &options, None, &attribution).unwrap();
+            assert_eq!(
+                outcome.response.disposition,
+                if changed {
+                    Disposition::Passthrough
+                } else {
+                    Disposition::Applied
+                }
+            );
+            if !changed {
+                assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+                assert!(outcome.response.after_tokens < outcome.response.before_tokens);
+            }
+            let repeated = post_tool_with_outcomes(&request, &options, None, &attribution).unwrap();
+            assert_eq!(repeated.response.output, request.content);
+            assert_eq!(repeated.response.disposition, Disposition::Passthrough);
+        }
+    }
+
+    #[test]
+    fn rtk_fallback_preserves_error_file_and_retrieve_guards() {
+        let directory = tempdir().unwrap();
+        let mut options = options();
+        options.rtk_data_dir = Some(directory.path().to_path_buf());
+        let attribution = Attribution {
+            agent_id: "test".into(),
+            session_id: Some("session".into()),
+            tool_use_id: Some("call".into()),
+        };
+        let content = serde_json::to_string_pretty(
+            &(0..30)
+                .map(|index| serde_json::json!({"name": format!("item-{index}"), "value": index}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        for (status, origin, kind) in [
+            (
+                ToolResultStatus::Error,
+                ContentOrigin::CommandOutput,
+                ResultKind::Tool,
+            ),
+            (
+                ToolResultStatus::Success,
+                ContentOrigin::FileContent,
+                ResultKind::Tool,
+            ),
+            (
+                ToolResultStatus::Success,
+                ContentOrigin::CommandOutput,
+                ResultKind::Retrieve,
+            ),
+            (
+                ToolResultStatus::Denied,
+                ContentOrigin::CommandOutput,
+                ResultKind::Tool,
+            ),
+        ] {
+            let mut store = OutcomeStore::open(directory.path(), true).unwrap();
+            let run = store
+                .begin("test", "session", "call", 1, "git log", str::to_owned)
+                .unwrap()
+                .unwrap();
+            store.record(&run, 0, false).unwrap();
+            let request = PostToolRequest {
+                status,
+                content_origin: origin,
+                result_kind: kind,
+                output_optimization: OutputOptimization::Rtk,
+                command: Some(run),
+                ..post_tool_request(&content)
+            };
+            let outcome = post_tool_with_outcomes(&request, &options, None, &attribution).unwrap();
+            assert_eq!(outcome.response.output, content);
             assert!(outcome.response.applied_operations.is_empty());
         }
     }

@@ -381,7 +381,7 @@ fn state_path_override(primary: &str, dsh_managed: &str) -> Option<String> {
 
 /// Resolve the directory containing tokenless SQLite databases.
 ///
-/// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only and may be an
+/// `TOKENLESS_DATA_DIR` affects statistics, stash and RTK receipts and may be an
 /// absolute directory outside the real home. DSH's managed shell supplies the
 /// same path through `DSH_TOKENLESS_DATA_DIR` because it removes inherited
 /// `TOKENLESS_*` variables. An invalid explicit override is returned as an
@@ -684,15 +684,27 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 .then(env_check::resolve_rtk_path)
                 .flatten()
                 .map(PathBuf::from);
-            let rtk_data_dir = if matches!(&request.request, Request::PreTool(_)) {
-                Some(
+            let rtk_data_dir = match &request.request {
+                Request::PreTool(_) => Some(
                     database_paths
                         .data_dir()
                         .map_err(|error| (error.to_owned(), 1))?
                         .to_path_buf(),
-                )
-            } else {
-                None
+                ),
+                Request::PostTool(value)
+                    if value.output_optimization == tokenless_protocol::OutputOptimization::Rtk =>
+                {
+                    match database_paths.data_dir() {
+                        Ok(path) => Some(path.to_path_buf()),
+                        Err(error) => {
+                            warn_soft(&format!(
+                                "tokenless: RTK receipt state unavailable: {error}; retaining RTK output ownership"
+                            ));
+                            None
+                        }
+                    }
+                }
+                _ => None,
             };
             let outcome = dispatch_with_store(
                 &request,

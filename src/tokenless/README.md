@@ -333,8 +333,9 @@ original output while Core attaches environment-diagnostic context.
 
 PreTool leaves recognized Cargo, pytest, npm/Jest, Go, and Make build/test
 commands unchanged so their native output has a single PostTool owner. Other
-supported commands may be rewritten by RTK, and their results continue to
-bypass PostTool compression.
+supported commands may be rewritten by RTK. Successful results enter PostTool only
+when complete execution receipts confirm unchanged output and PostTool supplies the exact
+registered execution command, preserving the original command's file-origin guards.
 
 Claude Code 2.1.121 or newer, Qoder CLI, OpenCode, and Cosh-NG can replace the
 live result. Their PostTool requests enable recovery when bare `tokenless`
@@ -589,7 +590,10 @@ The plugin translates OpenClaw tool hooks and live result middleware into Protoc
 
 Core owns RTK execution, JSON detection, compaction, TOON selection, thresholds, diagnostics, and final
 arbitration. The plugin carries Core's per-call `output_optimization` from PreTool into the matching
-PostTool request, so RTK output is not compressed twice. The local CLI recovery command is a trusted
+PostTool request. Core resumes processing only when complete execution receipts confirm unchanged
+output and PostTool supplies the exact registered execution command, restoring the original command
+for file-origin checks; changed or unconfirmed output bypasses
+compression. The local CLI recovery command is a trusted
 operator entry rather than Agent authorization, so the plugin applies only lossless candidates.
 
 The plugin declares `contracts.agentToolResultMiddleware: ["openclaw"]` and must be explicitly

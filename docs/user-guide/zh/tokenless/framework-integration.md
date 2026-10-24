@@ -79,7 +79,10 @@ Core。只有宿主槽支持文本且 Core 找到更小的合法表示时才会�
 
 Common Hook 与 OpenClaw 会把 RTK 所有权传给匹配的 PostTool 调用。Hermes 为兼容旧宿主版本
 采用阻止后建议重试；最终结果 Hook 会从 Hermes 实际执行的命令中识别带 Attribution 的 RTK
-Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
+Wrapper（含可选的执行批次参数）。只有完整回执确认成功调用的输出字节未变，Core 才恢复 PostTool，并用保存的原命令
+检查文件来源。宿主必须在 PostTool 的 `command` 中传回注册的完整执行命令；命令缺失或被修改，
+以及输出已改变或无法确认时，均保持旁路。三种 Adapter 在回执查询前均为 RTK 输出声明
+`recovery: none`，因此回退仅接受无损候选，不会为这些调用启用 Stash/retrieve 恢复。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 

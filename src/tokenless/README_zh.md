@@ -103,7 +103,8 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
 `tokenless compress`，`registerAgentToolResultMiddleware` 在同轮模型请求之前，把实时工具
 结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、TOON、阈值、诊断与最终仲裁；Plugin
-把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK 输出。
+把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool。只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
+Core 才恢复原命令以检查文件来源并继续处理；已改变或无法确认的输出保持旁路。
 本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
 候选。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
 PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Content Block 透传。不再注册
@@ -217,7 +218,8 @@ PostTool JSON、CSV/TSV 表格和符合条件的命令输出 Build Log 会进入
 旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
 
 PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
-输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写，其结果继续旁路 PostTool 压缩。
+输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写；只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
+成功结果才继续进入 PostTool，并保留原命令对应的文件来源保护。
 
 Claude Code 2.1.121 及以上版本、Qoder CLI、
 OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其

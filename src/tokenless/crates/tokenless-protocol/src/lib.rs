@@ -305,7 +305,7 @@ pub enum PreToolAction {
 pub enum OutputOptimization {
     /// No earlier optimization is known.
     None,
-    /// RTK rewrote the command and owns the resulting output shape.
+    /// RTK owns the output unless complete receipts confirm it was unchanged.
     Rtk,
 }
 
@@ -405,7 +405,8 @@ pub struct PostToolRequest {
     /// Shell command line behind a `command_output` result, when the host has it.
     ///
     /// Core reports a plain print of local files such as `cat page.html` as
-    /// `file_read`; the field is ignored for every other origin.
+    /// `file_read`. RTK fallback requires the exact registered execution command,
+    /// including its generation; missing or modified commands retain RTK ownership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// Optimization state returned by PreTool.

@@ -114,7 +114,11 @@ jq -n \
 
 只有 `post_tool` 会进入 `PostToolPipeline`。当前生产路由为：
 
-- Retrieve Result、Interrupted/Denied 调用和 RTK 已优化输出绕过压缩。
+- Retrieve Result 和 Interrupted/Denied 调用绕过压缩。
+- RTK 输出默认绕过压缩；只有完整执行回执确认字节未变且调用成功，Core 才恢复原命令并继续路由。
+  PostTool 必须在 `command` 中传入注册的完整执行命令；命令缺失或被修改时保留旁路。
+  输出已改变或无法确认时保留旁路；Token 估算持平不能授权回退。回执状态失败会发出警告并保留
+  旁路，不会使 PostTool 操作失败。
 - Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
 - 已识别的成功构建/测试命令输出使用 `BuildLogCompressor`，可选择 Terminal Cleanup 和可恢复的

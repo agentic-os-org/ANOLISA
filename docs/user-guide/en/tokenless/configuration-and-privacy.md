@@ -88,9 +88,12 @@ tokenizer and does not guarantee a reduction for every model tokenizer.
 The emitted operation is `diff_reduction` and recoverability is `retrievable`, not
 `lossless`: unmodified context is omitted from the visible output. Follow the
 emitted shell or tool instruction to retrieve the received original while it is in
-Stash. Recovery requires an additional tool call. File reads and results already
-marked as RTK-optimized bypass this compressor; enabling it does not change RTK
-command rewriting. Unsupported or incomplete diffs pass through. Special file
+Stash. Recovery requires an additional tool call. File-content results and RTK-owned
+output bypass this compressor. Core releases RTK ownership only after complete receipts
+confirm unchanged bytes; fallback still requires the host's declared recovery capability.
+Common Hooks, Hermes and OpenClaw declare no recovery for RTK results, so their fallback
+cannot use Diff reduction. Enabling this option does not change RTK command rewriting.
+Unsupported or incomplete diffs pass through. Special file
 sections such as renames and binary summaries retain their received bytes; encoded
 binary patches pass through in full. Tokenless does not open host-persisted output
 files to complete truncated diffs or change the host's truncation limit.
@@ -164,7 +167,7 @@ Local rendering and original recovery have been verified on finite samples.
 | `TOKENLESS_STATS_ENABLED` | Override local statistics | Does not affect SLS or Stash |
 | `TOKENLESS_SLS_ENABLED` | Override SLS metrics | Does not affect local statistics |
 | `TOKENLESS_COMPRESSION_ENABLED` | Override active compression | False is dry-run, not a full stop |
-| `TOKENLESS_DATA_DIR` | Directory containing `stats.db` and `stash.db` | Any accessible absolute directory except filesystem root; no parent traversal |
+| `TOKENLESS_DATA_DIR` | Directory containing `stats.db`, `stash.db` and `rtk-outcomes.db` | Any accessible absolute directory except filesystem root; no parent traversal |
 | `TOKENLESS_STATS_DB` | Override the statistics database | Must be under the real user home or selected data directory |
 | `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
@@ -192,6 +195,13 @@ Database path priority is:
 
 - Stats: `TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
 - Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
+- RTK receipts: `TOKENLESS_DATA_DIR/rtk-outcomes.db` > `~/.tokenless/rtk-outcomes.db`
+
+RTK receipts are independent of the statistics switch. They store the original and exact executed commands,
+agent/session/tool identifiers, execution generation and output-change flags, not tool-output
+text. PostTool consumes them once only when its command matches the registered execution. Unconsumed receipts expire after one day and
+are deleted on a subsequent rewrite. An unusable receipt directory disables this fallback;
+PostTool retains RTK ownership and returns the original output.
 
 `TOKENLESS_DATA_DIR` is an explicit directory-level relocation and may point outside the real user home, including to a managed service directory under `/var/lib`. Both the CLI and bundled RTK writer reject filesystem root, relative paths, parent traversal, and existing non-directory targets. Without a valid higher-priority file override, an invalid explicit data directory disables that operation's SQLite state instead of silently falling back to home.
 

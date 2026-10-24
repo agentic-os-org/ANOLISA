@@ -385,15 +385,23 @@ def _output_optimization(args: Any) -> str:
     except ValueError:
         return "none"
     for index, token in enumerate(tokens):
-        wrapper = tokens[index : index + 6]
-        if len(wrapper) < 6 or token != "env":
+        wrapper = tokens[index : index + 5]
+        if len(wrapper) < 5 or token != "env":
             continue
+        executable = index + 5
+        if (
+            executable + 1 < len(tokens)
+            and tokens[executable].startswith("TOKENLESS_RTK_RUN_ID=")
+            and tokens[executable + 1].startswith("TOKENLESS_RTK_ORDINAL=")
+        ):
+            executable += 2
         if (
             wrapper[1] == f"TOKENLESS_AGENT_ID={AGENT_ID}"
             and wrapper[2].startswith("TOKENLESS_SESSION_ID=")
             and wrapper[3].startswith("TOKENLESS_TOOL_USE_ID=")
             and wrapper[4].startswith("TOKENLESS_DATA_DIR=")
-            and os.path.basename(wrapper[5]) == "rtk"
+            and executable < len(tokens)
+            and os.path.basename(tokens[executable]) == "rtk"
         ):
             return "rtk"
     return "none"
