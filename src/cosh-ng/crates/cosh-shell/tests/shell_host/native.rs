@@ -1168,7 +1168,17 @@ fn enhanced_bash_xtrace_bounds_internal_hooks_and_preserves_user_state() {
 
 #[test]
 fn enhanced_zsh_xtrace_bounds_internal_hooks_and_preserves_user_state() {
-    if Command::new("zsh").arg("--version").output().is_err() {
+    const SENSITIVE_PATH: &str = "/cosh-private-zsh-path-2683:/usr/bin:/bin";
+    // Resolve zsh under the PATH the relay pins for the child. The caller's
+    // PATH can expose a prefixed zsh that the pinned child PATH cannot reach,
+    // so a plain caller-PATH check would pass while the relay spawn still
+    // fails.
+    if Command::new("zsh")
+        .env("PATH", SENSITIVE_PATH)
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         return;
     }
 
@@ -1192,7 +1202,7 @@ fn enhanced_zsh_xtrace_bounds_internal_hooks_and_preserves_user_state() {
          }\n",
     )
     .expect("zshrc");
-    let sensitive_path = "/cosh-private-zsh-path-2683:/usr/bin:/bin";
+    let sensitive_path = SENSITIVE_PATH;
     let config = ShellHostConfig::new("enhanced-zsh-bounded-xtrace", &work_dir)
         .with_integration(ShellIntegration::Enhanced)
         .with_env("HOME", home_dir.display().to_string())
