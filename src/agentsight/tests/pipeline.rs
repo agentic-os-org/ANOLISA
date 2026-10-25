@@ -13,7 +13,18 @@ use agentsight::event::Event;
 use agentsight::genai::GenAIBuilder;
 use agentsight::genai::semantic::{GenAISemanticEvent, MessagePart};
 use agentsight::parser::Parser;
+use agentsight::pipeline_core::PipelineCore;
 use agentsight::response_map::ResponseSessionMapper;
+
+#[ctor::ctor]
+fn isolate_procfs() {
+    // Synthetic event PIDs must not inherit metadata from unrelated host processes.
+    let root = std::env::temp_dir().join(format!(
+        "agentsight-pipeline-procfs-{}",
+        uuid::Uuid::new_v4()
+    ));
+    assert!(agentsight::utils::procfs::set_proc_root(root));
+}
 
 #[test]
 fn configured_connection_capacity_preserves_concurrent_sse() {
@@ -24,10 +35,7 @@ fn configured_connection_capacity_preserves_concurrent_sse() {
                 r#"{{"runtime_limits":{{"connection_capacity":{concurrency}}}}}"#
             ))
             .unwrap();
-        let parser = Parser::new();
-        let mut aggregator =
-            Aggregator::with_limits(config.connection_capacity, &config.runtime_limits);
-        let analyzer = Analyzer::new();
+        let mut core = PipelineCore::new(&config, Analyzer::new());
         let builder = GenAIBuilder::new();
         let mapper = ResponseSessionMapper::new();
         let cache = HashMap::new();
@@ -40,8 +48,8 @@ fn configured_connection_capacity_preserves_concurrent_sse() {
                 bytes,
                 "python3",
             );
-            for result in aggregator.process_result(parser.parse_event(Event::Ssl(ssl))) {
-                let analyzed = analyzer.analyze_aggregated(&result);
+            for result in core.process_event(Event::Ssl(ssl)) {
+                let analyzed = core.analyze_for_owned_delivery(result, false);
                 events.extend(
                     builder
                         .build_with_pending(&analyzed, &mapper, &cache)
@@ -128,9 +136,7 @@ fn native_event_clock_reaches_semantic_output() {
     };
     // Allow the bounded clock-sampling bracket; a container-epoch shift is far larger.
     let start = wall_ns();
-    let parser = Parser::new();
-    let mut aggregator = Aggregator::new();
-    let analyzer = Analyzer::new();
+    let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
     let builder = GenAIBuilder::new();
     let mapper = ResponseSessionMapper::new();
     let cache = HashMap::new();
@@ -178,8 +184,8 @@ fn native_event_clock_reaches_semantic_output() {
         bytes[header_len..].copy_from_slice(&payload);
         let ssl = SslEvent::from_bytes(&bytes).expect("native clock must decode");
         assert!(ssl.timestamp_ns >= start.saturating_sub(5_000_000));
-        for aggregated in aggregator.process_result(parser.parse_event(Event::Ssl(ssl))) {
-            let analyzed = analyzer.analyze_aggregated(&aggregated);
+        for aggregated in core.process_event(Event::Ssl(ssl)) {
+            let analyzed = core.analyze_for_owned_delivery(aggregated, true);
             result.extend(
                 builder
                     .build_with_pending(&analyzed, &mapper, &cache)
@@ -204,9 +210,7 @@ fn native_event_clock_reaches_semantic_output() {
 
 /// Run a sequence of SslEvents through the full pipeline, return any GenAI events produced.
 fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISemanticEvent> {
-    let parser = Parser::new();
-    let mut aggregator = Aggregator::new();
-    let analyzer = Analyzer::new();
+    let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
     let builder = GenAIBuilder::new();
     let mapper = ResponseSessionMapper::new();
     let pid_cache: HashMap<u32, String> = HashMap::new();
@@ -217,11 +221,8 @@ fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISem
         let ssl_event = common::make_ssl_event(pid, ssl_ptr, rw, buf, comm);
         let event = Event::Ssl(ssl_event);
 
-        let parse_result = parser.parse_event(event);
-        let aggregated_results = aggregator.process_result(parse_result);
-
-        for agg_result in &aggregated_results {
-            let analysis_results = analyzer.analyze_aggregated(agg_result);
+        for agg_result in core.process_event(event) {
+            let analysis_results = core.analyze_for_owned_delivery(agg_result, true);
             let (output, _pending_info) =
                 builder.build_with_pending(&analysis_results, &mapper, &pid_cache);
 
@@ -235,16 +236,13 @@ fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISem
 /// Same as [`run_pipeline`] but stops at the analyzer, so tests can assert on
 /// the `TokenRecord` that lands in the token database.
 fn run_analysis(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<AnalysisResult> {
-    let parser = Parser::new();
-    let mut aggregator = Aggregator::new();
-    let analyzer = Analyzer::new();
+    let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
 
     let mut all = Vec::new();
     for (pid, ssl_ptr, rw, buf, comm) in ssl_events {
         let ssl_event = common::make_ssl_event(pid, ssl_ptr, rw, buf, comm);
-        let parse_result = parser.parse_event(Event::Ssl(ssl_event));
-        for agg_result in &aggregator.process_result(parse_result) {
-            all.extend(analyzer.analyze_aggregated(agg_result));
+        for agg_result in &core.process_event(Event::Ssl(ssl_event)) {
+            all.extend(core.analyze_aggregated(agg_result));
         }
     }
     all
