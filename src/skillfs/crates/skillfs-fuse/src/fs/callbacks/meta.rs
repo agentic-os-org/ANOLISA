@@ -116,9 +116,14 @@ impl SkillFs {
                     reply.error(libc::ENOENT);
                     return;
                 }
-                let exists = skill_name == "skill-discover" || {
-                    let store = self.store.read();
-                    store.get(&skill_name).is_some()
+                let exists = if self.skill_layout == crate::path::SkillLayout::Flat
+                    && skill_name.starts_with('.')
+                {
+                    // Hidden working directories remain addressable without a discovery entry.
+                    std::fs::symlink_metadata(self.source_base().join(&skill_name))
+                        .is_ok_and(|meta| meta.is_dir())
+                } else {
+                    skill_name == "skill-discover" || self.store.read().get(&skill_name).is_some()
                 };
                 if exists {
                     let ino = self.inodes.allocate(&path_str, FileType::Directory, parent);
