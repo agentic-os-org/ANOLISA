@@ -401,5 +401,13 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
             assert_eq!(reply["effects"][0]["type"], "replace_result", "{reply}");
         }
     }
-    assert!(!f.root.path().join("missing").exists());
+    // Call-scoped receipts remain active when statistics and recovery are off.
+    for state in [
+        f.root.path().to_path_buf(),
+        f.root.path().join("missing/nested"),
+    ] {
+        assert!(state.join("rtk-outcomes.db").is_file());
+        assert!(!state.join("stats.db").exists());
+        assert!(!state.join("stash.db").exists());
+    }
 }
