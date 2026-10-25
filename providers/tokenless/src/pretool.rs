@@ -76,10 +76,7 @@ pub(super) fn optimization(event: &Value, data: &Path) -> &'static str {
                 )
             && words[3].starts_with("TOKENLESS_TOOL_USE_ID=")
             && data_directory_matches(&words[4], data)
-            && Path::new(&words[5]).is_absolute()
-            && Path::new(&words[5])
-                .file_name()
-                .is_some_and(|name| name == "rtk")
+            && rtk_command(&words[5..])
         {
             return "rtk";
         }
@@ -103,6 +100,27 @@ pub(super) fn optimization(event: &Value, data: &Path) -> &'static str {
         };
     }
     "none"
+}
+
+fn rtk_command(words: &[String]) -> bool {
+    // Tokenless may insert its receipt pair before the executable. Accept only
+    // that emitted shape so extra environment assignments cannot change ownership.
+    let command = match words {
+        [run, ordinal, rest @ ..]
+            if run
+                .strip_prefix("TOKENLESS_RTK_RUN_ID=")
+                .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+                && ordinal
+                    .strip_prefix("TOKENLESS_RTK_ORDINAL=")
+                    .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            rest
+        }
+        _ => words,
+    };
+    matches!(command, [program, _, ..]
+        if Path::new(program).is_absolute()
+            && Path::new(program).file_name().is_some_and(|name| name == "rtk"))
 }
 
 fn environment_assignment(word: &str) -> bool {
@@ -173,6 +191,39 @@ fn data_directory_matches(assignment: &str, data: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_wrappers_keep_attribution_and_literal_command_guards() {
+        let receipt =
+            "TOKENLESS_RTK_RUN_ID=0123456789abcdef0123456789abcdef TOKENLESS_RTK_ORDINAL=0";
+        let prefix = format!("env TOKENLESS_AGENT_ID=pi TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR=/state {receipt} /opt/rtk git status");
+        let mut event = json!({"agent":{"binding_id":"pi"},"session_id":"session","tool":{"name":"bash","call_id":"new-call","input":{"command":prefix}}});
+        for command in [prefix.clone(), format!("sudo {prefix}")] {
+            event["tool"]["input"]["command"] = json!(command);
+            assert_eq!(optimization(&event, Path::new("/state")), "rtk");
+        }
+        for command in [
+            prefix.replace("AGENT_ID=pi", "AGENT_ID=other"),
+            prefix.replace("SESSION_ID=session", "SESSION_ID=other"),
+            prefix.replace("DATA_DIR=/state", "DATA_DIR=/other"),
+            prefix.replace("0123456789abcdef0123456789abcdef", "invalid"),
+            prefix.replace("TOKENLESS_RTK_ORDINAL=0", "TOKENLESS_RTK_ORDINAL=-1"),
+            prefix.replace("TOKENLESS_RTK_ORDINAL=0 ", ""),
+            prefix.replace(receipt, "TOKENLESS_RTK_ORDINAL=0"),
+            prefix.replace(" /opt/rtk", " TOKENLESS_AGENT_ID=other /opt/rtk"),
+            prefix.replace("/opt/rtk", "/opt/rtk-lookalike"),
+            prefix.replace("/opt/rtk", "rtk"),
+            format!("{prefix} && echo other"),
+            format!("echo {prefix}"),
+        ] {
+            event["tool"]["input"]["command"] = json!(command);
+            assert_eq!(
+                optimization(&event, Path::new("/state")),
+                "none",
+                "{command}"
+            );
+        }
+    }
 
     #[test]
     fn optimization_uses_executed_attribution_without_granting_authority() {
