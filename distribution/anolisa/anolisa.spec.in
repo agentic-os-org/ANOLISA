@@ -143,7 +143,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Oct 15 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Sun Oct 25 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Preserve user skill files and keep npm launchers relocatable.
+- Report container product types and honor telemetry JSON output.
+- Expose unsupported hook phases and refresh component catalog versions.
+
+* Thu Oct 15 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.18-1
 - Add the QwenWorkCN local-mode adapter and refresh component release metadata.
 - Recover failed OpenClaw installs and preserve post-uninstall hooks safely.
 - Enforce Raw update conflicts, install permissions, and sandbox preview checks.

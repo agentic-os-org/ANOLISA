@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.19] - 2026-10-25
+
+### Changed
+
+- Report container deployments as `container` in telemetry and
+  `anolisa register status` instead of inheriting the host's cloud product.
+  Consumers of `product_type` must accept the new value. An explicit
+  `PRODUCT_TYPE` in `/etc/anolisa-release` still takes precedence; refresh or
+  remove stale declarations when building container images
+  ([#8206](https://github.com/agentic-os-org/ANOLISA/pull/8206)).
+- Update the component catalog to Agent Memory `0.2.10`, AgentSight `0.14.3`,
+  cosh-ng `0.28.0`, Copilot Shell `2.8.0`, OS Skills `0.6.3`, SkillFS `0.5.3`,
+  Tokenless `0.8.8`, and ws-ckpt `0.6.0`.
+
+### Fixed
+
+- Preserve user-added and edited files when disabling OpenClaw and Hermes
+  skills, and refuse activation into occupied directories that ANOLISA does
+  not own. Redirected or dangling directory ancestors stop cleanup and retain
+  the installation record for retry after the original path is restored.
+  Older records without per-file ownership still use whole-directory cleanup
+  after the same path checks
+  ([#6221](https://github.com/agentic-os-org/ANOLISA/pull/6221)).
+- Keep the npm launcher working when the complete installation, including its
+  platform dependency, is moved. Existing installations can obtain the relative
+  launcher by rerunning postinstall
+  ([#8278](https://github.com/agentic-os-org/ANOLISA/pull/8278)).
+- Honor `--json` for successful telemetry enable, disable, link, unlink, upload,
+  and init operations, including `--quiet --json`. Return the standard response
+  envelope with operation-specific state while keeping warnings on stderr
+  ([#8706](https://github.com/agentic-os-org/ANOLISA/pull/8706)).
+- Warn when a Raw install or update declares a hook phase that the CLI cannot
+  execute. A non-strict hook allows the operation to proceed; a `strict = true`
+  hook refuses the operation before download or file replacement. Repair remains
+  available for older installations with unsupported hook declarations
+  ([#6447](https://github.com/agentic-os-org/ANOLISA/pull/6447)).
+
 ## [0.3.18] - 2026-10-15
 
 ### Added
