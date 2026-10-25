@@ -533,7 +533,7 @@ def main():
         "--limit",
         type=int,
         default=10,
-        help="Max number of files to analyze (default: 10)",
+        help="Max number of files to analyze (non-negative; default: 10)",
     )
     parser.add_argument(
         "--min-steps",
@@ -547,6 +547,8 @@ def main():
         help="Path to analyze binary (default: cargo run -p agentsight-opt --bin analyze)",
     )
     args = parser.parse_args()
+    if args.limit < 0:
+        parser.error("--limit must be non-negative")
 
     if args.export_atif is not None:
         if args.binary:

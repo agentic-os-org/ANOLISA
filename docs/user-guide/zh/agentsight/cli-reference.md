@@ -628,6 +628,9 @@ python3 scripts/batch-analyze.py --file session.jsonl --export-atif ./atif-expor
 `--dir`、`--limit`（默认 10）和 `--min-steps`（默认 3）。目录扫描仍要求文件至少
 1 KiB，并排除 subagent 文件；小文件可通过 `--file` 显式导出。
 
+`--limit` 必须为非负整数：`0` 表示不处理文件，负数则在发现文件、分析或导出前
+以退出码 2 报错。
+
 文件名为源文件规范化绝对路径的完整 SHA-256 加 `.atif.json`。不同目录中的同名源文件
 不会混淆；再次导出同一路径会原子替换其旧产物。移动源文件后产物名会变化。
 源文件和目标目录中的其他文件保持不变，目标目录按需创建。标准输出按文件生成一行

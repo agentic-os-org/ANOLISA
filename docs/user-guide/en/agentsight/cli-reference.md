@@ -653,6 +653,9 @@ Selection is shared with analysis: `--file`, repeatable `--dir`, `--limit` (defa
 and `--min-steps` (default 3). Directory scans keep the existing 1 KiB minimum file size
 and subagent exclusion; use `--file` to export a small file explicitly.
 
+`--limit` must be non-negative: `0` selects no files, and negative values fail with
+exit code 2 before discovery, analysis, or export.
+
 Each name is the full SHA-256 of the canonical absolute source path followed by
 `.atif.json`. Same-name inputs in different directories remain distinct; exporting the
 same path again atomically replaces its previous artifact. Moving the source changes

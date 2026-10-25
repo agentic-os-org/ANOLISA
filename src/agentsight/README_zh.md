@@ -558,6 +558,7 @@ Token 解析支持多种 LLM API 格式：
 ## 批量分析并发
 
 批处理脚本可显式启用 `--jobs 1..8`（默认 1），限制并发调用数，并按原始顺序输出结果。
+`--limit` 仅接受非负整数；`0` 表示不处理文件。
 用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
 
 ## 项目起源

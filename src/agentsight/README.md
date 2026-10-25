@@ -576,6 +576,7 @@ Token parsing supports multiple LLM API formats:
 ## Batch concurrency
 
 The batch script accepts opt-in `--jobs 1..8` (default 1), with bounded concurrent invocations and ordered output.
+`--limit` accepts non-negative integers; `0` selects no files.
 See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
 
 ## Origins
