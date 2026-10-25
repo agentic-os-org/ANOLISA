@@ -60,7 +60,7 @@ Windows ARM64。
 在原生 PowerShell 中构建，需安装 Git、Rust 的 `x86_64-pc-windows-msvc` 工具链、
 Visual Studio C++ Build Tools（含 Windows SDK）。打包需要 Node.js/npm 和 Python 3.10+，
 千问办公 Adapter 同样使用 Python。不需要 Git Bash、WSL 或 `make`，不支持 Windows ARM64。
-Windows CI 与此构建入口分开处理。
+Linux CI 构建入口见下文。
 
 ```powershell
 cd src/tokenless
@@ -72,14 +72,14 @@ npm install -g $packages.FullName
 
 构建脚本拉取并修补固定版本的 RTK，将两个可执行文件写入
 `target/npm-prebuilt/win32-x64`。添加 `-Debug` 可构建开发版本。生成的 npm 包为本地
-制品，Windows 软件包尚未发布。现有 Linux/macOS 发布工作流保持不变。
+制品，此本地命令不会发布 Windows 软件包。
 
 统一发布时，将 Windows 构建主机的完整 `target/npm-prebuilt/win32-x64` 目录复制到
 Linux 打包主机 `src/tokenless` 下的同一位置。两台主机使用相同源码版本，备齐另外
 四个平台目录后运行 `make npm-package-all`。`--all` 要求五个平台的制品齐全，缺少
 任一二进制都会失败；`--target x64` 也包含 Windows。仅打包 Linux 或 macOS 时，
-使用 `--target linux` 或 `--target darwin`。当前发布工作流尚未传递 Windows 制品；
-Windows CI 将在支持合入后单独添加。
+使用 `--target linux` 或 `--target darwin`。Linux CI builder 也会构建 Windows
+二进制，因此生成产物不再必须使用原生 Windows 构建主机。
 
 本地验证运行 `cargo fmt --all -- --check`、
 `cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`，
@@ -100,3 +100,56 @@ Windows smoke 测试调用真实 PowerShell Hook 和原生二进制；应用界�
 验证 npm 安装后的启动器时，将 `TOKENLESS_TEST_BIN` 指向已安装的
 `anolisa-tokenless/bin`，并将 `TOKENLESS_TEST_NODE` 指向待验证的 Node 可执行文件
 （包括最低支持版本 16.7.0）。
+
+
+## Linux CI 与发布产物
+
+`tokenless-prebuilt-ci.yaml` 使用自部署 Linux 发布 runner
+（`anolisa-release-cross-x64`）交叉编译 `x86_64-pc-windows-msvc`，并运行 Wine
+冒烟测试，触发方式为 push 或手动调度；PR 在通用 CI runner 上运行 action 回归测试。
+同一构建 action 进入正式发布和预览矩阵。指定历史源码 tag 的预览
+继续使用该 tag 中的矩阵。
+
+runner 必须预先具备 `anolisa/rust-release-builder:windows-msvc-x86_64`，配置摘要为
+`sha256:7649bcb55d8c5632232c7f27e3c2191b71fb7c31149de87412c447fc7a997303`。
+Docker 的 containerd 镜像存储返回对应清单摘要作为镜像 ID：
+`sha256:1392a2684a4853a3da0219caef07c4b47f8833775b1559f18d54cd656abefb88`。
+这两个固定标识对应同一个已验证的 builder。
+action 在构建前校验镜像身份和镜像内 SDK 清单，不构建或拉取镜像；启用任务前须先部署。
+冻结镜像包含 Rust 1.93.0、cargo-xwin 0.23.1、maturin 1.15.0、LLVM 18.1.3、
+Wine 9.0，以及带导入库的 Windows Python 3.11.9。宿主需要已有发布 runner 工具，
+包括 Docker、Node.js/npm 和 cargo-sbom 0.10.0。源码、Cargo 下载缓存、编译输出
+与 Wine 状态分别挂载，不将宿主编译器 wrapper 和 Cargo 配置传入容器。
+
+在仓库根目录运行正式构建入口，输出目录须为空。默认构建当前检出的提交，
+指定 `--tag` 时构建该精确 tag：
+
+```bash
+root="$PWD"
+mkdir -p /tmp/tokenless-windows-release
+RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
+TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
+  bash .github/actions/build-tokenless-prebuilt/build.sh \
+    --source-repo "$root" \
+    --output-dir /tmp/tokenless-windows-release/artifacts \
+    --wheel-output-dir /tmp/tokenless-windows-release/wheels \
+    --version 0.8.8 --target-os windows --target-arch x86_64 \
+    --profile windows-msvc-x86_64
+```
+
+Windows ZIP 包含 `tokenless.exe`、`rtk.exe`、`LICENSE` 和 `npm/` 下的两个 npm
+tarball（仅面向 Windows 的根包与 `win32-x64` 平台包），附带与其他平台相同的
+SHA-256 和 CycloneDX 文件。CLI 与 RTK 静态链接 CRT，并检查导入表，拒绝依赖
+外部 VC++ runtime DLL。独立 Python wheel 使用 `cp311-abi3-win_amd64`，运行库
+由 Windows Python 提供。
+发布工作流将这些产物上传 GitHub，不发布到 npm 或 PyPI。准备跨平台 npm registry
+发布时应合并全部五个平台，不应将仅 Windows 的根 tarball 作为跨平台根包发布。
+重复构建目前存在 PE 构建标识差异；校验和标识本次生成的具体文件，尚不保证
+字节级一致重建。
+
+Wine 冒烟将 ZIP 和 wheel 解压到包含空格与中文的路径，验证 CLI、RTK、SDK、
+压缩、Stash 字节一致恢复、越权检索拒绝和统计归属，同时检查 npm 元数据及内置
+二进制。冒烟执行禁用网络并设置外层超时，编译或 Wine 失败都会使任务失败。
+构建诊断保存在 `<output-dir>.build/out`，CI 任务会上传这些记录。
+Wine 不验证原生 Windows ACL、PowerShell hook、Node 启动器或 QwenWork 激活。
+这些验收仍需在 Windows 10 和 Windows 11 上运行前述原生测试。

@@ -111,6 +111,11 @@ TARGETS = {
             "target-arch": "x86_64",
             "profile": "darwin11-x86_64",
         },
+        {
+            "target-os": "windows",
+            "target-arch": "x86_64",
+            "profile": "windows-msvc-x86_64",
+        },
     ),
 }
 
@@ -128,4 +133,7 @@ def component_targets(
     if source_targets.is_file():
         return tuple(runpy.run_path(str(source_targets))["TARGETS"]["tokenless"])
     # Older tags predate the shared matrix and ship the original three targets.
-    return tuple(target for target in targets if target["profile"] != "darwin11-x86_64")
+    return tuple(
+        target for target in targets
+        if target["profile"] not in ("darwin11-x86_64", "windows-msvc-x86_64")
+    )

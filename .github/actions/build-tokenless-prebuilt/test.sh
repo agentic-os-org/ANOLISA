@@ -477,6 +477,7 @@ if (
 fi
 
 python3 "$ACTION_DIR/test_verify_wheels.py"
+python3 "$ACTION_DIR/test_windows_package.py"
 
 for project in tokenless-fixture rtk-fixture; do
     install -d -m 0755 "$TEMPORARY/$project/src"
@@ -498,12 +499,18 @@ for target in \
     'linux x86_64 x86_64-unknown-linux-gnu' \
     'linux aarch64 aarch64-unknown-linux-gnu' \
     'macos aarch64 aarch64-apple-darwin' \
-    'macos x86_64 x86_64-apple-darwin'; do
+    'macos x86_64 x86_64-apple-darwin' \
+    'windows x86_64 x86_64-pc-windows-msvc'; do
     read -r target_os target_arch target_triple <<<"$target"
     artifact_dir="$ARTIFACT_ROOT/tokenless-prebuilt-1.0.0-$target_os-$target_arch"
     archive="$artifact_dir/tokenless-1.0.0-$target_os-$target_arch.tar.gz"
     install -d -m 0755 "$artifact_dir"
-    tar -C "$TEMPORARY" -czf "$archive" payload.txt
+    if [[ "$target_os" = windows ]]; then
+        archive="${archive%.tar.gz}.zip"
+        python3 -m zipfile -c "$archive" "$TEMPORARY/payload.txt"
+    else
+        tar -C "$TEMPORARY" -czf "$archive" payload.txt
+    fi
     (
         cd "$artifact_dir"
         sha256sum "${archive##*/}" > "${archive##*/}.sha256"

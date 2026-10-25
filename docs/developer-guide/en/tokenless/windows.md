@@ -80,7 +80,7 @@ Build this component from native PowerShell with Git, Rust's
 `x86_64-pc-windows-msvc` toolchain, and Visual Studio C++ Build Tools (including
 the Windows SDK). Packaging requires Node.js/npm and Python 3.10+; the
 QwenWork adapter also uses Python. No Git Bash, WSL, or `make` is required. Windows ARM64 is not
-supported; Windows CI remains separate from this build entry point.
+supported. The Linux CI entry point is described below.
 
 ```powershell
 cd src/tokenless
@@ -92,8 +92,7 @@ npm install -g $packages.FullName
 
 The build script fetches and patches the pinned RTK revision and writes both
 executables to `target/npm-prebuilt/win32-x64`. Add `-Debug` for a development
-build. The npm packages are local artifacts; Windows packages are not yet
-published. The existing Linux/macOS release workflows are unchanged.
+build. The npm packages are local artifacts; this command does not publish them.
 
 For a combined release, transfer the complete `target/npm-prebuilt/win32-x64`
 directory from the Windows build host to the same location under `src/tokenless`
@@ -101,8 +100,8 @@ on the Linux packaging host. Use the same source revision on both hosts, then
 run `make npm-package-all` after staging the other four platform directories.
 `--all` requires all five targets and fails if any binary is missing;
 `--target x64` also includes Windows. Use `--target linux` or `--target darwin`
-when packaging only those platforms. No release workflow transfers Windows
-artifacts yet; Windows CI will be added separately after support merges.
+when packaging only those platforms. The Linux CI builder also produces the Windows
+binaries, so a native build host is optional for artifact generation.
 
 For local verification, run `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
@@ -125,3 +124,65 @@ still executes the registered Python hooks with the installer's `powershell` set
 To test installed npm launchers, set `TOKENLESS_TEST_BIN` to the installed
 `anolisa-tokenless/bin` directory and `TOKENLESS_TEST_NODE` to the Node executable
 to verify (including the supported minimum, 16.7.0).
+
+
+## Linux CI and release artifacts
+
+`tokenless-prebuilt-ci.yaml` uses the self-hosted Linux release runner
+(`anolisa-release-cross-x64`) to cross-compile `x86_64-pc-windows-msvc` and run
+Wine smoke tests on pushes and manual dispatches. Pull requests run the action's
+regression tests on the general CI runner. The same build action participates in the release and preview
+matrices. Historical source-tag previews keep the matrix from that source tag.
+
+The runner must already contain `anolisa/rust-release-builder:windows-msvc-x86_64`.
+Its configuration digest is
+`sha256:7649bcb55d8c5632232c7f27e3c2191b71fb7c31149de87412c447fc7a997303`.
+Docker's containerd image store reports the corresponding manifest digest as the
+image ID: `sha256:1392a2684a4853a3da0219caef07c4b47f8833775b1559f18d54cd656abefb88`.
+Both fixed identifiers refer to the same verified builder.
+The action checks that identity and the image's SDK inventory before building;
+it does not build or pull the image. Provision it before enabling the job.
+The frozen image contains Rust 1.93.0, cargo-xwin 0.23.1, maturin 1.15.0,
+LLVM 18.1.3, Wine 9.0 and Windows Python 3.11.9 with its import libraries.
+The host needs the existing release-runner tools, including Docker,
+Node.js/npm and cargo-sbom 0.10.0. Source, Cargo downloads, build output and Wine
+state use separate mounts; host compiler wrappers and Cargo configuration are
+not passed into the container.
+
+Run the production entry point locally from the repository root with empty output
+directories. It builds the checked-out commit, or the exact `--tag` when supplied:
+
+```bash
+root="$PWD"
+mkdir -p /tmp/tokenless-windows-release
+RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
+TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
+  bash .github/actions/build-tokenless-prebuilt/build.sh \
+    --source-repo "$root" \
+    --output-dir /tmp/tokenless-windows-release/artifacts \
+    --wheel-output-dir /tmp/tokenless-windows-release/wheels \
+    --version 0.8.8 --target-os windows --target-arch x86_64 \
+    --profile windows-msvc-x86_64
+```
+
+The Windows ZIP contains `tokenless.exe`, `rtk.exe`, `LICENSE` and two npm
+tarballs under `npm/` (the Windows-targeted root package and `win32-x64` platform
+package). It has SHA-256 and CycloneDX sidecars like the other release archives.
+CLI and RTK use a static CRT, with an import check rejecting external VC++ runtime
+DLLs. The separate Python wheel uses `cp311-abi3-win_amd64` and the runtime supplied
+with Windows Python. The release workflow uploads
+these assets to GitHub; it does not publish to npm or PyPI. Use all five platform
+packages when preparing a combined npm registry release, rather than publishing
+the Windows-only root tarball as the cross-platform package. Repeated builds currently
+differ in PE build identifiers; the checksums identify the specific generated
+files, and byte-for-byte reproduction is not guaranteed.
+
+Wine smoke tests extract the ZIP and wheel into a path containing spaces and
+Chinese characters, then exercise the CLI, RTK, SDK, compression, byte-exact
+Stash recovery, denied retrieval and statistics attribution. npm metadata and
+embedded binaries are also checked. Smoke execution has no network access and
+an outer timeout. Compiler and Wine failures fail the job. Builder diagnostics
+remain in `<output-dir>.build/out`; the CI job uploads those diagnostics.
+Wine does not validate native Windows ACL behavior, PowerShell hooks, Node
+launchers or QwenWork activation. Continue running the native test suite above
+on Windows 10 and Windows 11 for those acceptance checks.

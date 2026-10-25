@@ -26,7 +26,7 @@ usage() {
     cat <<'EOF'
 Usage: build.sh --source-repo PATH --output-dir PATH --wheel-output-dir PATH \
   --version X.Y.Z \
-  --target-os {linux|macos} --target-arch {x86_64|aarch64} \
+  --target-os {linux|macos|windows} --target-arch {x86_64|aarch64} \
   --profile PROFILE [--tag tokenless/vX.Y.Z]
 EOF
 }
@@ -67,6 +67,9 @@ case "$TARGET_OS/$TARGET_ARCH/$PROFILE" in
         ;;
     macos/x86_64/darwin11-x86_64)
         RUST_TARGET=x86_64-apple-darwin
+        ;;
+    windows/x86_64/windows-msvc-x86_64)
+        RUST_TARGET=x86_64-pc-windows-msvc
         ;;
     *)
         die "profile $PROFILE does not match target $TARGET_OS/$TARGET_ARCH"
@@ -158,6 +161,11 @@ case "$SOURCE_DATE_EPOCH" in
 esac
 export RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
 export SOURCE_DATE_EPOCH
+
+if [ "$TARGET_OS" = windows ]; then
+    bash "$ACTION_DIR/windows.sh" "$COMPONENT_ROOT" "$OUTPUT_DIR" "$WHEEL_OUTPUT_DIR" "$VERSION"
+    exit 0
+fi
 
 for manifest in "$COMPONENT_ROOT/Cargo.toml" "$RTK_ROOT/Cargo.toml"; do
     cargo metadata \

@@ -63,6 +63,7 @@ class PlanMatrixTests(unittest.TestCase):
                 ("linux", "aarch64", "gnu2.17-aarch64"),
                 ("macos", "aarch64", "darwin11-aarch64"),
                 ("macos", "x86_64", "darwin11-x86_64"),
+                ("windows", "x86_64", "windows-msvc-x86_64"),
             ],
         )
         self.assertTrue(all(row["component"] == "tokenless" for row in matrix["include"]))
@@ -81,10 +82,10 @@ class PlanMatrixTests(unittest.TestCase):
             manifest = root / "src/tokenless/Cargo.toml"
             manifest.parent.mkdir(parents=True)
             manifest.touch()
-            self.assertEqual(plan_matrix.build_matrix("tokenless", root)["include"], current[:-1])
+            self.assertEqual(plan_matrix.build_matrix("tokenless", root)["include"], current[:3])
             source_matrix = root / ".github/actions/prebuilt-rust-common/targets.py"
             source_matrix.parent.mkdir(parents=True)
-            for rows in (current[:-1], current):
+            for rows in (current[:3], current[:4], current):
                 targets = [
                     {key: value for key, value in row.items() if key != "component"} for row in rows
                 ]
@@ -280,8 +281,9 @@ class PlanMatrixTests(unittest.TestCase):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(verifier.main(), 0)
-                self.assertEqual(validate.call_count, 4)
-                self.assertIn(f"Verified 16 {component} prebuilt release assets", output.getvalue())
+                count = 5 if component == "tokenless" else 4
+                self.assertEqual(validate.call_count, count)
+                self.assertIn(f"Verified {4 * count} {component} prebuilt release assets", output.getvalue())
                 duplicate = root / f"{component}-prebuilt-{version}-macos-x86_64-copy"
                 duplicate.mkdir()
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

@@ -44,6 +44,9 @@ class NativeTarget:
 
 
 TARGETS = {
+    ("windows", "x86_64"): NativeTarget(
+        "windows", "x86_64", frozenset({"win_amd64"}), "pe"
+    ),
     ("linux", "x86_64"): NativeTarget(
         "linux",
         "x86_64",
@@ -172,9 +175,25 @@ def verify_macho(payload: bytes, architecture: str, member: str) -> None:
         fail(f"{member} has Mach-O CPU type {cpu_type:#x}, expected {architecture}")
 
 
+def verify_pe(payload: bytes, member: str) -> None:
+    if len(payload) < 64 or payload[:2] != b"MZ":
+        fail(f"{member} is not a PE binary")
+    offset = struct.unpack_from("<I", payload, 0x3C)[0]
+    if offset < 64 or offset + 26 > len(payload):
+        fail(f"{member} has an invalid PE header offset")
+    if (
+        payload[offset:offset + 4] != b"PE\0\0"
+        or struct.unpack_from("<H", payload, offset + 4)[0] != 0x8664
+        or struct.unpack_from("<H", payload, offset + 24)[0] != 0x20B
+    ):
+        fail(f"{member} is not an x64 PE32+ binary")
+
+
 def verify_binary(payload: bytes, target: NativeTarget, member: str) -> None:
     if target.binary_format == "elf":
         verify_elf(payload, target.architecture, member)
+    elif target.binary_format == "pe":
+        verify_pe(payload, member)
     else:
         verify_macho(payload, target.architecture, member)
 
@@ -203,7 +222,8 @@ def verify_runtime(path: Path, version: str) -> NativeTarget:
         native_members = [
             name
             for name in archive.namelist()
-            if name.startswith("anolisa_tokenless/_native") and name.endswith(".so")
+            if name.startswith("anolisa_tokenless/_native")
+            and name.endswith(".pyd" if target.os_name == "windows" else ".so")
         ]
         if len(native_members) != 1:
             fail(f"{path.name} must contain exactly one native extension")
@@ -259,7 +279,7 @@ def verify_agentscope(path: Path, version: str) -> None:
             or normalize_python_version(requirement.group(2)) != version
         ):
             fail(f"{path.name} must require exactly {expected}")
-        native_suffixes = (".so", ".dylib", ".dll", ".exe")
+        native_suffixes = (".so", ".dylib", ".dll", ".exe", ".pyd")
         if any(name.endswith(native_suffixes) for name in archive.namelist()):
             fail(f"{path.name} must be a platform-independent wheel")
 
@@ -298,7 +318,7 @@ def main() -> int:
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--layout", choices=("flat", "aggregate"), required=True)
-    parser.add_argument("--os", choices=("linux", "macos"))
+    parser.add_argument("--os", choices=("linux", "macos", "windows"))
     parser.add_argument("--arch", choices=("x86_64", "aarch64"))
     parser.add_argument("--tokenless-source-root", type=Path)
     checksum_group = parser.add_mutually_exclusive_group()
