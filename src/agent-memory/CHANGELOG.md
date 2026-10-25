@@ -7,6 +7,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.11] - 2026-10-25
+
+### Fixed
+
+- **agent-memory**: Updated to v0.2.11, applies fact-category filtering before the keyword search result limit, so matching memories remain discoverable when other categories rank higher; this also covers short Chinese queries and fallback to keyword search, with case-sensitive category names. Vector/hybrid searches with an embedding provider still filter categories after truncation (#8721)
+- **agent-memory**: Applies the configured cold-memory exclusion and filters superseded memories before vector ranking and result limits, so excluded memories no longer crowd eligible results out of vector and hybrid searches (#3805)
+- **agent-memory**: Invalidates stale vectors after content edits and removes old search entries when files exceed the indexing size limit or stop being UTF-8, preventing keyword and vector results from serving obsolete content (#3803, #3820)
+- **agent-memory**: Removes only the requested path and its literal descendants from the index, preserving unrelated memories with wildcard-like characters or different letter casing in their names (#3801)
+- **agent-memory**: Skips redundant indexing and embedding calls for unchanged files after directory attribute updates, reducing embedding usage while preserving missing-vector recovery and files deleted and restored within one watcher batch (#8477)
+- **agent-memory**: Serializes concurrent automatic incremental consolidation and releases its guard after an unwind, preventing duplicate facts and allowing later automatic consolidation to continue; episodes retaining identical tool calls are deduplicated before applying budgets, while distinct tasks and recovery episodes remain separate (#8303, #8305)
+- **agent-memory**: Skips sanitized search-length markers when deriving interests and user profiles, preventing new `len=N` interests while preserving legacy recorded queries; previously generated junk facts remain and can be removed with `memory_forget` (#7928)
+- **agent-memory**: Preserves frontmatter metadata when a closing fence has no trailing newline, so export/import retains IDs and categories and summaries and profiles do not treat metadata as body text (#8687)
+- **agent-memory**: Preserves Chinese text, accents, and emoji when OpenClaw receives a reply split across pipe chunks, and releases the MCP worker after a failed initialization handshake before retrying, preventing corrupted tool results and orphaned processes (#8454, #8543)
+- **agent-memory**: Rejects invalid time-decay settings before service startup and ignores non-finite environment overrides with a warning, preventing broken recency rankings. Before upgrading, correct file settings to finite `time_decay_lambda >= 0` and `time_decay_alpha` in `[0, 1]`; invalid file settings now stop startup (#8701, #8699)
+- **agent-memory**: Keeps namespace initialization failures fatal on retry when user/group mappings were not completed, preventing a retry from starting the service with an incomplete isolation setup (#8439)
+
 ## [0.2.10] - 2026-10-15
 
 ### Added
