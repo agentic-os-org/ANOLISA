@@ -73,6 +73,7 @@ fn main() {
         policy_revision: "0".into(),
         policy_dsl: DSL.into(),
         policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy: None,
     };
     let binding = backend.apply(request).expect("apply enforce policy");
     println!(
