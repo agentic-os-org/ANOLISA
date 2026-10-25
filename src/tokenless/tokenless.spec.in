@@ -44,7 +44,7 @@ Command Rewriting, and Tool Ready environment pre-check strategies.
 
 Core Features:
 - Schema Compression: Compresses OpenAI Function Calling tool definitions
-- Response Compression: Compresses API/tool responses (removes debug/null/empty)
+- Response Compression: Compacts API/tool responses while preserving fields and empty values
 - TOON Context Compression: Encodes JSON to TOON format, chained after response compression
 - Command Rewriting: Filters CLI command output via RTK
 - Tool Ready: Pre-execution environment check, auto-fix, and failure attribution
@@ -539,7 +539,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Oct 21 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Sun Oct 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Add Windows x64 and Intel Mac packages and TOON spec v4.4 support
+- Preserve JSON fields, empty values, and exact numbers; remove obsolete Rust config fields
+- Resume lossless compression after unchanged RTK output and preserve exact CLI output
+- Keep advisory failures non-fatal and preview the Codex adapter lifecycle
+
+* Wed Oct 21 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.8-1
 - Add authenticated read-only stats, reversible path lists and QwenWork workspace Shell support
 - Keep all CSV and TSV rows at the cost of lower savings for some outputs
 - Improve adapter dry runs and keep CLI, Hook and worker failures from losing results

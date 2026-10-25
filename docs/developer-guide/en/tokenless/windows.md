@@ -161,7 +161,7 @@ TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
     --source-repo "$root" \
     --output-dir /tmp/tokenless-windows-release/artifacts \
     --wheel-output-dir /tmp/tokenless-windows-release/wheels \
-    --version 0.8.8 --target-os windows --target-arch x86_64 \
+    --version 0.9.0 --target-os windows --target-arch x86_64 \
     --profile windows-msvc-x86_64
 ```
 

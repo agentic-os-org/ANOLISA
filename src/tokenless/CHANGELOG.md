@@ -9,6 +9,26 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-25
+
+### Added
+
+- Windows x64 support includes a native CLI, bundled RTK, npm launchers, a Python ABI3 wheel, and the QwenWork adapter for local sessions. Release builds produce Windows ZIP and wheel assets; npm installation awaits separate registry publication. Windows ARM and QwenWork VM sessions remain unsupported ([#8853](https://github.com/agentic-os-org/ANOLISA/pull/8853), [#9011](https://github.com/agentic-os-org/ANOLISA/pull/9011), [#9015](https://github.com/agentic-os-org/ANOLISA/pull/9015)).
+- Intel Mac (macOS x86_64) is now a release build target for raw archives, npm binaries, and Python wheels. npm installation awaits separate registry publication ([#8770](https://github.com/agentic-os-org/ANOLISA/pull/8770)).
+
+### Changed
+
+- **Breaking for Rust callers:** Remove `drop_nulls` and `drop_empty_fields` from `JsonCompressionConfig` initializers and `preserve_top_level_shape` from `JsonCompressionContext` initializers. Complete JSON candidates now retain every field and empty value, including array positions; some inputs save fewer tokens or pass through. Explicit truncation and record reduction retain their recovery policies, and CLI arguments are unchanged ([#8814](https://github.com/agentic-os-org/ANOLISA/pull/8814)).
+- TOON encoding uses spec v4.4 to compact nested record arrays and objects keyed by ID. Upgrade decoders from `toon-format` 0.5.0 to 0.7.0 before consuming the new nested and keyed headers. Previously saved malformed empty-object-array documents still require their original JSON; the codec update does not repair them ([#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)).
+
+### Fixed
+
+- JSON compression and Stash recovery retain source numeric literals without precision loss. TOON candidates must preserve the retained values and numeric types; otherwise compression keeps exact JSON, and direct `compress-toon` returns the original input byte for byte ([#7784](https://github.com/agentic-os-org/ANOLISA/pull/7784), [#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)).
+- PostTool compression can resume when all tracked RTK invocations report byte-identical output and the executed command matches. Changed output or missing, stale, or mismatched evidence retains the RTK bypass; adapters without recovery remain limited to lossless candidates ([#8901](https://github.com/agentic-os-org/ANOLISA/pull/8901)).
+- `compress-response` and `compress-schema` now emit payloads byte for byte without appending a newline. Active-mode statistics match those emitted bytes; dry-run still emits the original input while recording predicted savings ([#7789](https://github.com/agentic-os-org/ANOLISA/pull/7789)).
+- Advisory messages no longer turn successful compression, passthrough, or statistics operations into panics when stderr is unwritable ([#7796](https://github.com/agentic-os-org/ANOLISA/pull/7796), [#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)).
+- Codex adapter install and uninstall commands now preview the actual lifecycle branches under `ANOLISA_DRY_RUN=1` without modifying files or registrations. Missing binaries and source trees fail before previewing steps the real installation cannot reach ([#7723](https://github.com/agentic-os-org/ANOLISA/pull/7723)).
+
 ## [0.8.8] - 2026-10-21
 
 ### Added

@@ -32,14 +32,18 @@ Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 �
 | Linux x86_64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl` |
 | Linux aarch64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
 | macOS Apple 芯片 | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_arm64.whl` |
+| macOS Intel | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_x86_64.whl` |
+| Windows x64 | `anolisa_tokenless-<version>-cp311-abi3-win_amd64.whl` |
 
-下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.8.8 安装到虚拟环境：
+Intel Mac 和 Windows x64 Wheel 从 v0.9.0 开始提供。
+
+下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.9.0 安装到虚拟环境：
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.8/anolisa_tokenless-0.8.8-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless-0.9.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 Linux 产物面向兼容 `manylinux_2_17` 的 glibc 发行版，不支持 Alpine Linux 等 musl 发行版。

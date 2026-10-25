@@ -85,8 +85,12 @@ for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
   hasnt "$doc" "Windows or Linux with musl" "$lang QUICKSTART no longer merges Windows with musl"
   hasnt "$doc" "Windows 或使用 musl" "$lang QUICKSTART no longer merges Windows with musl (zh)"
 done
-has_re "$DOC_EN_QUICKSTART" '^\| Windows \|.*Not supported, use WSL2' "en QUICKSTART marks Windows unsupported for curl"
-has_re "$DOC_ZH_QUICKSTART" '^\| Windows \|.*暂不支持，请使用 WSL2' "zh QUICKSTART marks Windows unsupported for curl"
+has_re "$DOC_EN_QUICKSTART" '^\| Windows \| Not currently supported \| x64: pending registry publication \| Not supported, use WSL2 \|' "en QUICKSTART separates Windows npm publication from curl support"
+has_re "$DOC_ZH_QUICKSTART" '^\| Windows \| 暂不支持 \| x64：等待 registry 发布 \| 暂不支持，请使用 WSL2 \|' "zh QUICKSTART separates Windows npm publication from curl support"
+for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
+  has "$doc" '@anolisa/tokenless-win32-x64' "manual lists the Windows npm build target"
+  has "$doc" 'os: win32, linux, darwin' "manual quotes the current npm platform manifest"
+done
 has_re "$DOC_EN_QUICKSTART" '^\| Linux with musl.*Source build only' "en QUICKSTART marks musl as source-build only"
 has_re "$DOC_ZH_QUICKSTART" '^\| 使用 musl 的 Linux.*仅源码构建' "zh QUICKSTART marks musl as source-build only"
 has "$DOC_EN_QUICKSTART" "source-build fallback is validated on Linux only" "en QUICKSTART states macOS has no source-build path"
@@ -272,16 +276,15 @@ has "$UNINSTALL_SH" "another installation has taken over that path" \
   "uninstall.sh refuses a recorded path another installer replaced"
 has "$UNINSTALL_SH" "file_digest" "uninstall.sh verifies the recorded file identity"
 
-# --- Intel macOS: no route may be advertised that the release cannot deliver --
-# `@anolisa/tokenless-darwin-x64` is not on the registry, and the installer
-# refuses its source-build fallback on macOS, so every column of the Intel macOS
-# row has to read "not supported" until that package is published.
+# --- Intel macOS: distinguish build support from registry availability --------
+# The release builds Intel Mac artifacts, but npm and the curl npm path need
+# the matching platform package on the registry. Source builds remain Linux-only.
 has_re "$DOC_EN_QUICKSTART" \
-  '^\| macOS x86_64 \| Not currently supported \| Not currently supported \| Not currently supported \| Not currently supported \|$' \
-  "en QUICKSTART marks Intel macOS unsupported for every method"
+  '^\| macOS x86_64 \| Not currently supported \| Pending registry publication \| Pending registry publication \| Pending registry publication \|$' \
+  "en QUICKSTART marks Intel macOS npm routes pending publication"
 has_re "$DOC_ZH_QUICKSTART" \
-  '^\| macOS x86_64 \| 暂不支持 \| 暂不支持 \| 暂不支持 \| 暂不支持 \|$' \
-  "zh QUICKSTART marks Intel macOS unsupported for every method"
+  '^\| macOS x86_64 \| 暂不支持 \| 等待 registry 发布 \| 等待 registry 发布 \| 等待 registry 发布 \|$' \
+  "zh QUICKSTART marks Intel macOS npm routes pending publication"
 hasnt "$DOC_EN_QUICKSTART" "npm and curl ship prebuilt binaries on macOS x86_64" \
   "en QUICKSTART no longer claims prebuilt Intel macOS binaries"
 hasnt "$DOC_ZH_QUICKSTART" "npm 和 curl 方式在 macOS x86_64 上提供预编译二进制" \

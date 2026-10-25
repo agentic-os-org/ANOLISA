@@ -33,15 +33,19 @@ CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the targe
 | Linux x86_64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl` |
 | Linux aarch64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
 | macOS Apple silicon | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_arm64.whl` |
+| macOS Intel | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_x86_64.whl` |
+| Windows x64 | `anolisa_tokenless-<version>-cp311-abi3-win_amd64.whl` |
 
-The lifecycle API examples below require Tokenless 0.8.0. Install v0.8.8 on Linux x86_64
+Intel Mac and Windows x64 wheels are available starting with v0.9.0.
+
+The lifecycle API examples below require Tokenless 0.8.0. Install v0.9.0 on Linux x86_64
 into a virtual environment:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.8/anolisa_tokenless-0.8.8-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless-0.9.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 The Linux assets target glibc-based distributions compatible with `manylinux_2_17`; they do not
