@@ -197,6 +197,8 @@ ws-ckpt reload
 
 The OpenClaw adapter requires OpenClaw >= 2026.2.13. Installation stops rather than leaving a partial integration when the detected version or config capabilities cannot update the tool allowlist safely.
 
+Hermes plugin enable/disable calls have a timeout so an unresponsive runtime does not block local setup or cleanup indefinitely; see [Plugin Installation](../../docs/user-guide/en/ws-ckpt/index.md#plugin-installation) for recovery steps.
+
 ## Components
 
 | Component | Status | Description |

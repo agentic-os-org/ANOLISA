@@ -62,6 +62,8 @@ ws-ckpt plugin uninstall --runtime openclaw
 
 `plugin install` first runs a detect script to verify prerequisites (exit 2 = missing prerequisite, abort; exit 1 = not installed but installable, continue), then runs the install script. Scripts live under `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`.
 
+For Hermes, each `plugins enable` or `plugins disable` call has a 30-second timeout, followed by up to 5 seconds before forced termination. If enabling fails or times out, installation retains the plugin link and warns you to run `hermes plugins enable ws-ckpt` manually once Hermes responds. If disabling fails or times out, uninstall warns and continues removing the local plugin, configuration entries, and skill. A running gateway may still need `hermes gateway restart` to apply the change. These limits apply to the Hermes CLI calls, not the whole installation or uninstall.
+
 The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose config write path avoids persisting runtime defaults and restores unchanged `${VAR}` references before writing to disk. OpenClaw >= 2026.9.1 uses conditional config writes. Versions from 2026.2.13 to <2026.9.1 use plain JSON writes only when the root config does not contain `$include`; otherwise installation stops before installing the plugin and requires an OpenClaw upgrade. An unparseable version, missing write capability, or failed allowlist update also aborts installation rather than leaving a partial integration. Uninstall remains best-effort: it removes local plugin files but warns and skips plugin unregister and allowlist cleanup when no safe config write is available.
 
 ---

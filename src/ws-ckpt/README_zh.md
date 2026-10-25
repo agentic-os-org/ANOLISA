@@ -189,6 +189,8 @@ ws-ckpt reload
 
 OpenClaw adapter 要求 OpenClaw >= 2026.2.13。若检测到的版本或配置能力无法安全更新工具 allowlist，安装会中止，避免留下不完整的集成。
 
+Hermes 插件启用和禁用调用设有超时，避免运行时无响应导致本地安装或清理一直阻塞；恢复步骤见[插件安装](../../docs/user-guide/zh/ws-ckpt/index.md#插件安装)。
+
 ## 组件
 
 | 组件 | 状态 | 说明 |
