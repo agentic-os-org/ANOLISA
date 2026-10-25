@@ -23,7 +23,8 @@ pub use atomic::write_atomic;
 
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
@@ -114,17 +115,86 @@ pub fn write(root: BorrowedFd<'_>, rel: &Path, content: &[u8]) -> Result<u64> {
 /// Write only if the file doesn't exist; fails with `AlreadyExists`
 /// otherwise. This is the create-new semantic mem_write wants when
 /// `overwrite=false`.
+///
+/// On a write or flush error, remove the incomplete file so the caller can
+/// retry. If cleanup also fails, report both errors. This does not make
+/// writes atomically visible or clean up after process termination.
 pub fn write_create_new(root: BorrowedFd<'_>, rel: &Path, content: &[u8]) -> Result<u64> {
-    let mut f = open_in_root(
+    // Hold the parent through cleanup: an ordinary directory rename must not
+    // redirect removal to a different tree at the former parent pathname.
+    let parent_path = rel
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = rel.file_name().ok_or_else(|| {
+        MemoryError::InvalidArgument(format!("'{}' has no file name", rel.display()))
+    })?;
+    // Splitting off the leaf must not turn `new/` or `new/.` into a file
+    // creation: these spellings require a directory in the original path.
+    if rel
+        .as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|b| *b == b'/')
+        .next()
+        != Some(name.as_encoded_bytes())
+    {
+        return Err(MemoryError::InvalidArgument(format!(
+            "'{}' does not end in a file name",
+            rel.display()
+        )));
+    }
+    let name = Path::new(name);
+    let parent = open_in_root(
         root,
-        rel,
+        parent_path,
+        OFlag::O_PATH | OFlag::O_DIRECTORY,
+        Mode::empty(),
+    )?;
+    let mut f = open_in_root(
+        parent.as_fd(),
+        name,
         OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o644),
     )?;
-    f.write_all(content)?;
-    f.flush()?;
+    if let Err(error) = f.write_all(content).and_then(|()| f.flush()) {
+        if let Err(cleanup) = remove_failed_creation(&parent, name, &f) {
+            return Err(MemoryError::Other(format!(
+                "create '{}': {error}; removing incomplete file failed: {cleanup}",
+                rel.display()
+            )));
+        }
+        return Err(MemoryError::Io(error));
+    }
     Ok(content.len() as u64)
 }
+
+fn remove_failed_creation(parent: &File, name: &Path, created: &File) -> Result<()> {
+    use nix::errno::Errno;
+    use nix::fcntl::AtFlags;
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
+    let stat =
+        match nix::sys::stat::fstatat(Some(parent.as_raw_fd()), name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        {
+            Ok(stat) => stat,
+            Err(Errno::ENOENT) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+    let metadata = created.metadata()?;
+    // A destination already replaced by another operation is no longer ours.
+    // This check is best effort; callers still need to serialize external
+    // renames of the same leaf against writes and their failure cleanup.
+    if stat.st_dev != metadata.dev() || stat.st_ino != metadata.ino() {
+        return Ok(());
+    }
+    match unlinkat(Some(parent.as_raw_fd()), name, UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(Errno::ENOENT) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod create_cleanup_tests;
 
 pub fn append(root: BorrowedFd<'_>, rel: &Path, content: &[u8]) -> Result<u64> {
     let mut f = open_in_root(

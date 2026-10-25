@@ -228,8 +228,13 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_diff` | `path1`、`path2` | — | unified diff |
 | `mem_mkdir` | `path` | — | `created <path>` |
 | `mem_remove` | `path` | `recursive` | `removed <path>` |
-| `mem_promote` | `session_path`、`store_path` | — | 把会话 scratch 文件原子移入持久化仓 |
+| `mem_promote` | `session_path`、`store_path` | — | 把会话 scratch 文件复制到持久化仓的新文件 |
 | `mem_session_log` | — | — | 当前会话 JSONL |
+
+`mem_write(overwrite=false)` 和 `mem_promote` 拒绝覆盖已有目标。写入失败时，会删除
+本次创建的不完整文件，以便重试同一请求；清理失败会与写入错误一起报告。这不是原子发布：
+并发读取可能看到写入中的内容，进程崩溃也可能留下残缺文件。外部操作替换同一目标时，
+应与这些写入及其清理串行执行。
 
 `mem_edit` 和设置了 `overwrite=true` 的 `mem_write` 会先为已有普通文件
 写好完整替换内容，再发布新文件；发布前的写入失败会保留原内容。
@@ -564,7 +569,7 @@ model = "text-embedding-3-small"
 - Agent 跨会话持久化笔记和决策（Claude Code、Cursor、Continue、自研 rmcp 客户端等）。
 - 多 Agent 系统中 Agent A 写、Agent B 读的笔记跨进程共享。
 - 操作审计和状态恢复（`mem_log`、JSONL 审计、journald、`mem_revert`、`mem_snapshot_restore`）。
-- "先草稿、决定后才持久化"的多回合模式（`mem_promote` 从 session scratch 原子移入持久化仓）。
+- "先草稿、决定后才持久化"的多回合模式（`mem_promote` 从 session scratch 复制到持久化仓）。
 
 ---
 
@@ -631,7 +636,7 @@ let tools = client.list_tools(Default::default()).await?;
 
 1. 每次 Agent 运行设 `MEMORY_SESSION_ID=<sid>` 和 `MEMORY_SESSION_DIR=/run/anolisa/sessions`。
 2. Agent 把草稿写到 `/run/anolisa/sessions/<sid>/scratch/`。
-3. Agent 决定"这条值得保留"时调用 `mem_promote` 原子移入持久化仓。
+3. Agent 决定"这条值得保留"时调用 `mem_promote` 复制到持久化仓，保留 scratch 中的原文件。
 
 ---
 

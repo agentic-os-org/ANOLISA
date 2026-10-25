@@ -240,8 +240,15 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `mem_diff` | `path1`, `path2` | — | unified diff |
 | `mem_mkdir` | `path` | — | `created <path>` |
 | `mem_remove` | `path` | `recursive` | `removed <path>` |
-| `mem_promote` | `session_path`, `store_path` | — | atomically move session scratch file into the persistent store |
+| `mem_promote` | `session_path`, `store_path` | — | copy session scratch file into a new persistent-store file |
 | `mem_session_log` | — | — | current session JSONL |
+
+`mem_write(overwrite=false)` and `mem_promote` refuse existing destinations. On a
+write failure, they remove the incomplete file they created so the same request
+can be retried; a cleanup failure is reported alongside the write error. This is
+not atomic publication: concurrent readers can see a write in progress, and a
+process crash can leave a partial file. Serialize external replacements of the
+same destination against these operations.
 
 `mem_edit` and `mem_write` with `overwrite=true` prepare a complete
 replacement for an existing regular file before publishing it. A write failure
@@ -596,7 +603,7 @@ model = "text-embedding-3-small"
 - Cross-session persistence of notes and decisions (Claude Code, Cursor, Continue, custom rmcp clients).
 - Multi-agent systems where Agent A writes and Agent B reads shared notes.
 - Operation audit and state recovery (`mem_log`, JSONL audit, journald, `mem_revert`, `mem_snapshot_restore`).
-- Multi-turn "draft first, persist when decided" pattern (`mem_promote` atomically moves files from session scratch into the persistent store).
+- Multi-turn "draft first, persist when decided" pattern (`mem_promote` copies files from session scratch into the persistent store).
 
 ---
 
@@ -663,7 +670,7 @@ let tools = client.list_tools(Default::default()).await?;
 
 1. Set `MEMORY_SESSION_ID=<sid>` and `MEMORY_SESSION_DIR=/run/anolisa/sessions` for each agent run.
 2. Agent writes drafts to `/run/anolisa/sessions/<sid>/scratch/`.
-3. When a draft is worth keeping, the agent calls `mem_promote` to atomically move it into the persistent store.
+3. When a draft is worth keeping, the agent calls `mem_promote` to copy it into the persistent store, retaining the scratch original.
 
 ---
 
