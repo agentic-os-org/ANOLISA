@@ -206,7 +206,7 @@
     {
       "name": "legacy fixed-kind template is rejected",
       "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"kind": "prevent_file_deletion", "files": ["/valid"]}}},
-      "expectedError": {"code": "invalid_request", "message": "unknown field `kind`, expected one of `specVersion`, `description`, `rules`"}
+      "expectedError": {"code": "invalid_request", "message": "unknown field `kind`, expected one of `specVersion`, `description`, `rules`, `fileProtection`"}
     },
     {
       "name": "missing format version",
@@ -216,7 +216,7 @@
     {
       "name": "missing rules",
       "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1"}}},
-      "expectedError": {"code": "invalid_request", "message": "missing field `rules`"}
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.rules: requires 1..1024 rules"}
     },
     {
       "name": "rules must be an array",
@@ -226,7 +226,7 @@
     {
       "name": "unknown template field",
       "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/valid"}, "where": {"operation": {"eq": "delete"}}}], "unexpected": true}}},
-      "expectedError": {"code": "invalid_request", "message": "unknown field `unexpected`, expected one of `specVersion`, `description`, `rules`"}
+      "expectedError": {"code": "invalid_request", "message": "unknown field `unexpected`, expected one of `specVersion`, `description`, `rules`, `fileProtection`"}
     },
     {
       "name": "empty rules",
@@ -236,7 +236,7 @@
     {
       "name": "unknown format version",
       "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "99", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/valid"}, "where": {"operation": {"eq": "delete"}}}]}}},
-      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.specVersion: only 0.1 is supported"}
+      "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.specVersion: only 0.1 and 0.2 are supported"}
     },
     {
       "name": "description type",

@@ -19,9 +19,10 @@ use asc_policy_adapter_agentsight::AgentSightAdapter;
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::identifiers::{ResourceId, Revision};
+use asc_policy_types::target::TranslationOutcome;
 use common::*;
 use http::{Exchange, MockHttp};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Default)]
 struct TestClock(AtomicU64);
@@ -46,6 +47,23 @@ fn spec(revision: u32) -> PreparedBinding {
     .unwrap();
     spec.binding_revision = Revision::new(revision).unwrap();
     spec.policy.policy_name = format!("prevent deletion {revision}");
+    spec
+}
+
+fn structured_spec(revision: u32) -> PreparedBinding {
+    let mut spec = spec(revision);
+    spec.policy.template = serde_json::from_value(json!({
+        "specVersion": "0.2",
+        "fileProtection": {
+            "topology": "static_at_apply",
+            "targets": [{
+                "path": "/etc/agent/config.yaml",
+                "kind": "exact_file",
+                "protections": {"delete": true, "ordinaryWrite": true}
+            }]
+        }
+    }))
+    .unwrap();
     spec
 }
 
@@ -179,6 +197,77 @@ fn inspect_registered(repo: &SqlitePolicyRepository, request: &AgentSightHttpReq
                 .any(|d| path(&d.target.id) == request.path && d.presence == Presence::Unknown)
         );
     }
+}
+
+#[test]
+fn real_http_applies_structured_policy_from_adapter_through_client() {
+    let desired = structured_spec(7);
+    let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&desired).unwrap()
+    else {
+        panic!("structured binding must translate");
+    };
+    let prepared = AgentSightClient::with_dependencies(Wire::new([]), Identity::default())
+        .prepare_apply(&plan)
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&prepared.content).unwrap();
+    let request_body: Vec<u8> = serde_json::from_value(payload["request"].clone()).unwrap();
+    let request_value: Value = serde_json::from_slice(&request_body).unwrap();
+    assert!(request_value.get("policy_dsl").is_none());
+    assert_eq!(
+        request_value["file_protection_policy"]["targets"][0]["protections"]["ordinary_write"],
+        true
+    );
+    let acknowledgement = serde_json::to_vec(&json!({
+        "request": request_value,
+        "state": "enforced",
+        "domain_id": 7
+    }))
+    .unwrap();
+    let repo = Arc::new(
+        SqlitePolicyRepository::with_binding_states(vec![ReconcileRecord {
+            status_version: 1,
+            binding: BindingView {
+                spec: desired.clone(),
+                status: BindingStatus::PendingApply.into(),
+            },
+            deployments: vec![],
+        }])
+        .unwrap(),
+    );
+    let server = MockHttp::start(
+        vec![
+            Exchange {
+                request: request(AgentSightHttpMethod::Get, "/enforcement/health", None),
+                response: Some(response(200, STRUCTURED_HEALTH)),
+            },
+            Exchange {
+                request: request(
+                    AgentSightHttpMethod::Post,
+                    "/enforcement/bindings",
+                    Some(request_body),
+                ),
+                response: Some(response(200, &acknowledgement)),
+            },
+        ],
+        |_| {},
+    );
+    let worker = core(
+        repo.clone(),
+        Arc::new(TestClock::default()),
+        &server.base_url,
+    );
+    let mut schedule = AttemptSchedule::default();
+    assert_eq!(
+        worker
+            .reconcile(&desired.binding_id, &mut schedule)
+            .unwrap(),
+        Disposition::Completed
+    );
+    let record = repo.read(&desired.binding_id).unwrap().unwrap();
+    assert_eq!(record.binding.status.phase, BindingStatus::Ready);
+    assert_eq!(record.deployments.len(), 1);
+    assert_eq!(record.deployments[0].presence, Presence::Present);
+    server.finish(2);
 }
 
 #[test]

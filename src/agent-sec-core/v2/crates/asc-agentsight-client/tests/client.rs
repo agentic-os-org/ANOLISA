@@ -46,6 +46,32 @@ fn create_checks_health_and_reuses_the_derived_idempotency_identity() {
 }
 
 #[test]
+fn structured_create_emits_exact_downstream_json_without_policy_dsl() {
+    const EXPECTED: &[u8] = br#"{"binding_id":"d525d62c-2a3d-570b-9c25-d29c336c1d87","agent_id":"","root_pid":4242,"process_start_time":987654,"policy_id":"00000000-0000-4000-8000-000000000002","policy_revision":"1","policy_mode":"enforce","file_protection_policy":{"version":1,"topology_mode":"static_at_apply","targets":[{"path":"/etc/agent/config.yaml","kind":"exact_file","protections":{"delete":true,"ordinary_write":true},"exclusions":[]},{"path":"/workspace/important","kind":"directory_tree","protections":{"delete":true,"ordinary_write":false},"exclusions":[{"path":"/workspace/important/cache.db","kind":"exact_entry"},{"path":"/workspace/important/tmp","kind":"directory_subtree"}]}]}}"#;
+    let request: serde_json::Value = serde_json::from_slice(EXPECTED).unwrap();
+    let acknowledgement = serde_json::to_vec(&serde_json::json!({
+        "request": request,
+        "state": "enforced",
+        "domain_id": 7
+    }))
+    .unwrap();
+    let wire = Wire::new([
+        Ok(response(200, STRUCTURED_HEALTH)),
+        Ok(response(200, &acknowledgement)),
+    ]);
+    let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
+    let prepared = client.prepare_apply(&structured_plan(7)).unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&prepared.content).unwrap();
+    assert_eq!(envelope["schemaVersion"], 2);
+    assert!(client.create(&prepared).error.is_none());
+    let requests = wire.requests();
+    assert_eq!(requests[1].body.as_deref(), Some(EXPECTED));
+    let body: serde_json::Value = serde_json::from_slice(EXPECTED).unwrap();
+    assert!(body.get("policy_dsl").is_none());
+    wire.consumed();
+}
+
+#[test]
 fn delete_treats_no_content_and_binding_not_found_as_absent() {
     let wire = Wire::new([
         Ok(response(204, b"")),
@@ -190,4 +216,41 @@ fn create_fails_closed_when_file_delete_guard_is_unavailable() {
     assert_eq!(error.code, "AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE");
     assert_eq!(wire.requests().len(), 1);
     wire.consumed();
+}
+
+#[test]
+fn structured_capability_preflight_requires_each_used_primitive_and_defaults_missing_false() {
+    for (field, code) in [
+        (
+            "static_mount_topology",
+            "AGENTSIGHT_STATIC_MOUNT_TOPOLOGY_UNAVAILABLE",
+        ),
+        (
+            "file_entry_delete_protection",
+            "AGENTSIGHT_FILE_ENTRY_DELETE_PROTECTION_UNAVAILABLE",
+        ),
+        (
+            "directory_tree_delete_protection",
+            "AGENTSIGHT_DIRECTORY_TREE_DELETE_PROTECTION_UNAVAILABLE",
+        ),
+        (
+            "ordinary_write_protection",
+            "AGENTSIGHT_ORDINARY_WRITE_PROTECTION_UNAVAILABLE",
+        ),
+    ] {
+        let mut health: serde_json::Value = serde_json::from_slice(STRUCTURED_HEALTH).unwrap();
+        health["capabilities"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        let bytes = serde_json::to_vec(&health).unwrap();
+        let wire = Wire::new([Ok(response(200, &bytes))]);
+        let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
+        let input = client.prepare_apply(&structured_plan(7)).unwrap();
+        let error = client.create(&input).error.unwrap();
+        assert_eq!(error.kind, FailureKind::Rejected);
+        assert_eq!(error.code, code);
+        assert_eq!(wire.requests().len(), 1);
+        wire.consumed();
+    }
 }

@@ -21,5 +21,6 @@ fn file_policy(files: Vec<String>) -> asc_policy_types::authoring::PolicyTemplat
                 because: None,
             })
             .collect(),
+        file_protection: None,
     }
 }
