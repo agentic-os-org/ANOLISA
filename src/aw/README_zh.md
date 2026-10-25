@@ -44,6 +44,10 @@ aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
+launcher 转发退出信号后，Agent 需要超过默认两秒的强制清理前宽限期时，可设置
+`spec.agents.<target>.shutdown_grace_ms`。有界等待和应用清理职责见
+[退出宽限期](../../docs/user-guide/zh/aw/configuration.md#设置-agent-退出宽限期)。
+
 用 `aw validate --config next.yaml --against current.yaml` 离线检查仅涉及策略的修改，
 详见[配置](../../docs/user-guide/zh/aw/configuration.md#比较策略修改)；
 此命令不更新运行中的实例。

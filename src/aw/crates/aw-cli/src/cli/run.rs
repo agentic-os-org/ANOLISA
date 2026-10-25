@@ -71,6 +71,12 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     let config = aw_config::Validator::new()?.parse(&bytes)?;
     let target = args.required("--agent")?;
     let agent = &config.as_value()["spec"]["agents"][target];
+    // JSON Schema integers also accept decimal and exponent spellings.
+    let shutdown_grace = Duration::from_millis(
+        agent["shutdown_grace_ms"]
+            .as_f64()
+            .map_or(2000, |value| value as u64),
+    );
     let name = agent["adapter"]
         .as_str()
         .ok_or("configured Agent target not found")?;
@@ -239,51 +245,49 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             service.pid
         );
         let mut reported: Result<()> = Ok(());
-        let status = readiness::run(&plan.command, &SIGNAL, plan.readiness, |pid| {
-            if reloadable {
-                reported = service
-                    .client
-                    .call(
-                        Operation::AssociateProcess {
-                            instance_id: hook_binding.binding.instance_id.clone(),
-                            pid,
-                        },
-                        Instant::now() + Duration::from_secs(2),
-                    )
-                    .map(|_| ())
-                    .map_err(Into::into);
-                if reported.is_err() {
-                    let _ = SIGNAL.compare_exchange(
-                        0,
-                        libc::SIGTERM,
-                        std::sync::atomic::Ordering::AcqRel,
-                        std::sync::atomic::Ordering::Acquire,
-                    );
+        let failed = AtomicBool::new(false);
+        let status = readiness::run(
+            &plan.command,
+            &SIGNAL,
+            &failed,
+            shutdown_grace,
+            plan.readiness,
+            |pid| {
+                if reloadable {
+                    reported = service
+                        .client
+                        .call(
+                            Operation::AssociateProcess {
+                                instance_id: hook_binding.binding.instance_id.clone(),
+                                pid,
+                            },
+                            Instant::now() + Duration::from_secs(2),
+                        )
+                        .map(|_| ())
+                        .map_err(Into::into);
+                    if reported.is_err() {
+                        failed.store(true, std::sync::atomic::Ordering::Release);
+                    }
                 }
-            }
-            if observing && reported.is_ok() {
-                reported = service
-                    .client
-                    .call(
-                        Operation::ReportRun {
-                            instance_id: hook_binding.binding.instance_id.clone(),
-                            outcome: RunOutcome::Started { pid },
-                        },
-                        Instant::now() + Duration::from_secs(2),
-                    )
-                    .map(|_| ())
-                    .map_err(Into::into);
-                if reported.is_err() {
-                    let _ = SIGNAL.compare_exchange(
-                        0,
-                        libc::SIGTERM,
-                        std::sync::atomic::Ordering::AcqRel,
-                        std::sync::atomic::Ordering::Acquire,
-                    );
+                if observing && reported.is_ok() {
+                    reported = service
+                        .client
+                        .call(
+                            Operation::ReportRun {
+                                instance_id: hook_binding.binding.instance_id.clone(),
+                                outcome: RunOutcome::Started { pid },
+                            },
+                            Instant::now() + Duration::from_secs(2),
+                        )
+                        .map(|_| ())
+                        .map_err(Into::into);
+                    if reported.is_err() {
+                        failed.store(true, std::sync::atomic::Ordering::Release);
+                    }
                 }
-            }
-            started = true;
-        });
+                started = true;
+            },
+        );
         reported?;
         let status = status?;
         Ok(match status.code() {

@@ -5,7 +5,48 @@ use super::{
     support::{Fixture, Process, Service, TIMEOUT},
 };
 use serde_json::{json, Value};
-use std::{fs, process::Output};
+use std::{fs, os::unix::process::ExitStatusExt, process::Output};
+
+#[test]
+fn configured_shutdown_grace_reaches_the_foreground_launcher() {
+    for configured in [false, true] {
+        let fixture = Fixture::new();
+        let mut document = fixture.document();
+        if configured {
+            // A schema integer may arrive as a floating-point JSON number.
+            document["spec"]["agents"]["qoder"]["shutdown_grace_ms"] = json!(4000.0);
+        }
+        let service = Service::start(&fixture, &document);
+        let mut process = Process::spawn(
+            &fixture,
+            fixture.launch(&["--hold", "--shutdown-delay", "3"], None),
+        );
+        process
+            .wait_until("shutdown handler ready", TIMEOUT, |_| {
+                Ok((
+                    fixture.root.join("ready-one").exists(),
+                    "waiting for ready marker".into(),
+                ))
+            })
+            .unwrap();
+        let pid = fs::read_to_string(fixture.root.join("started-one")).unwrap();
+        process.signal(libc::SIGTERM);
+        let output = process.finish();
+        assert_eq!(fixture.root.join("cleanup-one").exists(), configured);
+        if configured {
+            assert_eq!(
+                output.status.code(),
+                Some(37),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        } else {
+            assert_eq!(output.status.signal(), Some(libc::SIGKILL));
+        }
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        service.released(&fixture);
+    }
+}
 
 fn update(fixture: &Fixture) -> Output {
     let mut command = fixture.command();

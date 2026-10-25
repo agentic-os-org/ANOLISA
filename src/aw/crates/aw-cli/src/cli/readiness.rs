@@ -8,7 +8,7 @@ use std::{
     os::unix::fs::MetadataExt,
     process::ExitStatus,
     sync::{
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
         mpsc,
     },
     thread,
@@ -18,11 +18,20 @@ use std::{
 pub(super) fn run(
     command: &CommandSpec,
     signal: &AtomicI32,
+    failed: &AtomicBool,
+    shutdown_grace: Duration,
     ready: Option<Readiness>,
     started: impl FnOnce(u32),
 ) -> Result<ExitStatus> {
     let Some(ready) = ready else {
-        return aw_exec::run_foreground_observed(command, signal, started).map_err(Into::into);
+        return aw_exec::run_foreground_with_grace(
+            command,
+            signal,
+            failed,
+            shutdown_grace,
+            started,
+        )
+        .map_err(Into::into);
     };
     if ready.timeout.is_zero() || ready.timeout > Duration::from_secs(120) {
         return Err("native startup deadline must be within 1..120000 ms".into());
@@ -30,23 +39,20 @@ pub(super) fn run(
     let (stop, receiver) = mpsc::sync_channel(1);
     thread::scope(|scope| {
         let mut watcher = None;
-        let execution = aw_exec::run_foreground_observed(command, signal, |pid| {
-            started(pid);
-            let ready = &ready;
-            watcher = Some(scope.spawn(move || {
-                let result = wait(ready, receiver, pid);
-                if result.is_err() {
-                    // aw-exec consumes this signal and cleans up only its owned group.
-                    let _ = signal.compare_exchange(
-                        0,
-                        libc::SIGTERM,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
-                }
-                result
-            }));
-        });
+        let execution =
+            aw_exec::run_foreground_with_grace(command, signal, failed, shutdown_grace, |pid| {
+                started(pid);
+                let ready = &ready;
+                watcher = Some(scope.spawn(move || {
+                    let result = wait(ready, receiver, pid);
+                    if result.is_err() {
+                        // Startup failure keeps its short cleanup budget even when
+                        // the application has a longer cooperative shutdown grace.
+                        failed.store(true, Ordering::Release);
+                    }
+                    result
+                }));
+            });
         let _ = stop.send(());
         let registered = match watcher {
             Some(watcher) => watcher

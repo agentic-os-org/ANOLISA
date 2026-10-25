@@ -52,6 +52,34 @@ AW does not expand variables such as `$HOME`.
 For all editor commands and a custom rule example, see the
 [configuration tool reference](packages.md#edit-existing-provider-and-hook-configuration).
 
+## Set the Agent shutdown grace period
+
+Set `spec.agents.<target>.shutdown_grace_ms` in the selected Agent's configuration
+when its shutdown handler needs more time to close requests and SDK clients.
+The value is an integer from `1` to `120000` milliseconds; omitting it retains the
+default `2000` milliseconds. For example, `shutdown_grace_ms: 15000` gives the
+Agent process group a 15-second grace period from when the foreground launcher
+first forwards an external termination signal. When the grace expires, AW starts
+forced cleanup. Repeated termination signals do not restart the grace period.
+Time spent before signal forwarding and in final process cleanup is outside this
+interval; this field is not a deadline for the entire shutdown operation.
+
+This setting does not change the two-second grace before forced cleanup for
+internal readiness or lifecycle failures. Cleanup of a naturally exited Agent's
+remaining child processes starts immediately. It does not change `aw stop` service
+shutdown or the lifetime of independently started Agents attached with
+`aw agent connect`.
+
+The application must stop accepting requests, drain work and close SDK clients.
+Increasing this grace period does not perform that work or guarantee that SDK
+cleanup finishes. Coordinate the application's deadlines and the container or
+supervisor's termination budget with this value, and verify shutdown in the
+deployment image.
+
+Changes take effect only for a newly started launcher; policy updates cannot
+change this field. Older AW binaries reject configurations containing it. Before
+rolling back, remove the field and account for the restored two-second default.
+
 ## Compare policy edits
 
 Prepare a separate candidate file and compare it with the existing configuration:

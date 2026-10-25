@@ -253,6 +253,13 @@
         "argv": {
           "$ref": "#/$defs/argv"
         },
+        "shutdown_grace_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000,
+          "default": 2000,
+          "description": "Grace before forced Agent-group cleanup, starting when aw run first forwards an external termination signal."
+        },
         "qoder": {
           "type": "object",
           "additionalProperties": false,

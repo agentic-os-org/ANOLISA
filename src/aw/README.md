@@ -53,6 +53,12 @@ aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
+Set `spec.agents.<target>.shutdown_grace_ms` when an Agent needs more than the
+default two-second grace before forced cleanup after the launcher forwards a
+termination signal. See
+[shutdown grace](../../docs/user-guide/en/aw/configuration.md#set-the-agent-shutdown-grace-period)
+for the bounded wait and application cleanup responsibilities.
+
 Use `aw validate --config next.yaml --against current.yaml` to check policy-only
 edits offline. See [configuration](../../docs/user-guide/en/aw/configuration.md#compare-policy-edits);
 this does not update a running instance.

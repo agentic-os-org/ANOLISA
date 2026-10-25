@@ -1034,5 +1034,8 @@ serveRequests 为业务服务，在工厂返回前配置业务回调。任务完
 sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要明确的安全语义。常驻模式
 在回调错误时停止任务，包括 on_error: report；正常策略拒绝沿用原生语义。Claude 中断无法
 确认时会终止 AW 的自有前台进程组，部署需配置监督器重启。发送退出信号前先排空请求，
-外层 launcher 在两秒后强制回收。Schema/BeforeModel、Retrieve 的后续接点和授权依赖见
+并设置目标的 `shutdown_grace_ms` 为应用剩余清理留出时间。外层 launcher 从首次转发
+退出信号到开始强制清理，默认给予两秒宽限期。
+作用范围和限制见[退出宽限期](../../../user-guide/zh/aw/configuration.md#设置-agent-退出宽限期)。
+Schema/BeforeModel、Retrieve 的后续接点和授权依赖见
 [常驻合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/resident-sdk.md)。

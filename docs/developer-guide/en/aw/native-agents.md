@@ -1215,7 +1215,11 @@ PostTool. Start the sec-core daemon separately and supply a real custom Hook.
 Opaque MCP tools need explicit security semantics. Resident mode stops tasks on
 callback errors even for `on_error: report`; policy denial remains a normal native
 denial. A failed Claude interrupt terminates AW's owned foreground process group,
-so configure supervisor restart. Drain requests before sending termination: the
-outer launcher forces group cleanup after two seconds. Schema/BeforeModel and
+so configure supervisor restart. Drain requests before sending termination and
+set the target's `shutdown_grace_ms` to allow time for the application's remaining
+cleanup. The outer launcher defaults to a two-second grace from its first signal
+forwarding until forced cleanup starts. See
+[shutdown grace](../../../user-guide/en/aw/configuration.md#set-the-agent-shutdown-grace-period)
+for scope and limits. Schema/BeforeModel and
 Retrieve require the later native seams and authorization work listed in the
 [resident contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/resident-sdk.md).

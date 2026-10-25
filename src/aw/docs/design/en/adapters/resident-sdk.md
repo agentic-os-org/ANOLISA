@@ -96,11 +96,17 @@ must close clients in `finally`. Process death is the fallback for abandoned
 clients; an alive client with no close has no inferred business deadline.
 Configure application request deadlines and overload responses explicitly.
 
-The existing launcher forwards termination to its owned group and forces cleanup
-after two seconds. Drain HTTP admission and finish/close requests **before** sending
-that signal when graceful completion is required. Gunicorn graceful-timeout by
-itself cannot extend AW's outer deadline. Deployment acceptance must test draining,
-forced shutdown, worker replacement and supervisor restart in the actual image.
+The launcher forwards termination to its owned group and starts forced cleanup
+after the target's `shutdown_grace_ms` grace period, defaulting to two seconds.
+Timing starts when the foreground loop first forwards an external termination
+signal; repeated signals do not reset it. Pre-forwarding waits and final process
+cleanup are outside this interval. Internal readiness/lifecycle failures retain
+a two-second grace before forced cleanup. Cleanup of a naturally exited Agent's
+remaining children starts immediately. Drain HTTP admission and finish/close
+requests **before** sending termination when graceful completion is required.
+Coordinate Gunicorn graceful-timeout and AW's outer grace period; neither performs
+application draining or guarantees SDK cleanup. Deployment acceptance must test
+draining, forced shutdown, worker replacement and supervisor restart in the actual image.
 Already executed local or remote tool effects cannot be undone by PostTool.
 
 Active task scopes cannot use reload or AgentSight observation. Resident entrypoints
