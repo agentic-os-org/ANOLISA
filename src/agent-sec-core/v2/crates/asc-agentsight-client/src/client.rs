@@ -264,6 +264,8 @@ struct EnforcementHealth {
 }
 
 #[derive(Debug, Deserialize)]
+// Each independent wire capability must default false when an older server omits it.
+#[allow(clippy::struct_excessive_bools)]
 struct EnforcementCapabilities {
     #[serde(default)]
     file_delete_guard: bool,
@@ -497,7 +499,7 @@ fn decode_structured_plan(content: &[u8]) -> Result<DecodedPlan, AgentSightClien
         return Err(rejected("AGENTSIGHT_UNSUPPORTED_PLAN_SCHEMA"));
     }
     validate_file_protection_policy(&plan.file_protection_policy)
-        .map_err(|_| rejected("AGENTSIGHT_INVALID_PLAN"))?;
+        .map_err(|()| rejected("AGENTSIGHT_INVALID_PLAN"))?;
     decode_plan_parts(
         plan.source,
         plan.scope,

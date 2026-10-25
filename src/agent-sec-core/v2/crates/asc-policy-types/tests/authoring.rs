@@ -133,7 +133,7 @@ fn recursive_predicates_have_a_depth_and_total_node_budget() {
     assert!(policy(&value).validate().is_err());
 }
 
-fn structured_policy(targets: Json) -> Json {
+fn structured_policy(targets: &Json) -> Json {
     json!({
         "specVersion": "0.2",
         "fileProtection": {
@@ -145,7 +145,7 @@ fn structured_policy(targets: Json) -> Json {
 
 #[test]
 fn structured_file_protection_round_trips_all_contract_variants() {
-    let value = structured_policy(json!([
+    let value = structured_policy(&json!([
         {
             "path": "/etc/agent/config.yaml",
             "kind": "exact_file",
@@ -209,7 +209,7 @@ fn structured_targets_enforce_paths_scopes_protections_and_cardinality() {
         let mut target = valid_target.clone();
         target["path"] = json!(path);
         assert!(
-            serde_json::from_value::<PolicyTemplate>(structured_policy(json!([target])))
+            serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([target])))
                 .unwrap()
                 .validate()
                 .is_err()
@@ -230,7 +230,7 @@ fn structured_targets_enforce_paths_scopes_protections_and_cardinality() {
         Json::Array(vec![valid_target.clone(); 65]),
     ] {
         assert!(
-            serde_json::from_value::<PolicyTemplate>(structured_policy(targets))
+            serde_json::from_value::<PolicyTemplate>(structured_policy(&targets))
                 .unwrap()
                 .validate()
                 .is_err()
@@ -247,7 +247,7 @@ fn structured_paths_reject_duplicate_targets_and_duplicate_or_conflicting_exclus
         "exclusions": []
     });
     assert!(
-        serde_json::from_value::<PolicyTemplate>(structured_policy(json!([
+        serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([
             target.clone(),
             target.clone()
         ])))
@@ -263,7 +263,7 @@ fn structured_paths_reject_duplicate_targets_and_duplicate_or_conflicting_exclus
             {"path":"/workspace/tree/cache","kind":second_kind}
         ]);
         assert!(
-            serde_json::from_value::<PolicyTemplate>(structured_policy(json!([with_exclusions])))
+            serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([with_exclusions])))
                 .unwrap()
                 .validate()
                 .is_err()

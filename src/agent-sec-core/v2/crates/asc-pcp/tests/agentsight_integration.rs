@@ -37,7 +37,7 @@ impl Clock for TestClock {
     }
 }
 
-const LIVE_WORKER: &str = r#"
+const LIVE_WORKER: &str = r"
 import os, sys
 fds = {}
 for line in sys.stdin:
@@ -74,7 +74,7 @@ for line in sys.stdin:
         print('errno=' + str(error.errno), flush=True)
 for fd in fds.values():
     os.close(fd)
-"#;
+";
 
 struct LiveWorker {
     child: Child,
@@ -98,7 +98,7 @@ impl LiveWorker {
     }
 
     fn pid(&self) -> i32 {
-        self.child.id() as i32
+        i32::try_from(self.child.id()).unwrap()
     }
 
     fn run(&mut self, operation: &str, path: &Path) -> String {
