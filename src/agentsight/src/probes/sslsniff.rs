@@ -547,6 +547,9 @@ impl SslSniff {
         // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
         let result = match kind {
             SslLibKind::OpenSsl => attach_openssl(&mut self.skel, path, -1),
+            SslLibKind::Python => {
+                return attach_python_ssl(pid, path, || attach_openssl(&mut self.skel, path, -1));
+            }
             SslLibKind::GnuTls => attach_gnutls(&mut self.skel, path, -1),
             SslLibKind::Nss => attach_nss(&mut self.skel, path, -1),
             SslLibKind::ExplicitTap => {
@@ -634,13 +637,7 @@ impl SslSniff {
             }
         };
 
-        match result {
-            Ok(links) => AttachOutcome::Attached(links),
-            Err(e) => {
-                log::warn!("[attach_process] pid={pid}: attach failed for {path}: {e:#}");
-                AttachOutcome::Failed
-            }
-        }
+        finish_ssl_attach(pid, path, result)
     }
 
     /// Detach SSL probes for a process and clean up traced files.
@@ -1209,6 +1206,8 @@ fn missing_tap_is_a_coverage_gap(path: &str) -> bool {
 enum SslLibKind {
     /// libssl.so  (OpenSSL / LibreSSL)
     OpenSsl,
+    /// Python may embed OpenSSL in its executable or in a shared libpython.
+    Python,
     /// libgnutls.so
     GnuTls,
     /// libnspr4.so (NSS / Firefox)
@@ -1266,14 +1265,48 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
     ) {
         return Some(SslLibKind::ExplicitTap);
     }
-    // uv Python statically links OpenSSL into the binary. The ELF .symtab contains
-    // SSL_write/SSL_read/SSL_do_handshake as LOCAL symbols, so attach_openssl()
-    // (symbol-name uprobe) works directly. Only match python3.<ver> (with version
-    // suffix) to avoid matching bare "python3" symlinks from system Python.
-    if name.starts_with("python3.") {
-        return Some(SslLibKind::OpenSsl);
+    // uv builds differ in whether OpenSSL lives in the executable or libpython.
+    // These are candidates: inspect the image before attempting symbol attach.
+    if name.starts_with("python3.") || (name.starts_with("libpython3.") && name.contains(".so")) {
+        return Some(SslLibKind::Python);
     }
     None
+}
+
+// A missing symbol name rules out this image; libbpf resolves the actual
+// function when present. Scan only after inode dedup, so both positive and
+// negative results are shared by workers mapping the same Python build.
+fn python_ssl_present(path: &str) -> Result<bool> {
+    let hits = scan_file_patterns(path, &[b"SSL_write\0"])
+        .with_context(|| format!("failed to scan Python SSL image {path}"))?;
+    Ok(hits.first().is_some_and(|matches| !matches.is_empty()))
+}
+
+fn attach_python_ssl(
+    pid: i32,
+    path: &str,
+    attach: impl FnOnce() -> Result<Vec<Link>>,
+) -> AttachOutcome {
+    match python_ssl_present(path) {
+        Ok(true) => finish_ssl_attach(pid, path, attach()),
+        Ok(false) => AttachOutcome::Untraceable,
+        Err(error) => {
+            log::warn!(
+                "[attach_process] pid={pid}: cannot inspect Python SSL image {path}: {error:#}"
+            );
+            AttachOutcome::Failed
+        }
+    }
+}
+
+fn finish_ssl_attach(pid: i32, path: &str, result: Result<Vec<Link>>) -> AttachOutcome {
+    match result {
+        Ok(links) => AttachOutcome::Attached(links),
+        Err(error) => {
+            log::warn!("[attach_process] pid={pid}: attach failed for {path}: {error:#}");
+            AttachOutcome::Failed
+        }
+    }
 }
 
 /// Parse a maps `dev` field (`maj:min`, both hex) into one stable value.
@@ -1705,6 +1738,9 @@ static CODEX_OFFSET_TABLE: std::sync::LazyLock<Option<OffsetTable>> =
         let json = include_str!("../../agentsight.json");
         OffsetTable::load(json)
     });
+
+#[cfg(test)]
+mod python_tests;
 
 #[cfg(test)]
 mod tests {

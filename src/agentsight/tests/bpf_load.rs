@@ -48,6 +48,98 @@ fn sslsniff_bpf_loads() {
 
 #[test]
 #[ignore]
+fn python_shared_openssl_library_attaches() {
+    use std::process::{Command, Stdio};
+
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: uprobe attach requires root");
+        return;
+    }
+
+    // Reproduce uv's shared build without depending on an installed Python:
+    // SSL functions are LOCAL symbols in libpython, absent from the launcher.
+    let directory = tempfile::tempdir().expect("Python SSL fixture directory");
+    let library_source = directory.path().join("python_ssl.c");
+    let library = directory.path().join("libpython3.11.so.1.0");
+    std::fs::write(
+        &library_source,
+        r#"
+#include <stddef.h>
+#include <unistd.h>
+#define SSL_FN __attribute__((used, noinline))
+static SSL_FN int SSL_write(void *ssl, const void *buf, int len) { return len; }
+static SSL_FN int SSL_read(void *ssl, void *buf, int len) { return 0; }
+static SSL_FN int SSL_write_ex(void *ssl, const void *buf, size_t len, size_t *out) { return 0; }
+static SSL_FN int SSL_read_ex(void *ssl, void *buf, size_t len, size_t *out) { return 0; }
+static SSL_FN int SSL_do_handshake(void *ssl) { return 1; }
+void python_ssl_wait(void) { sleep(60); }
+"#,
+    )
+    .expect("write shared Python SSL fixture");
+    let build = Command::new("cc")
+        .args([
+            "-shared",
+            "-fPIC",
+            "-O0",
+            "-Wl,-soname,libpython3.11.so.1.0",
+        ])
+        .arg(&library_source)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile shared Python SSL fixture");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let launcher_source = directory.path().join("launcher.c");
+    let launcher = directory.path().join("python3.11");
+    std::fs::write(
+        &launcher_source,
+        "extern void python_ssl_wait(void); int main(void) { python_ssl_wait(); return 0; }\n",
+    )
+    .expect("write Python launcher fixture");
+    let build = Command::new("cc")
+        .arg(&launcher_source)
+        .arg("-L")
+        .arg(directory.path())
+        .args(["-l:libpython3.11.so.1.0", "-Wl,-rpath,$ORIGIN", "-o"])
+        .arg(&launcher)
+        .output()
+        .expect("compile Python launcher fixture");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    config::set_verbose(true);
+    let mut sniffer = SslSniff::new().expect("sslsniff BPF should load on this kernel");
+    let mut child = Command::new(&launcher)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start Python launcher fixture");
+    let mut result = Ok(());
+    for _ in 0..25 {
+        result = sniffer.attach_process(child.id() as i32);
+        if result.is_err() || sniffer.traced_inode_count() > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let attached = sniffer.traced_inode_count();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    result.expect("discover and attach Python SSL probes");
+    assert_eq!(attached, 1, "attach to libpython rather than the launcher");
+}
+
+#[test]
+#[ignore]
 fn procmon_bpf_loads() {
     let (_pt, shared) = make_shared_maps();
     ProcMon::new_with_shared(&shared).expect("procmon BPF should load on this kernel");
