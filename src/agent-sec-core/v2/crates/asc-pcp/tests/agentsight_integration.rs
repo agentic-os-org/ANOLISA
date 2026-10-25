@@ -9,8 +9,13 @@ mod http;
 #[path = "support/store.rs"]
 mod store;
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use store::{TestAdmission, TestStore};
 
 use asc_agentsight_client::*;
@@ -29,6 +34,111 @@ struct TestClock(AtomicU64);
 impl Clock for TestClock {
     fn now_ms(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+const LIVE_WORKER: &str = r#"
+import os, sys
+fds = {}
+for line in sys.stdin:
+    parts = line.rstrip('\n').split('\t')
+    op = parts[0]
+    try:
+        if op == 'openfd':
+            fds[parts[1]] = os.open(parts[1], os.O_RDWR)
+        elif op == 'writefd':
+            os.write(fds[parts[1]], b'-fd-write')
+        elif op == 'write':
+            with open(parts[1], 'ab') as f:
+                f.write(b'-write')
+        elif op == 'pwrite':
+            fd = os.open(parts[1], os.O_RDWR)
+            try:
+                os.pwrite(fd, b'pwrite', 0)
+            finally:
+                os.close(fd)
+        elif op == 'read':
+            with open(parts[1], 'rb') as f:
+                f.read()
+        elif op == 'touch':
+            with open(parts[1], 'wb') as f:
+                f.write(b'created')
+        elif op == 'unlink':
+            os.unlink(parts[1])
+        elif op == 'exit':
+            break
+        else:
+            raise ValueError(op)
+        print('ok', flush=True)
+    except OSError as error:
+        print('errno=' + str(error.errno), flush=True)
+for fd in fds.values():
+    os.close(fd)
+"#;
+
+struct LiveWorker {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+}
+
+impl LiveWorker {
+    fn spawn() -> Self {
+        let mut child = Command::new("python3")
+            .args(["-u", "-c", LIVE_WORKER])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        Self {
+            input: child.stdin.take().unwrap(),
+            output: BufReader::new(child.stdout.take().unwrap()),
+            child,
+        }
+    }
+
+    fn pid(&self) -> i32 {
+        self.child.id() as i32
+    }
+
+    fn run(&mut self, operation: &str, path: &Path) -> String {
+        writeln!(self.input, "{operation}\t{}", path.display()).unwrap();
+        self.input.flush().unwrap();
+        let mut result = String::new();
+        self.output.read_line(&mut result).unwrap();
+        result.trim().to_owned()
+    }
+}
+
+impl Drop for LiveWorker {
+    fn drop(&mut self) {
+        let _ = writeln!(self.input, "exit");
+        let _ = self.input.flush();
+        let _ = self.child.wait();
+    }
+}
+
+struct LiveFiles(PathBuf);
+
+impl LiveFiles {
+    fn new() -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("asc-chain-{}-{nonce}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        Self(root)
+    }
+
+    fn path(&self, suffix: &str) -> PathBuf {
+        self.0.join(suffix)
+    }
+}
+
+impl Drop for LiveFiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -268,6 +378,146 @@ fn real_http_applies_structured_policy_from_adapter_through_client() {
     assert_eq!(record.deployments.len(), 1);
     assert_eq!(record.deployments[0].presence, Presence::Present);
     server.finish(2);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires isolated live AgentSight, ActPlane enforcer, BPF LSM, and root"]
+fn live_structured_policy_reaches_bpf_lsm() {
+    let base_url = std::env::var("ASC_E2E_AGENTSIGHT_BASE_URL").unwrap();
+    let token_file = std::env::var_os("ASC_E2E_AGENTSIGHT_TOKEN_FILE").unwrap();
+    let files = LiveFiles::new();
+    let protected = files.path("protected");
+    let excluded_file = protected.join("excluded.txt");
+    let excluded_tree = protected.join("excluded-tree");
+    let excluded_child = excluded_tree.join("free.txt");
+    let nested_direct = excluded_tree.join("direct.txt");
+    let existing = protected.join("existing.txt");
+    let future = protected.join("future.txt");
+    let write_only = files.path("write-only.txt");
+    let delete_only = files.path("delete-only");
+    let delete_only_file = delete_only.join("entry.txt");
+    fs::create_dir_all(&excluded_tree).unwrap();
+    fs::create_dir(&delete_only).unwrap();
+    for path in [
+        &excluded_file,
+        &excluded_child,
+        &nested_direct,
+        &existing,
+        &write_only,
+        &delete_only_file,
+    ] {
+        fs::write(path, b"fixture").unwrap();
+    }
+
+    let mut worker = LiveWorker::spawn();
+    assert_eq!(worker.run("openfd", &write_only), "ok");
+    let resolver = ProcProcessIdentityResolver;
+    let pid = worker.pid();
+    let revision = u32::try_from(pid).unwrap();
+    let mut binding = spec(revision);
+    binding.scope.selector = asc_policy_types::scope::ScopeSelector::Pid { pid: revision };
+    binding.scope.process = asc_policy_types::process_discovery::ProcessIdentity {
+        boot_id: resolver.boot_id().unwrap(),
+        pid_namespace: resolver.pid_namespace(pid).unwrap(),
+        pid: u32::try_from(pid).unwrap(),
+        start_time: resolver.process_start_time(pid).unwrap(),
+    };
+    binding.policy.template = serde_json::from_value(json!({
+        "specVersion": "0.2",
+        "fileProtection": {
+            "topology": "static_at_apply",
+            "targets": [
+                {
+                    "path": protected,
+                    "kind": "directory_tree",
+                    "protections": {"delete": true, "ordinaryWrite": true},
+                    "exclusions": [
+                        {"path": excluded_file, "kind": "exact_entry"},
+                        {"path": excluded_tree, "kind": "directory_subtree"}
+                    ]
+                },
+                {
+                    "path": nested_direct,
+                    "kind": "exact_file",
+                    "protections": {"delete": true, "ordinaryWrite": true}
+                },
+                {
+                    "path": write_only,
+                    "kind": "exact_file",
+                    "protections": {"delete": false, "ordinaryWrite": true}
+                },
+                {
+                    "path": delete_only,
+                    "kind": "directory_tree",
+                    "protections": {"delete": true, "ordinaryWrite": false}
+                }
+            ]
+        }
+    }))
+    .unwrap();
+    let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&binding).unwrap()
+    else {
+        panic!("live structured binding must translate");
+    };
+    let client = AgentSightClient::new_with_token_file(&base_url, &token_file).unwrap();
+    let prepared = client.prepare_apply(&plan).unwrap();
+    let applied = client.create(&prepared);
+    assert!(applied.error.is_none(), "apply failed: {applied:?}");
+    assert_eq!(applied.observations[0].presence, Presence::Present);
+
+    assert_eq!(worker.run("read", &existing), "ok");
+    assert_eq!(worker.run("write", &existing), "errno=1");
+    assert_eq!(worker.run("pwrite", &existing), "errno=1");
+    assert_eq!(worker.run("unlink", &existing), "errno=1");
+    assert_eq!(worker.run("writefd", &write_only), "errno=1");
+    assert_eq!(worker.run("write", &excluded_file), "ok");
+    assert_eq!(worker.run("unlink", &excluded_file), "ok");
+    assert_eq!(worker.run("write", &excluded_child), "ok");
+    assert_eq!(worker.run("unlink", &excluded_child), "ok");
+    assert_eq!(worker.run("write", &nested_direct), "errno=1");
+    assert_eq!(worker.run("unlink", &nested_direct), "errno=1");
+    assert_eq!(worker.run("write", &delete_only_file), "ok");
+    assert_eq!(worker.run("unlink", &delete_only_file), "errno=1");
+    assert_eq!(worker.run("touch", &future), "errno=1");
+    assert_eq!(fs::read(&future).unwrap(), b"");
+
+    let token = fs::read_to_string(&token_file).unwrap();
+    let violations_url = format!(
+        "{}/enforcement/violations?limit=100",
+        base_url.trim_end_matches('/')
+    );
+    let mut observed = false;
+    for _ in 0..40 {
+        let response = ureq::get(&violations_url)
+            .set("Authorization", &format!("Bearer {}", token.trim()))
+            .call()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body: Value = serde_json::from_reader(response.into_reader()).unwrap();
+        let violations = body["violations"].as_array().unwrap();
+        let saw_unlink = violations
+            .iter()
+            .any(|event| event["operation"] == "unlink" && event["blocked"] == true);
+        let saw_write = violations
+            .iter()
+            .any(|event| event["operation"] == "ordinary_write" && event["blocked"] == true);
+        if saw_unlink && saw_write {
+            observed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        observed,
+        "AgentSight did not expose both live denial operations"
+    );
+
+    let detached = client.delete_targets(std::slice::from_ref(&prepared.target));
+    assert!(detached.error.is_none(), "detach failed: {detached:?}");
+    assert_eq!(detached.observations[0].presence, Presence::Absent);
+    assert_eq!(worker.run("write", &existing), "ok");
+    assert_eq!(worker.run("unlink", &existing), "ok");
 }
 
 #[test]

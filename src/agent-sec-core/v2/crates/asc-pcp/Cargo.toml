@@ -22,6 +22,7 @@ asc-policy-repository-sqlite = { workspace = true, features = ["test-support"] }
 asc-policy-adapter-agentsight = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+ureq = { workspace = true }
 
 [lints]
 workspace = true
