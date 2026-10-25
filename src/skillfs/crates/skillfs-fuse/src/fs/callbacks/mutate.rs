@@ -190,6 +190,16 @@ impl SkillFs {
                 // The async Reparse (triggered when SKILL.md is later written) will
                 // replace the placeholder with the real parsed entry.
                 //
+                // A dot-prefixed top-level name is a hidden working copy:
+                // `SkillStore::load_from_directory` skips dot-prefixed
+                // top-level directories on every scan, so a placeholder for
+                // one would list and resolve a name no fresh scan ever
+                // serves, and would hand the hidden directory a store entry
+                // the write path then keeps refreshing. The physical
+                // directory is still created — only the store
+                // synchronization is suppressed, mirroring the nested
+                // send sites' `hermes_nested_sync_eligible` rule.
+                //
                 // L1: a `mkdir /.skillfs-inbox/<skill>` is the install
                 // entrance for a brand-new (or hidden / repaired)
                 // skill. It maps to the same physical
@@ -200,7 +210,12 @@ impl SkillFs {
                 // `/skills/<skill>` if the resolver returns
                 // `current` / `fallback`.
                 let placeholder_skill = match &path_type {
-                    PathType::SkillDir { skill_name } => Some(skill_name.clone()),
+                    PathType::SkillDir { skill_name } if !skill_name.starts_with('.') => {
+                        Some(skill_name.clone())
+                    }
+                    // The inbox grammar (`is_inbox_skill_name_allowed`)
+                    // already rejects every dot-prefixed name, so the
+                    // hidden-copy rule above needs no inbox twin.
                     PathType::InboxSkillDir { skill_name }
                         if Self::is_inbox_skill_name_allowed(skill_name) =>
                     {
@@ -1826,6 +1841,17 @@ impl SkillFs {
         new_physical: &Path,
     ) -> Option<skillfs_core::store::LoadError> {
         self.store.write().remove(old_name);
+        // A rename onto a dot-prefixed top-level name hides the directory
+        // from every discovery scan, so the live store must agree: drop the
+        // old entry (its directory is gone) and insert nothing under the
+        // hidden name. A fresh scan of the renamed tree serves neither.
+        if new_name.starts_with('.') {
+            info!(
+                name = %new_name,
+                "sync: renamed onto a hidden top-level name — entry withdrawn"
+            );
+            return None;
+        }
         let md_path = new_physical.join("SKILL.md");
         // The mount's ceiling, not the default: reads, listings and the
         // sync-worker reparses all refuse over-limit manifests, so the
