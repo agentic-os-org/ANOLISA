@@ -323,6 +323,10 @@ agent：
 2. 可选的 **OS 适配器** stage 第二个执行，且只作用于 `SKILL.md`，在 Ubuntu/Debian
    与 Alinux/Anolis 约定之间改写发行版相关字面量。
 
+启发式归一化选择 Yarn 时，仅把不带参数的 `npm install` 改写成 `yarn install`。
+带包名、选项或重定向的安装命令保持原样：Yarn 使用 `add` 添加依赖，并不支持所有 npm
+选项。例如，`npm install lodash` 保持不变；如果技能要求使用 Yarn，请直接写出对应命令。
+
 两个 stage 都是可选的：可以两者都开、仅 directive（默认）、仅适配器（关闭
 directive），或两者都关闭——空流水线原样返回选中的字节。初始化诊断会报告实际
 启用的 stage 列表。

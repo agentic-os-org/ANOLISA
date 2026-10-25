@@ -356,6 +356,12 @@ ordered transform pipeline before an agent sees them:
    rewrites distribution-specific literals between Ubuntu/Debian and
    Alinux/Anolis conventions.
 
+When heuristic normalization selects Yarn, only a bare `npm install` is rewritten
+to `yarn install`. Install commands with package names, flags, or redirections
+remain unchanged: Yarn uses `add` for new dependencies and does not share all npm
+options. For example, `npm install lodash` stays as written; use an explicit
+Yarn command in the skill when that is required.
+
 Both stages are optional: you can run both, directive-only (the default),
 adapter-only (directive disabled), or neither — an empty pipeline serves the
 selected raw bytes unchanged. Initialization diagnostics report the actual
