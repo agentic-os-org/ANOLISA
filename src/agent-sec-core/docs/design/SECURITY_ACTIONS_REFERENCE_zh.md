@@ -280,6 +280,11 @@ failed item 导致 `success=false, exit_code=1`，但 `error_type` 为空，因�
 正常返回 `success=true, exit_code=0`，stdout 是 human-readable summary。当前 backend 不
 捕获 reader exception，异常按 middleware unhandled-error path 传播。
 
+[CURRENT] human-readable hardening 合规率以最新含有效 `passed/total` 统计的 scan 为基线，
+只追加时间严格晚于该 scan 的 reinforce `fixed` 数；较早或同一时间的修复不重复累计。
+含可用统计的非零退出 scan 同样更新基线；无统计的失败 scan 不替代已有基线。
+此修正不改变上述 `data` 字段、事件总数、命令参数或 lifecycle 副作用。
+
 查询发生在本次 summary SecurityEvent 写入之前，因此 `data` 不包含本次 summary event；
 调用完成后 lifecycle 会新增一条 summary event。
 
