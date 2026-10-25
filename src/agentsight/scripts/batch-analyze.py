@@ -587,7 +587,7 @@ def main():
         "--limit",
         type=int,
         default=10,
-        help="Max number of files to analyze (default: 10)",
+        help="Max number of files to analyze (non-negative; default: 10)",
     )
     parser.add_argument(
         "--min-steps",
@@ -606,6 +606,8 @@ def main():
         help="Compute local perf/cost statistics without LLM requests or credentials",
     )
     args = parser.parse_args()
+    if args.limit < 0:
+        parser.error("--limit must be non-negative")
     if args.stats_only and args.dim == "accuracy":
         parser.error("--stats-only supports perf and cost; accuracy requires LLM analysis")
 
