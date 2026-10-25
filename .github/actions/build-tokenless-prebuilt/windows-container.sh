@@ -31,11 +31,11 @@ case "$1" in
         done
         # The extension uses the CRT supplied with Windows Python.
         export RUSTFLAGS='-C link-arg=/Brepro'
-        # The SDK's packaged resource contract uses the extensionless name on every OS.
+        # PowerShell requires the executable suffix when resolving the SDK's RTK alias.
         rtk_dir=/source/python/tokenless/python/anolisa_tokenless/_bin
         mkdir -p "$rtk_dir"
-        install -m 0755 "$CARGO_TARGET_DIR/$target/release/rtk.exe" "$rtk_dir/rtk"
-        trap 'rm -f "$rtk_dir/rtk"' EXIT
+        install -m 0755 "$CARGO_TARGET_DIR/$target/release/rtk.exe" "$rtk_dir/rtk.exe"
+        trap 'rm -f "$rtk_dir/rtk.exe"' EXIT
         cd /source/python/tokenless
         "${reproducible[@]}" maturin build --locked --target "$target" \
             --profile python-release --out /wheels

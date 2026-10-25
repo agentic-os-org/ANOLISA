@@ -227,11 +227,12 @@ def verify_runtime(path: Path, version: str) -> NativeTarget:
         ]
         if len(native_members) != 1:
             fail(f"{path.name} must contain exactly one native extension")
+        rtk_name = "rtk.exe" if target.os_name == "windows" else "rtk"
         rtk_members = [
-            name for name in archive.namelist() if name == "anolisa_tokenless/_bin/rtk"
+            name for name in archive.namelist() if name == f"anolisa_tokenless/_bin/{rtk_name}"
         ]
         if len(rtk_members) != 1:
-            fail(f"{path.name} must contain exactly one embedded RTK binary")
+            fail(f"{path.name} must contain exactly one embedded {rtk_name} binary")
         rtk_info = archive.getinfo(rtk_members[0])
         if not ((rtk_info.external_attr >> 16) & 0o111):
             fail(f"{path.name} embeds a non-executable RTK binary")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise packaged Windows CLI, RTK and ABI3 SDK under Windows Python in Wine."""
+"""Exercise Windows artifacts; pass --powershell powershell.exe on native Windows."""
 
+import argparse
 import asyncio
 import json
 import os
@@ -25,9 +26,14 @@ def run(binary: Path, *arguments: str, payload: bytes | None = None, expected: i
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("archives", type=Path)
+    parser.add_argument("wheels", type=Path)
+    parser.add_argument("version")
+    parser.add_argument("--powershell", type=Path, help="execute SDK rewrites with this PowerShell")
+    args = parser.parse_args()
     assert sys.platform == "win32", "this smoke test must use Windows Python"
-    archives, wheels = map(Path, sys.argv[1:3])
-    version = sys.argv[3]
+    archives, wheels, version = args.archives, args.wheels, args.version
     # Windows keeps the imported .pyd locked until Python exits; the Wine prefix owns this fixture.
     root = Path(tempfile.mkdtemp(prefix="tokenless 中文 smoke "))
     with zipfile.ZipFile(archives / f"tokenless-{version}-windows-x86_64.zip") as package:
@@ -107,18 +113,19 @@ def main() -> None:
     with zipfile.ZipFile(wheel) as package:
         package.extractall(site)
     sys.path.insert(0, str(site))
-    asyncio.run(sdk_smoke(root, description))
+    asyncio.run(sdk_smoke(root, description, args.powershell))
     print("PASS: Windows Python ABI3 SDK, packaged RTK, Stash, authorization and statistics")
 
 
-async def sdk_smoke(root: Path, description: str) -> None:
+async def sdk_smoke(root: Path, description: str, powershell: Path | None) -> None:
     import anolisa_tokenless as sdk_api
 
     sdk = sdk_api.TokenlessSdk(sdk_api.TokenlessConfig(data_dir=root / "sdk-state"))
+    assert sdk._rtk_path.name == "rtk.exe", sdk._rtk_path
     attribution = sdk_api.Attribution("windows-ci", "sdk-smoke", "sdk-call")
     rewritten = await sdk.pre_tool(
         sdk_api.PreToolRequest(
-            "shell",
+            "PowerShell",
             {"command": "git status", "other": "中文"},
             "command",
             sdk_api.PreToolCapabilities(True, False),
@@ -127,6 +134,36 @@ async def sdk_smoke(root: Path, description: str) -> None:
     )
     assert rewritten.action == sdk_api.PreToolAction.REPLACE_ARGUMENTS, rewritten
     assert rewritten.arguments["other"] == "中文"
+    if powershell is None:
+        print("NOT RUN: SDK PowerShell execution (pass --powershell on native Windows)")
+    else:
+        fixture = root / "SDK 中文 input.txt"
+        fixture.write_text("TOKENLESS_WHEEL_RTK_SENTINEL\n", encoding="utf-8")
+        for path, expected in ((fixture, 0), (root / "missing.txt", 1)):
+            quoted = str(path).replace("'", "''")
+            rewritten = await sdk.pre_tool(
+                sdk_api.PreToolRequest(
+                    "PowerShell",
+                    {"command": f"cat '{quoted}'"},
+                    "command",
+                    sdk_api.PreToolCapabilities(True, False),
+                    attribution,
+                )
+            )
+            assert rewritten.action == sdk_api.PreToolAction.REPLACE_ARGUMENTS, rewritten
+            output = run(
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$ErrorActionPreference = 'Stop'; "
+                + rewritten.arguments["command"]
+                + " | Out-String; exit $LASTEXITCODE",
+                expected=expected,
+            )
+            if expected == 0:
+                assert b"TOKENLESS_WHEEL_RTK_SENTINEL" in output, output
+        print("PASS: SDK PowerShell pipeline output and native failure exit code")
     before = await sdk.before_model(
         sdk_api.BeforeModelRequest(
             (

@@ -58,6 +58,7 @@ def create_runtime(
     version: str = VERSION,
     platform: str | None = None,
     binary_architecture: str | None = None,
+    rtk_name: str | None = None,
 ) -> Path:
     platform = platform or PLATFORMS[(os_name, architecture)]
     path = directory / f"anolisa_tokenless-{version}-cp311-abi3-{platform}.whl"
@@ -83,7 +84,8 @@ def create_runtime(
         )
         extension = "_native.pyd" if os_name == "windows" else "_native.abi3.so"
         add_member(archive, f"anolisa_tokenless/{extension}", payload, 0o100755)
-        add_member(archive, "anolisa_tokenless/_bin/rtk", payload, 0o100755)
+        rtk_name = rtk_name or ("rtk.exe" if os_name == "windows" else "rtk")
+        add_member(archive, f"anolisa_tokenless/_bin/{rtk_name}", payload, 0o100755)
     return path
 
 
@@ -279,6 +281,21 @@ def main() -> int:
         bad_windows.mkdir()
         create_runtime(bad_windows, "windows", "x86_64", binary_architecture="aarch64")
         run_verifier(bad_windows, "--layout", "flat", "--os", "windows", "--arch", "x86_64", expect_success=False)
+
+        for os_name, wrong_name in (("windows", "rtk"), ("macos", "rtk.exe")):
+            wrong_rtk_name = root / f"wrong-rtk-name-{os_name}"
+            wrong_rtk_name.mkdir()
+            create_runtime(wrong_rtk_name, os_name, "x86_64", rtk_name=wrong_name)
+            run_verifier(
+                wrong_rtk_name,
+                "--layout",
+                "flat",
+                "--os",
+                os_name,
+                "--arch",
+                "x86_64",
+                expect_success=False,
+            )
 
         bad_architecture = root / "bad-architecture"
         bad_architecture.mkdir()
