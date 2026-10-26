@@ -89,17 +89,17 @@ export async function fixture(t, callback = async () => ({}), extra = {}, policy
     await query.initializationResult();
   }
   t.after(async () => { input.resolve(); await resident.close(); });
-  const model = (id, input = { command: "fixture" }, name = "Bash") => transport.emit({ type: "assistant",
-    session_id: "session", uuid: `message-${id}`, parent_tool_use_id: null,
+  const model = (id, input = { command: "fixture" }, name = "Bash", parent = null) => transport.emit({ type: "assistant",
+    session_id: "session", uuid: `message-${id}`, parent_tool_use_id: parent,
     message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
   const hook = (id, request, event = "PreToolUse", input = { command: "fixture" },
-    { name = "Bash", mcpContext, group = 0 } = {}) => {
+    { name = "Bash", mcpContext, group = 0, session = "session" } = {}) => {
     const callbackId = transport.hooks[event][group].hookCallbackIds[0];
     transport.emit({ type: "control_request", request_id: request,
       request: { subtype: "hook_callback", callback_id: callbackId, tool_use_id: id,
         input: { hook_event_name: event, tool_use_id: id, tool_name: name, tool_input: input,
           ...(mcpContext ? { mcp_context: mcpContext } : {}),
-          cwd: process.cwd(), session_id: "session", tool_response: "result" } } });
+          cwd: process.cwd(), session_id: session, tool_response: "result" } } });
   };
   const response = async request => {
     for (let attempt = 0; attempt < 1000; attempt++) {

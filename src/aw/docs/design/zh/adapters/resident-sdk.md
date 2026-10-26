@@ -42,7 +42,14 @@ Pi 使用公开模型 stream 及其产生的工具对象。Claude 使用私有 l
 转发层和固定 SDK 传输的回调调度上下文。MCP `_meta.claudecode/toolUseId` 在 SDK 移除
 handler 参数中的元数据前，将原生帧关联到同一个身份。
 Qoder 使用固定 Worker 私有 partial 输出中的完整模型工具块，并按原生 control 调度上下文
-核验每个 Hook。
+核验每个 Hook。子工具的私有 stream-start 帧在活动且已授权的父 Agent 下预留原生 ID。
+PreTool 或权限回调可能早于完整 assistant 帧到达；回调在原生取消边界内等待该帧及其登记
+确认，回调输入不能补充缺失的模型参数。未完成生产者占用活动调用预算，固定十二秒期限
+从子调用 stream-start 帧到达开始，完整 assistant 参数到达后结束。该期限独立于 Provider
+事件预算，目前没有配置覆盖项。参数流过慢可能导致所属 Query 失败；Adapter 始终等待
+完整生产端参数后才授权。
+取消、身份不匹配或父调用完成会阻止新授权；结果屏障仍等待原始回调排空后再回收。未知 ID
+立即拒绝。
 
 服务仅保留活动明细。结果采纳后，closing 状态拒绝新 Hook open，取消并等待未完成 Provider，
 删除两个阶段的关联，再回收调用。Claude 暂留已采纳调用的小记录，直到原生完成 Hook 结束且

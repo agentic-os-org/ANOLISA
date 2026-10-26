@@ -50,7 +50,20 @@ loopback Anthropic Messages relay and the pinned SDK transport dispatch context.
 MCP `_meta.claudecode/toolUseId` links the native frame to that same identity before
 the SDK removes metadata from its public handler arguments.
 Qoder uses completed model tool blocks from the pinned Worker's private partial
-output and verifies each Hook against its native control-dispatch context.
+output and verifies each Hook against its native control-dispatch context. For
+child tools, a private stream-start frame reserves the native ID under an active,
+admitted parent Agent. A PreTool or permission callback can arrive before the
+complete assistant frame; it waits inside the native cancellation boundary for
+that frame and its registration acknowledgement. The callback input cannot supply
+missing model parameters. Pending producers count toward the active invocation
+budget and have a fixed 12-second deadline, starting when the child's stream-start
+frame arrives and ending when its complete assistant input arrives. This bound
+is independent of Provider event budgets and currently has no configuration
+override. Slow parameter streaming can exceed it and fail the owning Query;
+the adapter never authorizes from partial or callback-supplied input. Cancellation,
+mismatched identity or parent
+completion blocks new authorization; result barriers still drain original callbacks
+before retirement. Unknown IDs fail immediately.
 
 Only active details are retained. After result adoption, closing fences new Hook
 opens, cancels/joins unfinished Provider work, removes both phase correlations,

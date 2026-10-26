@@ -60,8 +60,9 @@ export class Resident {
   fail(error) {
     this.failure ??= error;
     this.scope.failed = true;
+    this.identities.cancel(this.failure);
     // Interrupt uses the native control plane; do not await it from its own Hook.
-    if (this.query && !this.interruption) {
+    if (this.query && !this.closing && !this.interruption) {
       this.interruption = this.query.interrupt();
       this.interruption.catch(() => {});
     }
@@ -111,10 +112,11 @@ export class Resident {
           const key = `${event}:${groupIndex}:${callbackIndex}`;
           return (input, id, context) => this.track(async () => {
             const tool = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event);
-            const entry = tool ? await this.identities.claim(input, id, key) : undefined;
+            const entry = tool ? await this.identities.claim(input, id, key, context.signal) : undefined;
             const result = await callback(input, id, context);
             checkExecutionCleanup();
             if (entry && event === "PreToolUse") {
+              this.identities.check(entry, true);
               if (result?.hookSpecificOutput?.permissionDecision === "deny") entry.phase = "denied";
               else if (entry.phase !== "denied") entry.phase = "allowed";
             }
@@ -129,14 +131,26 @@ export class Resident {
     }
     const canUseTool = options.canUseTool && ((...args) => this.track(async () => {
       const ticket = this.identities.dispatch.getStore();
-      if (ticket?.kind !== "can_use_tool" || !ticket.entry || ticket.entry.phase === "denied" ||
-          args[0] !== ticket.entry.name || !isDeepStrictEqual(args[1], ticket.entry.input) ||
+      if (ticket?.kind !== "can_use_tool" || !ticket.entry || args[0] !== ticket.entry.name ||
           args[2].toolUseID !== ticket.entry.native)
         return { behavior: "deny", message: "AW rejected native permission identity" };
+      if (ticket.entry.callbacks.has("can_use_tool"))
+        throw new Error("AW rejected repeated native permission callback");
+      ticket.entry.callbacks.add("can_use_tool");
+      await this.identities.ready(ticket.entry, args[2].signal, true);
+      if (ticket.entry.phase === "denied" || !isDeepStrictEqual(args[1], ticket.entry.input)) {
+        ticket.entry.phase = "denied";
+        return { behavior: "deny", message: "AW rejected native permission identity" };
+      }
       const result = await options.canUseTool(...args);
       checkExecutionCleanup();
+      this.identities.check(ticket.entry, true);
+      if (result.behavior === "deny") ticket.entry.phase = "denied";
       return result;
-    }, this.identities.dispatch.getStore()?.entry));
+    }, this.identities.dispatch.getStore()?.entry).catch(error => {
+      this.fail(error);
+      return { behavior: "deny", message: "AW native permission identity failed" };
+    }));
     const decorated = { ...options, hooks, ...(canUseTool ? { canUseTool } : {}) };
     for (const path of ["resolveModel", "onAuthExpired", "resolveSessionArtifacts", "onElicitation",
       "auth.fetchJobToken", "auth.fetchServiceAccountToken",
@@ -175,8 +189,12 @@ export class Resident {
       throw new Error("Pinned Qoder Query lacks native control response transport");
     const record = query.recordInboundSessionMessage.bind(query);
     query.recordInboundSessionMessage = message => {
-      try { this.identities.produce(message); }
-      catch (error) {
+      try {
+        this.identities.produce(message);
+        if (message.type === "user")
+          for (const block of message.message?.content ?? [])
+            if (block.type === "tool_result") this.identities.terminal(block.tool_use_id);
+      } catch (error) {
         this.fail(error);
         throw this.failure;
       }
@@ -316,8 +334,8 @@ export class Resident {
     if (this.owner && (options.env !== undefined || options.auth !== undefined))
       throw new Error("Qoder daemon owns its credential environment; Query overrides are unsupported");
     const environment = { ...(this.owner?.environment ?? process.env), ...(options.env ?? {}) };
-    // Worker 1.1.78 publishes completed model tool blocks before dispatch only
-    // with partial output enabled. Keep that producer channel private by default.
+    // Partial output supplies root producers and child identity announcements;
+    // child callbacks await the complete assistant on this private channel.
     options = { ...options, includePartialMessages: true,
       ...(this.owner ? {} : { env: { ...environment } }),
       ...(options.auth ? { auth: credentialOptions(options.auth) } : {}) };
@@ -390,6 +408,7 @@ export class Resident {
       this.closing = true;
       this.releaseInput?.();
       this.scope.failed = true;
+      this.identities.cancel(this.failure ?? new Error("AW native Query closed before child producer"));
       this.closed = this.finish();
       this.closed.catch(() => {});
     }
