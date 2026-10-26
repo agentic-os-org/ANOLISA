@@ -256,12 +256,12 @@ pub fn remove_empty_dir(root: BorrowedFd<'_>, rel: &Path) -> Result<()> {
         nix::unistd::UnlinkatFlags::RemoveDir,
     ) {
         Ok(()) => Ok(()),
-        Err(nix::errno::Errno::ENOTEMPTY) | Err(nix::errno::Errno::EEXIST) => Err(
-            MemoryError::InvalidArgument(format!(
+        Err(nix::errno::Errno::ENOTEMPTY) | Err(nix::errno::Errno::EEXIST) => {
+            Err(MemoryError::InvalidArgument(format!(
                 "'{}' is a directory; pass recursive=true to remove",
                 rel.display()
-            )),
-        ),
+            )))
+        }
         Err(nix::errno::Errno::ENOENT) => Err(MemoryError::NotFound(rel.display().to_string())),
         Err(e) => Err(MemoryError::Other(format!(
             "unlinkat dir {}: {e}",
