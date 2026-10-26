@@ -1,4 +1,4 @@
-//! Skill Ledger business CLI; all scanning and trust operations execute in the daemon.
+//! Skill security commands; trust operations use the daemon and assessments run locally.
 
 use crate::InputError;
 use asc_daemon_protocol::{DaemonRequest, method};
@@ -20,6 +20,8 @@ pub(crate) struct Selection {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SkillLedgerCommand {
+    /// Plan and run local safety assessments without a daemon.
+    Score(super::SkillScoreCommand),
     /// Initialize the daemon system key and scan a baseline.
     Init {
         /// Initialize only the key.
@@ -114,6 +116,7 @@ pub(crate) enum SkillLedgerCommand {
 impl SkillLedgerCommand {
     pub(crate) fn request(&self) -> Result<DaemonRequest, InputError> {
         let params = match self {
+            Self::Score(_) => return Err(InputError::LocalCommand),
             Self::Init {
                 no_baseline,
                 force_keys,

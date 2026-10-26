@@ -1,0 +1,9 @@
+{
+  "version": "3.12.11",
+  "build": "20250902",
+  "architecture": "x86_64-unknown-linux-gnu",
+  "url": "https://releases.astral.sh/github/python-build-standalone/releases/download/20250902/cpython-3.12.11%2B20250902-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+  "sha256": "49b3c31d7c51bfb469d6ff77db1b800cbdd7aaa11fafb9af0b517d9aa129b48b",
+  "checksum_source": "https://raw.githubusercontent.com/astral-sh/uv/0.8.17/crates/uv-python/download-metadata.json",
+  "licenses": "The original CPython distribution and dependency license files are retained."
+}

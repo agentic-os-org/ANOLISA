@@ -38,6 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pgpy = ["pgpy>=0.5"]
+skill-score = ["anthropic==1.1.0"]
 
 [dependency-groups]
 dev = [
@@ -71,6 +72,10 @@ include = [
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/NOTICE",
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/rules/*.yaml",
     "src/agent_sec_cli/skill_ledger/analyze.schema.json",
+    "src/agent_sec_cli/skill_score/tool-inventory.json",
+    "src/agent_sec_cli/skill_score/vendor/masb/LICENSE",
+    "src/agent_sec_cli/skill_score/vendor/masb/provenance.json",
+    "src/agent_sec_cli/skill_score/vendor/masb/config/*.yaml",
 ]
 # Native module name (must match lib.rs function name)
 module-name = "agent_sec_cli._native"
@@ -134,7 +139,7 @@ select = [
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent_sec_cli"]
+known-first-party = ["agent_sec_cli", "agent_sec_skill_score_runtime"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -154,7 +159,7 @@ extend-exclude = "/backend-skill/templates/"
 [tool.isort]
 profile = "black"
 line_length = 80
-known_first_party = ["agent_sec_cli"]
+known_first_party = ["agent_sec_cli", "agent_sec_skill_score_runtime"]
 extend_skip_glob = ["dev-tools/backend-skill/templates/*"]
 
 [[tool.uv.index]]
