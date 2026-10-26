@@ -262,6 +262,8 @@ not retained. Other hard links and already-open handles keep the old content.
 An error saying the replacement was published but directory sync failed means
 new content is already visible; read the file before retrying.
 
+`mem_edit` requires exactly one occurrence of `old_str`, including overlapping occurrences. For example, `aba` occurs twice in `ababa`; the edit fails and leaves the file unchanged. Include more surrounding text to identify the intended occurrence.
+
 ### Tier B — structured retrieval (7)
 
 For keyword search, pass ordinary text to `memory_search`, for example

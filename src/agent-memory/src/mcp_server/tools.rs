@@ -82,7 +82,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Replace exactly one occurrence of old_str with new_str in a file. Errors if old_str matches zero or multiple times."
+        description = "Replace exactly one occurrence of old_str with new_str in a file. Errors if old_str matches zero or multiple times, including overlapping matches."
     )]
     async fn mem_edit(
         &self,
