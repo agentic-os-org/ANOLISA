@@ -45,6 +45,14 @@ fn main() -> ExitCode {
             };
         }
     };
+    // Assessment owns its lifecycle and must start before telemetry threads.
+    if let Plan::SkillScore(command) = cli.plan() {
+        return exec_score(command);
+    }
+    run_observed(&cli)
+}
+
+fn run_observed(cli: &Cli) -> ExitCode {
     let runtime = match asc_observability::init_runtime("agent-sec-cli") {
         Ok(runtime) => runtime,
         Err(reason) => {
@@ -70,7 +78,7 @@ fn main() -> ExitCode {
         span.in_scope(|| {
             let _context = asc_observability::request_context().attach();
             asc_observability::report_propagation_issues();
-            let result = run(&cli);
+            let result = run(cli);
             let success = matches!(result, Ok(0));
             if success {
                 asc_observability::mark_success();
@@ -117,6 +125,16 @@ fn main() -> ExitCode {
     }
 }
 
+fn exec_score(command: &asc_cli::SkillScoreCommand) -> ExitCode {
+    match command.exec() {
+        Ok(never) => match never {},
+        Err(error) => {
+            eprintln!("agent-sec-cli: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run(cli: &Cli) -> Result<u8, RunError> {
     let socket = match cli.plan() {
         Plan::Sandbox(command) => {
@@ -138,6 +156,8 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
         Plan::PolicyDefault(command) => return render_policy_default(command),
         Plan::ObservabilitySchema => return render_observability_schema(),
         Plan::Daemon { socket } => socket,
+        // main handles assessment before entering this observed command path.
+        Plan::SkillScore(_) => unreachable!("assessment exec is handled before runtime startup"),
     };
     if let Some(result) = run_owned_transport(cli, socket) {
         return result;
