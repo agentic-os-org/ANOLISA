@@ -34,17 +34,25 @@ DEFAULT_OPENCLAW_PROFILES_DIR = Path("output/run/openclaw-profiles")
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError as exc:
-            logger.warning("Skipping malformed OpenClaw JSONL line file=%s line=%s error=%s", path, line_number, exc)
-            continue
-        if isinstance(entry, dict):
-            entries.append(entry)
+    # Decode per line so one truncated multi-byte character cannot abort the
+    # export of this file and of the other sessions.
+    with path.open("rb") as stream:
+        for line_number, raw_line in enumerate(stream, start=1):
+            try:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "Skipping malformed OpenClaw JSONL line file=%s line=%s error=%s",
+                    path,
+                    line_number,
+                    exc,
+                )
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
     return entries
 
 

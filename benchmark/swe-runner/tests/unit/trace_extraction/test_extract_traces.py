@@ -16,6 +16,9 @@
 
 import csv
 import json
+from pathlib import Path
+
+import pytest
 
 from swe_runner.trace_extraction import (
     analyze_trace_files,
@@ -90,6 +93,65 @@ class TestSanitizePathComponent:
 
 
 class TestRecordOpenClawJsonlTracesInWindow:
+    @pytest.mark.parametrize("damage", [b"\xe4\xb8", b'{"text":"\xff"}\n'])
+    @pytest.mark.parametrize("position", ["middle", "tail"])
+    def test_damaged_utf8_does_not_discard_complete_sessions(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, damage: bytes, position: str
+    ) -> None:
+        profiles_root = tmp_path / "profiles"
+        originals = {}
+        for session_id in ("damaged", "healthy"):
+            sessions = profiles_root / session_id / "agents" / "main" / "sessions"
+            sessions.mkdir(parents=True)
+            path = sessions / f"{session_id}.jsonl"
+            entries = [
+                {"type": "session", "id": session_id},
+                {"role": "user", "content": f"Issue ID: {session_id}__case-1"},
+                {
+                    "id": "first-turn",
+                    "role": "assistant",
+                    "content": "完整记录",
+                    "usage": {"input": 10, "output": 3},
+                },
+                {
+                    "id": "second-turn",
+                    "role": "assistant",
+                    "content": "valid record after damage",
+                    "usage": {"input": 20, "output": 5},
+                },
+            ]
+            lines = [json.dumps(entry, ensure_ascii=False).encode("utf-8") + b"\n" for entry in entries]
+            if session_id == "damaged":
+                if position == "middle":
+                    lines.insert(3, damage + b"\n")
+                else:
+                    lines.append(damage)
+            payload = b"".join(lines)
+            path.write_bytes(payload)
+            originals[path] = payload
+
+        recorded = record_openclaw_jsonl_traces_in_window(
+            0, 1, profiles_root=profiles_root, trace_root=tmp_path / "traces"
+        )
+        assert len(recorded) == 2
+        data = [json.loads(path.read_text(encoding="utf-8")) for path in recorded]
+        assert {trace["session_id"] for trace in data} == {"damaged", "healthy"}
+        for trace in data:
+            assert trace["total_steps"] == 2
+            assert trace["total_input_tokens"] == 30
+            assert trace["total_output_tokens"] == 8
+            assert trace["steps"][0]["assistant_output"][0]["content"] == "完整记录"
+        assert "Skipping malformed OpenClaw JSONL line" in caplog.text
+        assert f"line={4 if position == 'middle' else 5}" in caplog.text
+        for path, payload in originals.items():
+            assert path.read_bytes() == payload
+
+    def test_jsonl_reader_propagates_filesystem_errors(self, tmp_path: Path) -> None:
+        from swe_runner.trace_extraction.openclaw_jsonl import _read_jsonl
+
+        with pytest.raises(FileNotFoundError):
+            _read_jsonl(tmp_path / "missing.jsonl")
+
     def test_records_real_openclaw_message_content_shape(self, tmp_path):
         profiles_root = tmp_path / "openclaw-profiles"
         sessions_dir = profiles_root / "pydata__xarray-5131" / "agents" / "pydata__xarray-5131" / "sessions"
