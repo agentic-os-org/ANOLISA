@@ -219,6 +219,24 @@ class TestExtractVerdict:
         assert verdict == "DENY"
         assert reason == "malicious"
 
+    def test_nested_braces_in_reason(self) -> None:
+        content = '{"verdict": "DENY", "reason": "command contains {sensitive} data"}'
+        verdict, reason = _extract_verdict(content)
+        assert verdict == "DENY"
+        assert reason == "command contains {sensitive} data"
+
+    def test_nested_braces_with_markdown_fence(self) -> None:
+        content = '```json\n{"verdict": "DENY", "reason": "hits {rule_a} in {ctx}"}\n```'
+        verdict, reason = _extract_verdict(content)
+        assert verdict == "DENY"
+        assert reason == "hits {rule_a} in {ctx}"
+
+    def test_deeply_nested_braces_in_reason(self) -> None:
+        content = '{"verdict": "PASS", "reason": "checked {{nested}} ok"}'
+        verdict, reason = _extract_verdict(content)
+        assert verdict == "PASS"
+        assert reason == "checked {{nested}} ok"
+
     def test_empty_string(self) -> None:
         verdict, reason = _extract_verdict("")
         assert verdict is None

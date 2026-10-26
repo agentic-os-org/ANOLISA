@@ -108,6 +108,23 @@ SYSTEM_PROMPT = (
 _JSON_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
 
+def _extract_first_json(text: str) -> Optional[str]:
+    """Find the first balanced JSON object in ``text``.
+
+    Unlike the flat ``_JSON_RE`` regex, this handles nested braces inside
+    string values by delegating to the stdlib JSON decoder's ``raw_decode``.
+    """
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch == "{":
+            try:
+                _obj, end = decoder.raw_decode(text[i:])
+            except json.JSONDecodeError:
+                continue
+            return text[i : i + end]
+    return None
+
+
 def _extract_verdict(content: str) -> tuple[Optional[str], str]:
     """Best-effort parse of model output -> (verdict, reason).
 
@@ -116,10 +133,12 @@ def _extract_verdict(content: str) -> tuple[Optional[str], str]:
     if not content:
         return None, ""
     text = content.strip()
-    # Try direct JSON first.
     candidates: List[str] = []
     if text.startswith("{") and text.endswith("}"):
         candidates.append(text)
+    first_json = _extract_first_json(text)
+    if first_json is not None:
+        candidates.append(first_json)
     candidates.extend(_JSON_RE.findall(text))
     for cand in candidates:
         try:
