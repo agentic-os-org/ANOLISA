@@ -61,7 +61,7 @@ adopted a policy. The admitted surface remains:
 | Event | Candidate effects | Failure action |
 | --- | --- | --- |
 | `tool.before` | `observe`, `block` | `report`, or `block` with Adapter support |
-| `tool.after` | `observe`, `replace_result` | `report` |
+| `tool.after` | `observe`, `replace_result` | `report`, or `withhold_result` with explicit Adapter failure-action evidence |
 
 Enabled unsupported events, guards, `ask`, input-replacement
 effects and guarantees beyond `native_hook` are rejected. The

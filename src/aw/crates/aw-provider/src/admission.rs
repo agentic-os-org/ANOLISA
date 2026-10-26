@@ -31,6 +31,8 @@ pub struct AdapterCapabilities {
     pub entrypoint: String,
     /// Supported effects by event, restricted to this library's initial surface.
     pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions supported by each event at this exact entrypoint.
+    pub failure_actions: BTreeMap<String, Vec<String>>,
 }
 
 /// One configured step checked against the implementation and Adapter.
@@ -172,6 +174,14 @@ pub fn preflight(
             "Adapter evidence exceeds the supported event or effect surface",
         )?;
     }
+    for (event, actions) in &capabilities.failure_actions {
+        require(
+            event == "tool.after"
+                && capabilities.events.contains_key(event)
+                && actions.iter().all(|action| action == "withhold_result"),
+            "Adapter evidence exceeds the supported failure action surface",
+        )?;
+    }
     require(
         spec["execution"]["guarantee"] == "native_hook",
         "only native_hook execution can be admitted",
@@ -219,7 +229,13 @@ pub fn preflight(
             if step["enabled"] == false {
                 continue;
             }
-            candidates.push(preflight_step(spec, event_name, step, effects)?);
+            candidates.push(preflight_step(
+                spec,
+                event_name,
+                step,
+                effects,
+                capabilities,
+            )?);
         }
     }
     Ok(candidates)
@@ -230,6 +246,7 @@ fn preflight_step(
     event: &str,
     step: &Value,
     adapter_effects: &[String],
+    capabilities: &AdapterCapabilities,
 ) -> Result<AdmittedStep, Error> {
     let provider_name = string(&step["provider"])?;
     let provider = spec["providers"]
@@ -284,7 +301,15 @@ fn preflight_step(
         on_error == "report"
             || (event == "tool.before"
                 && on_error == "block"
-                && adapter_effects.iter().any(|effect| effect == "block")),
+                && adapter_effects.iter().any(|effect| effect == "block"))
+            || (event == "tool.after"
+                && on_error == "withhold_result"
+                && capabilities
+                    .failure_actions
+                    .get(event)
+                    .is_some_and(|actions| {
+                        actions.iter().any(|action| action == "withhold_result")
+                    })),
         "failure action is not supported by the implementation and Adapter",
     )?;
     Ok(AdmittedStep {

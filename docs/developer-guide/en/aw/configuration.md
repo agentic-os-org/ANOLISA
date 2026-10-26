@@ -146,7 +146,9 @@ acquiring approval capability. Native host approval is unaffected.
 `withhold_result` is valid only after a tool. `report` records a failure and
 continues. Withholding requires a verified model-consumption boundary; replacing
 a history entry is insufficient. Required redaction must not use `report`.
-The service must enforce these requirements at admission and execution.
+The service enforces these requirements at admission and execution. Currently only
+ordinary QwenPaw resident launches declare `withhold_result` for structured Provider
+and boolean Hook after steps. Reloadable launches and native-command steps reject it.
 
 Both tool events and their steps accept `match.tools`. A step runs only when
 the tool matches both lists; entries within one list are alternatives. Omitting

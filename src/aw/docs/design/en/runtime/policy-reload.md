@@ -5,11 +5,12 @@
 AW can explicitly update the policy of an idle instance launched with a stable
 bridge. The native host process stays alive; busy instances reject the update.
 The runtime path is opt-in through `aw run --reloadable`, pinned to
-Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App and Qoder SDK
+Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App and Qoder SDK
 1.0.56 / bundled Worker 1.1.78. External attachment supports the TUI and App
 through `aw agent connect --pid PID`; SDK daemon attachment and steer remain
 planned. For `qoder-sdk`, ordinary `aw run` opens a resident child scope for each
-managed Query. Resident policy changes use a rolling restart; `--reloadable`
+managed Query. Ordinary QwenPaw App launches open a task scope for each managed
+Agent reply. Resident policy changes use a rolling restart; `--reloadable`
 retains the separate idle-update contract described below.
 
 ## Qoder SDK request admission
@@ -236,7 +237,7 @@ request, including model waits; `on_acting` tracks the actual tool generator.
 Callbacks obtain the active plan from AW, preserving native scheduling, denial
 and final replacement. Only normal generator exhaustion releases request/tool
 claims; a policy denial before native tool entry also releases that tool claim.
-AgentScope 2.0.9 does not propagate wrapper closure through every child generator.
+AgentScope 2.0.10 does not propagate wrapper closure through every child generator.
 A final response or successful wrapper `aclose()` therefore cannot prove native
 cleanup. Hold the final tool response and ERROR/INTERRUPTED chunks until normal
 exhaustion and the end notification: QwenPaw's ToolCoordinator stops pulling at
@@ -248,7 +249,7 @@ instance when completion cannot be established. For external instances, use the 
 interface and correlate its endpoint, working directory and executing process.
 
 Hot installation uses the same pinned AW plugin and startup-ready callback. The
-2.2.2b4 native plugin API invokes startup callbacks during hot install. An owned
+2.2.2.post1 native plugin API invokes startup callbacks during hot install. An owned
 `aw-attachment.json` descriptor beside the installed plugin replaces the need
 for post-start environment injection. The CLI verifies that the selected App PID
 owns its loopback port; success also requires that PID's nonce-bearing receipt.

@@ -185,7 +185,9 @@ preserved; admission does not schedule distinct events or choose parallelism.
 | A missing Provider, operation, capability or matching configuration validation | Rejected with an explicit reason |
 
 Before-tool `on_error` may be `report`, or `block` when the Adapter supports
-blocking. After-tool failures support `report`. Other failure actions are rejected.
+blocking. After-tool failures support `report`, or `withhold_result` when the
+prepared Adapter explicitly declares that event-scoped failure action. Currently
+only the ordinary QwenPaw resident entrypoint declares it. Other actions are rejected.
 
 `required: false` does not authorize silently dropping an enabled unsupported
 step. Every enabled structured Provider still supplies discovery and exact

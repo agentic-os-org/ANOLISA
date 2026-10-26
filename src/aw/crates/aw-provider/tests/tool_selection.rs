@@ -34,6 +34,7 @@ fn selected(
         .parse(&serde_json::to_vec(&value).unwrap())
         .unwrap();
     let caps = AdapterCapabilities {
+        failure_actions: Default::default(),
         adapter: "qoder".into(),
         version: "fixture".into(),
         entrypoint: "fixture".into(),

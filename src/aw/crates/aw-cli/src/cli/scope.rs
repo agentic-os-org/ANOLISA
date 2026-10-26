@@ -61,7 +61,10 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
     )?;
     let mut root = HookBinding::read(args.required("--binding")?)?;
     if root.adapter != args.required("--adapter")?
-        || !matches!(root.adapter.as_str(), "pi" | "claude-sdk" | "qoder-sdk")
+        || !matches!(
+            root.adapter.as_str(),
+            "pi" | "claude-sdk" | "qoder-sdk" | "qwenpaw"
+        )
         || root.reloadable
     {
         return Err("unsupported SDK scope binding".into());

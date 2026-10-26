@@ -12,7 +12,7 @@ import time
 from types import ModuleType, SimpleNamespace
 
 if sys.argv[1:] == ["--version"]:
-    print("QwenPaw, version 2.2.2b4")
+    print("QwenPaw, version 2.2.2.post1")
     raise SystemExit(0)
 assert "AW_NATIVE_CONFIG" not in os.environ
 root = Path(os.environ["FAKE_ROOT"])
@@ -64,7 +64,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             spec = importlib.util.spec_from_file_location("attach_plugin", destination / "plugin.py")
             plugin = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(plugin)
-            plugin.version = lambda name: "2.2.2b4" if name == "qwenpaw" else "2.0.9"
+            plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
             startup = []
             plugin.plugin.register(SimpleNamespace(config={}, register_middleware=lambda f, **kw: factories.append(f),
                 register_startup_hook=lambda name, callback: startup.append(callback)))

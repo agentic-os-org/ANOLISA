@@ -154,7 +154,8 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 | 缺少 Provider、操作、能力或匹配的配置校验证据 | 拒绝，并给出明确原因 |
 
 工具执行前的 `on_error` 支持 `report`；Adapter 支持阻断时，也可以使用 `block`。
-工具执行后的失败动作只支持 `report`，其他失败动作拒绝准入。
+工具执行后的失败支持 `report`；已准备的 Adapter 显式声明该事件失败动作时，
+还支持 `withhold_result`。目前仅普通 QwenPaw resident 入口声明该能力。其他动作拒绝。
 
 `required: false` 不允许静默丢弃已启用但不受支持的步骤。所有启用的结构化
 Provider 仍须在运行时选择工具之前提供发现证据和精确的配置校验证据。

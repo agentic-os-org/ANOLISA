@@ -13,23 +13,30 @@ from typing import Any
 import anyio
 
 
-async def command(
+class ScopeTransportFailure(RuntimeError):
+    """Bounded payload or pipe failures, distinct from scope ownership failures."""
+
+
+async def exchange(
     config: dict[str, Any],
     action: str,
     value: Any,
     timeout: float,
     hook: dict[str, Any] | None = None,
     environment: dict[str, str] | None = None,
-) -> tuple[int, bytes]:
+) -> tuple[int, bytes, bytes]:
     """Keep service RPC and binding serialization inside AW's CLI boundary."""
-    encoded = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+    except (TypeError, ValueError) as error:
+        raise ScopeTransportFailure("SDK scope payload cannot be encoded") from error
     if len(encoded) > 1024 * 1024:
-        raise RuntimeError("SDK scope input exceeds one MiB")
+        raise ScopeTransportFailure("SDK scope input exceeds one MiB")
     args = [
         config["executable"],
         "scope",
         "--adapter",
-        "claude-sdk",
+        config.get("adapter", "claude-sdk"),
         "--binding",
         config["binding"],
         "--action",
@@ -51,7 +58,7 @@ async def command(
         while chunk := await stream.read(65536):
             result.extend(chunk)
             if len(result) > limit:
-                raise RuntimeError("SDK scope response exceeds its byte limit")
+                raise ScopeTransportFailure("SDK scope response exceeds its byte limit")
         return bytes(result)
 
     async def write() -> None:
@@ -86,9 +93,23 @@ async def command(
                 if not job.done():
                     job.cancel()
             await asyncio.gather(joined, *jobs, return_exceptions=True)
+    return code, stdout, stderr
+
+
+def diagnostics(stderr: bytes) -> None:
     if stderr:
         sys.stderr.buffer.write(stderr)
         sys.stderr.buffer.flush()
+
+
+async def command(
+    config: dict[str, Any], action: str, value: Any, timeout: float,
+    hook: dict[str, Any] | None = None,
+    environment: dict[str, str] | None = None,
+) -> tuple[int, bytes]:
+    """Keep lifecycle callers' response contract while reporting diagnostics."""
+    code, stdout, stderr = await exchange(config, action, value, timeout, hook, environment)
+    diagnostics(stderr)
     return code, stdout
 
 
@@ -141,13 +162,25 @@ class Scope:
             raise
 
     async def invoke(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
+        code, stdout, stderr = await self.invoke_native(hook, payload)
+        diagnostics(stderr)
+        return code, stdout
+
+    async def invoke_native(
+        self, hook: dict[str, Any], payload: dict[str, Any],
+    ) -> tuple[int, bytes, bytes]:
+        """Retain native denial text separately from structured stdout directives."""
         self.check()
-        return await command(
+        try:
+            native_input = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ScopeTransportFailure("SDK native payload cannot be encoded") from error
+        return await exchange(
             self.config,
             "invoke",
             {
                 "scope": self.handle,
-                "native_input": json.dumps(payload, ensure_ascii=False, allow_nan=False),
+                "native_input": native_input,
             },
             (hook["budget_ms"] + 3000) / 1000,
             hook,

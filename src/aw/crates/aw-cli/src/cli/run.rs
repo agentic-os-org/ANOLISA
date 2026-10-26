@@ -192,7 +192,9 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         };
         instance = Some(binding.instance_id.clone());
         let reloadable = args.flags.contains_key("--reloadable");
-        if matches!(name, "pi" | "claude-sdk") || (name == "qoder-sdk" && !reloadable) {
+        if matches!(name, "pi" | "claude-sdk")
+            || (matches!(name, "qoder-sdk" | "qwenpaw") && !reloadable)
+        {
             service.client.call(
                 Operation::OwnInstance {
                     instance_id: binding.instance_id.clone(),

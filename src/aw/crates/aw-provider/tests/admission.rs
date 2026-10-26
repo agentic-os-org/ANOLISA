@@ -56,6 +56,7 @@ fn configuration(document: &Value) -> Configuration {
 fn capabilities(adapter: &str) -> AdapterCapabilities {
     // Synthetic evidence exercises admission; this is not a real version matrix.
     AdapterCapabilities {
+        failure_actions: Default::default(),
         adapter: adapter.into(),
         version: "fixture-1".into(),
         entrypoint: "fixture-tool-hooks".into(),
@@ -595,4 +596,42 @@ fn result_replacement_requires_adapter_evidence_and_is_the_final_enabled_step() 
     document["spec"]["events"]["tool.after"]["steps"][1]["enabled"] = json!(false);
     document["spec"]["events"]["tool.after"]["steps"][0]["effects"] = json!(["replace_result"]);
     assert!(preflight(&configuration(&document), "qoder", &caps).is_ok());
+}
+
+#[test]
+fn withholding_requires_explicit_event_scoped_adapter_evidence() {
+    let mut document = document();
+    document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    let config = configuration(&document);
+    for adapter in [
+        "qoder",
+        "openclaw",
+        "hermes",
+        "qwenpaw",
+        "pi",
+        "claude-sdk",
+        "agentscope",
+    ] {
+        assert!(preflight(&config, adapter, &capabilities(adapter)).is_err());
+    }
+    let mut caps = capabilities("qwenpaw");
+    caps.failure_actions
+        .insert("tool.after".into(), vec!["withhold_result".into()]);
+    let steps = preflight(&config, "qwenpaw", &caps).unwrap();
+    assert_eq!(
+        steps
+            .iter()
+            .find(|step| step.event == "tool.after")
+            .unwrap()
+            .on_error,
+        "withhold_result"
+    );
+    for (event, action) in [
+        ("tool.before", "withhold_result"),
+        ("tool.after", "block"),
+        ("unknown", "withhold_result"),
+    ] {
+        caps.failure_actions = BTreeMap::from([(event.into(), vec![action.into()])]);
+        assert!(preflight(&config, "qwenpaw", &caps).is_err());
+    }
 }

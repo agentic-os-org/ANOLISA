@@ -52,7 +52,7 @@ Agent 已采用策略。准入范围仍为：
 | 事件 | 候选效果 | 失败动作 |
 | --- | --- | --- |
 | `tool.before` | `observe`、`block` | `report`，或在 Adapter 支持时使用 `block` |
-| `tool.after` | `observe`, `replace_result` | `report` |
+| `tool.after` | `observe`, `replace_result` | `report`，或 Adapter 显式提供失败动作能力时使用 `withhold_result` |
 
 启用但不受支持的事件、guard、`ask`、输入替换效果及超出
 `native_hook` 的保证均被拒绝。完整准入合同见[协议设计](../../../../../../docs/developer-guide/zh/aw/providers/protocol.md)。

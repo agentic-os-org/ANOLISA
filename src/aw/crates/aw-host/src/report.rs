@@ -103,6 +103,8 @@ pub enum FailureAction {
     Report,
     /// Request a native block because execution failed, not because policy matched.
     Block,
+    /// Withhold a tool result when a required PostTool step fails.
+    WithholdResult,
 }
 
 /// Native callback bytes and status; the Adapter applies its framework's semantics.

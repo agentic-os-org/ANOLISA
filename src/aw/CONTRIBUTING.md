@@ -148,7 +148,7 @@ Agent. The nightly job matrix is generated from this inventory. All eight Agents
 have automated suites. OpenClaw covers official Hook runners; full OpenClaw
 Gateway model flows still require explicit acceptance.
 
-Qoder CLI 1.1.64 and QwenPaw 2.2.2b4 / AgentScope 2.0.9 each require four real
+Qoder CLI 1.1.64 and QwenPaw 2.2.2.post1 / AgentScope 2.0.10 each require four real
 sec-core cases: `allow`, `scan-deny`, `backend-error` and `timeout-block`. The jobs
 reuse the candidate's checksummed `aw`, Provider, `agent-sec-cli` and
 `agent-sec-daemon` binaries. Each case starts a private Ubuntu 24.04 container,

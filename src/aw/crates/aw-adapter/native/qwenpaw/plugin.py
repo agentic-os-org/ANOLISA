@@ -19,6 +19,7 @@ from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
 
+
 class CallbackFailure(RuntimeError):
     """A fixed adapter failure code, separate from a native policy denial."""
 
@@ -29,8 +30,15 @@ class AwToolMiddleware(MiddlewareBase):
     def __init__(self, config: dict[str, Any], hook: dict[str, Any]) -> None:
         self.config = config
         self.hook = hook
+        self.scope = None
 
     async def _invoke(self, payload: dict[str, Any]) -> tuple[int, bytes, bytes]:
+        if self.scope is not None:
+            from .aw_scope import ScopeTransportFailure
+            try:
+                return await self.scope.invoke_native(self.hook, payload)
+            except ScopeTransportFailure as error:
+                raise CallbackFailure("scope_transport_failure") from error
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
         if len(encoded) > 1024 * 1024:
             raise CallbackFailure("native_input_limit")
@@ -71,6 +79,8 @@ class AwToolMiddleware(MiddlewareBase):
                 "AW %s step %s failed: %s; on_error=%s",
                 self.hook["event"], self.hook["step"], code, self.hook["on_error"],
             )
+            if self.hook["event"] == "tool.after" and self.hook["on_error"] == "withhold_result":
+                raise CallbackFailure("strict_posttool_failed") from error
             if self.hook["event"] == "tool.before" and self.hook["on_error"] == "block":
                 return ToolResponse(
                     state=ToolResultState.DENIED,
@@ -236,8 +246,8 @@ class AwPlugin:
     """Validate once, then register factories which perform no configuration I/O."""
 
     def register(self, api: Any) -> None:
-        if version("qwenpaw") != "2.2.2b4" or version("agentscope") != "2.0.9":
-            raise RuntimeError("AW requires QwenPaw 2.2.2b4 and AgentScope 2.0.9")
+        if version("qwenpaw") != "2.2.2.post1" or version("agentscope") != "2.0.10":
+            raise RuntimeError("AW requires QwenPaw 2.2.2.post1 and AgentScope 2.0.10")
         if api.config.get("enabled") is False:
             raise RuntimeError("QwenPaw configuration disables the AW plugin")
         descriptor = Path(__file__).with_name("aw-attachment.json")
@@ -259,13 +269,23 @@ class AwPlugin:
                 raise ValueError("Unsupported AW native event")
             if not isinstance(hook.get("step"), str) or not hook["step"]:
                 raise ValueError("AW step must be a nonempty string")
-            if hook.get("on_error") not in {"report", "block"}:
+            if hook.get("on_error") not in {"report", "block", "withhold_result"}:
                 raise ValueError("Invalid AW failure policy")
             if type(hook.get("budget_ms")) is not int or not 1 <= hook["budget_ms"] <= 55000:
                 raise ValueError("AW native budget must be 1..55000 ms")
-        if config.get("reloadable"):
+        if config.get("resident"):
+            if config.get("reloadable"):
+                raise RuntimeError("AW resident task scopes require a non-reloadable QwenPaw binding")
+            from .aw_native import install_guard
+            from .aw_resident import ResidentMiddleware
+            install_guard()
+            api.register_middleware(
+                lambda ctx, agent_config: ResidentMiddleware(config, AwToolMiddleware, ctx),
+                priority=0,
+            )
+        elif config.get("reloadable"):
             api.register_middleware(lambda ctx, agent_config: AwReloadMiddleware(config), priority=0)
-        for hook in config["hooks"]:
+        for hook in ([] if config.get("resident") else config["hooks"]):
             def factory(ctx: Any, agent_config: Any, hook: dict = hook) -> AwToolMiddleware:
                 return AwToolMiddleware(config, hook)
 

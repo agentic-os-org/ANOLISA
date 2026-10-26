@@ -53,6 +53,7 @@ fn host_cancellation_and_outer_deadlines_stop_nested_policy_descendants() {
             &serde_json::to_vec(&document).unwrap(),
             "qoder",
             aw_provider::admission::AdapterCapabilities {
+                failure_actions: Default::default(),
                 adapter: "qoder".into(),
                 version: "1.1.64".into(),
                 entrypoint: "interactive".into(),

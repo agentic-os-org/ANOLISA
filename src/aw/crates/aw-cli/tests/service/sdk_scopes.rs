@@ -18,6 +18,11 @@ fn callback(adapter: &str, after: bool, scenario: &str, cwd: &str) -> Value {
         "qoder-sdk" => json!({"hook_event_name":if after {"PostToolUse"} else {"PreToolUse"},
             "cwd":cwd,"session_id":"session","tool_use_id":"call","tool_name":"Bash",
             "tool_input":{"command":"true"},"tool_response":"original","scenario":scenario}),
+        "qwenpaw" => json!({"event":if after {"tool.after"} else {"tool.before"},
+            "session_id":"session","tool_call":{"id":"call","name":"exec",
+            "input":json!({"command":"true"}).to_string()},
+            "tool_response":{"content":[{"type":"text","text":"original"}],"state":"success"},
+            "scenario":scenario}),
         _ => panic!("missing SDK scope native fixture for {adapter}"),
     };
     if !after {
@@ -121,7 +126,7 @@ impl Drop for OwnedChild {
 
 #[test]
 fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
-    for adapter in ["pi", "claude-sdk", "qoder-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk", "qwenpaw"] {
         for unrelated in [false, true] {
             let fixture = Fixture::new();
             let other =
@@ -195,7 +200,7 @@ fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
 
 #[test]
 fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
-    for adapter in ["pi", "claude-sdk", "qoder-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk", "qwenpaw"] {
         let fixture = Fixture::new();
         let (service, parent, binding) = host(&fixture, adapter);
         let task = fixture.0.join("task");
@@ -309,7 +314,7 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
 
 #[test]
 fn expired_sdk_handoff_can_close_without_reviving_callbacks() {
-    for adapter in ["pi", "claude-sdk", "qoder-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk", "qwenpaw"] {
         let fixture = Fixture::new();
         let (service, parent, binding) = host(&fixture, adapter);
         let input = json!({"pid":std::process::id(), "cwd":fixture.0,

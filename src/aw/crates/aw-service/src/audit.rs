@@ -204,6 +204,7 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let action = value.failure_action.map(|action| match action {
         FailureAction::Report => "report",
         FailureAction::Block => "block",
+        FailureAction::WithholdResult => "withhold_result",
     });
     let blocked = effects
         .as_array()
@@ -298,6 +299,7 @@ mod tests {
             Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),

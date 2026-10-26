@@ -121,7 +121,7 @@ CPU、内存和 I/O 数据。CLI 夹具失败时标明具体命令和工作目�
 版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。八种 Agent
 均有自动验收。OpenClaw 覆盖官方 Hook runner，完整 Gateway 模型流程仍需单独验收。
 
-Qoder CLI 1.1.64 和 QwenPaw 2.2.2b4 / AgentScope 2.0.9 各自必须完成四项真实
+Qoder CLI 1.1.64 和 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 各自必须完成四项真实
 sec-core 用例：`allow`、`scan-deny`、`backend-error` 和 `timeout-block`。任务复用
 候选提交的 `aw`、Provider、`agent-sec-cli` 和 `agent-sec-daemon`，并核对校验和。
 每个用例在独立 Ubuntu 24.04 容器中启动真实 daemon，清单通过多平台 manifest digest

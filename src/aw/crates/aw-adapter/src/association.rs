@@ -3,6 +3,9 @@
 use aw_contracts::canonical;
 use serde_json::{json, Value};
 
+#[cfg(test)]
+mod tests;
+
 fn identifier(value: &Value) -> Option<&str> {
     value.as_str().filter(|text| {
         !text.trim().is_empty() && text.len() <= 512 && !text.chars().any(char::is_control)
@@ -51,7 +54,10 @@ fn matches_native(
         ),
         "qwenpaw" => (
             native["session_id"].clone(),
-            native["tool_call"]["id"].clone(),
+            native
+                .get("aw_invocation_id")
+                .unwrap_or(&native["tool_call"]["id"])
+                .clone(),
             native["tool_call"]["name"].clone(),
             match native["tool_call"]["input"]
                 .as_str()

@@ -342,10 +342,10 @@ impl Event<'_> {
                 }
             }
         };
-        let failure_action = result.is_err().then_some(if step.on_error == "block" {
-            FailureAction::Block
-        } else {
-            FailureAction::Report
+        let failure_action = result.is_err().then_some(match step.on_error.as_str() {
+            "block" => FailureAction::Block,
+            "withhold_result" => FailureAction::WithholdResult,
+            _ => FailureAction::Report,
         });
         Ok(Invocation {
             record,

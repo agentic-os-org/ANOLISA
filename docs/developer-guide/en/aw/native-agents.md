@@ -11,7 +11,7 @@ starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
 The current Linux source build supports Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10, Hermes revision `952c941e` and explicit
 Claude SDK 0.2.88 workers with bundled CLI 2.1.161, plus Pi Coding Agent/Core SDK 0.84.2 workers
 and AgentScope SDK 2.0.6 through explicitly wired public factories in a foreground Python worker.
 Other first-release adapters are delivered separately. AW does not install an
@@ -79,7 +79,7 @@ native permissions. Test one target at a time initially.
 | --- | --- | --- |
 | Qoder | CLI >=1.1.64 with native command Hooks, completed login | Interactive or print; optional `--native-settings` |
 | OpenClaw | 2026.9.6, configured JSON and existing state directory; stop any Gateway using that profile | AW starts a new `gateway run`; pass both native paths |
-| QwenPaw | 2.2.2b4 / AgentScope 2.0.9, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
+| QwenPaw | 2.2.2.post1 / AgentScope 2.0.10, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
 | Hermes | Clean official revision `952c941e`, installed Python console script and initialized local chat profile | Install the AW plugin once into that profile; pass the same profile when running |
 
 Launch Qoder:
@@ -266,7 +266,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ## Start AgentScope SDK
 
 Use a Python environment with `agentscope==2.0.6`; the SDK is separate from
-QwenPaw's verified AgentScope 2.0.9 runtime. `argv` selects the SDK environment's
+QwenPaw's verified AgentScope 2.0.10 runtime. `argv` selects the SDK environment's
 Python and a `.py` application or `-m MODULE`. AW verifies that exact SDK version,
 supplies `aw_agentscope` and a protected runtime configuration, and awaits a
 receipt after the real public factory has installed middleware.
@@ -320,27 +320,47 @@ final-response replacement directives report failure and retain the original res
 
 ## Start QwenPaw
 
-Install QwenPaw 2.2.2b4 with AgentScope 2.0.9 and initialize its model configuration
+Install QwenPaw 2.2.2.post1 with AgentScope 2.0.10 and initialize its model configuration
 through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
 `QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
 its owned temporary plugin, preserves existing plugins and native configuration,
 and removes its plugin after the App exits.
 
-Native middleware retains onion ordering: before runs forward, after unwinds in
-reverse, and the host controls concurrent tools. After observes terminal
-`ToolResponse` objects, including AW-denied results, without repeating streaming
-chunks. The point covers tools executed inside the App; external execution tools
-and attempts denied before middleware are outside its coverage. Event budgets
-must be 1..55,000 ms. Native commands use the AW plugin's documented convention:
-before exit 2 denies, exit 0 continues, and explicit ask/approve is unsupported.
-Callback failures are reported and follow the step's `on_error`; `report` preserves
-execution and after results, while before `block` denies. Cancellation still propagates.
+Ordinary launches verify resident middleware on each constructed Agent and open
+an acknowledged task scope. Before Hooks run forward; after Hooks unwind in
+reverse. The host controls native tool concurrency. Offloaded tools keep their
+scope until native generators, Hooks and background completion callbacks finish.
+Background HTTP output and next-request hints become visible only after all required
+native callbacks succeed. Denials retain policy text and Tokenless retry arguments.
+Completed invocations retire their state, allowing long sessions to continue
+within the bounded active-call limit.
 
-The native startup hook confirms plugin registration after loading completes.
-It does not promise enforcement before the App's public endpoint opens. ACP/TUI,
-reload and multi-worker launch remain rejected because this integration does not
-verify their plugin lifecycle. Use the App's normal API or interface after the
-native Hooks ready message.
+After Hooks receive redacted terminal `ToolResponse` objects, including AW-denied
+results. The application credential extension supplies task-private environments
+and cleanup. Redactors must be idempotent across repeated delivery/Hook checks.
+Authorization-bearing arguments remain unchanged. `on_error: report`
+preserves callback error reporting; before `block` denies execution. For structured
+Providers and boolean Hooks, after `withhold_result` prevents unverified result
+delivery and later dispatch. This action is admitted only on ordinary resident
+launches. Strict after processing withholds streaming chunks for matching tools.
+Task-private execution also withholds intermediate chunks until terminal redaction.
+Native Hook or lifecycle failures fence the Agent even when AW steps use `report`;
+restart the failed Agent after correcting the cause. Cleanup timeout or uncertain finish/release acknowledgement fences
+new requests process-wide and requires a worker restart. Credentials remain owned
+until native work is confirmed drained. Shutdown shares one ten-second budget
+with nested cleanup, including cancellation. Event budgets must be
+1..55,000 ms;
+ask/approve directives remain unsupported. Native permissions run before these
+callbacks; external execution and earlier permission denials have separate native
+paths.
+
+The startup receipt confirms plugin loading; each Agent additionally passes the
+actual installation guard before its request starts. Use App/API after the native
+Hooks ready message. ACP/TUI and multi-worker launches remain rejected.
+`--reloadable` retains legacy busy tracking and policy updates; resident child
+scopes and its long-session retirement are available on ordinary launches.
+Native evidence capture is rejected for ordinary resident launches because that
+child-scope observation contract is unavailable.
 
 ```bash
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
@@ -703,7 +723,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
 the implementation. This build implements Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10, Hermes revision `952c941e` and explicit
 Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw agent connect`
 validates the configuration and dispatches to that adapter. Hermes supports
 persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and

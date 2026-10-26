@@ -140,7 +140,7 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
-运行时路径支持已验证的 Qoder 1.1.73 TUI、QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，
+运行时路径支持已验证的 Qoder 1.1.73 TUI、QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，
 以及 Qoder SDK 1.0.56 / bundled Worker 1.1.78。SDK 目标使用
 [显式 daemon 和 Query 工厂](../../../developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)；
 实例内所有受管 session 都须空闲，包括原生清理完成。
@@ -221,7 +221,7 @@ Qoder 的 `Stop` 不等于空闲，须等
 | --- | --- | --- |
 | Qoder | CLI 1.1.64 或更新版本，原生 Hook 可用 | 交互或 print |
 | OpenClaw | 2026.9.6，已初始化原生配置和状态目录 | 新启动的 Gateway |
-| QwenPaw | 2.2.2b4，AgentScope 2.0.9 | App/API |
+| QwenPaw | 2.2.2.post1，AgentScope 2.0.10 | App/API |
 | Hermes | 使用[兼容版本及安装步骤](../../../developer-guide/zh/aw/native-agents.md#启动-hermes) | 本地 chat |
 | AgentScope、Pi、Claude SDK | 需要在应用中显式接线 | [SDK 接入参考](../../../developer-guide/zh/aw/native-agents.md) |
 
@@ -264,13 +264,15 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 
 Pi / Claude 常驻目标沿用同一配置格式，按 [SDK worker 说明](../../../developer-guide/zh/aw/native-agents.md#pi-和-claude-sdk-常驻宿主) 选择常驻入口及公共工厂。
 
-普通受管 Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。resident 策略变更采用滚动重启，独立的 `--reloadable` 路径保留空闲更新合同。
+普通受管 Qoder SDK Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。
+
+普通 QwenPaw App 启动为每个受管 Agent reply 分配任务 scope。工具私有环境需要显式接入原生执行 helper。resident 策略变更采用滚动重启，`--reloadable` 保留独立的空闲更新路径。
 所需工厂及生命周期边界见[原生接入说明](../../../developer-guide/zh/aw/native-agents.md)。
 
 ## 接入已启动的原生进程
 
-容器控制器可以照常启动 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
-AgentScope 2.0.9 App，在派发首个请求前安装 AW。进程、终端和生命周期仍由控制器
+容器控制器可以照常启动 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2.post1 /
+AgentScope 2.0.10 App，在派发首个请求前安装 AW。进程、终端和生命周期仍由控制器
 管理。启动时记录 PID，在安装成功前保持请求派发暂停。
 
 这些精确版本既是当前 Preview attach/update 路径允许的支持集合，也是实际验收版本。
@@ -282,7 +284,7 @@ AgentScope 2.0.9 App，在派发首个请求前安装 AW。进程、终端和生
 | Qoder TUI | 支持 1.1.73；输入前通过 ConfigChange 确认，请求后等待原生 idle-prompt 确认 |
 | Qoder 单次 `-p` / `--print` 执行 | 普通 `aw run` 支持 print；attach/update 不接纳此模式 |
 | Qoder 常驻 headless 输入 | 尚未接纳或验收；需要单独验证输入前 readiness、多次请求及请求结束/空闲边界 |
-| QwenPaw `app` | 支持 2.2.2b4 / AgentScope 2.0.9；它是 HTTP 后端，可通过 API 无界面使用，无须打开 UI |
+| QwenPaw `app` | 支持 2.2.2.post1 / AgentScope 2.0.10；它是 HTTP 后端，可通过 API 无界面使用，无须打开 UI |
 | QwenPaw ACP / TUI | 不支持；固定版本的 TUI 使用 ACP 子进程，不经过 App 的 HTTP 插件管理端点 |
 | QwenPaw `desktop` | 不是受支持的 attach 目标；它通过 `python -m qwenpaw` 启动独立 App，其入口及进程归属尚未纳入本版直接 `qwenpaw app` 的验收 |
 

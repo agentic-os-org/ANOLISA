@@ -64,6 +64,7 @@ fn check_names(replacement: bool) {
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            failure_actions: Default::default(),
                             adapter: "openclaw".into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),

@@ -31,6 +31,7 @@ fn all_native_dialects_close_skipped_callbacks_without_failure_blocks() {
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            failure_actions: Default::default(),
                             adapter: adapter.clone(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),

@@ -4,10 +4,11 @@
 
 AW 可以显式更新通过稳定桥接启动的空闲实例策略，原生宿主进程保持运行；忙碌实例拒绝更新。
 运行时路径通过 `aw run --reloadable` 显式启用，固定 Qoder 1.1.73 TUI 和
-QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，以及 Qoder SDK 1.0.56 / bundled Worker
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled Worker
 1.1.78。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
 外部接入和 steer 仍在规划中。
 `qoder-sdk` 的普通 `aw run` 为每个受管 Query 建立常驻子 scope。
+普通 QwenPaw App 启动为每个受管 Agent reply 建立任务 scope。
 常驻策略变更采用滚动重启；`--reloadable` 保留下述独立的空闲更新合同。
 
 ## Qoder SDK 请求准入
@@ -174,7 +175,7 @@ SessionStart 已发生，因此通过 `ConfigChange` 确认：有限次数的后
 预装一个稳定 middleware 桥接。`on_reply` 跟踪完整请求及模型等待，`on_acting` 跟踪实际
 工具 generator。回调从 AW 获取激活计划，保留原生调度、拒绝和最终结果替换。
 只有正常耗尽 generator 才释放请求/工具声明；原生工具执行前的策略拒绝也会释放该工具声明。
-AgentScope 2.0.9 不会将包装层关闭逐层传递到所有子 generator，因此最终响应或包装层
+AgentScope 2.0.10 不会将包装层关闭逐层传递到所有子 generator，因此最终响应或包装层
 `aclose()` 成功都不能证明原生清理完成。QwenPaw 的 ToolCoordinator 收到最终响应或
 ERROR/INTERRUPTED 片段就停止拉取，因此这些输出须等正常耗尽流并发送结束通知后再交付。
 终结片段后允许 Toolkit 返回累积响应；终结片段或最终响应后的其他输出会被拒绝。
@@ -182,7 +183,7 @@ ERROR/INTERRUPTED 片段就停止拉取，因此这些输出须等正常耗尽�
 结束时应使用新实例。
 外部实例通过目标 App 的插件管理接口接入，确认 endpoint、工作目录和执行进程的关联。
 
-热安装复用固定版本的现有 AW 插件及 startup-ready 回调。2.2.2b4 原生插件 API
+热安装复用固定版本的现有 AW 插件及 startup-ready 回调。2.2.2.post1 原生插件 API
 在热安装时会执行 startup 回调；安装目录中的私有 `aw-attachment.json` 描述文件
 解决运行中 App 无法继承新增环境变量的问题。CLI 验证所选 App PID 拥有 loopback
 端口，并要求该 PID 返回带 nonce 的凭据；仅 API 成功不能证明回调成功。

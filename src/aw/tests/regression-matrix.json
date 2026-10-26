@@ -710,6 +710,42 @@
     "scope-openclaw-completion": {
       "target": "aw-cli/test/posttool",
       "test": "openclaw_scope::exact_native_selectors_preserve_replacement_completion_identity"
+    },
+    "qwenpaw-resident-boolean-withhold": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::boolean_after_failure_withholds_result_and_stops_next_dispatch"
+    },
+    "qwenpaw-resident-native-denial": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::native_denial_text_survives_resident_scope_transport"
+    },
+    "qwenpaw-resident-observation": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident_observation_is_rejected_before_launch"
+    },
+    "qwenpaw-managed-association": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "association::tests::qwenpaw_dispatch_identity_keeps_native_call_and_exact_input"
+    },
+    "qwenpaw-resident-withhold": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::withhold_failure_blocks_result_and_next_dispatch_through_launcher"
+    },
+    "qwenpaw-resident-report": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::report_failure_preserves_results_and_next_dispatch_through_launcher"
+    },
+    "qwenpaw-resident-denial": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::before_denial_prevents_native_execution_through_resident_factory"
+    },
+    "qwenpaw-resident-registration": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::registration_and_missing_factory_fail_closed_and_release_launch"
+    },
+    "qwenpaw-withhold-reload-rejection": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::reloadable_entry_rejects_withhold_before_service_or_plugin_creation"
     }
   },
   "agents": {
@@ -1017,15 +1053,37 @@
         "attach-dotenv-disabled",
         "attach-dotenv-home",
         "attach-dotenv-empty",
-        "scope-native-skips"
+        "scope-native-skips",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli",
+        "qwenpaw-resident-observation",
+        "qwenpaw-managed-association",
+        "qwenpaw-resident-withhold",
+        "qwenpaw-resident-boolean-withhold",
+        "qwenpaw-resident-native-denial",
+        "qwenpaw-resident-report",
+        "qwenpaw-resident-denial",
+        "qwenpaw-resident-registration",
+        "qwenpaw-withhold-reload-rejection"
       ],
       "security": [
         "security-retry",
-        "scope-native-skips"
+        "scope-native-skips",
+        "qwenpaw-resident-observation",
+        "qwenpaw-managed-association",
+        "qwenpaw-resident-withhold",
+        "qwenpaw-resident-boolean-withhold",
+        "qwenpaw-resident-native-denial",
+        "qwenpaw-resident-report",
+        "qwenpaw-resident-denial",
+        "qwenpaw-resident-registration",
+        "qwenpaw-withhold-reload-rejection"
       ],
       "tokenless": [
         "final-replacement",
-        "scope-sdk-result"
+        "scope-sdk-result",
+        "qwenpaw-resident-denial"
       ]
     },
     "qoder-sdk": {

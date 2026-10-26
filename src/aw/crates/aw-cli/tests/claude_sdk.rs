@@ -42,6 +42,7 @@ fn claude_hook_cli_preserves_deny_success_failure_identity_and_audit() {
                 Operation::Bind {
                     target: "claude".into(),
                     capabilities: Capabilities {
+                        failure_actions: Default::default(),
                         adapter: "claude-sdk".into(),
                         version: "0.2.88".into(),
                         entrypoint: "sdk-worker".into(),

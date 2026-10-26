@@ -123,7 +123,9 @@ Qoder、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6
 `on_error: block` 仅用于执行前的 `tool.before` 或 guard；`withhold_result`
 仅用于工具后；`report` 记录失败后继续。禁止原结果交付需要已验证的模型消费
 边界，只修改历史记录不足以满足要求。必需的安全隐藏不能使用 `report`。
-服务在准入时拒绝尚不能落实的效果与失败动作。
+服务在准入时拒绝尚不能落实的效果与失败动作。目前仅普通 QwenPaw resident 启动
+为结构化 Provider 和布尔 Hook 的 After 步骤声明 `withhold_result`；reloadable
+启动和原生命令步骤拒绝该动作。
 
 工具事件及其步骤均可配置 `match.tools`。工具必须同时匹配事件和步骤的列表，
 才会执行该步骤；单个列表内任一条目匹配即可。任一层省略选择器或使用 `["*"]`

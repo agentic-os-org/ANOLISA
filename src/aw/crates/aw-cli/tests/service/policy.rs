@@ -30,7 +30,7 @@ fn bind(fixture: &Fixture, client: &Client, adapter: &str) -> Binding {
         let (version, entrypoint) = match adapter {
             "qoder" => ("1.1.73", "tui"),
             "qoder-sdk" => ("1.0.56", "sdk-worker"),
-            "qwenpaw" => ("2.2.2b4", "app"),
+            "qwenpaw" => ("2.2.2.post1", "app"),
             _ => panic!("unsupported policy fixture adapter"),
         };
         capabilities.version = version.into();

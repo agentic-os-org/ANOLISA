@@ -9,7 +9,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 会话结束后继续保存执行记录。
 
 当前 Linux 源码版本支持 Qoder CLI >=1.1.64、OpenClaw 2026.9.6、
-QwenPaw 2.2.2b4 / AgentScope 2.0.9、Hermes 官方提交 `952c941e`，以及显式接入的
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10、Hermes 官方提交 `952c941e`，以及显式接入的
 Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core SDK 0.84.2 worker，
 以及在前台 Python worker 中通过显式公共工厂接线的 AgentScope SDK 2.0.6。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
@@ -69,7 +69,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 | --- | --- | --- |
 | Qoder | 支持原生命令 Hook 的 CLI >=1.1.64，已登录 | 交互或 print 入口；可选 `--native-settings` |
 | OpenClaw | 2026.9.6，已配置的 JSON 和现有状态目录；先停止使用该 profile 的 Gateway | AW 新启 `gateway run`，须传入两个原生路径 |
-| QwenPaw | 2.2.2b4 / AgentScope 2.0.9，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
+| QwenPaw | 2.2.2.post1 / AgentScope 2.0.10，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
 | Hermes | 干净的官方提交 `952c941e`、已安装的 Python console script 和已初始化的本地 chat profile | 在该 profile 中安装一次 AW 插件，运行时使用同一 profile |
 
 启动 Qoder：
@@ -237,7 +237,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ## 启动 AgentScope SDK
 
 使用安装了 `agentscope==2.0.6` 的 Python 环境；这与 QwenPaw 已验证的
-AgentScope 2.0.9 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
+AgentScope 2.0.10 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
 `-m MODULE`。AW 校验该 SDK 版本，提供 `aw_agentscope` 与受保护的运行配置，
 等待真实公共工厂安装 middleware 后生成的回执。
 
@@ -282,21 +282,33 @@ RTK，PostTool 不依赖 RTK。文本槽适用条件、故障处理和遥测配�
 
 ## 启动 QwenPaw
 
-安装 QwenPaw 2.2.2b4 与 AgentScope 2.0.9，通过 QwenPaw 初始化模型配置。示例
+安装 QwenPaw 2.2.2.post1 与 AgentScope 2.0.10，通过 QwenPaw 初始化模型配置。示例
 使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
 AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
 
-原生 middleware 保持嵌套顺序：before 正序、after 逆序展开，工具并发由宿主决定。
-after 观察终结的 `ToolResponse`，包括 AW 拒绝结果，不对流式 chunk 重复调用。
-当前点位覆盖 App 内实际执行的工具；外部执行工具以及进入 middleware 前已被拒绝
-的尝试不在覆盖范围。事件预算为 1..55,000 ms。原生命令使用 AW 插件明确约定：
-before 退出 2 表示拒绝，退出 0 表示继续，显式 ask/approve 尚不支持。
-回调故障记录错误并按步骤的 `on_error` 处理：`report` 保留工具执行和 after 结果，
-工具前的 `block` 返回拒绝；宿主取消继续传播。
+普通启动会检查每个已构造 Agent 实际安装的 resident middleware，并创建已确认的
+任务作用域。Before 正序执行、After 逆序展开，原生工具并发由宿主决定。Offload 工具
+保留作用域直到生成器、原生 Hook 和后台完成回调全部结束；已完成调用及时回收状态，
+长会话按活跃调用容量准入。
 
-原生 startup hook 在插件加载完成后确认注册；它不承诺 App 对外端口开放之前已经
-防护。ACP/TUI、reload 和多 worker 启动仍被拒绝，这些入口的插件生命周期尚未验收。
-看到原生 Hook 就绪提示后，通过 App 原有 API 或界面使用。
+后台 HTTP 输出和下一轮提示在全部必要原生回调成功后才发布；拒绝结果保留策略说明及
+Tokenless 重试参数。脱敏函数必须幂等，以支持多个交付及 Hook 边界重复检查。
+After Hook 接收脱敏后的终结 `ToolResponse`，包括 AW 拒绝结果。应用凭据扩展提供
+任务私有环境与清理；授权所依据的工具参数保持原样。`on_error: report` 保持配置的
+回调故障报告策略，工具前 `block` 拒绝执行。结构化 Provider 和布尔 Hook 的工具后
+`withhold_result` 阻止未核验结果交付及后续派发，仅普通 resident 启动准入该动作。
+严格 After 路径暂扣匹配工具的流式 chunk；任务私有执行也会暂扣中间 chunk，直到终态脱敏。
+原生 Hook 或生命周期故障会封锁 Agent，包括 AW 步骤配置为 `report` 的情况；
+修复原因后重启失败的 Agent。清理超时或 finish/release 确认状态不明会在进程范围内
+封锁新请求，须重启 worker；凭据保留至原生工作确认排空。Shutdown 与嵌套清理
+共用十秒预算，包含取消后的排空。
+事件预算为 1..55,000 ms，ask/approve 指令尚不支持。
+原生权限检查在这些回调之前执行；外部执行工具和此前的权限拒绝沿各自原生路径处理。
+
+Startup 回执确认插件加载，每个 Agent 在请求开始前另行通过实际安装检查。看到原生
+Hook 就绪信息后使用 App/API；ACP/TUI、多 worker 启动继续被拒绝。`--reloadable`
+保留既有 busy 跟踪与策略更新；普通启动提供 resident 子作用域及长会话回收。共享
+子作用域尚无原生证据采集合同，普通 resident 启动会拒绝该配置。
 
 ```bash
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
@@ -308,7 +320,7 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 在工具前后执行命令，不安装安全策略。受支持的适配器可复用同一份
 `aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
 
-零 Provider、零事件步骤的配置也可以启动 App；AW 确认插件就绪，不注册工具 middleware。
+零 Provider、零事件步骤的普通配置也会安装 resident 准入与清理 middleware。
 
 ## 启动 OpenClaw
 
@@ -597,7 +609,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | 从 stdin 读取一个开发者操作 JSON 对象，默认 5,000 毫秒 |
 
 `--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
-当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.9
+当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2.post1 / AgentScope 2.0.10
 和 Hermes 官方提交 `952c941e` Adapter，以及显式 Claude SDK 0.2.88、Pi SDK 0.84.2
 与 AgentScope SDK 2.0.6 worker。
 `aw agent connect` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，

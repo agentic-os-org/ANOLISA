@@ -35,6 +35,7 @@ fn skipped_replacement_is_neutral_for_claude_and_qwen_callbacks() {
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            failure_actions: Default::default(),
                             adapter: adapter.into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),

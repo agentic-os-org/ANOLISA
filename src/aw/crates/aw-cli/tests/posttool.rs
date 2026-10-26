@@ -225,6 +225,7 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
                 Operation::Bind {
                     target: "agent".into(),
                     capabilities: Capabilities {
+                        failure_actions: Default::default(),
                         adapter: adapter.into(),
                         version: "1.0.56".into(),
                         entrypoint: "sdk-worker".into(),
@@ -249,6 +250,7 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            failure_actions: Default::default(),
                             adapter: adapter.into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),

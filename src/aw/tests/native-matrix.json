@@ -1347,14 +1347,14 @@
       "python": "3.12.3",
       "mode": "automated",
       "versions": {
-        "qwenpaw": "2.2.2b4",
-        "agentscope": "2.0.9"
+        "qwenpaw": "2.2.2.post1",
+        "agentscope": "2.0.10"
       },
       "requirements": [
-        "qwenpaw==2.2.2b4",
-        "agentscope==2.0.9"
+        "qwenpaw==2.2.2.post1",
+        "agentscope==2.0.10"
       ],
-      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks. Ordinary App replies use child scopes through pinned Agent and Coordinator seams; resident tests cover 1025 calls with bounded active capacity, cancellation and original finalizers, private execution environments, exact dispatch input and strict PostTool output withholding. Pinned HTTP output and next-Agent hints are checked across processor, completion and offload barriers, cleanup failures and one shutdown deadline. A real scope CLI/service fixture checks denial text, Tokenless retry instructions and completion. Resident hot reload and evidence capture are rejected; the separate reloadable path retains its prior idle-update contract.",
       "cases": [
         {
           "name": "middleware",
@@ -1446,6 +1446,28 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-lifecycle",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_resident.py"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 52
+        },
+        {
+          "name": "resident-service",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_resident_service.py",
+            "--bin",
+            "{bin}"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 4
         }
       ],
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"

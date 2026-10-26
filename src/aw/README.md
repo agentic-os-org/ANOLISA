@@ -64,7 +64,7 @@ edits offline. See [configuration](../../docs/user-guide/en/aw/configuration.md#
 this does not update a running instance.
 
 Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
-Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App, or
+Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App, or
 Qoder SDK 1.0.56 / Worker 1.1.78.
 Edit the same configuration file, then explicitly apply it.
 `aw update --config aw.yaml --agent TARGET` selects the
@@ -147,7 +147,9 @@ It lists capabilities declared by the runtime and covered by CI contract tests.
 See the [native Agent integration reference](../../docs/developer-guide/en/aw/native-agents.md)
 for supported versions, tool types, and text replacement boundaries.
 
-Each ordinary managed Query owns a child scope; daemon shutdown drains its Queries and original callbacks. Resident policy changes use a rolling restart. The separate `--reloadable` path retains its idle-update contract.
+Each ordinary managed Qoder SDK Query owns a child scope; daemon shutdown drains its Queries and original callbacks.
+
+Ordinary QwenPaw App launches use a task scope for each managed Agent reply. Private tool environments require the explicit native execution helper. Strict after steps use `on_error: withhold_result` to retain unverified output. Resident policy changes use a rolling restart; `--reloadable` keeps the separate idle-update path.
 
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |

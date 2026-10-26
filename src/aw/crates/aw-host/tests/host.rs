@@ -456,3 +456,44 @@ fn mismatched_or_invalid_event_data_is_rejected_before_invocation() {
     assert!(fixture.calls("invoke").is_empty());
     fixture.assert_reaped();
 }
+
+#[test]
+fn admitted_withholding_preserves_provider_failure_and_success() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    let mut caps = capabilities();
+    caps.failure_actions
+        .insert("tool.after".into(), vec!["withhold_result".into()]);
+    let cancelled = AtomicBool::new(false);
+    let host = Host::prepare(
+        &serde_json::to_vec(&document).unwrap(),
+        "target",
+        caps,
+        fixture.context(),
+        Instant::now() + TIMEOUT,
+        &cancelled,
+    )
+    .unwrap();
+    for scenario in ["normal", "provider-error"] {
+        let selected = host
+            .event(
+                event("tool.after", scenario),
+                Instant::now() + TIMEOUT,
+                &cancelled,
+            )
+            .unwrap();
+        let invocation = selected.invoke("record").unwrap();
+        if scenario == "normal" {
+            assert!(invocation.result.is_ok());
+            assert_eq!(invocation.failure_action, None);
+        } else {
+            assert!(matches!(invocation.result, Err(Failure::Provider { .. })));
+            assert_eq!(
+                invocation.failure_action,
+                Some(FailureAction::WithholdResult)
+            );
+        }
+    }
+    fixture.assert_reaped();
+}
