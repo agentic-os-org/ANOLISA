@@ -13,6 +13,9 @@ use std::{
 };
 
 pub(crate) fn absolute(path: &Path) -> Result<()> {
+    // Normalize separators before lstat: a trailing slash makes lstat follow a
+    // final symlink, which would hide it from the ancestor check.
+    let path = path.components().as_path();
     require(
         path.is_absolute() && !path.components().any(|p| matches!(p, Component::ParentDir)),
         format!("expected absolute path without '..': {}", path.display()),
@@ -141,6 +144,7 @@ fn lock_file(file: File, path: &Path, operation: i32) -> Result<PackageLock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn failed_lock_acquisition_or_validation_leaves_no_published_lock() {
@@ -172,6 +176,20 @@ mod tests {
                     .ino()
             );
         }
+    }
+
+    #[test]
+    fn trailing_separator_does_not_hide_a_final_symlink() {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+        fs::create_dir_all(&target).unwrap();
+        let directory = tempfile::tempdir_in(fs::canonicalize(target).unwrap()).unwrap();
+        let real = directory.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(absolute(&link).is_err());
+        let trailing = PathBuf::from(format!("{}/", link.display()));
+        assert!(absolute(&trailing).is_err());
     }
 
     #[test]
