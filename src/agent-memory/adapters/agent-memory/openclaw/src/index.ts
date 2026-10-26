@@ -468,6 +468,7 @@ export default definePluginEntry({
 
     // ── Auto-capture: persist notable observations after each turn ──
     let lastCaptureHash = "";
+    const inFlightCaptures = new Set<string>();
     api.on(
       "agent_end",
       async (
@@ -505,8 +506,7 @@ export default definePluginEntry({
             .update(contentStr)
             .digest("hex")
             .slice(0, 16);
-          if (hash === lastCaptureHash) return;
-          lastCaptureHash = hash;
+          if (hash === lastCaptureHash || inFlightCaptures.has(hash)) return;
 
           // Trigger-based filtering: only capture when the assistant
           // mentions decisions, findings, preferences, or notable items.
@@ -532,11 +532,20 @@ export default definePluginEntry({
             return;
           }
 
-          await client.callTool("memory_observe", {
-            content,
-            hint: `auto-capture-${hash}`,
-          });
-          api.logger.info?.("agent-memory: auto-captured observation");
+          inFlightCaptures.add(hash);
+          try {
+            await client.callTool("memory_observe", {
+              content,
+              hint: `auto-capture-${hash}`,
+            });
+            // Keep failures retryable. The server does not deduplicate hints,
+            // so a timeout after a successful write can still create a duplicate
+            // on retry: capture is at-least-once, not exactly-once.
+            lastCaptureHash = hash;
+            api.logger.info?.("agent-memory: auto-captured observation");
+          } finally {
+            inFlightCaptures.delete(hash);
+          }
         } catch (err) {
           api.logger.warn?.(
             `agent-memory: auto-capture hook failed (${err instanceof Error ? err.message : String(err)})`,

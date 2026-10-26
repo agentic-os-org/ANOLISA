@@ -28,7 +28,7 @@ import { McpStdioClient } from "../../src/mcp-client.js";
 const plugin = (await import("../../src/index.js")).default;
 
 // resolveConfig requires an existing, executable binaryPath. It is never
-// spawned — no test below calls a tool — so a stub file is enough.
+// spawned — capture tests replace callTool before it can start a process.
 const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-memory-register-"));
 const binaryPath = path.join(binDir, "agent-memory");
 fs.writeFileSync(binaryPath, "#!/bin/sh\nexit 0\n");
@@ -43,6 +43,7 @@ function config(sessionId: string, extra: Record<string, unknown> = {}) {
 
 type MockHost = ReturnType<typeof mockApi>;
 type Cleanup = () => Promise<void>;
+type Hook = (event?: unknown, ctx?: Record<string, unknown>) => Promise<unknown>;
 
 function mockApi(
   pluginConfig: Record<string, unknown>,
@@ -50,7 +51,7 @@ function mockApi(
 ) {
   const tools: string[] = [];
   const hooks: string[] = [];
-  const handlers = new Map<string, Cleanup>();
+  const handlers = new Map<string, Hook>();
   const warnings: string[] = [];
   const api = {
     pluginConfig,
@@ -64,7 +65,8 @@ function mockApi(
         warnings.push(message);
       },
     },
-    on: (event: string, handler: Cleanup) => {
+    on: (event: string, handler: Hook) => {
+      assert.ok(!handlers.has(event), `unexpected duplicate hook: ${event}`);
       hooks.push(event);
       handlers.set(event, handler);
     },
@@ -277,5 +279,81 @@ describe("plugin shutdown ownership", () => {
     assert.equal(stopped.length, mark);
     assert.deepEqual(replacement.warnings, []);
     await replacement.handlers.get("gateway_stop")!();
+  });
+});
+
+describe("auto-capture persistence", () => {
+  for (const rejectFirst of [false, true]) {
+    it(`deduplicates pending captures when the first write ${rejectFirst ? "fails" : "succeeds"}`, async () => {
+      const host = register(mockApi(config("ses_capture_pending")));
+      const realCall = McpStdioClient.prototype.callTool;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let calls = 0;
+      McpStdioClient.prototype.callTool = async () => {
+        calls++;
+        if (calls === 1) {
+          await gate;
+          if (rejectFirst) throw new Error("temporary storage failure");
+        }
+        return "observation saved";
+      };
+      const event = {
+        messages: [{ role: "assistant", content: "I found that the project uses SQLite." }],
+      };
+      try {
+        const capture = host.handlers.get("agent_end")!;
+        const first = capture(event, {});
+        const overlapping = capture(event, {});
+        try {
+          assert.equal(calls, 1, "an identical in-flight capture must be suppressed");
+        } finally {
+          release();
+          await Promise.all([first, overlapping]);
+        }
+        await capture(event, {});
+        assert.equal(calls, rejectFirst ? 2 : 1, "only a failed capture is retried");
+        await capture(event, {});
+        assert.equal(calls, rejectFirst ? 2 : 1, "a saved capture remains deduplicated");
+      } finally {
+        release();
+        McpStdioClient.prototype.callTool = realCall;
+        await host.handlers.get("gateway_stop")!();
+      }
+    });
+  }
+
+  it("retries a failed observation and deduplicates only after it is saved", async () => {
+    const host = register(mockApi(config("ses_capture_retry")));
+    const realCall = McpStdioClient.prototype.callTool;
+    const attempts: Array<{ name: string; args: Record<string, unknown> }> = [];
+    McpStdioClient.prototype.callTool = async function (name, args) {
+      attempts.push({ name, args });
+      if (attempts.length === 1) throw new Error("temporary storage failure");
+      return "observation saved";
+    };
+    try {
+      const event = {
+        messages: [{
+          role: "assistant",
+          content: [{ type: "text", text: "I found that the project uses SQLite." }],
+        }],
+      };
+      await host.handlers.get("agent_end")!(event, {});
+      assert.equal(attempts.length, 1);
+      assert.ok(host.warnings.some((warning) => warning.includes("temporary storage failure")));
+
+      await host.handlers.get("agent_end")!(event, {});
+      assert.equal(attempts.length, 2, "an unsaved observation must be retried");
+      assert.equal(attempts[0].name, "memory_observe");
+      assert.deepEqual(attempts[1], attempts[0]);
+      assert.equal(attempts[1].args.content, "I found that the project uses SQLite.");
+
+      await host.handlers.get("agent_end")!(event, {});
+      assert.equal(attempts.length, 2, "a saved observation must remain deduplicated");
+    } finally {
+      McpStdioClient.prototype.callTool = realCall;
+      await host.handlers.get("gateway_stop")!();
+    }
   });
 });
