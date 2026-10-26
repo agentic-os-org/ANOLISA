@@ -4,6 +4,20 @@
 
 需要理解架构、扩展功能、补充测试或参与贡献时，从这里开始。
 
+## Semantic Arbiter
+
+- [组件概览](../../../src/semantic-arbiter/README_zh.md)
+- [协议与公共库契约](../../../src/semantic-arbiter/docs/design/protocol_zh.md)
+- [CLI 与集成指南](../../user-guide/zh/semantic-arbiter/index.md)
+
+在 `src/semantic-arbiter` 中运行开发者示例，可查看封闭场景单元替换、内存 executor fixture 和 EvidenceSource 采集：
+
+```bash
+cargo run --example judgment_unit
+cargo run --example executor_fixture
+cargo run --example evidence_source
+```
+
 ## SDK
 
 - [Tokenless Python SDK](sdk/tokenless/index.md)

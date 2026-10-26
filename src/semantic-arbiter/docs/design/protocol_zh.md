@@ -12,9 +12,11 @@
 | `evaluate` | `semantic-arbiter/v1alpha2` / `model_evaluation` | 在实时截止期限内复用同一确定性硬门禁，再向模型提交满足条件的问题 |
 | `describe` | 能力声明 | 支持的操作、版本、模式、场景、后端、候选控制、obligation 类型和消息大小上限 |
 
-两种操作均使用内联冻结证据。`check` 不执行外部 I/O，也不重放 Agent 或其动作；模型求值将选定输入发送给配置的后端。两者都不采集文件系统事实或执行 Directive。单元注册表和组合规则固定；调用者可选择 `preservation`、`task_scope` 或二者。当前 `check` 生产方输出候选 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。所有操作及未来场景的完整 CandidateControl 接口始终为 `nop < allow < ask < block`。库已提供显式 EvidenceSource 注册和求值前有界采集；生产证据源、可配置组合、真实 Agent 接入和 Executor 尚待实现。
+两种操作均使用内联冻结证据。`check` 不执行外部 I/O，也不重放 Agent 或其动作；模型求值将选定输入发送给配置的后端。两者都不采集文件系统事实或执行 Directive。调用者可选择 `preservation`、`task_scope` 或二者。当前 `check` 生产方输出候选 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。所有操作及未来场景的完整 CandidateControl 接口始终为 `nop < allow < ask < block`。
 
-公共定义位于 [`contract.rs`](../../src/contract.rs)、[`evidence.rs`](../../src/evidence.rs)、[`config.rs`](../../src/config.rs)、[`evaluation.rs`](../../src/evaluation.rs)、[`outcome.rs`](../../src/outcome.rs) 和 [`protocol.rs`](../../src/protocol.rs)。使用公共解码和校验入口执行语义约束。
+公共库已实现显式 EvidenceSource 采集、封闭场景 JudgmentUnit 替换、确定性 Outcome 组合和消费方侧 executor 契约。CLI 保持使用内置单元、固定组合、上述行为和协议版本。生产证据源、真实 Executor、原生 Adapter 集成、生产级持久 claim 与审计，以及效果核验仍待消费方集成。
+
+公共定义位于 [`contract.rs`](../../src/contract.rs)、[`evidence.rs`](../../src/evidence.rs)、[`config.rs`](../../src/config.rs)、[`judgment.rs`](../../src/judgment.rs)、[`evaluation.rs`](../../src/evaluation.rs)、[`composition.rs`](../../src/composition.rs)、[`executor.rs`](../../src/executor.rs)、[`outcome.rs`](../../src/outcome.rs) 和 [`protocol.rs`](../../src/protocol.rs)。使用公共解码和校验入口执行语义约束。
 
 ## 请求字段
 
@@ -120,6 +122,12 @@ URL 拒绝内嵌凭证、查询参数和片段。HTTPS 使用证书校验。HTTP
 
 仅支持 Noul 答案。每个值表示一个命题的独立 P(yes)，各问题的概率之和无需为一。值必须为 `[0,1]` 内的有限 JSON 数字。字符串、布尔值、null 和越界数字均被拒绝。`noul-floor-ppm/v2` 保留精确十进制 token，包括指数表示，并在浮点转换之前计算 `yes_ppm=floor(p*1000000)` 和 `no_ppm=floor((1-p)*1000000)`。阈值比较使用这些精确 floor 值。`raw_json_number()` 提供无损读取；`raw()` 是有损便捷接口。概率和单元置信度表示模型支持度，尚未建立其与事实正确率或安全性的校准关系。
 
+### 判断单元注册表
+
+`JudgmentUnitRegistry` 是两个封闭 `Scenario` 值的显式进程内替换点。构造函数要求恰好一个 `preservation` 单元和恰好一个 `task_scope` 单元；单元修订必须非空，问题 ID 必须非空且互不相同。注册表不能增加任意线协议场景，也不执行插件或动态代码发现。消费方替换一个单元时，需要为另一个槽位提供内置实现或另一项经过审核的实现。
+
+`Evaluator::with_units` 在准备问题和推导响应时使用传入的注册表。各单元声明的修订、问题 ID 和问题内容均进入 `config_digest`。求值稳定后，`EvaluationRecord` 冻结期望响应和原始配置摘要；后续响应复核比较这些不可变值，不会再次调用判断单元或模型。中央答案校验要求保持原单元和证据引用，将置信度限制在 `0..=1000000`，并且只允许对应封闭场景所定义的 value/reason 组合。自定义单元返回其他答案时产生 `invalid_response`。
+
 ## 响应字段与校验
 
 ### 公共响应和单元答案
@@ -149,7 +157,7 @@ URL 拒绝内嵌凭证、查询参数和片段。HTTPS 使用证书校验。HTTP
 | `evaluated_at_ms` | Unix 毫秒表示的最终有效性检查时间 |
 | `elapsed_ms` | 求值完成时的单调流逝时间，包含输入准备 |
 | `model_called` | 是否调用了所选后端；没有满足条件的问题被调用时为 false |
-| `judgments[].unit`、`unit_revision`、`question_id` | 单元身份、解释版本（`semantic-units/v1`）和版本化问题身份 |
+| `judgments[].unit`、`unit_revision`、`question_id` | 单元身份、已注册单元声明的解释修订和版本化问题身份 |
 | `judgments[].threshold_ppm` | 该单元配置的支持度阈值 |
 | `judgments[].probability` | 已校验的 `{raw,yes_ppm,no_ppm}`，不可用时为 null |
 | `judgments[].error` | 脱敏后端错误或 null；例如 `timeout`、`authentication`、`rate_limited`、`transport`、`http`、`invalid_response`、`response_too_large` |
@@ -158,7 +166,7 @@ URL 拒绝内嵌凭证、查询参数和片段。HTTPS 使用证书校验。HTTP
 
 CLI 在入口捕获墙钟和单调时钟。准备、推理、正文读取、校验和组合共用一个截止期限，受原始事件和配置超时限制。推理和组合后会复核证据。满足模型求值条件的路径耗尽预算时产生 `unknown` 答案和候选 `nop`，除非已有确定性硬阻断要求 `block`。证据或预算过期后，概率仍可保留在 trace 中，同时 `model_used=false`。
 
-独立留存 `EvaluationRun::record()`。`evaluation::decode_response` 和 `validate_response` 要求原始请求、配置，以及不可反序列化构造的本地 `EvaluationRecord`，据此推导预期结果，无需再次调用模型。后端注入属于受信进程内 API；调用者必须将实际适配器与其配置绑定。线上的 trace 和后端标签本身不能提供跨不可信进程边界的认证。记录校验确认已记录结果的一致性；执行前消费方必须再次检查时效。`check` 响应校验依据留存请求重算确定性结果。
+独立留存 `EvaluationRun::record()`。`evaluation::decode_response` 和 `validate_response` 要求原始请求、配置，以及不可反序列化构造的本地 `EvaluationRecord`，并与冻结的期望响应比较，不会再次调用判断单元或模型。后端注入属于受信进程内 API；调用者必须将实际适配器与其配置绑定。线上的 trace 和后端标签本身不能提供跨不可信进程边界的认证。记录校验确认已记录结果的一致性；执行前消费方必须再次检查时效。`check` 响应校验依据留存请求重算确定性结果。
 
 ### 摘要
 
@@ -168,12 +176,18 @@ CLI 在入口捕获墙钟和单调时钟。准备、推理、正文读取、校�
 |---|---|---|
 | `check` 的 `input_digest` | `semantic-arbiter/v1alpha1\0check-input\0` | `CheckRequest` |
 | 求值 `input_digest` | `semantic-arbiter/v1alpha2\0evaluation-input\0` | `EvaluationRequest` |
-| 求值 `config_digest` | `semantic-arbiter/v1alpha2\0evaluation-config\0` | 包含配置、单元版本、归一化版本及按保留意图/任务范围排序的问题定义的数组 |
+| 求值 `config_digest` | `semantic-arbiter/v1alpha2\0evaluation-config\0` | 包含配置、框架单元修订、归一化版本，以及按场景排序的问题 ID、单元修订和问题定义的数组 |
 | `ModelConfig::digest()` | `semantic-arbiter/v1alpha2\0model-config\0` | 仅配置；与响应的 `config_digest` 分别计算 |
 
 `\0` 表示一个零字节。`config_revision` 是调用者维护的策略标签；`config_digest` 绑定实际配置和版本化语义。这些载荷不包含凭证值。摘要绑定内容，不提供发送方认证。
 
 ## Outcome、Directive 和回执字段
+
+### 确定性组合
+
+`composition::compose_outcome` 在不授权或执行的情况下组合独立形成的 `OutcomeContribution` 值。候选控制取 `nop < allow < ask < block` 下的最大值。主体控制形成有界并集，`freeze`、`quarantine` 和 `kill` 各自最多保留一项内容完全相同的请求。obligation 按 ID 精确去重，证据引用形成有序集合。
+
+组合会拒绝不可用的细粒度能力、工作区或实例绑定不匹配、空受控标识符、同一 Directive ID 或主体动作下的内容冲突，以及与保留 ID `candidate-approval` 的冲突。结果包含恰好一个 audit obligation；未提供 audit 且已声明 audit 能力时，组合会加入规范的 critical `audit` obligation，多个不同的 audit 请求会失败。主体按 freeze、quarantine、kill 排序。obligation 按动作类别再按 ID 排序，audit 位于末尾；证据引用按字典序排序。这些规则使输出不受贡献输入顺序影响。当前 CLI 继续使用固定的内置组合路径。
 
 | 字段 | 含义 |
 |---|---|
@@ -185,7 +199,7 @@ CLI 在入口捕获墙钟和单调时钟。准备、推理、正文读取、校�
 | Approval `parameters.id`、`candidate_id` | 保留 ID `candidate-approval` 和等待审批的绑定候选 |
 | Subject / obligation `parameters` | 原始主体请求或 obligation，保留不可变 `id` 和动作参数 |
 
-所有操作和未来场景均使用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。当前 `check` 生产方输出 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。两者的主体控制均为空，obligation 仅有 `snapshot/audit`。`ask` 表示确定性的“需要审批”决策；歧义和 `unknown` 答案都不会产生 `ask`。其类型、校验和 Approval Directive 投影现已预留。当前成果保护/任务范围生产方不会输出，运行时 `ApprovalExecutor` 与 Adapter 准入仍待实现。更广的词汇覆盖未来增强/审批、安全、主体控制和清理场景；通用合并、执行调度和动作实现尚待完成。`Outcome::directives` 投影 ask、主体请求和 obligation。消费方通过原生接口阻断候选。主体请求保持独立；等待中的 kill 不吸收 freeze 或 quarantine。
+所有操作和未来场景均使用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。当前 `check` 生产方输出 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。两者的主体控制均为空，obligation 仅有 `snapshot/audit`。`ask` 表示确定性的“需要审批”决策；歧义和 `unknown` 答案都不会产生 `ask`。其类型、校验和 Approval Directive 投影现已预留。当前成果保护/任务范围生产方不会输出，真实审批执行与 Adapter 准入仍待消费方集成。更广的词汇覆盖未来增强/审批、安全、主体控制和清理场景。公共确定性组合已经可用；执行调度、真实动作实现和原生采用仍由消费方负责。`Outcome::directives` 投影 ask、主体请求和 obligation。消费方通过原生接口阻断候选。主体请求保持独立；等待中的 kill 不吸收 freeze 或 quarantine。
 
 | Obligation `action.kind` | `action.parameters` |
 |---|---|
@@ -207,6 +221,14 @@ CLI 在入口捕获墙钟和单调时钟。准备、推理、正文读取、校�
 | `state`、`reason` | 仅接受 `applied/confirmed`、`rejected/denied`、`unknown/unconfirmed` |
 
 消费方独立完成准入和效果核验后生成回执。`decode_receipt` 接收 `CheckRequest` 和留存 Outcome，检查关联及状态/原因一致性。该 API 不提供模型求值回执解码器或操作系统效果核验。消费方须另行核验能力、身份、范围、授权、幂等和截止期限。答案 `unknown`、候选 `nop`、候选 `ask` 和回执 `unknown` 是四种不同状态，分别表示语义支持不足、未形成候选判断、确定性要求审批，以及执行效果未确认。回执为 `unknown` 时，查询原回执或人工检查效果；禁止自动重复 Directive。拒绝同样不授予重试权限。两种操作均不生成执行回执。
+
+### 消费方侧 executor 生命周期
+
+`executor` 模块属于消费方侧库契约。`AuthorizationContext` 是消费方创建的受信输入；证据、模型输出和 Directive 都不能创建或扩大该上下文。准入要求使用受支持的 check 或 evaluate 协议版本、精确匹配细粒度 `DirectiveCapability`、截止期限尚未到期、候选/工作区/实例绑定匹配，并且 allowlist 包含每个非空受控范围或参数 ID。`ExecutorRegistry` 为每项能力注册恰好一个 Executor。
+
+`idempotency_key` 是 `api_version`、`request_id`、完整 `Binding` 和完整不可变 `Directive` 的稳定域分隔摘要。执行顺序为 claim、条件分发和查询。新 claim 最多分发一次，随后查询效果。已有 claim 跳过分发并查询原请求。分发结果不会决定回执；只有独立查询可映射为 `applied/confirmed` 或 `rejected/denied`。查询失败或结果未确认时映射为 `unknown/unconfirmed`，未知效果绝不自动重放。
+
+`executor::fixture` 提供仅供测试和示例使用的内存 claim store 与脚本化 Executor。它不执行外部动作，也不能证明原生 Adapter 支持。真实 Executor、原生 Adapter 采用、生产级持久 claim、持久审计和操作系统效果核验仍待消费方集成。
 
 ## CLI 完成语义与接入边界
 

@@ -12,9 +12,11 @@
 | `evaluate` | `semantic-arbiter/v1alpha2` / `model_evaluation` | The same deterministic hard gate followed by eligible model questions under a real-time deadline |
 | `describe` | Capability declaration | Supported operations, versions, modes, scenarios, backends, candidate controls, obligation kinds and message size limit |
 
-Both operations use inline frozen evidence. `check` performs no external I/O and does not replay an Agent or its actions; model evaluation sends selected input to the configured backend. Neither operation collects filesystem facts or executes directives. The unit registry and composition are fixed; callers select `preservation`, `task_scope`, or both. Current `check` producers emit candidate `allow/block`; current `evaluate` producers emit `nop/allow/block`. The full CandidateControl interface remains `nop < allow < ask < block` for every operation and future scenario. The library provides explicit EvidenceSource registration and bounded pre-evaluation collection; production sources, configurable composition, live Agent integration and Executors remain pending.
+Both operations use inline frozen evidence. `check` performs no external I/O and does not replay an Agent or its actions; model evaluation sends selected input to the configured backend. Neither operation collects filesystem facts or executes directives. Callers select `preservation`, `task_scope`, or both. Current `check` producers emit candidate `allow/block`; current `evaluate` producers emit `nop/allow/block`. The full CandidateControl interface remains `nop < allow < ask < block` for every operation and future scenario.
 
-Public definitions are in [`contract.rs`](../../src/contract.rs), [`evidence.rs`](../../src/evidence.rs), [`config.rs`](../../src/config.rs), [`evaluation.rs`](../../src/evaluation.rs), [`outcome.rs`](../../src/outcome.rs) and [`protocol.rs`](../../src/protocol.rs). Use their public decoding and validation entry points to enforce semantic constraints.
+The library implements explicit EvidenceSource collection, closed-scenario JudgmentUnit replacement, deterministic Outcome composition and consumer-side executor contracts. The CLI keeps the built-in units, fixed composition, behavior and protocol versions shown above. Production evidence sources, real Executors, native Adapter integration, persistent production claims and audit, and effect verification remain pending consumer integration.
+
+Public definitions are in [`contract.rs`](../../src/contract.rs), [`evidence.rs`](../../src/evidence.rs), [`config.rs`](../../src/config.rs), [`judgment.rs`](../../src/judgment.rs), [`evaluation.rs`](../../src/evaluation.rs), [`composition.rs`](../../src/composition.rs), [`executor.rs`](../../src/executor.rs), [`outcome.rs`](../../src/outcome.rs) and [`protocol.rs`](../../src/protocol.rs). Use their public decoding and validation entry points to enforce semantic constraints.
 
 ## Request fields
 
@@ -120,6 +122,12 @@ Upstream `answers` must contain exactly the requested question IDs. Each answer 
 
 Only Noul answers are supported. Each value represents an independent P(yes) for one proposition; probabilities across questions need not sum to one. Values must be finite JSON numbers in `[0,1]`. Strings, booleans, nulls and out-of-range numbers are rejected. `noul-floor-ppm/v2` preserves the exact decimal token, including exponent notation, and computes `yes_ppm=floor(p*1000000)` and `no_ppm=floor((1-p)*1000000)` before floating-point conversion. Threshold comparisons use these exact floors. `raw_json_number()` provides lossless access; `raw()` is a lossy convenience accessor. Probability and unit confidence express model support, with no established calibration to factual correctness or safety.
 
+### Judgment-unit registry
+
+`JudgmentUnitRegistry` is an explicit process-local replacement point for the two closed `Scenario` values. Its constructor requires exactly one `preservation` unit and exactly one `task_scope` unit, with nonempty revisions and nonempty distinct question IDs. The registry cannot add an arbitrary wire scenario and performs no plugin or dynamic code discovery. A consumer replacing one unit supplies the built-in or another reviewed implementation for the other slot.
+
+`Evaluator::with_units` uses the supplied registry while preparing questions and deriving the response. Each unit's declared revision, question ID and question content enter `config_digest`. Once evaluation stabilizes, `EvaluationRecord` freezes the expected response and the original configuration digest; later response validation compares those immutable values and does not invoke a unit or model again. Central answer validation requires the original unit and evidence references, bounds confidence to `0..=1000000`, and permits only the value/reason pairs defined for that closed scenario. A custom unit returning any other answer causes `invalid_response`.
+
 ## Response fields and verification
 
 ### Common response and unit answers
@@ -149,7 +157,7 @@ An `allow` remains advisory. When it includes `snapshot`, the consumer must hold
 | `evaluated_at_ms` | Final validity-check time in Unix milliseconds |
 | `elapsed_ms` | Monotonic elapsed time through evaluation, including input preparation |
 | `model_called` | Whether the selected backend was invoked; false when no eligible question is called |
-| `judgments[].unit`, `unit_revision`, `question_id` | Unit identity, interpretation revision (`semantic-units/v1`) and versioned question identity |
+| `judgments[].unit`, `unit_revision`, `question_id` | Unit identity, the registered unit's declared interpretation revision and versioned question identity |
 | `judgments[].threshold_ppm` | Configured support threshold for that unit |
 | `judgments[].probability` | Validated `{raw,yes_ppm,no_ppm}`, or null when unavailable |
 | `judgments[].error` | Sanitized backend error or null; examples include `timeout`, `authentication`, `rate_limited`, `transport`, `http`, `invalid_response`, `response_too_large` |
@@ -158,7 +166,7 @@ An `allow` remains advisory. When it includes `snapshot`, the consumer must hold
 
 The CLI captures wall and monotonic clocks at ingress. Preparation, inference, body reads, validation and composition consume one deadline bounded by the original event and configured timeout. Evidence is rechecked after inference and composition. Exhaustion after an eligible model path yields an `unknown` answer and candidate `nop` unless a deterministic hard blocker already requires `block`. A probability can remain in the trace with `model_used=false` when its evidence or budget expires.
 
-Retain `EvaluationRun::record()` independently. `evaluation::decode_response` and `validate_response` require the original request, configuration and non-deserializable local `EvaluationRecord`, then derive the expected result without another model call. Backend injection is a trusted in-process API; callers must bind the actual adapter to its configuration. Wire traces and backend labels alone provide no authentication across an untrusted process boundary. Record validation establishes recorded consistency; consumers must check freshness again before execution. Check response validation recomputes the deterministic result from the retained request.
+Retain `EvaluationRun::record()` independently. `evaluation::decode_response` and `validate_response` require the original request, configuration and non-deserializable local `EvaluationRecord`, then compare against the frozen expected response without invoking a unit or model again. Backend injection is a trusted in-process API; callers must bind the actual adapter to its configuration. Wire traces and backend labels alone provide no authentication across an untrusted process boundary. Record validation establishes recorded consistency; consumers must check freshness again before execution. Check response validation recomputes the deterministic result from the retained request.
 
 ### Digests
 
@@ -168,12 +176,18 @@ Digests are `sha256:` followed by lowercase SHA-256 over a domain separator and 
 |---|---|---|
 | Check `input_digest` | `semantic-arbiter/v1alpha1\0check-input\0` | `CheckRequest` |
 | Evaluation `input_digest` | `semantic-arbiter/v1alpha2\0evaluation-input\0` | `EvaluationRequest` |
-| Evaluation `config_digest` | `semantic-arbiter/v1alpha2\0evaluation-config\0` | Array containing configuration, unit revision, normalization revision and ordered preservation/task-scope question definitions |
+| Evaluation `config_digest` | `semantic-arbiter/v1alpha2\0evaluation-config\0` | Array containing configuration, framework unit revision, normalization revision, and ordered scenario/question ID/unit revision/question definitions |
 | `ModelConfig::digest()` | `semantic-arbiter/v1alpha2\0model-config\0` | Configuration alone; separate from the response's `config_digest` |
 
 `\0` denotes a zero byte. `config_revision` is a caller-maintained policy label; `config_digest` binds effective configuration and versioned semantics. Credential values are absent from these payloads. Digests bind content and provide no sender authentication.
 
 ## Outcome, Directive and receipt fields
+
+### Deterministic composition
+
+`composition::compose_outcome` combines independently formed `OutcomeContribution` values without authorization or execution. Candidate control is the maximum under `nop < allow < ask < block`. Subject controls form a bounded union with at most one exact request for each of `freeze`, `quarantine` and `kill`. Obligations are exact-deduplicated by ID, and evidence references form a sorted set.
+
+Composition rejects unavailable granular capabilities, workspace or instance binding mismatches, empty controlled identifiers, conflicting content under one directive ID or subject action, and collisions with the reserved `candidate-approval` ID. The result contains exactly one audit obligation; composition adds the canonical critical `audit` obligation when none was supplied and the audit capability is declared, while multiple distinct audit requests fail. Subjects are sorted as freeze, quarantine and kill. Obligations are sorted by action class and then ID, with audit last; evidence references are lexicographically sorted. These rules make output independent of contribution order. The current CLI continues to use its fixed built-in composition path.
 
 | Field | Meaning |
 |---|---|
@@ -185,7 +199,7 @@ Digests are `sha256:` followed by lowercase SHA-256 over a domain separator and 
 | Approval `parameters.id`, `candidate_id` | Reserved ID `candidate-approval` and the bound candidate awaiting approval |
 | Subject / obligation `parameters` | Original subject request or obligation, retaining its immutable `id` and action parameters |
 
-The full CandidateControl contract applies to every operation and future scenario, ordered `nop < allow < ask < block`. Current `check` producers emit `allow/block`; current `evaluate` producers emit `nop/allow/block`. Both emit empty subject controls and only `snapshot/audit` obligations. `ask` is a deterministic decision to require approval; ambiguity and `unknown` answers never produce it. Its types, validation and Approval Directive projection are reserved now. Current preservation/task-scope producers do not emit it, and runtime `ApprovalExecutor` and Adapter admission remain pending. The wider vocabulary covers future enhancement/approval, security, subject-control and cleanup scenarios; general merging, execution scheduling and action implementations remain pending. `Outcome::directives` projects ask, subject requests and obligations. The consumer handles candidate blocking through its native interface. Subject requests remain independent; a pending kill does not absorb freeze or quarantine.
+The full CandidateControl contract applies to every operation and future scenario, ordered `nop < allow < ask < block`. Current `check` producers emit `allow/block`; current `evaluate` producers emit `nop/allow/block`. Both emit empty subject controls and only `snapshot/audit` obligations. `ask` is a deterministic decision to require approval; ambiguity and `unknown` answers never produce it. Its types, validation and Approval Directive projection are reserved now. Current preservation/task-scope producers do not emit it, and real approval execution and Adapter admission remain pending consumer integration. The wider vocabulary covers future enhancement/approval, security, subject-control and cleanup scenarios. Public deterministic composition is available; execution scheduling, real action implementations and native adoption remain consumer responsibilities. `Outcome::directives` projects ask, subject requests and obligations. The consumer handles candidate blocking through its native interface. Subject requests remain independent; a pending kill does not absorb freeze or quarantine.
 
 | Obligation `action.kind` | `action.parameters` |
 |---|---|
@@ -207,6 +221,14 @@ Directive IDs are unique within an outcome; `candidate-approval` is reserved. Ea
 | `state`, `reason` | Only `applied/confirmed`, `rejected/denied`, `unknown/unconfirmed` are accepted |
 
 Consumers create receipts after independent admission and effect verification. `decode_receipt` takes a `CheckRequest` and retained Outcome and checks correlation and state/reason consistency. This API supplies no model-evaluation receipt decoder or operating-system effect verification. Consumers must separately verify capability, identity, scope, authorization, idempotency and deadline. An answer `unknown`, candidate `nop`, candidate `ask`, and receipt `unknown` are four distinct states: incomplete semantic support, no candidate judgment, a deterministic approval requirement, and an unconfirmed execution effect. For a receipt `unknown`, query the original receipt or inspect the effect manually; never automatically repeat the directive. Rejection also grants no retry permission. Neither operation manufactures execution receipts.
+
+### Consumer-side executor lifecycle
+
+The `executor` module is a consumer-side library contract. `AuthorizationContext` is trusted input created by the consumer; evidence, model output and a Directive cannot create or expand it. Admission requires a supported check or evaluation protocol version, the exact granular `DirectiveCapability`, an unexpired deadline, matching candidate/workspace/instance bindings and an allowlist containing every nonempty controlled scope or parameter ID. `ExecutorRegistry` registers exactly one Executor per capability.
+
+`idempotency_key` is a stable domain-separated digest of `api_version`, `request_id`, the complete `Binding` and the complete immutable `Directive`. Execution follows claim, conditional dispatch and query. A new claim dispatches at most once and then queries the effect. An existing claim skips dispatch and queries the original request. A dispatch result never determines the receipt; only the independent query maps to `applied/confirmed` or `rejected/denied`. A failed or unconfirmed query maps to `unknown/unconfirmed`, and an unknown effect is never automatically replayed.
+
+`executor::fixture` supplies an in-memory claim store and scripted Executor solely for tests and examples. It performs no external action and establishes no native Adapter support. Real Executors, native Adapter adoption, durable production claims, persistent audit and operating-system effect verification remain pending consumer integration.
 
 ## CLI completion and integration boundary
 
