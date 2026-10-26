@@ -50,7 +50,7 @@ impl FlowContext {
     }
 }
 
-/// Exactly one terminal kind is committed for every admitted Flow.
+/// Exactly one terminal kind is committed for each Flow that reaches terminal commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalKind {
     /// All required evidence and Ring Buffer coverage were established.
@@ -187,7 +187,9 @@ pub struct FlowCounters {
     pub complete: u64,
     /// Committed non-complete terminals.
     pub incomplete: u64,
-    /// Admitted exchanges abandoned without terminal evidence; never certified as complete.
+    /// Admitted exchanges abandoned without terminal evidence.
+    /// These admissions commit no `TerminalKind` and are excluded from
+    /// `complete` and `incomplete`.
     pub evidence_unavailable: u64,
     /// Events arriving after terminal commit.
     pub late_event_total: u64,
