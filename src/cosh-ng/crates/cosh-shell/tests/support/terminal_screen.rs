@@ -277,6 +277,9 @@ impl TerminalSession {
             revents: 0,
         };
         let result = unsafe { libc::poll(&mut poll, 1, 10) };
+        if result < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            return;
+        }
         assert!(
             result >= 0,
             "poll screen PTY: {}",
@@ -293,7 +296,11 @@ impl TerminalSession {
                 self.parser.process(&bytes[..count]);
                 self.last_output = Instant::now();
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
             Err(error) => panic!("screen PTY read: {error}"),
         }
     }

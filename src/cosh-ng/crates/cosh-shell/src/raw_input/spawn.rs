@@ -14,8 +14,10 @@ use super::card_capture::CardInputState;
 use super::event_parser::{CandidateLineBuffer, NativeLineState};
 use super::event_sender::{RawInputEventSink, WakingRawInputEventSender};
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
+#[cfg(test)]
+use super::mode::complete_capture_replay;
 use super::mode::{
-    abandon_active_capture, complete_capture_chain_if_pending, complete_capture_replay,
+    abandon_active_capture, complete_capture_chain_if_pending, complete_locked_capture_replay,
     current_raw_input_mode, expire_capture_submission, PostCaptureOwner, RawInputMode,
 };
 use super::pty::write_all_pty;
@@ -48,7 +50,7 @@ use assistance::{flush_pending_assistance_escape, resolve_assistance_shortcut};
 pub(super) use capture::relay_late_capture_input;
 use capture::{
     capture_generation, capture_owns_input, capture_quarantine_generation, drain_abandoned_capture,
-    relay_input_chunk, CaptureOwnedInput,
+    relay_input_chunk, wait_for_pending_capture_replay, CaptureOwnedInput,
 };
 use deadline::{flush_pending_deadlines, next_pending_deadline, receive_input};
 pub(super) use finish::finish_input_relay;
@@ -58,7 +60,9 @@ use prompt_ghost::{
 use read_batch::{
     is_pending_shell_submission, should_split_passthrough_batch, InputRead, RelayReadContext,
 };
+#[cfg(test)]
 use reader::read_input_chunks;
+use reader::spawn_input_reader;
 pub(in crate::raw_input) use state::input_relay_context;
 pub(super) use state::RawInputRelayState;
 use state::{flush_deferred_zsh_tab_typeahead, sync_pending_draft_escape};
@@ -111,18 +115,24 @@ where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
-        let input_events = WakingRawInputEventSender::new(input_events, wake);
-        let (read_tx, read_rx) = mpsc::sync_channel(INPUT_READ_AHEAD_CAPACITY);
-        // The relay must wake without a later keystroke to resolve a bare ESC.
-        let reader_input_mode = input_mode.clone();
-        thread::spawn(move || read_input_chunks(input, read_tx, reader_input_mode, input_fd));
-
         let mut state = RawInputRelayState::with_shell_route(input_generation, shell_route);
+        let (read_rx, input_events, replay_wake) =
+            spawn_input_reader(input, input_events, &input_mode, input_fd, wake, &state)?;
         loop {
+            wait_for_pending_capture_replay(
+                &mut master,
+                &input_classifier,
+                &input_events,
+                &input_mode,
+                &mut state,
+                replay_wake.as_ref(),
+                Some(&read_rx),
+            )?;
             sync_pending_draft_escape(&mut state);
             let input = match receive_input(&read_rx, &mut state) {
                 Ok(input) => input,
                 Err(RecvTimeoutError::Timeout) => {
+                    let had_deadline = next_pending_deadline(&state).is_some();
                     flush_pending_deadlines(
                         &mut master,
                         &input_classifier,
@@ -130,7 +140,9 @@ where
                         &input_mode,
                         &mut state,
                     )?;
-                    input_events.notify_relay();
+                    if had_deadline {
+                        input_events.notify_relay();
+                    }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => InputRead::Eof,
@@ -149,7 +161,20 @@ where
                             .iter()
                             .position(|byte| matches!(byte, b'\n' | b'\r'))
                             .expect("split predicate requires a submission");
-                        let remainder = bytes.split_off(submit + 1);
+                        let mut split_at = submit + 1;
+                        // #7768: startup type-ahead coalesces separately typed
+                        // reads, so a Tab typed right after the Enter would
+                        // otherwise lead the deferred batch and reach ZLE as a
+                        // lone keystroke. Keep it with the submitted line so
+                        // the zsh Tab handoff sees submit+Tab in one read —
+                        // exactly what it receives when the reads do not
+                        // coalesce.
+                        if bytes.get(split_at) == Some(&b'\t')
+                            && state.zsh_path_prompt_buffering.is_some()
+                        {
+                            split_at += 1;
+                        }
+                        let remainder = bytes.split_off(split_at);
                         let shell_owned = is_pending_shell_submission(
                             &bytes[..submit],
                             &state,
@@ -220,6 +245,16 @@ where
                             },
                         )?;
                     }
+                    input_events.notify_relay();
+                }
+                InputRead::CaptureInvalidated => {
+                    flush_pending_deadlines(
+                        &mut master,
+                        &input_classifier,
+                        &input_events,
+                        &input_mode,
+                        &mut state,
+                    )?;
                     input_events.notify_relay();
                 }
                 InputRead::Eof => {

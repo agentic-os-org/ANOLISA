@@ -81,6 +81,11 @@ blank when accepting a cursor-edited draft whose mirror cannot prove it is
 non-secret. This is an accept-line display change, separate from editable
 geometry; argument bytes and the privacy guard remain intact.
 
+A Ctrl-X binding outside pasted text can accept a line without an observable
+Enter. Enhanced Bash therefore hands input back to Bash until the next real
+primary-prompt marker; the same conservative boundary applies to Ctrl-X Ctrl-R
+configuration reloads. No private guard is injected into an unproven PS2 reader.
+
 At an empty Enhanced main prompt, `Shift+Tab` switches to Shell-only and
 disables Cosh input interception (publishing a `◌` status line when status
 symbols are enabled). Pressing it again restores Assisted routing (publishing

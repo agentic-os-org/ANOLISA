@@ -140,7 +140,7 @@ pub(crate) fn batch_consent_covers_request(request: &RuntimeApprovalRequest, run
         && request.run_id == run_id
 }
 
-fn finalize_approval_decision(
+pub(super) fn finalize_approval_decision(
     state: &mut InlineState,
     request_index: usize,
     status: ApprovalRequestStatus,

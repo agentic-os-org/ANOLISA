@@ -288,6 +288,10 @@ impl NativeLineState {
         }
     }
 
+    pub(super) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
     pub(super) fn history_mirror_requires_fail_closed(&self) -> bool {
         self.dirty && !self.in_paste && self.pending_paste_delimiter.is_empty()
     }

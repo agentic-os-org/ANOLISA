@@ -2,6 +2,168 @@ use super::*;
 #[cfg(target_os = "linux")]
 use nix::libc;
 
+#[cfg(target_os = "linux")]
+fn native_ps2_agent_text_stays_bash_owned(kind: &str) {
+    use super::support::terminal_screen::TerminalSession;
+    let mut session = TerminalSession::spawn_with_startup(
+        "bash", "enhanced", 100,
+        &[(".bashrc", "PS1='\\[\\e[32m\\]screen$ \\[\\e[0m\\]'\nPS2='native-cont> '\nbind '\"\\C-x\\C-a\": accept-line'\n")],
+    );
+    let result = session.home().join("consumer-result");
+    let before = session.home().join("bash-before");
+    let after = session.home().join("bash-after");
+    let fresh = session.home().join("fresh-effect");
+    session.send(b"printf '%s' \"$$\" > \"$HOME/bash-before\"; pwd > \"$HOME/cwd-before\"; printf '%s' \"$PS1\" > \"$HOME/ps1-before\"\n");
+    session.wait_screen("Bash identity before continuation", |screen| {
+        before.exists() && screen.contents().ends_with("screen$ ")
+    });
+    let opener: &[u8] = if kind == "custom-accept-paste" {
+        b"printf '%s\\n' > \"$HOME/consumer-result\" '\x18\x01"
+    } else if kind == "heredoc" {
+        b"cat > \"$HOME/consumer-result\" <<'NATIVE_END'\n"
+    } else {
+        b"printf '%s\\n' > \"$HOME/consumer-result\" '\n"
+    };
+    session.send(opener);
+    session.wait_screen("original Bash PS2 before marker", |screen| {
+        screen.contents().ends_with("native-cont> ")
+            && !screen.hide_cursor()
+            && screen.cursor_position().1 == 13
+    });
+    if kind == "slash-edit" {
+        session.send(b"/");
+        session.wait_screen("Slash draft before native edit", |screen| {
+            screen.contents().contains("native-cont> /") && !screen.hide_cursor()
+        });
+        session.send(b"\x7f?? native ps2'\n");
+    } else if kind == "custom-accept-paste" {
+        session.send(b"\x1b[200~?? native ps2'\x1b[201~\n");
+    } else if kind == "heredoc" {
+        session.send(b"?? native ps2\nNATIVE_END\n");
+    } else {
+        session.send(b"?? native ps2'\n");
+    }
+    let expected: &[u8] = if kind == "heredoc" {
+        b"?? native ps2\n"
+    } else {
+        b"\n?? native ps2\n"
+    };
+    session.wait_screen("native consumer and PS1 before fresh input", |screen| {
+        screen.contents().contains("Thinking...")
+            || screen.contents().contains("Agent ")
+            || (fs::read(&result).is_ok_and(|bytes| bytes == expected)
+                && screen.contents().ends_with("screen$ ")
+                && !screen.hide_cursor()
+                && screen.cursor_position().1 == 8)
+    });
+    let raw = session.raw_output();
+    assert!(
+        !raw.contains("Thinking...") && !raw.contains("Agent "),
+        "{kind}: {raw:?}"
+    );
+    assert_eq!(
+        fs::read(&result).ok().as_deref(),
+        Some(expected),
+        "{kind}: native consumer: {raw:?}"
+    );
+    assert!(raw.contains("\x1b[32m"), "original green PS1: {raw:?}");
+    let row = session.screen().cursor_position().0;
+    assert!(
+        (0..8).all(
+            |column| session.screen().cell(row, column).unwrap().fgcolor() == vt100::Color::Idx(2)
+        ),
+        "original PS1 cells remain green: {raw:?}"
+    );
+    assert_eq!(
+        fs::read(session.home().join("ps1-before")).unwrap(),
+        b"\\[\\e[32m\\]screen$ \\[\\e[0m\\]"
+    );
+    assert!(!fresh.exists(), "fresh input must not precede native PS1");
+    session.send(b"pX\x7f");
+    session.wait_screen("original prompt cursor edits first fresh input", |screen| {
+        screen.contents().ends_with("screen$ p")
+            && !screen.hide_cursor()
+            && screen.cursor_position().1 == 9
+    });
+    session.send(b"rintf 'fresh-once\\n' >> \"$HOME/fresh-effect\"; printf '%s' \"$$\" > \"$HOME/bash-after\"; pwd > \"$HOME/cwd-after\"; printf '%s' \"$PS1\" > \"$HOME/ps1-after\"\n");
+    session.wait_screen("first fresh input completes once", |screen| {
+        after.exists()
+            && fresh.exists()
+            && screen.contents().ends_with("screen$ ")
+            && !screen.hide_cursor()
+            && screen.cursor_position().1 == 8
+    });
+    assert_eq!(fs::read(&fresh).unwrap(), b"fresh-once\n");
+    assert_eq!(
+        fs::read(session.home().join("ps1-before")).unwrap(),
+        fs::read(session.home().join("ps1-after")).unwrap()
+    );
+    let row = session.screen().cursor_position().0;
+    assert!(
+        (0..8).all(
+            |column| session.screen().cell(row, column).unwrap().fgcolor() == vt100::Color::Idx(2)
+        ),
+        "PS1 remains green after first fresh input"
+    );
+    assert_eq!(
+        fs::read(&before).unwrap(),
+        fs::read(&after).unwrap(),
+        "same original Bash"
+    );
+    assert_eq!(
+        fs::read(session.home().join("cwd-before")).unwrap(),
+        fs::read(session.home().join("cwd-after")).unwrap()
+    );
+    eprintln!(
+        "{kind}: original Bash PS2/PS1 and fresh-once: {:?}",
+        session.raw_output()
+    );
+    if kind == "custom-accept-paste" {
+        session.send(b"?? primary-after-native-control\n");
+        session.wait_screen("fresh primary marker restores Agent routing", |screen| {
+            screen.contents().contains("Agent ") && screen.contents().ends_with("screen$ ")
+        });
+    }
+    session.finish();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_quoted_ps2_agent_marker_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("quote");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_heredoc_agent_marker_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("heredoc");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_ps2_slash_edited_to_agent_marker_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("slash-edit");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_custom_accept_line_ps2_paste_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("custom-accept-paste");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_primary_prompt_still_accepts_explicit_agent_marker() {
+    use super::support::terminal_screen::TerminalSession;
+    let mut session = TerminalSession::spawn("enhanced", 100);
+    session.send(b"?? primary-agent-control\n");
+    session.wait_screen("primary prompt selects Agent", |screen| {
+        screen.contents().contains("Agent ") && screen.contents().ends_with("screen$ ")
+    });
+    eprintln!("primary Agent control: {:?}", session.raw_output());
+    session.finish();
+}
+
 #[test]
 fn raw_cli_isolated_candidate_redraws_add_no_status_lines() {
     let prompt = "isolated-owner$ ";
@@ -877,4 +1039,11 @@ fn raw_cli_zsh_native_path_slash_and_tab_stay_in_shell() {
     assert!(!output.contains("Slash commands"), "{output}");
     assert!(!output.contains("User mode"), "{output}");
     assert!(!output.contains("/mode [recommend|agent]"), "{output}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_explicit_exit_42_preserves_status() {
+    let session = super::support::terminal_screen::TerminalSession::spawn("enhanced", 100);
+    session.finish_with_input(b"exit 42\n", 42);
 }

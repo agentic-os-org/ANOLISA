@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    update_input_mode, write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
-    UserPtyInputGeneration,
+    write_all_pty, RawInputEvent, RawInputMode, RawObserverAction, UserPtyInputGeneration,
 };
 use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
 
@@ -38,16 +37,15 @@ pub(super) use activity::{DriverCompletion, RawActionWatchdog};
 use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown};
 use input_events::{
     apply_prompt_boundary_evidence, candidate_display_columns, drain_raw_input_events,
-    latest_capture_submission_generation, observe_with_input_mode_lock,
-    publish_prompt_snapshot_if_drained, write_no_wrap_overlay,
+    observe_with_input_mode_lock, publish_prompt_snapshot_if_drained, write_no_wrap_overlay,
 };
 use input_readiness::RawInputReadinessProbe;
 use interactive_sentinel::{
     emit_interactive_hint_if_waiting, InputWaitStatus, InteractiveHintKind, SentinelThrottle,
 };
-use pty_emit::resolve_pty_emit;
 #[cfg(test)]
 use pty_emit::restore_prompt_display_before_handoff;
+use pty_emit::{resolve_pty_emit, update_input_mode_and_wake};
 use terminal_recovery::{restore_terminal_after_interrupted_command, PendingTerminalRecovery};
 use terminal_size::sync_outer_terminal_winsize;
 
@@ -175,11 +173,7 @@ where
             bounded_bash_handoff,
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
-        update_input_mode(
-            input_mode,
-            &observer_action,
-            latest_capture_submission_generation(&parser.events),
-        );
+        update_input_mode_and_wake(input_mode, &observer_action, parser, wake)?;
         let mut hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display_position() > display_start {
             write_pending_display_preserving_prompt_ghost(
@@ -311,11 +305,7 @@ where
                             &observer_action,
                             &mut pending_prompt_restore,
                         );
-                        update_input_mode(
-                            input_mode,
-                            &observer_action,
-                            latest_capture_submission_generation(&parser.events),
-                        );
+                        update_input_mode_and_wake(input_mode, &observer_action, parser, wake)?;
                         hold_shell_output = observer_action.hold_shell_output();
                         if !hold_shell_output && parser.display_position() > display_start {
                             write_pending_display_preserving_prompt_ghost(
@@ -464,11 +454,7 @@ where
             bounded_bash_handoff,
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
-        update_input_mode(
-            input_mode,
-            &observer_action,
-            latest_capture_submission_generation(&parser.events),
-        );
+        update_input_mode_and_wake(input_mode, &observer_action, parser, wake)?;
         let runtime_poll_pending = matches!(
             &observer_action,
             RawObserverAction::HoldShellOutput | RawObserverAction::DelayShellOutput

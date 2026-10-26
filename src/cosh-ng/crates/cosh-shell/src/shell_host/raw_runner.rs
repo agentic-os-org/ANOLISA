@@ -26,6 +26,7 @@ use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog}
 
 mod interactive;
 pub(super) mod raw_mode_guard;
+mod startup_gate;
 mod wake;
 
 pub use interactive::{
@@ -389,6 +390,8 @@ where
         prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
     }
     if config.integration.uses_markers() {
+        // #7768: hold the relay until the path-routing gate is up, closing the
+        // startup window between precmd/prompt and the prompt_ready marker.
         read_until_streaming_with_presentation(
             &mut session.master,
             &mut session.child,
@@ -396,13 +399,7 @@ where
             &mut output,
             &mut prompt_presentation,
             Duration::from_secs(5),
-            |parser| {
-                if config.native_mode {
-                    parser.precmd_count() >= 1
-                } else {
-                    parser.prompt_count(config.prompt.as_bytes()) >= 1
-                }
-            },
+            |parser| startup_gate::relay_release_ready(config, parser, &main_prompt_gate),
         )?;
     }
     let input_master = session.master.try_clone()?;
@@ -436,7 +433,8 @@ where
             main_prompt_gate,
             slash_route_enabled,
             session.zsh_path_prompt_buffering.take(),
-        ),
+        )
+        .with_native_terminal(session.terminal.try_clone()?),
         wake_writer,
     );
     let (driver_completion_sender, driver_completion_receiver) = mpsc::channel();

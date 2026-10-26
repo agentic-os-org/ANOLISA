@@ -69,6 +69,10 @@ Bash 既有的历史隐私提交保护仍会在接受经过光标编辑、镜像
 添加一个前导空格。这是 accept-line 阶段的显示变化，与编辑区几何分开；参数字节和
 隐私保护逻辑保持原样。
 
+Ctrl-X 多键绑定可能不经 Enter 就接受当前行。Enhanced Bash 会在粘贴外收到
+Ctrl-X 后将输入交还 Bash，直到真实主提示符 marker 恢复；Ctrl-X Ctrl-R 配置
+重载也采用这一保守边界，不向尚未确认归属的 PS2 读取方注入私有 guard。
+
 在 Enhanced 的空主提示符处按 `Shift+Tab` 会切换到 Shell-only 并关闭 Cosh 输入拦截
 （状态符号开启时发布 `◌` 状态行），再次按下则恢复 Assisted 路由（开启时发布 `◇`），
 不向 Shell 提交空命令，也不重启子 Shell。
