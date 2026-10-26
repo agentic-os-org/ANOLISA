@@ -179,6 +179,41 @@ async fn lists_ten_tier_a_tools() {
     let _ = child.kill().await;
 }
 
+/// The packaged static catalog (installed by the RPM / Makefile as
+/// `mcp-servers/agent-memory.json`) must advertise exactly the public
+/// tool surface asserted by EXPECTED_TOOLS, so a newly registered tool
+/// cannot silently drift from the descriptor static-discovery clients
+/// read. Profile filtering stays a runtime concern and is unaffected.
+#[test]
+fn packaged_mcp_catalog_matches_expected_tools() {
+    let raw = include_str!("../config/mcp-server.json");
+    let descriptor: Value =
+        serde_json::from_str(raw).expect("config/mcp-server.json must be valid JSON");
+    let advertised: Vec<&str> = descriptor["tools"]
+        .as_array()
+        .expect("descriptor must contain a tools array")
+        .iter()
+        .map(|t| t.as_str().expect("tool catalog entries must be strings"))
+        .collect();
+
+    let mut packaged: Vec<&str> = advertised.clone();
+    let mut contract: Vec<&str> = EXPECTED_TOOLS.to_vec();
+    packaged.sort_unstable();
+    contract.sort_unstable();
+    assert_eq!(
+        packaged, contract,
+        "config/mcp-server.json and the MCP contract EXPECTED_TOOLS diverge; \
+         sync the packaged catalog whenever tools are added or removed"
+    );
+
+    let unique: std::collections::HashSet<_> = advertised.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        advertised.len(),
+        "packaged catalog contains duplicate tool names: {advertised:?}"
+    );
+}
+
 #[tokio::test]
 async fn write_read_grep_workflow() {
     let tmp = tempfile::tempdir().unwrap();
