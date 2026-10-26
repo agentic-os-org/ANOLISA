@@ -3,7 +3,8 @@
 [中文版](../../zh/aw/native-agents.md)
 
 This reference is for integration and maintenance. For installation and daily use,
-see the [user guide](../../../user-guide/en/aw/index.md).
+see the [user guide](../../../user-guide/en/aw/index.md). Compare public Hook,
+MCP and policy-update support in the [capability matrix](../../../user-guide/en/aw/capabilities.md).
 
 AW connects your tool policies and Hook commands to an Agent while preserving
 its normal interface. You describe the programs and events in `aw.yaml`; AW
@@ -14,6 +15,7 @@ The current Linux source build supports Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
 QwenPaw 2.2.2.post1 / AgentScope 2.0.10, Hermes revision `952c941e` and explicit
 Claude SDK 0.2.88 workers with bundled CLI 2.1.161, plus Pi Coding Agent/Core SDK 0.84.2 workers
 and AgentScope SDK 2.0.6 through explicitly wired public factories in a foreground Python worker.
+Qoder SDK 1.0.56 / Worker 1.1.78 uses managed daemon and Query factories.
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
 
@@ -42,6 +44,7 @@ For optional lifecycle observation, see [AgentSight through aw run](../../../use
 | Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
 | Start a Pi SDK 0.84.2 worker | ✅ Public SDK factory; see [worker guide](#start-a-pi-sdk-worker) |
 | Start a Claude SDK 0.2.88 worker | ✅ Explicit public factory Bridge; see [worker guide](#start-a-claude-sdk-worker) |
+| Start a Qoder SDK 1.0.56 worker | ✅ Managed daemon and Query factories; see [worker guide](#start-a-qoder-sdk-worker) |
 | Start AgentScope SDK through AW | ✅ [Explicit public factories](#start-agentscope-sdk) in one foreground Python worker |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, input rewriting or OS enforcement | ❌ Not admitted by the current structured Provider path |

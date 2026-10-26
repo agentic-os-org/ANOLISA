@@ -10,6 +10,7 @@ Agent 的界面、模型账号和权限设置继续由原框架管理。
 
 | 要做什么 | 阅读哪一页 |
 | --- | --- |
+| 对比 16 个 Hook、受管 MCP 和热更新模式 | [能力支持矩阵](capabilities.md) |
 | 第一次使用，安装后启动 Qoder | [安装与首次运行](installation.md) |
 | 在自己的 Linux 机器上编译 | [从源码构建 AW](../../../../contribute/zh/aw/building.md) |
 | 选择 Agent、增加规则或修改配置 | [配置与 Agent 启动](configuration.md) |

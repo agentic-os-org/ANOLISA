@@ -101,7 +101,7 @@ with `observe` or a single final structured `replace_result`, plus native steps
 at these points. Boolean/native steps cannot request result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, guards and stronger execution guarantees
-are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope 2.0.6 factories have launch Adapters;
+are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope 2.0.6 factories have launch Adapters;
 their supported versions, entrypoints and
 after-event coverage are listed in the [native Agent reference](native-agents.md).
 
@@ -146,8 +146,8 @@ acquiring approval capability. Native host approval is unaffected.
 `withhold_result` is valid only after a tool. `report` records a failure and
 continues. Withholding requires a verified model-consumption boundary; replacing
 a history entry is insufficient. Required redaction must not use `report`.
-The service enforces these requirements at admission and execution. Currently only
-ordinary QwenPaw resident launches declare `withhold_result` for structured Provider
+The service enforces these requirements at admission and execution. Ordinary
+Qoder SDK and QwenPaw resident launches declare `withhold_result` for structured Provider
 and boolean Hook after steps. Reloadable launches and native-command steps reject it.
 
 Both tool events and their steps accept `match.tools`. A step runs only when

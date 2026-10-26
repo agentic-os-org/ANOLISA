@@ -2,10 +2,32 @@
 
 [English](README.md)
 
-AW 让不同 Agent 共用安全检查、工具输出压缩和自定义规则。
-它通过一份配置启动原生 Agent，并在工具调用前后运行所选 Provider。
-Agent 继续管理自己的模型、界面和权限；AW 保存本地执行记录，便于检查运行情况。
-当前为 Linux Preview。
+AW 为 Agent 和 SDK 应用提供统一 Hook 编排、受管 MCP 接入和策略热更新。
+通过一份配置选择 Agent 目标，组合安全检查、工具输出压缩和自定义规则。
+Adapter 将原生执行接入这些公共合同，Agent 继续管理自己的模型、界面和权限。
+当前为 Linux Preview；可用能力由 Adapter 和启动模式共同决定。
+
+## 通用能力
+
+| 能力 | AW 提供什么 | 接入边界 |
+| --- | --- | --- |
+| 统一 Hook | 在工具执行前后组合用户规则与 sec-core、Tokenless 等 Provider，统一工具选择、步骤顺序、期限和审计。 | Adapter 转换原生事件并采纳支持的效果。安全检查按其覆盖的工具选择，保留原生权限检查。 |
+| 受管 MCP | 将 MCP 工具纳入同一套调用前后策略链，管理调用身份、生命周期归属和结果处理。 | 通过支持的受管工厂或工具接点注册。各 Adapter 明确支持的传输、身份证据和结果位置。 |
+| 策略热更新 | 校验后显式向空闲实例应用策略变更，保留宿主进程。 | 普通 Qoder SDK 和 QwenPaw 支持任务完整排空后的空闲更新。受限 `--reloadable` / PID attach 模式保留各自限制；其他普通 Adapter 需重启。 |
+
+在一份 `aw.yaml` 中定义目标，通过
+`aw run --config aw.yaml --agent <target>` 选择启动。
+CLI 接入安装原生 Hook；SDK 应用使用文档指定的受管工厂或插件。
+新增 Adapter 复用公共配置、Provider 协议和生命周期合同，逐步补齐原生能力。
+配置要求的能力尚未支持时，准入明确拒绝；每个 Adapter 分别声明支持的效果和启动模式。
+
+[能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)按 Adapter 和启动模式记录
+16 个 Hook、受管 MCP 与策略热更新的支持情况，分别列出已实现边界与后续计划。
+策略热更新复用统一框架合同，各 Adapter 提供经过验证的安全切换边界。
+
+当前接入合同见[自定义 Hook 与 SDK 接入](../../docs/developer-guide/zh/aw/native-agents.md)、
+[受管 MCP](docs/design/zh/adapters/claude-mcp.md)和
+[策略更新](../../docs/user-guide/zh/aw/configuration.md#更新预热实例)。
 
 ## 安装与使用
 
@@ -51,6 +73,12 @@ launcher 转发退出信号后，Agent 需要超过默认两秒的强制清理�
 用 `aw validate --config next.yaml --against current.yaml` 离线检查仅涉及策略的修改，
 详见[配置](../../docs/user-guide/zh/aw/configuration.md#比较策略修改)；
 此命令不更新运行中的实例。
+
+普通 Qoder SDK 和 QwenPaw worker 支持显式空闲策略更新，无需重启。全部 Query/reply、
+原生回调和私有租约完全清理后，更新为新任务快照选择策略，保留严格 Post 和受管 MCP。
+受管 Qoder `startDaemon()` 和 QwenPaw App startup 在首个任务前确认就绪。先准备 Hook
+文件，再执行 `aw update --config aw.yaml --agent TARGET` 应用完整策略，成功后派发任务。
+同一目标有多个实例时使用 `--instance ID`。管控侧串行化更新与任务派发；活跃任务使更新返回 `busy`。
 
 通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2.post1 /
 AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / Worker 1.1.78
@@ -108,6 +136,7 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 | 任务 | 文档 |
 | --- | --- |
 | 选择能力和开始使用 | [AW 用户指南](../../docs/user-guide/zh/aw/index.md) |
+| 对比 Hook、MCP 和热更新支持情况 | [能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md) |
 | 安装包、生成配置和首次运行 | [安装 AW](../../docs/user-guide/zh/aw/installation.md) |
 | 选择 Agent、启用 Provider 和修改配置 | [配置 AW](../../docs/user-guide/zh/aw/configuration.md) |
 | 压缩工具输出 | [Tokenless](../../docs/user-guide/zh/aw/tokenless.md) |
@@ -120,11 +149,16 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 用户手册集中在 `docs/user-guide/{en,zh}/aw/`，接入参考在
 `docs/developer-guide/{en,zh}/aw/`。组件协议设计保留在本目录的 `docs/design/`。
 
-## Hook 支持
+<a id="hook-支持"></a>
 
-下表由[回归矩阵](tests/regression-matrix.json)生成，表示运行时声明并由 CI 契约测试
-覆盖的能力。支持版本、工具类型和文本替换范围见
-[原生 Agent 接入参考](../../docs/developer-guide/zh/aw/native-agents.md)。
+## Adapter 能力覆盖
+
+上面的通用能力说明 AW 的产品范围；下表按 Adapter 列出工具事件和效果的覆盖情况，
+由[回归矩阵](tests/regression-matrix.json)生成，并由 CI 契约测试核对。
+`✓` 表示已声明且有契约覆盖的效果，`—` 表示尚未支持。
+MCP 接入、严格 Post 失败处理、常驻生命周期和热更新见
+[能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)。
+[原生 Agent 接入参考](../../docs/developer-guide/zh/aw/native-agents.md)说明支持的工具类型与文本替换范围。
 
 普通受管 Qoder SDK Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。
 显式应用工厂为每次受管 MCP handler 调用提供私有租约。普通 QwenPaw App 启动为每个
@@ -134,7 +168,7 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 两种普通 resident 路径均准入严格 After 的 `on_error: withhold_result`，阻止未核验
 结果交付和后续派发。Post 之前已经发生的工具副作用继续生效。
 [统一安全示例](crates/aw-service/examples/aw.sdk-security.yaml) 通过
-`--agent qoder-sdk` 或 `--agent qwenpaw` 选择目标。resident 策略变更采用滚动重启；
+`--agent qoder-sdk` 或 `--agent qwenpaw` 选择目标。resident 策略变更支持在 Query 完整关闭或 reply 完整排空后显式空闲更新；
 `--reloadable` 保留独立的空闲更新路径，不提供严格 Post 和私有执行租约。
 
 <!-- aw-regression-matrix:start -->

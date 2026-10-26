@@ -3,6 +3,7 @@
 [English](../../en/aw/native-agents.md)
 
 本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/aw/index.md)。
+公共 Hook、MCP 与策略更新支持情况见[能力矩阵](../../../user-guide/zh/aw/capabilities.md)。
 
 AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互界面。在 `aw.yaml`
 中声明程序和事件后，AW 启动或复用本地服务，接通受支持的原生 Hook，并在 Agent
@@ -12,6 +13,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 QwenPaw 2.2.2.post1 / AgentScope 2.0.10、Hermes 官方提交 `952c941e`，以及显式接入的
 Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core SDK 0.84.2 worker，
 以及在前台 Python worker 中通过显式公共工厂接线的 AgentScope SDK 2.0.6。
+Qoder SDK 1.0.56 / Worker 1.1.78 使用受管 daemon 与 Query 工厂。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
@@ -43,6 +45,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 | 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
 | 启动 Pi SDK 0.84.2 worker | ✅ 公共 SDK 工厂；见[worker 指南](#启动-pi-sdk-worker) |
 | 启动 Claude SDK 0.2.88 worker | ✅ 显式公共工厂 Bridge；见 [worker 指南](#启动-claude-sdk-worker) |
+| 启动 Qoder SDK 1.0.56 worker | ✅ 受管 daemon 与 Query 工厂；见 [worker 指南](#启动-qoder-sdk-worker) |
 | 通过 AW 启动 AgentScope SDK | ✅ 单个前台 Python worker 中[显式接线的公共工厂](#启动-agentscope-sdk) |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
 | 其他事件、跨框架 `ask`、输入改写或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |

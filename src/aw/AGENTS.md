@@ -108,6 +108,38 @@ framework and Provider tables, with test-only dependencies identified.
 
 ## Adding an Agent or Hook
 
+### Shared capabilities and support evidence
+
+Unified Hooks, managed MCP and policy updates are shared AW capabilities.
+Keep configuration, admission, revision handling, lifecycle ownership and audit
+in the common framework; Adapters supply native boundaries and effect adoption.
+Frameworks may deliver these capabilities in different orders. A missing native
+boundary must produce an explicit unsupported capability at admission.
+
+Maintain the paired [capability support reference](../../docs/user-guide/en/aw/capabilities.md)
+in the same PR as any support change. Record the Adapter, supported version and
+launch mode, execution boundary, limitations and runnable acceptance evidence.
+Keep implemented, experimental, vocabulary-only and planned states distinct.
+The generated README grid remains the event/effect catalog; the support reference
+covers MCP, lifecycle and update modes. Update both when their claims change.
+Recognition of any of the 16 event names, an internal lifecycle notification,
+or a model-response identity tap does not establish a public Provider Hook.
+
+Policy updates must reuse candidate preparation, revision checks, durable audit
+and atomic activation. Native request/scope admission and activation must share
+a gate; preparation, unacknowledged handoffs and unfinished cleanup count as
+occupancy. Retain one policy revision through a task's before/after and MCP
+checks. Confirm native route adoption before dispatch, preserve old policy on
+rejected updates, and keep uncertain cleanup fail-closed. Describe each Adapter's
+verified readiness, launch mode and switching boundary; never infer reload
+support from a PID or native settings watcher. Keep external PID attachment,
+internal process identity and update target selection distinct. Prewarmed workers
+need readiness before their first task. The control plane may pause dispatch for
+updates; retain the runtime busy gate and avoid adding active-task switching
+without an explicit contract. Post-activation audit failure must stop dispatch
+rather than report an unchanged old policy. Current support
+and the staged roadmap remain in the capability reference.
+
 Update these together in the same change:
 
 1. Register the Adapter and its event/effect profile in

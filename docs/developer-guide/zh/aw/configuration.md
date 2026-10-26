@@ -84,7 +84,7 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 当前运行时准入工具前 `observe`/`block`、工具后 `observe` 或唯一且最后的结构化
 `replace_result`，以及这两个点位的原生步骤。布尔/原生步骤不能请求结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。运行时仍拒绝其他已识别事件、guard 和更强执行保证。
-Qoder、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6 工厂均有启动 Adapter；
+Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6 工厂均有启动 Adapter；
 受支持版本、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
 
 ## 事件、效果与工具选择
@@ -123,7 +123,7 @@ Qoder、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6
 `on_error: block` 仅用于执行前的 `tool.before` 或 guard；`withhold_result`
 仅用于工具后；`report` 记录失败后继续。禁止原结果交付需要已验证的模型消费
 边界，只修改历史记录不足以满足要求。必需的安全隐藏不能使用 `report`。
-服务在准入时拒绝尚不能落实的效果与失败动作。目前仅普通 QwenPaw resident 启动
+服务在准入时拒绝尚不能落实的效果与失败动作。普通 Qoder SDK 与 QwenPaw resident 启动
 为结构化 Provider 和布尔 Hook 的 After 步骤声明 `withhold_result`；reloadable
 启动和原生命令步骤拒绝该动作。
 
