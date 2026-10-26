@@ -133,6 +133,10 @@ stage_payload() {
         die "bundled Python runtime contains a symbolic link"
     fi
     normalize_modes "$stage"
+    if [ -n "${RAW_SKILL_SCORE_PAYLOAD:-}" ]; then
+        python3 "$ROOT/packaging/raw/stage_skill_score.py" \
+            "$stage" "$RAW_SKILL_SCORE_PAYLOAD" "$VERSION"
+    fi
     python3 "$ROOT/packaging/raw/verify_release.py" \
         "$ROOT" "$CONTRACT" --payload-root "$stage" > /dev/null
 }
@@ -176,6 +180,13 @@ TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 [ -x "$BUILD_DIR/linux-sandbox" ] || die "missing build output $BUILD_DIR/linux-sandbox"
 
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" "$ROOT" "$CONTRACT")"
+if [ -n "${RAW_SKILL_SCORE_PAYLOAD:-}" ]; then
+    [ -n "${RAW_PREVIEW_VERSION:-}" ] || die "assessment packages require RAW_PREVIEW_VERSION"
+    [ -f "$RAW_SKILL_SCORE_PAYLOAD" ] || die "assessment payload does not exist"
+    VERSION="$RAW_PREVIEW_VERSION"
+elif [ -n "${RAW_PREVIEW_VERSION:-}" ]; then
+    die "RAW_PREVIEW_VERSION requires RAW_SKILL_SCORE_PAYLOAD"
+fi
 
 if [ "$COMMAND" = "stage" ]; then
     [ -n "${DESTDIR:-}" ] || die "DESTDIR is required by stage-raw"

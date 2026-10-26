@@ -1,0 +1,81 @@
+network:
+  - id: NET001
+    name: External network request
+    severity: WARNING
+    description: Detects direct external network access from a skill.
+    patterns:
+      - "\\b(curl|wget)\\b\\s+https?://"
+      - "\\brequests\\.(get|post|put|delete)\\s*\\("
+      - "\\bfetch\\s*\\(\\s*['\\\"]https?://"
+    allowed_domains:
+      - github.com
+      - pypi.org
+      - npmjs.com
+file:
+  - id: FILE001
+    name: Sensitive file access
+    severity: HIGH
+    description: Detects access to credentials, keys, or environment files.
+    patterns:
+      - "(^|/)\\.ssh/"
+      - "(^|/)\\.env(\\.|$)"
+      - "id_rsa|id_dsa|id_ed25519"
+      - "credentials\\.json|api_keys\\.conf"
+  - id: FILE002
+    name: Dangerous file modification
+    severity: HIGH
+    description: Detects destructive or broad file modification commands.
+    patterns:
+      - "rm\\s+-rf\\s+/"
+      - "chmod\\s+(777|a\\+rwx)"
+      - ">\\s+/(etc|usr|bin|sbin)/"
+command:
+  - id: CMD001
+    name: Dangerous shell command
+    severity: HIGH
+    description: Detects dangerous shell commands.
+    patterns:
+      - "\\bsudo\\b"
+      - "rm\\s+-rf\\s+/"
+      - "\\bdd\\s+.*of=/"
+      - ">\\s*/dev/(tcp|udp|null)"
+  - id: CMD002
+    name: Programmatic command execution
+    severity: WARNING
+    description: Detects code paths that execute system commands.
+    patterns:
+      - "\\bos\\.system\\s*\\("
+      - "subprocess\\.(call|run|Popen).*shell\\s*=\\s*True"
+      - "\\bexec\\s*\\("
+injection:
+  - id: INJ001
+    name: Code execution primitive
+    severity: WARNING
+    description: Detects dynamic code execution patterns.
+    patterns:
+      - "\\beval\\s*\\("
+      - "\\bexec\\s*\\("
+      - "__import__\\s*\\("
+      - "\\bcompile\\s*\\("
+  - id: INJ003
+    name: Backdoor pattern
+    severity: CRITICAL
+    description: Detects reverse shell or backdoor-like payloads.
+    patterns:
+      - "bash\\s+-i\\s+>&\\s*/dev/tcp/"
+      - "\\b(nc|netcat)\\b.*\\s-e\\s+/"
+dependency:
+  - id: DEP001
+    name: Global package install
+    severity: WARNING
+    description: Detects global package installation.
+    patterns:
+      - "npm\\s+(install|i).*\\s-g\\b"
+      - "yarn\\s+global"
+      - "pip\\s+install.*--global"
+  - id: DEP002
+    name: Forced package reinstall
+    severity: INFO
+    description: Detects package force reinstall or broad upgrades.
+    patterns:
+      - "pip\\s+install.*(--upgrade|--force-reinstall)"

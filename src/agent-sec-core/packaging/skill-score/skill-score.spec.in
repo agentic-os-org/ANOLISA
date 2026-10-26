@@ -1,0 +1,48 @@
+Name: agent-sec-skill-score-cli
+Version: @VERSION@
+Release: 1%{?dist}
+Summary: Optional AgentSecCore Skill safety assessment CLI
+License: Apache-2.0
+URL: https://github.com/agentic-os-org/ANOLISA
+Source0: skill-score-payload.tar.gz
+ExclusiveArch: x86_64
+AutoReqProv: no
+Requires: glibc >= @GLIBC_VERSION@
+Requires: libgcc
+Requires: libstdc++
+Requires: ca-certificates
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+
+%description
+Optional assessment CLI in /opt/agent-sec/skill-score-cli. The system
+AgentSecCore CLI, daemon and default runtime are not replaced.
+
+%package -n agent-sec-skill-score-runtime
+Summary: Optional isolated Harbor runtime for Skill safety assessment
+AutoReqProv: no
+Requires: glibc >= @GLIBC_VERSION@
+Requires: libgcc
+Requires: libstdc++
+Requires: ca-certificates
+
+%description -n agent-sec-skill-score-runtime
+Private Python 3.12 and pinned Harbor. Docker and the assessment images
+must be provisioned separately by the deployment platform.
+
+%prep
+%setup -q -c -T
+tar -xzf %{SOURCE0}
+
+%build
+
+%install
+install -d %{buildroot}/opt/agent-sec
+cp -a opt/agent-sec/skill-score-cli %{buildroot}/opt/agent-sec/
+cp -a opt/agent-sec/skill-score-runtime %{buildroot}/opt/agent-sec/
+
+%files
+/opt/agent-sec/skill-score-cli
+
+%files -n agent-sec-skill-score-runtime
+/opt/agent-sec/skill-score-runtime

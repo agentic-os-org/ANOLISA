@@ -14,6 +14,7 @@ mod scan_pii;
 mod scan_prompt;
 mod scope;
 mod skill_ledger;
+mod skill_score;
 
 use asc_daemon_protocol::DaemonRequest;
 use clap::Subcommand;
@@ -31,6 +32,7 @@ use self::scan_pii::ScanPiiCommand;
 use self::scan_prompt::ScanPromptCommand;
 pub use self::scan_prompt::{PromptScanPlan, ScanPromptInputError};
 use self::scope::ScopeCommand;
+pub use self::skill_score::SkillScoreCommand;
 use crate::InputError;
 
 #[derive(Debug, Subcommand)]
@@ -61,7 +63,7 @@ pub(crate) enum Command {
     ScanPrompt(ScanPromptCommand),
     /// List the caller's own security events from the daemon.
     Events(EventsCommand),
-    /// Manage Skill scanning, signatures, history and activation.
+    /// Manage Skill scanning, signatures, history, activation and local assessments.
     #[command(name = "skillsec", alias = "skill-ledger", subcommand)]
     SkillLedger(skill_ledger::SkillLedgerCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
@@ -147,7 +149,14 @@ impl Command {
     }
 
     pub(crate) const fn is_skill_sec(&self) -> bool {
-        matches!(self, Self::SkillLedger(_))
+        matches!(self, Self::SkillLedger(_)) && self.skill_score().is_none()
+    }
+
+    pub(crate) const fn skill_score(&self) -> Option<&SkillScoreCommand> {
+        match self {
+            Self::SkillLedger(skill_ledger::SkillLedgerCommand::Score(command)) => Some(command),
+            _ => None,
+        }
     }
 
     pub(crate) fn after_success(&self, request: &DaemonRequest, output: &mut serde_json::Value) {

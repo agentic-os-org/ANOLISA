@@ -4,7 +4,7 @@
 
 **面向 AI Agent 的 OS 级安全内核。** 为 Agent 负载提供纵深防御：提示词注入检测、
 代码扫描、PII 检测、Skill 完整性追踪、沙箱隔离，以及本地安全事件
-存储。安全扫描本地运行，无 Token 消耗；可选的 Intent 提案使用云模型，可能产生费用。
+存储。安全扫描本地运行，无 Token 消耗；可选的 Intent 提案和 Skill Score 评测使用云模型，可能产生费用。
 适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
@@ -50,6 +50,10 @@ Cosh 可通过 `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 接入这条流程，并复�
 V2 源码构建会将 `agent-sec-daemon` 作为 host-level
 `agent-sec-core.service` systemd unit 安装。V2 迁移会通过 Rust 实现保留 hook 使用的
 CLI 命令与集成 capability surface。
+
+## 可选 Skill 安全评测
+
+`agent-sec-cli skillsec score plan/run` 组件提供模型辅助计划、Docker 动态执行和有证据支撑的评分。CLI 与 worker 安装在执行环境内，平台负责沙箱生命周期和产物管理。组件使用原版 Harbor，通过公开 Compose 配置接入 ASC 自有网络侧车；预览版标准 `sec-core` raw 包通过 V2 CLI 暴露评分命令，并随包交付私有 Python 运行时；镜像单独交付。详见[安装、接口与验证指南](../../docs/user-guide/zh/agent-sec-core/skill-score.md)。
 
 ## V2 SkillSec 与 Policy CLI
 

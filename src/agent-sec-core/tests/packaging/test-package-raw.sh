@@ -194,4 +194,38 @@ finally:
     manifest.write_text(original)
 PY
 
+SCORE_PAYLOAD="$TMP/score-payload.tar.gz"
+python3 - "$SCORE_PAYLOAD" "$ROOT" <<'PY'
+import io
+import sys
+import tarfile
+from pathlib import Path
+
+with tarfile.open(sys.argv[1], "w:gz") as archive:
+    for name in (
+        "skill-score-cli/bin/python3.11",
+        "skill-score-cli/bin/agent-sec-cli",
+        "skill-score-runtime/bin/python3.12",
+    ):
+        data = b"#!/bin/sh\nexit 0\n"
+        if name.endswith("agent-sec-cli"):
+            data = (Path(sys.argv[2]) / "packaging/skill-score/agent-sec-cli").read_bytes()
+        member = tarfile.TarInfo("opt/agent-sec/" + name)
+        member.size, member.mode = len(data), 0o755
+        archive.addfile(member, io.BytesIO(data))
+PY
+PREVIEW_VERSION="${VERSION}-skillscore.1234567"
+RAW_SKILL_SCORE_PAYLOAD="$SCORE_PAYLOAD" RAW_PREVIEW_VERSION="$PREVIEW_VERSION" \
+    run_package "$TMP/score-out"
+mkdir "$TMP/score-stage"
+tar -xzf "$TMP/score-out/sec-core-${PREVIEW_VERSION}-linux-x86_64.tar.gz" \
+    -C "$TMP/score-stage"
+cmp "$BUILD/v2/bin/agent-sec-cli" "$TMP/score-stage/bin/agent-sec-cli"
+test ! -e "$TMP/score-stage/bin/agent-sec-skill-score"
+test -x "$TMP/score-stage/lib/anolisa/sec-core/skill-score/cli/bin/agent-sec-cli"
+test -x "$TMP/score-stage/lib/anolisa/sec-core/skill-score/runtime/bin/python3.12"
+grep -Fxq "version = \"$PREVIEW_VERSION\"" "$TMP/score-stage/.anolisa/component.toml"
+test -z "$(find "$TMP/score-stage" -name '*.tar*' -print -quit)"
+python3 "$ROOT/tests/packaging/test_skill_score_raw.py"
+
 echo "OK: agent-sec-core V2 raw package tests passed"

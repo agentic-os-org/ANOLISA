@@ -17,7 +17,7 @@ use clap::Parser;
 use commands::Command;
 pub use commands::{
     CapabilitiesCommand, DefaultPolicy, EventsCommand, EventsRunError, EventsTransport,
-    IntentFailure, PiiOutputFormat, PromptScanPlan, ScanPromptInputError,
+    IntentFailure, PiiOutputFormat, PromptScanPlan, ScanPromptInputError, SkillScoreCommand,
 };
 
 /// Parsed invocation for one CLI command.
@@ -41,6 +41,8 @@ pub enum Plan<'a> {
     PolicyDefault(&'a DefaultPolicy),
     /// Generate the observability record schema without a daemon endpoint.
     ObservabilitySchema,
+    /// Run the assessment without a daemon or shared telemetry runtime.
+    SkillScore(&'a SkillScoreCommand),
     /// Sent to the daemon listening on `socket`.
     Daemon {
         /// Resolved absolute endpoint of the running daemon.
@@ -100,6 +102,21 @@ impl Cli {
         // V1 validates bootstrap context before help/command parsing.
         context::parse(None, trace_context_input.as_deref())?;
         let arguments = Arguments::try_parse_from(&argv)?;
+        if arguments.command.skill_score().is_some() {
+            for (option, present) in [
+                ("--socket", arguments.socket.is_some()),
+                ("--timeout-ms", arguments.timeout_ms.is_some()),
+                ("--otel-context", arguments.otel_context.is_some()),
+                ("--trace-context", trace_context_input.is_some()),
+            ] {
+                if present {
+                    return Err(clap::Error::raw(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        format!("{option} is not supported by local skillsec score commands"),
+                    ));
+                }
+            }
+        }
         // Clap propagates global values across subcommands using last-wins.
         // Scan text/code accept hyphen values, so their next token is data even
         // when it happens to spell a global option.
@@ -131,6 +148,7 @@ impl Cli {
             Some(_) => None,
             None if arguments.command.is_observability_schema()
                 || arguments.command.policy_default().is_some()
+                || arguments.command.skill_score().is_some()
                 || arguments
                     .command
                     .sandbox()
@@ -174,6 +192,9 @@ impl Cli {
     pub fn plan(&self) -> Plan<'_> {
         if let Some(command) = self.command.sandbox() {
             return Plan::Sandbox(command);
+        }
+        if let Some(command) = self.command.skill_score() {
+            return Plan::SkillScore(command);
         }
         if self.command.is_observability_schema() {
             return Plan::ObservabilitySchema;
@@ -427,6 +448,37 @@ impl InputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_hook_keeps_socket_while_score_remains_local() {
+        let hook = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/run/hook.sock",
+                "sandbox",
+                "hook",
+                "prepare",
+                "--permissions",
+                "permissions.json",
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(hook.socket(), Some(Path::new("/run/hook.sock")));
+        assert!(matches!(
+            hook.plan(),
+            Plan::Sandbox(sandbox::SandboxCommand::Hook(_))
+        ));
+
+        let score = Cli::parse_from_with_socket_env(
+            ["agent-sec-cli", "skillsec", "score", "plan", "skill"],
+            Some(OsStr::new("relative-invalid-socket")),
+        )
+        .unwrap();
+        assert!(score.socket().is_none());
+        assert!(matches!(score.plan(), Plan::SkillScore(_)));
+    }
 
     #[test]
     fn sandbox_never_resolves_a_daemon_and_preserves_target_options() {
