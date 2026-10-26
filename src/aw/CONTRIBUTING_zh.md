@@ -114,6 +114,8 @@ Preview 包，验证真实 sec-core health、Tokenless/RTK 契约、安装、服
 实际配额的 CPU 数量。每组 Cargo 测试另有 600 秒总期限；失败后停止后续组。
 始终上传的 `test-evidence/` 记录命令、耗时、退出码，以及执行前后的 cgroup
 CPU、内存和 I/O 数据。CLI 夹具失败时标明具体命令和工作目录，不输出环境变量。
+该阶段结束后才安装 Python，用于比较包清单。安装目录和数据库统一放在私有 `/tmp`
+目录，退出时清理，并将 demo 证据保留到产物目录。
 
 [tests/native-matrix.json](tests/native-matrix.json) 为每个已注册 Agent 记录固定
 版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。八种 Agent

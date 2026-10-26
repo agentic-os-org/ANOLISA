@@ -125,7 +125,10 @@ jobs:
       - name: Test installer and build the four artifacts
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          ! command -v python3
+          if command -v python3 >/dev/null; then
+            echo 'Installer acceptance requires a Python-free environment' >&2
+            exit 1
+          fi
           bash src/aw/scripts/check_packages.sh "$AW_PREVIEW_DIR/test-evidence"
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
@@ -178,6 +181,8 @@ jobs:
             -p aw-provider-tokenless --test provider --test pretool --test managed_rtk -- --ignored
           cargo test --locked --manifest-path providers/tokenless/Cargo.toml \
             -p aw-provider-tokenless --test views -- --ignored
+      - name: Install package comparison prerequisite
+        run: apt-get install -y --no-install-recommends python3
       - name: Verify installed packages and service lifecycle
         shell: bash
         run: |
@@ -185,11 +190,12 @@ jobs:
           cd "$AW_PREVIEW_DIR/packages"
           sha256sum -c SHA256SUMS
           for archive in *.tar.gz; do tar -xzf "$archive"; done
-          root="$(dirname "$PWD")"
-          chmod 700 "$root"
+          evidence="$(dirname "$PWD")"
           runtime="$(mktemp -d /tmp/aw-preview.XXXXXX)"
+          root="$runtime/prefixes"
+          mkdir -m 700 "$root"
           export XDG_STATE_HOME="$runtime/package-state"
-          trap 'mkdir -p "$root/demo"; cp -a "$runtime/demo/." "$root/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
+          trap 'mkdir -p "$evidence/demo"; cp -a "$runtime/demo/." "$evidence/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
           bundle_dir() {
             local matches=( "$PWD/$1-"*/ )
             test "${#matches[@]}" -eq 1 || return 1
@@ -238,7 +244,7 @@ jobs:
           "$root/next/bin/aw" config validate --config "$runtime/next.yaml"
           "$combined_bundle/aw" uninstall --prefix "$root/next" --yes
           test -x "$root/combined/bin/aw"
-          cp "$combined_bundle/manifest.json" "$root/demo-manifest.json"
+          cp "$combined_bundle/manifest.json" "$evidence/demo-manifest.json"
           "$combined_bundle/aw" uninstall --prefix "$root/combined" --yes
           "$core_bundle/aw" uninstall --prefix "$root/split" --yes
           test -f "$runtime/demo/result.json"

@@ -138,6 +138,9 @@ Cargo suite has a 600-second outer deadline; failures stop later suites. The
 always-uploaded `test-evidence/` contains commands, elapsed times, exit codes and
 before/after cgroup CPU, memory and I/O counters. CLI fixture failures identify
 the exact command and working directory without dumping the environment.
+Python is installed only after this stage for package inventory comparisons.
+Installed prefixes and their database live in one private `/tmp` directory;
+cleanup removes them while retaining demo evidence in the artifact directory.
 
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered

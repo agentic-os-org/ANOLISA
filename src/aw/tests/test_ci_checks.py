@@ -36,7 +36,7 @@ class PackageWorkflowTests(GateFixture):
         step = workflow.split(
             "      - name: Verify Tokenless PreTool and PostTool contracts\n", 1
         )[1]
-        step = step.split("      - name: Verify installed packages", 1)[0]
+        step = step.split("      - name:", 1)[0]
         script = textwrap.dedent(step.split("        run: |\n", 1)[1])
         workspace = self.root / "container workspace"
         expected = [

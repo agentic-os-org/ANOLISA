@@ -78,6 +78,23 @@ class PackageSelectionTests(GateFixture):
             ],
         )
         self.assertFalse(any("packages_pty" in command for command in commands))
+        # Installing Python before this stage must fail before Cargo can run.
+        python = binary / "python3"
+        python.write_text("#!/bin/sh\nexit 0\n")
+        python.chmod(0o700)
+        before = capture.read_bytes()
+        result = subprocess.run(
+            ["/bin/sh", "-eu", "-c", script],
+            cwd=self.root,
+            env={
+                "PATH": str(binary), "GITHUB_WORKSPACE": str(self.root),
+                "AW_PREVIEW_DIR": str(preview), "AW_PACKAGE_COMMANDS": str(capture),
+            },
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Python-free environment", result.stderr)
+        self.assertEqual(capture.read_bytes(), before)
 
     def test_terminal_target_remains_required_in_the_python_enabled_gate(self) -> None:
         matrix = json.loads((AW / "tests/regression-matrix.json").read_text())
