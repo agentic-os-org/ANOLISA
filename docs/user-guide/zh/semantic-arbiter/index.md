@@ -10,9 +10,9 @@
 
 | 状态 | 本指南中的含义 |
 |---|---|
-| **核心已实现** | 固定的成果保护/任务范围判断、冻结内联证据、确定性 `check`，以及通过 Bailian/TypeSafe 进行 Noul 模型求值 |
+| **核心已实现** | 成果保护/任务范围判断、冻结内联证据、有界 EvidenceSource 采集、封闭场景 JudgmentUnit 替换、确定性 Outcome 组合、消费方侧 executor 契约、确定性 `check`，以及通过 Bailian/TypeSafe 进行 Noul 模型求值 |
 | **仅契约类型/校验** | 已有完整 `nop < allow < ask < block` CandidateControl 词汇、更完整的 Outcome 类型、Directive 投影和回执校验；当前场景不会产生 `ask` 或扩展动作 |
-| **消费方集成待实现** | 任务/历史采集与投递、准入、原生阻断、全部 Executor、持久审计和效果核验仍需接入；实时 EvidenceSource 采集与通用组合也待实现 |
+| **消费方集成待实现** | 任务/历史投递、原生准入与阻断、真实 Executor、原生 Adapter 集成、生产级持久 claim/审计和效果核验仍需接入 |
 | **外部能力须核验** | AgentSight、AW、ws-ckpt 和原生 Adapter 接口须对照目标版本源码与部署行为核验；历史能力清单不能证明支持情况 |
 
 | 业务场景 | 目的 | 目标输出 | 可用范围 |
@@ -32,11 +32,13 @@
 
 | 阶段 | 职责与边界 |
 |---|---|
-| 消费方与 EvidenceSource | 认证任务/候选来源，绑定身份和版本，冻结有界证据。目标证据源声明 provenance、新鲜度、大小和采集时限；当前由调用者提供内联证据 |
-| JudgmentUnit 与 Scenario | 单元选择必需证据、版本化问题及阈值；场景按业务目的组织单元。当前仅有两个固定单元与固定组合 |
-| 经校验的答案与 Outcome | 校验答案格式、证据引用、覆盖范围和有效期，再确定性映射为限制与 obligation。模型支持度只能收紧确定性约束 |
-| 消费方准入与 Executor | 检查声明能力、配置许可、原生 Adapter 支持、身份、资源范围及剩余期限；必需保护未确认前保持候选暂停 |
+| 消费方与 EvidenceSource | 认证任务/候选来源，绑定身份和版本，冻结有界证据。`EvidenceSourceRegistry` 显式注册进程内来源，执行新鲜度/大小/deadline 限制，并返回内联证据与缺口 |
+| JudgmentUnit 与 Scenario | 单元选择必需证据、版本化问题及阈值。`JudgmentUnitRegistry` 为每个现有封闭场景保存恰好一个单元：`preservation` 和 `task_scope` |
+| 经校验的答案与 Outcome | 校验答案格式、证据引用、覆盖范围和有效期，再确定性映射为限制与 obligation。`composition::compose_outcome` 提供公共确定性组合 |
+| 消费方准入与 Executor | 使用受信消费方授权、细粒度能力、显式 Executor 注册和独立效果查询；原生 Adapter 支持与真实动作实现需要消费方集成 |
 | Receipt 与审计 | 留存不可变 Directive，核验效果并逐项记录结果。发出请求或收到成功的传输响应均不能证明生效 |
+
+场景注册表不能增加任意线协议场景，也不执行动态发现。`Evaluator::with_units` 在推导响应时将各单元声明的修订、问题 ID 和问题内容绑定到配置摘要。留存的求值记录冻结期望响应，因此后续复核不会再次调用自定义单元。自定义答案改变单元或证据引用、超过置信度上限，或使用封闭场景范围外的 value/reason 组合时，中央校验会拒绝该答案。
 
 消费方集成必须从经过认证的用户/操作者入口采集任务原文和保留要求，将当前任务及版本独立于有界会话历史留存，并标注历史遗漏或裁剪。同时冻结候选、工作区、任务和配置修订。采集、推理、保护和最终复核共享原事件截止期限，辅助采集不得续期。任务、候选或策略修订变化后须重新判定。
 
@@ -52,7 +54,15 @@ make build
 ./target/debug/semantic-arbiter describe
 ```
 
-`describe` 列出 `deterministic_check` 和 `model_evaluation`、`bailian` 和 `typesafe` 后端、`preservation` 和 `task_scope` 场景，以及消息大小上限。当前 `check` 输出候选 `allow/block`；当前 `evaluate` 输出 `nop/allow/block`。两者都只产生建议类 `snapshot/audit` obligation。无需启动 daemon。
+开发者示例分别演示替换封闭场景注册表中的一个单元、运行内存 executor fixture 和执行内存 EvidenceSource 采集：
+
+```bash
+cargo run --example judgment_unit
+cargo run --example executor_fixture
+cargo run --example evidence_source
+```
+
+`executor_fixture` 不执行外部动作，也不能证明原生 Adapter 支持。`describe` 列出 `deterministic_check` 和 `model_evaluation`、`bailian` 和 `typesafe` 后端、`preservation` 和 `task_scope` 场景，以及消息大小上限。当前 `check` 输出候选 `allow/block`；当前 `evaluate` 输出 `nop/allow/block`。两者都只产生建议类 `snapshot/audit` obligation。无需启动 daemon。
 
 ## 命令帮助
 
@@ -132,7 +142,7 @@ printf 'semantic-arbiter exit: %s\n' "$status"
 | `preservation` | 任务意图是否要求资源保持不变？yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留本地重建结果：相同字节为 `allow`，独有成果为 `needs_snapshot` |
 | `task_scope` | 候选操作是否符合任务意图？yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
 
-`evaluate` 复用确定性硬门禁。结构化保留要求、允许资源上限、任务/证明缺失和覆盖缺口保持约束力，硬阻断保持 `block`。最多发起一次合并后端调用；没有满足条件的单元时不调用。注册表和组合规则固定。
+`evaluate` 复用确定性硬门禁。结构化保留要求、允许资源上限、任务/证明缺失和覆盖缺口保持约束力，硬阻断保持 `block`。最多发起一次合并后端调用；没有满足条件的单元时不调用。CLI 使用内置单元注册表和固定组合。库消费方可以通过 `Evaluator::with_units` 传入经过审核的封闭场景注册表；该能力不改变线协议接受的场景或协议版本。
 
 检查以下响应字段：
 
@@ -179,7 +189,7 @@ Outcome 将候选限制、持续的主体请求和有序 obligation 分开，用
 | `ask` | 确定性判断本候选需要人工审批；等待和超时期间均保持暂停。审批后须重新检查上下文；审批既不证明授权，也不证明执行 |
 | `block` | 通过消费方原生阻断接口阻止本候选；不能撤回已执行的操作 |
 
-目标组合取最严结果，`nop < allow < ask < block`；后续增强不能取消阻断。候选控制仅对本候选有效。`ask` 绝不从歧义推导：其类型、校验和 Approval Directive 投影现已预留，但当前场景不会产生，运行时 `ApprovalExecutor`/Adapter 准入仍待 A4/A10。单元答案 `unknown` 表示语义支持不足。确定性 `check` 将此类保护不确定性映射为 `block`；`evaluate` 中满足模型求值条件的弃权产生候选 `nop`，除非已有确定性硬阻断要求 `block`。执行回执 `unknown` 又是另一状态，表示效果尚未确认。
+`composition::compose_outcome` 在 `nop < allow < ask < block` 下取最大结果；后续增强不能取消阻断。候选控制仅对本候选有效。`ask` 绝不从歧义推导：其类型、校验和 Approval Directive 投影现已预留，当前场景不会产生；真实审批执行与 Adapter 准入仍待消费方集成。单元答案 `unknown` 表示语义支持不足。确定性 `check` 将此类保护不确定性映射为 `block`；`evaluate` 中满足模型求值条件的弃权产生候选 `nop`，除非已有确定性硬阻断要求 `block`。执行回执 `unknown` 又是另一状态，表示效果尚未确认。
 
 ### 主体控制
 
@@ -189,7 +199,7 @@ Outcome 将候选限制、持续的主体请求和有序 obligation 分开，用
 | `quarantine` | 限制网络、敏感路径或凭证访问 | 独立于暂停；解除限制需要新授权 |
 | `kill` | 终止主体 | 不可撤销；需要稳定目标身份、范围检查和人工确认 |
 
-每项 `SubjectDirective` 包含 `id`、绑定的 `instance_id`、`action` 和非空、由消费方解析的 `scope_ids`。仅有 PID 不足以识别目标。目标组合对跨判定的独立保护取并集，不隐式移除已有保护。请求描述期望动作，不表示已确认的进程状态；每项都需要独立授权和回执。
+每项 `SubjectDirective` 包含 `id`、绑定的 `instance_id`、`action` 和非空、由消费方解析的 `scope_ids`。仅有 PID 不足以识别目标。`compose_outcome` 形成有界并集，freeze、quarantine 和 kill 各自最多保留一项内容完全相同的请求。内容完全相同的重复项会合并；同一动作下的请求冲突、ID 冲突、绑定不匹配和细粒度能力不可用都会被拒绝。结果按 freeze、quarantine、kill 排序。请求描述期望动作，不表示已确认的进程状态；每项都需要独立授权和回执。
 
 ### Obligations
 
@@ -207,7 +217,7 @@ Outcome 将候选限制、持续的主体请求和有序 obligation 分开，用
 | `retrieve_memory` | `query_id` | 在授权范围内检索记忆 / 增强 |
 | `inject_context` | 非空、已审核的 `material_ids` | 通过已准入的原生通道补充材料 / 增强 |
 
-目标组合对 obligation 取并集，明确执行顺序并分别留存回执。保护类始终 fail-closed：必需工作未确认时暂停依赖它的执行，`critical=false` 也不能降级。增强类通常 fail-open，但失败必须可见；`critical=true` 将其升级为保护语义。每个非空 Outcome 必须恰有一项 `audit`，包括候选为 `nop` 的纯主体控制；证据引用和已启用场景的缺口也必须审计。
+`compose_outcome` 按 ID 精确去重 obligation，并拒绝同一 ID 下的不同内容。它要求已声明的细粒度能力和匹配的绑定，按动作类别和 ID 排序 obligation，对证据引用排序，并生成恰好一项 `audit`；已授权时会用规范的 critical `audit` 补全缺失项，多个不同的 audit 请求会失败。保护类始终 fail-closed：必需工作未确认时暂停依赖它的执行，`critical=false` 也不能降级。增强类通常 fail-open，但失败必须可见；`critical=true` 将其升级为保护语义。
 
 ### Directive 与回执
 
@@ -221,9 +231,11 @@ Outcome 将候选限制、持续的主体请求和有序 obligation 分开，用
 
 unknown 回执涉及执行效果，与 unknown 判定答案、候选 `nop` 或候选 `ask` 含义不同。绝不自动重复效果未知的 Directive，也不放行依赖它的候选。当前 `decode_receipt` 使用 `CheckRequest` 和留存的 Outcome 校验 check 协议关联及 state/reason 一致性，既不提供模型求值回执解码器，也不核验 OS 效果。两种操作均不产生执行回执。
 
+公共 `executor` 模块提供消费方侧准入和生命周期契约。受信 `AuthorizationContext` 携带受支持的协议版本、不可变请求/绑定、有效期、细粒度能力和允许的非空受控 ID。稳定幂等键绑定 `api_version + request_id + Binding + Directive`。`ExecutorRegistry::execute` 执行准入和 claim，仅对新 claim 分发，并始终查询原始不可变请求。已有 claim 只查询，不再次分发。分发结果不决定效果是否已应用；独立查询决定回执。查询失败或结果未确认时产生 `unknown/unconfirmed`，且绝不自动重放。
+
 ## 消费方集成设计
 
-**下列全部 Executor 均待接入，并始终位于 semantic-arbiter 之外。** 准入必须取配置许可、声明输出、Executor 支持和已核验原生 Adapter 能力的交集，再检查身份、范围和截止期限。不支持必需保护时保持候选阻断。消费方负责调度、逐项 Directive 幂等、配额和持久审计。
+**Executor trait 和注册表已经实现；下列每个产生真实效果的 Executor 仍待消费方集成，并位于 semantic-arbiter 之外。** 准入必须取配置许可、声明输出、Executor 支持和已核验原生 Adapter 能力的交集，再检查身份、范围和截止期限。不支持必需保护时保持候选阻断。消费方负责调度、配额、生产级持久 claim、持久审计和效果核验。`executor::fixture` 仅用于内存测试/示例，不能证明原生 Adapter 支持。
 
 | 职责分组 | Executor | 必需行为 |
 |---|---|---|

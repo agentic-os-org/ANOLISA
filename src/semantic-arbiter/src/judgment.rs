@@ -1,15 +1,21 @@
 //! Versioned semantic propositions constrained by deterministic resource protections.
 
+use std::fmt;
+use std::sync::Arc;
+
 use crate::contract::{AnswerValue, Reason, Scenario, UnitAnswer};
 use crate::model::{NoulProbability, NoulQuestion};
+use crate::protocol::ContractError;
 
 /// Fixed rules for interpreting the versioned model propositions.
 pub const UNIT_REVISION: &str = "semantic-units/v1";
 
 /// A registered unit interprets probabilities, never executable model output.
-pub trait JudgmentUnit: Sync {
+pub trait JudgmentUnit: Send + Sync {
     /// Scenario for which this unit can form an answer.
     fn scenario(&self) -> Scenario;
+    /// Stable revision covering question and decision semantics.
+    fn revision(&self) -> &'static str;
     /// Stable identity binding a model answer to its exact question.
     fn question_id(&self) -> &'static str;
     /// Instructions are owned by the component, not supplied by evidence.
@@ -29,6 +35,9 @@ pub struct PreservationUnit;
 impl JudgmentUnit for PreservationUnit {
     fn scenario(&self) -> Scenario {
         Scenario::Preservation
+    }
+    fn revision(&self) -> &'static str {
+        UNIT_REVISION
     }
     fn question_id(&self) -> &'static str {
         "preservation-v1"
@@ -72,6 +81,9 @@ impl JudgmentUnit for TaskScopeUnit {
     fn scenario(&self) -> Scenario {
         Scenario::TaskScope
     }
+    fn revision(&self) -> &'static str {
+        UNIT_REVISION
+    }
     fn question_id(&self) -> &'static str {
         "task-scope-v1"
     }
@@ -107,11 +119,104 @@ impl JudgmentUnit for TaskScopeUnit {
     }
 }
 
-pub(crate) fn unit(scenario: Scenario) -> &'static dyn JudgmentUnit {
-    match scenario {
-        Scenario::Preservation => &PreservationUnit,
-        Scenario::TaskScope => &TaskScopeUnit,
+/// Explicit process-local selection of one unit for each closed scenario.
+#[derive(Clone)]
+pub struct JudgmentUnitRegistry {
+    preservation: Arc<dyn JudgmentUnit>,
+    task_scope: Arc<dyn JudgmentUnit>,
+}
+
+impl JudgmentUnitRegistry {
+    /// Register exactly one unit for each supported scenario.
+    pub fn new(
+        preservation: Arc<dyn JudgmentUnit>,
+        task_scope: Arc<dyn JudgmentUnit>,
+    ) -> Result<Self, ContractError> {
+        if preservation.scenario() != Scenario::Preservation
+            || task_scope.scenario() != Scenario::TaskScope
+            || preservation.revision().is_empty()
+            || task_scope.revision().is_empty()
+            || preservation.question_id().is_empty()
+            || task_scope.question_id().is_empty()
+            || preservation.question_id() == task_scope.question_id()
+        {
+            return Err(ContractError::InvalidInput);
+        }
+        Ok(Self {
+            preservation,
+            task_scope,
+        })
     }
+
+    /// Select the registered unit without discovering or loading code dynamically.
+    pub fn unit(&self, scenario: Scenario) -> &dyn JudgmentUnit {
+        match scenario {
+            Scenario::Preservation => self.preservation.as_ref(),
+            Scenario::TaskScope => self.task_scope.as_ref(),
+        }
+    }
+}
+
+impl Default for JudgmentUnitRegistry {
+    fn default() -> Self {
+        Self {
+            preservation: Arc::new(PreservationUnit),
+            task_scope: Arc::new(TaskScopeUnit),
+        }
+    }
+}
+
+impl fmt::Debug for JudgmentUnitRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JudgmentUnitRegistry")
+            .field(
+                "preservation",
+                &(
+                    self.preservation.question_id(),
+                    self.preservation.revision(),
+                ),
+            )
+            .field(
+                "task_scope",
+                &(self.task_scope.question_id(), self.task_scope.revision()),
+            )
+            .finish()
+    }
+}
+
+pub(crate) fn validate_decision(
+    baseline: &UnitAnswer,
+    answer: UnitAnswer,
+) -> Result<UnitAnswer, ContractError> {
+    if answer.unit != baseline.unit
+        || answer.evidence_refs != baseline.evidence_refs
+        || answer.confidence_ppm > 1_000_000
+    {
+        return Err(ContractError::InvalidResponse);
+    }
+    let valid = match baseline.unit {
+        Scenario::Preservation => {
+            matches!(
+                (answer.value, answer.reason),
+                (AnswerValue::Allow, Reason::Allowed)
+                    | (AnswerValue::NeedsSnapshot, Reason::NeedsSnapshot)
+                    | (AnswerValue::Preserve, Reason::Preserved)
+                    | (AnswerValue::Unknown, Reason::Undetermined)
+            ) && !(baseline.value == AnswerValue::NeedsSnapshot
+                && answer.value == AnswerValue::Allow)
+        }
+        Scenario::TaskScope => matches!(
+            (answer.value, answer.reason),
+            (AnswerValue::Allow, Reason::Allowed)
+                | (AnswerValue::OutsideScope, Reason::OutsideScope)
+                | (AnswerValue::Unknown, Reason::Undetermined)
+        ),
+    };
+    if !valid {
+        return Err(ContractError::InvalidResponse);
+    }
+    Ok(answer)
 }
 
 pub(crate) fn eligible(answer: &UnitAnswer) -> bool {

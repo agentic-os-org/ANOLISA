@@ -10,9 +10,9 @@ The complete target design covers six business scenarios: protect results, enfor
 
 | Status | What it means in this guide |
 |---|---|
-| **Implemented core** | Fixed preservation/task-scope judgments, frozen inline evidence, deterministic `check` and Noul model evaluation through Bailian/TypeSafe |
+| **Implemented core** | Preservation/task-scope judgments, frozen inline evidence, bounded EvidenceSource collection, closed-scenario JudgmentUnit replacement, deterministic Outcome composition, consumer-side executor contracts, deterministic `check` and Noul model evaluation through Bailian/TypeSafe |
 | **Contract types/validation only** | Full `nop < allow < ask < block` CandidateControl vocabulary, wider Outcome types, Directive projection and receipt validation exist; current scenarios do not produce `ask` or wider actions |
-| **Pending consumer integration** | Task/history collection and delivery, admission, native blocking, every Executor, persistent audit and effect verification still require integration; live EvidenceSource collection and general composition also remain pending |
+| **Pending consumer integration** | Task/history delivery, native admission and blocking, real Executors, native Adapter integration, persistent production claims/audit and effect verification still require integration |
 | **External capability requires verification** | AgentSight, AW, ws-ckpt and native Adapter interfaces must be checked against target-version source and deployment behavior; historical capability inventories establish no support |
 
 | Business scenario | Purpose | Proposed output | Availability |
@@ -32,11 +32,13 @@ The target flow is **EvidenceSource → JudgmentUnit/Scenario → validated answ
 
 | Stage | Responsibility and boundary |
 |---|---|
-| Consumer and EvidenceSource | Authenticate task/candidate origins, bind identities and versions, and freeze bounded evidence. Target sources declare provenance, freshness, size and collection deadlines; today the caller supplies inline evidence |
-| JudgmentUnit and Scenario | A unit selects required evidence, a versioned question and its threshold; a scenario groups units for a business purpose. Today there are two fixed units and fixed composition |
-| Validated answers and Outcome | Validate answer shape, evidence references, coverage and expiry, then deterministically map answers to restrictions and obligations. Model support can only narrow deterministic constraints |
-| Consumer admission and Executors | Check declared capability, configured permission, native Adapter support, identity, resource scope and remaining deadline; hold the candidate while required protections are unconfirmed |
+| Consumer and EvidenceSource | Authenticate task/candidate origins, bind identities and versions, and freeze bounded evidence. `EvidenceSourceRegistry` explicitly registers process-local sources, enforces freshness/size/deadline bounds and returns inline evidence plus gaps |
+| JudgmentUnit and Scenario | A unit selects required evidence, a versioned question and its threshold. `JudgmentUnitRegistry` contains exactly one unit for each existing closed scenario: `preservation` and `task_scope` |
+| Validated answers and Outcome | Validate answer shape, evidence references, coverage and expiry, then deterministically map answers to restrictions and obligations. `composition::compose_outcome` provides deterministic public composition |
+| Consumer admission and Executors | Use trusted consumer authorization, granular capabilities, explicit Executor registration and independent effect queries; native Adapter support and real action implementations require consumer integration |
 | Receipt and audit | Retain the immutable directive, verify its effect and record each result. Sending a request or receiving a successful transport response proves no effect |
+
+The scenario registry cannot add arbitrary wire scenarios and performs no dynamic discovery. `Evaluator::with_units` binds each unit's declared revision, question ID and question content into the configuration digest while deriving the response. The retained evaluation record freezes the expected response, so later validation does not invoke a custom unit again. Central validation rejects custom answers that change the unit or evidence references, exceed the confidence bound, or use a value/reason pair outside the closed scenario.
 
 Consumer integration must capture task text and retention requirements from an authenticated user/operator entry, retain the current task and version independently of bounded session history, and mark omitted or truncated history. Freeze the candidate, workspace, task and configuration revisions together. Collection, inference, protection and final revalidation share the original event deadline; auxiliary collection never renews it. Changed task, candidate or policy revisions require a fresh judgment.
 
@@ -52,7 +54,15 @@ make build
 ./target/debug/semantic-arbiter describe
 ```
 
-`describe` lists `deterministic_check` and `model_evaluation`, the `bailian` and `typesafe` backends, the `preservation` and `task_scope` scenarios, and the message size limit. Current `check` output uses candidate `allow/block`; current `evaluate` output uses `nop/allow/block`. Both produce only advisory `snapshot/audit` obligations. No daemon is required.
+Developer examples exercise replacement of one unit in the closed scenario registry, the in-memory executor fixture and in-memory EvidenceSource collection:
+
+```bash
+cargo run --example judgment_unit
+cargo run --example executor_fixture
+cargo run --example evidence_source
+```
+
+`executor_fixture` performs no external action and demonstrates no native Adapter support. `describe` lists `deterministic_check` and `model_evaluation`, the `bailian` and `typesafe` backends, the `preservation` and `task_scope` scenarios, and the message size limit. Current `check` output uses candidate `allow/block`; current `evaluate` output uses `nop/allow/block`. Both produce only advisory `snapshot/audit` obligations. No daemon is required.
 
 ## Command help
 
@@ -132,7 +142,7 @@ This command retains the request's deadline and uses its inline evidence. It col
 | `preservation` | Does task intent require keeping the resource unchanged? Yes support meeting the threshold yields `preserve`; no support meeting it retains the local rebuild result: `allow` for identical bytes or `needs_snapshot` for unique results |
 | `task_scope` | Does the candidate operation satisfy task intent? Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
 
-`evaluate` reuses the deterministic hard gate. Structured retention, allowed-resource limits, missing task/proof and coverage gaps remain binding and hard blockers remain `block`. At most one batched backend call is made; no call is made when no unit is eligible. The registry and composition are fixed.
+`evaluate` reuses the deterministic hard gate. Structured retention, allowed-resource limits, missing task/proof and coverage gaps remain binding and hard blockers remain `block`. At most one batched backend call is made; no call is made when no unit is eligible. The CLI uses the built-in unit registry and fixed composition. Library consumers may pass a reviewed closed-scenario registry through `Evaluator::with_units`; this does not change accepted wire scenarios or protocol versions.
 
 Inspect these response fields:
 
@@ -179,7 +189,7 @@ Outcome separates candidate restrictions, persistent subject requests and ordere
 | `ask` | A deterministic decision that this candidate requires human approval; hold it while waiting and on timeout. Approval requires fresh context checks and proves neither authorization nor execution |
 | `block` | Prevent this candidate through the consumer's native blocking interface; cannot undo an operation already executed |
 
-Target composition takes the strictest result, `nop < allow < ask < block`; a later enhancement cannot cancel a block. Candidate control lasts for one candidate. `ask` is never inferred from ambiguity: its types, validation and Approval Directive projection are reserved now, but current scenarios do not produce it and runtime `ApprovalExecutor`/Adapter admission remains pending A4/A10. An `unknown` unit answer means insufficient semantic support. Deterministic `check` maps such protection uncertainty to `block`; an eligible model abstention in `evaluate` produces candidate `nop` unless a deterministic hard blocker already requires `block`. An unknown execution receipt is separate again: it means an effect was not confirmed.
+`composition::compose_outcome` takes the maximum result under `nop < allow < ask < block`; a later enhancement cannot cancel a block. Candidate control lasts for one candidate. `ask` is never inferred from ambiguity: its types, validation and Approval Directive projection are reserved now, while current scenarios do not produce it and real approval execution plus Adapter admission remain pending consumer integration. An `unknown` unit answer means insufficient semantic support. Deterministic `check` maps such protection uncertainty to `block`; an eligible model abstention in `evaluate` produces candidate `nop` unless a deterministic hard blocker already requires `block`. An unknown execution receipt is separate again: it means an effect was not confirmed.
 
 ### Subject control
 
@@ -189,7 +199,7 @@ Target composition takes the strictest result, `nop < allow < ask < block`; a la
 | `quarantine` | Restrict access to network, sensitive paths or credentials | Independent of suspension; lifting restrictions requires new authorization |
 | `kill` | Terminate the subject | Irreversible; requires stable target identity, scope checks and human confirmation |
 
-Each `SubjectDirective` carries `id`, bound `instance_id`, `action` and nonempty consumer-resolved `scope_ids`. A bare PID is insufficient. Target composition unions independent protections across judgments without implicitly removing existing protection. Requests describe desired actions, not confirmed process state; each needs its own authorization and receipt.
+Each `SubjectDirective` carries `id`, bound `instance_id`, `action` and nonempty consumer-resolved `scope_ids`. A bare PID is insufficient. `compose_outcome` forms a bounded union with at most one exact request for each of freeze, quarantine and kill. Exact duplicates collapse; conflicting requests for one action, ID conflicts, binding mismatches and unavailable granular capabilities are rejected. The result is sorted as freeze, quarantine and kill. Requests describe desired actions, not confirmed process state; each needs its own authorization and receipt.
 
 ### Obligations
 
@@ -207,7 +217,7 @@ Each obligation has an outcome-local unique `id`, `critical` and an `action` wit
 | `retrieve_memory` | `query_id` | Retrieve memories within authorized scope / enhancement |
 | `inject_context` | Nonempty reviewed `material_ids` | Supply material through an admitted native channel / enhancement |
 
-Target composition unions obligations with explicit execution order and independent receipts. Protection always fails closed: unconfirmed required work holds dependent execution, even with `critical=false`. Enhancements normally fail open with visible failures; `critical=true` upgrades them to protection semantics. Every nonempty Outcome requires exactly one `audit`, including subject-only control with candidate `nop`; evidence references and enabled-scenario gaps also require audit.
+`compose_outcome` exact-deduplicates obligations by ID and rejects different content under the same ID. It requires declared granular capabilities and matching bindings, sorts obligations by action class and ID, sorts evidence references, and produces exactly one `audit`; when authorized, a missing audit is filled with the canonical critical `audit`, while multiple distinct audit requests fail. Protection always fails closed: unconfirmed required work holds dependent execution, even with `critical=false`. Enhancements normally fail open with visible failures; `critical=true` upgrades them to protection semantics.
 
 ### Directives and receipts
 
@@ -221,9 +231,11 @@ Target composition unions obligations with explicit execution order and independ
 
 An unknown receipt concerns execution, unlike an unknown judgment answer, candidate `nop`, or candidate `ask`. Never automatically repeat a directive with an unknown effect or release a candidate depending on it. Current `decode_receipt` validates check-protocol correlation and state/reason consistency using `CheckRequest` and the retained Outcome; it supplies neither a model-evaluation receipt decoder nor an OS-effect checker. Neither operation produces execution receipts.
 
+The public `executor` module supplies consumer-side admission and lifecycle contracts. A trusted `AuthorizationContext` carries a supported protocol version, the immutable request/binding, expiry, granular capabilities and allowed nonempty controlled IDs. The stable idempotency key binds `api_version + request_id + Binding + Directive`. `ExecutorRegistry::execute` admits, claims, dispatches only a new claim and always queries the original immutable request. An existing claim is queried without another dispatch. The dispatch result does not determine whether an effect was applied; an independent query determines the receipt. A failed or unconfirmed query becomes `unknown/unconfirmed`, which is never replayed automatically.
+
 ## Consumer integration design
 
-**All Executors below are pending integration and remain outside semantic-arbiter.** Admission must intersect configured permission, declared outputs, Executor support and verified native Adapter capabilities, then check identity, scope and deadline. Unsupported protection keeps the candidate blocked. Consumers own scheduling, per-directive idempotency, quotas and durable audit.
+**The Executor trait and registry are implemented; every real effecting Executor below remains pending consumer integration and outside semantic-arbiter.** Admission must intersect configured permission, declared outputs, Executor support and verified native Adapter capabilities, then check identity, scope and deadline. Unsupported protection keeps the candidate blocked. Consumers own scheduling, quotas, durable production claims, persistent audit and effect verification. `executor::fixture` is limited to in-memory tests/examples and proves no native Adapter support.
 
 | Responsibility | Executor | Required behavior |
 |---|---|---|

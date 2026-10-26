@@ -11,7 +11,7 @@ use crate::contract::{
     UnitAnswer,
 };
 use crate::deadline::Ingress;
-use crate::judgment::{self, UNIT_REVISION};
+use crate::judgment::{self, JudgmentUnitRegistry, UNIT_REVISION};
 use crate::model::{
     BackendIdentity, BackendKind, BackendMode, ModelBackend, ModelError, ModelReply, ModelRequest,
     NoulProbability, NORMALIZATION_VERSION,
@@ -150,12 +150,14 @@ pub struct EvaluationResponse {
 pub struct EvaluationRecord {
     input_digest: String,
     config_digest: String,
+    config_policy_digest: String,
     backend: BackendIdentity,
     started_at_ms: u64,
     completed_at_ms: u64,
     elapsed_ms: u64,
     exhausted: bool,
     reply: Option<Result<ModelReply, ModelError>>,
+    expected_response: Option<EvaluationResponse>,
 }
 
 /// One result and its immutable, independently retained local observations.
@@ -177,11 +179,21 @@ impl EvaluationRun {
 pub struct Evaluator<B> {
     config: ModelConfig,
     backend: B,
+    units: JudgmentUnitRegistry,
 }
 
 impl<B: ModelBackend> Evaluator<B> {
-    /// Bind a trusted adapter to its matching configuration, or an explicit test fixture.
+    /// Bind a trusted adapter to the built-in judgment units.
     pub fn new(config: ModelConfig, backend: B) -> Result<Self, ContractError> {
+        Self::with_units(config, backend, JudgmentUnitRegistry::default())
+    }
+
+    /// Bind a trusted adapter to an explicit process-local unit registry.
+    pub fn with_units(
+        config: ModelConfig,
+        backend: B,
+        units: JudgmentUnitRegistry,
+    ) -> Result<Self, ContractError> {
         config.validate()?;
         let identity = backend.identity();
         let fixture =
@@ -189,7 +201,11 @@ impl<B: ModelBackend> Evaluator<B> {
         if !fixture && identity != config.identity() {
             return Err(ContractError::BindingMismatch);
         }
-        Ok(Self { config, backend })
+        Ok(Self {
+            config,
+            backend,
+            units,
+        })
     }
 
     /// Evaluate frozen inputs under the original real-time deadline.
@@ -214,16 +230,18 @@ impl<B: ModelBackend> Evaluator<B> {
             return Err(ContractError::BindingMismatch);
         }
         let baseline = reference_answers(&Input::from(request), started_at_ms)?;
-        let model_request = prepare_model_request(request, &baseline)?;
+        let model_request = prepare_model_request(request, &baseline, &self.units)?;
         let mut record = EvaluationRecord {
             input_digest: input_digest(request)?,
-            config_digest: configuration_digest(&self.config)?,
+            config_digest: configuration_digest(&self.config, &self.units)?,
+            config_policy_digest: self.config.digest()?,
             backend: self.backend.identity(),
             started_at_ms,
             completed_at_ms: started_at_ms,
             elapsed_ms: ingress.elapsed_ms(),
             exhausted: deadline.expired(),
             reply: None,
+            expected_response: None,
         };
         if !model_request.questions.is_empty() && !deadline.expired() {
             let reply = tokio::time::timeout_at(
@@ -239,7 +257,7 @@ impl<B: ModelBackend> Evaluator<B> {
             record.completed_at_ms = deadline.ingress.now_ms();
             record.elapsed_ms = deadline.ingress.elapsed_ms();
             record.exhausted = deadline.expired();
-            let response = derive_response(request, &self.config, &record)?;
+            let response = derive_response(request, &self.config, &record, &self.units)?;
             validation::bounded(&response)?;
             let now_ms = ingress.now_ms();
             let evidence_expired = response.answers.iter().any(|answer| {
@@ -252,6 +270,7 @@ impl<B: ModelBackend> Evaluator<B> {
             if (!record.exhausted && deadline.expired()) || evidence_expired {
                 continue;
             }
+            record.expected_response = Some(response.clone());
             return Ok(EvaluationRun { response, record });
         }
     }
@@ -268,16 +287,15 @@ pub fn validate_response(
     request.validate_at(record.started_at_ms)?;
     validation::bounded(response)?;
     if record.input_digest != input_digest(request)?
-        || record.config_digest != configuration_digest(config)?
+        || record.config_policy_digest != config.digest()?
         || request.binding.config_revision != config.config_revision
     {
         return Err(ContractError::BindingMismatch);
     }
-    let expected = derive_response(request, config, record)?;
-    if *response != expected {
-        return Err(ContractError::InvalidResponse);
+    match &record.expected_response {
+        Some(expected) if response == expected => Ok(()),
+        _ => Err(ContractError::InvalidResponse),
     }
-    Ok(())
 }
 
 /// Decode a response only with its original input, configuration and local record.
@@ -297,12 +315,20 @@ pub fn input_digest(request: &EvaluationRequest) -> Result<String, ContractError
     digest(b"semantic-arbiter/v1alpha2\0evaluation-input\0", request)
 }
 
-fn configuration_digest(config: &ModelConfig) -> Result<String, ContractError> {
+fn configuration_digest(
+    config: &ModelConfig,
+    units: &JudgmentUnitRegistry,
+) -> Result<String, ContractError> {
     let questions: Vec<_> = [Scenario::Preservation, Scenario::TaskScope]
         .into_iter()
         .map(|scenario| {
-            let unit = judgment::unit(scenario);
-            (unit.question_id(), unit.question())
+            let unit = units.unit(scenario);
+            (
+                scenario,
+                unit.question_id(),
+                unit.revision(),
+                unit.question(),
+            )
         })
         .collect();
     digest(
@@ -322,12 +348,13 @@ fn digest(domain: &[u8], value: &impl Serialize) -> Result<String, ContractError
 fn prepare_model_request(
     request: &EvaluationRequest,
     baseline: &[UnitAnswer],
+    units: &JudgmentUnitRegistry,
 ) -> Result<ModelRequest, ContractError> {
     let questions = baseline
         .iter()
         .filter(|answer| judgment::eligible(answer))
         .map(|answer| {
-            let unit = judgment::unit(answer.unit);
+            let unit = units.unit(answer.unit);
             (unit.question_id().to_string(), unit.question())
         })
         .collect();
@@ -363,6 +390,7 @@ fn derive_response(
     request: &EvaluationRequest,
     config: &ModelConfig,
     record: &EvaluationRecord,
+    units: &JudgmentUnitRegistry,
 ) -> Result<EvaluationResponse, ContractError> {
     let input = Input::from(request);
     let initial = reference_answers(&input, record.started_at_ms)?;
@@ -371,7 +399,7 @@ fn derive_response(
     let mut answers = Vec::new();
     let mut controls = Vec::new();
     for (before, base) in initial.iter().zip(baseline) {
-        let unit = judgment::unit(base.unit);
+        let unit = units.unit(base.unit);
         let threshold = match base.unit {
             Scenario::Preservation => config.thresholds.preservation_ppm,
             Scenario::TaskScope => config.thresholds.task_scope_ppm,
@@ -397,7 +425,8 @@ fn derive_response(
         } else if !judgment::eligible(&base) {
             (base.clone(), CandidateControl::Block)
         } else if let Some(probability) = &probability {
-            let answer = unit.decide(&base, probability, threshold);
+            let answer =
+                judgment::validate_decision(&base, unit.decide(&base, probability, threshold))?;
             let control = match answer.value {
                 AnswerValue::Allow | AnswerValue::NeedsSnapshot => CandidateControl::Allow,
                 AnswerValue::Preserve | AnswerValue::OutsideScope => CandidateControl::Block,
@@ -412,7 +441,7 @@ fn derive_response(
         };
         judgments.push(JudgmentTrace {
             unit: base.unit,
-            unit_revision: UNIT_REVISION.into(),
+            unit_revision: unit.revision().into(),
             question_id: unit.question_id().into(),
             threshold_ppm: threshold,
             probability,
