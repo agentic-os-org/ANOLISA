@@ -475,6 +475,14 @@ impl AppConfig {
                  a larger weight lets the recency boost swamp BM25 relevance"
             )));
         }
+        let threshold = self.memory.consolidation.conflict_bm25_threshold;
+        if !threshold.is_finite() {
+            return Err(MemoryError::InvalidArgument(format!(
+                "[memory.consolidation].conflict_bm25_threshold = {threshold} must be a finite \
+                 number; a non-finite threshold makes every BM25 score comparison false and \
+                 silently disables conflict detection"
+            )));
+        }
         Ok(())
     }
 
@@ -629,7 +637,10 @@ impl AppConfig {
         );
         if let Ok(v) = std::env::var("MEMORY_CONFLICT_THRESHOLD") {
             match v.parse::<f64>() {
-                Ok(n) => self.memory.consolidation.conflict_bm25_threshold = n,
+                Ok(n) if n.is_finite() => self.memory.consolidation.conflict_bm25_threshold = n,
+                Ok(_) => {
+                    tracing::warn!("MEMORY_CONFLICT_THRESHOLD must be a finite number; ignoring")
+                }
                 Err(e) => {
                     tracing::warn!("MEMORY_CONFLICT_THRESHOLD={v:?} not a f64: {e}; ignoring")
                 }
@@ -842,6 +853,20 @@ mod tests {
         cfg = AppConfig::default();
         cfg.memory.index.time_decay_lambda = f64::NAN;
         assert!(cfg.validate().is_err(), "NaN lambda must be rejected");
+
+        cfg = AppConfig::default();
+        cfg.memory.consolidation.conflict_bm25_threshold = f64::NAN;
+        assert!(
+            cfg.validate().is_err(),
+            "NaN conflict threshold must be rejected"
+        );
+
+        cfg = AppConfig::default();
+        cfg.memory.consolidation.conflict_bm25_threshold = f64::INFINITY;
+        assert!(
+            cfg.validate().is_err(),
+            "infinite conflict threshold must be rejected"
+        );
     }
 
     #[test]
