@@ -535,7 +535,7 @@ fn user_event_text(event: &serde_json::Value) -> Option<String> {
 /// Top-level `content` of a Gemini CLI user record, distinguished from
 /// Claude-style events by the record `id` and the missing `message` wrapper.
 fn gemini_user_content(event: &serde_json::Value) -> Option<&serde_json::Value> {
-    (event.get("id").is_some_and(|v| v.is_str()) && event.get("message").is_none())
+    (event.get("id").is_some_and(|v| v.is_string()) && event.get("message").is_none())
         .then(|| event.get("content"))
         .flatten()
 }
