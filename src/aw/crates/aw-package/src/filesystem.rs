@@ -187,9 +187,12 @@ mod tests {
         fs::create_dir(&real).unwrap();
         let link = directory.path().join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(absolute(&real).is_ok());
         assert!(absolute(&link).is_err());
-        let trailing = PathBuf::from(format!("{}/", link.display()));
-        assert!(absolute(&trailing).is_err());
+        for suffix in ["/", "///", "/."] {
+            let trailing = PathBuf::from(format!("{}{suffix}", link.display()));
+            assert!(absolute(&trailing).is_err(), "suffix {suffix}");
+        }
     }
 
     #[test]
