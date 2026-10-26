@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-export async function startDaemon() { return {}; }
+export async function startDaemon() { return { async stop() {} }; }
 export const gates = new Map();
 export const backgrounds = new Map();
 export function gate(name) {

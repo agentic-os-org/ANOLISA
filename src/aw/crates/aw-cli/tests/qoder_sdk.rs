@@ -20,7 +20,7 @@ fn setup(f: &Fixture) -> Value {
     fs::copy(source.join("synthetic.mjs"), &app).unwrap();
     let sdk = f.root.join("node_modules/@qoder-ai/qoder-agent-sdk");
     fs::create_dir_all(sdk.join("dist")).unwrap();
-    fs::write(sdk.join("package.json"), json!({"name":"@qoder-ai/qoder-agent-sdk","version":"1.0.54","qoderCliVersion":"1.1.74","qoderSdkBrand":"global","type":"module","main":"dist/index.js"}).to_string()).unwrap();
+    fs::write(sdk.join("package.json"), json!({"name":"@qoder-ai/qoder-agent-sdk","version":"1.0.56","qoderCliVersion":"1.1.78","qoderSdkBrand":"global","type":"module","main":"dist/index.js"}).to_string()).unwrap();
     fs::copy(source.join("sdk.mjs"), sdk.join("dist/index.js")).unwrap();
     let mut document = f.document();
     document["spec"]["agents"] = json!({"sdk":{"adapter":"qoder-sdk","argv":[node,app]}});
@@ -59,7 +59,14 @@ fn query_hooks_preserve_first_call_identity_and_cleanup() {
         assert_eq!(requests.len(), 2);
         for request in &requests {
             assert_eq!(request["event"]["session_id"], "session-1");
-            assert_eq!(request["event"]["tool"]["call_id"], "call-1");
+            assert_eq!(
+                request["event"]["tool"]["call_id"].as_str().unwrap().len(),
+                36
+            );
+            assert_eq!(
+                request["event"]["native"]["aw_native_tool_use_id"],
+                "call-1"
+            );
             assert_eq!(request["event"]["agent"]["adapter"], "qoder-sdk");
         }
         let after = requests
@@ -105,7 +112,7 @@ fn unsupported_versions_overrides_and_replacement_are_rejected() {
                 &path,
                 fs::read_to_string(&path)
                     .unwrap()
-                    .replace("1.0.54", "1.0.55"),
+                    .replace("1.0.56", "1.0.55"),
             )
             .unwrap();
         }
@@ -141,7 +148,7 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 12"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 26"));
 }
 
 #[test]

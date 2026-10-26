@@ -124,7 +124,9 @@ worker 可以是 launcher 自身或其后代；fork worker 在 fork 后创建独
 并发预算通过 spec.daemon.limits 配置：默认 64 个 binding（含根）、128 个 live event、
 64 个 Provider call、128 条连接、每 binding 256 个活动 invocation，各字段范围为 1..4096。
 status 展示用量、峰值和拒绝原因。准备中、空闲和排空中的 binding 都占容量。
-Pi/Claude 常驻生产接点按严格递增序号登记 invocation。协议启用和旧事件准入共享同一把锁，
+Pi/Claude 常驻生产接点与普通 Qoder SDK 生产接点按严格递增序号登记 invocation。
+每个普通 Qoder Query 持有一个已确认的子 scope；原生命令队列和原始回调排空后才回收
+invocation 并释放 scope。协议启用和旧事件准入共享同一把锁，
 接纳过旧模式工作的 binding 在其结束后也不能切换协议。FinishInvocation 拒绝新 open、排空
 worker，并针对迟到 close 原子回收身份与两阶段关联。未知/已回收 callback 被拒绝，
 高水位拒绝旧注册，慢调用保持活动。

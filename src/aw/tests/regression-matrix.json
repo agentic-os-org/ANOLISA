@@ -1052,7 +1052,10 @@
         "qoder-sdk-reload",
         "qoder-sdk-single-config",
         "scope-native-skips",
-        "scope-qoder-sdk-close"
+        "scope-qoder-sdk-close",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli"
       ],
       "security": [
         "security-retry",

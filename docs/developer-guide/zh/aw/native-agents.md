@@ -875,8 +875,8 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
 
 ## 启动 Qoder SDK Worker
 
-使用 `adapter: qoder-sdk`、`@qoder-ai/qoder-agent-sdk@1.0.54`、随包提供的
-Worker 1.1.74（国际版）和 Node.js 22 或更新版本。将 SDK 安装到 Worker 的应用目录，
+使用 `adapter: qoder-sdk`、`@qoder-ai/qoder-agent-sdk@1.0.56`、随包提供的
+Worker 1.1.78（国际版）和 Node.js 22 或更新版本。将 SDK 安装到 Worker 的应用目录，
 在现有 AW 配置中设置目标：
 
 ```yaml
@@ -920,16 +920,43 @@ daemon，因为无法核验它的启动配置。仅启动 daemon 不会报告 Qu
 AW 沿用前台 Worker 生命周期，在 Worker 退出时释放自己的绑定。
 
 AW 在 Query 初始化前注册回调，SDK 握手成功后报告就绪。
-`tool.before` 支持观察和拒绝；`tool.after` 观察原生工具成功和失败的结果。
-原生权限拒绝保留优先级，结果替换在准入时拒绝。现有 SDK Hook 保留；参数改写和权限
+`tool.before` 支持观察和拒绝；`tool.after` 使用 `on_error: report` 观察原生工具成功和失败的结果。
+准入仅允许 `tool.before` 使用 `on_error: block`。原生权限拒绝保留优先级，
+结果替换和扣留在准入时拒绝。现有 SDK Hook 保留；参数改写和权限
 Hook 覆盖不受支持，防止实际执行参数与检查参数不同。
 
 使用 `settingSources: []`，不要传入 `settings`、插件、额外 CLI 参数或运行时 transport
 覆盖。进程环境和启动环境中的 Hook 禁用标志按 bundled Worker 的去除首尾空白
-语义解析并拒绝。所有接入 AW 的 Query 使用绑定的工作目录。回调按 Query 注册；同一 daemon 上
-直接使用原生 SDK 创建的 Query 不受修改，**也不受 AW 保护**。同一 AW 实例内接入的
-Query 共用配置的策略，不支持分别选择 session 策略。注册后通过 `applyFlagSettings` 修改 Hook 路由不在支持范围内；
-AW 不保证修改后的策略执行和审计完整性。
+语义解析并拒绝。普通 `createQuery()` 为每个 Query 建立已确认的常驻 scope，
+使用其规范工作目录和环境快照。直接创建的 Query 可以使用不同环境；共享 daemon
+拥有固定环境及当前凭据，其 Query 拒绝 `env` 和 `auth` 覆盖。
+运行期可通过原生 `daemon.auth(payload)` 更换 daemon 凭据。`daemon.stop()` 等待
+所有已安装 payload 的活动凭据回调，包括凭据更换后仍在运行的旧回调。需要不同原生凭据时，
+使用独立 daemon 或直接创建 Query。受管 Query 共用配置策略；通过原生 SDK 绕过
+Bridge 创建的 Query **不受 AW 保护**。
+
+普通 Query 要求 evidence `mode: off`：子 scope 无法继承 AgentSight 观测根 binding。
+启动准入在发布就绪前明确拒绝启用的 evidence。
+
+Bridge 返回冻结的公共 Query 接口，隐藏原生解析器、transport、回调映射和 Hook 路由
+修改方法。内部启用 Worker partial 输出，使模型工具身份先于分派到达；调用方未设置
+`includePartialMessages: true` 时隐藏 `stream_event`。回调数据无法自行登记工具身份。
+工具完成后，等待原生命令队列屏障及原始回调 finally 结束，再退休其关联记录。
+提前 return、取消和 transport 故障均等待原生 close，以及原始 Hook、权限、凭据、
+模型和 MCP 回调完成后释放 scope。记忆生成/消费、技能演进的 gate/result 回调，
+以及执行中的 `sendHostAction()`（包括原生 fallback 清理）也纳入等待。
+关闭开始后拒绝新 Host action。清理失败时保留所有权，直到 Worker 退出。
+支持原生认证回调；逐工具凭据租约注入和 Hook 可见凭据脱敏仍待后续集成。
+
+进程内 MCP 使用 `await bridge.createSdkMcpServer(options)`，每个 Query 提供新的受管
+server。保留原生 schema、annotations、权限设置和结构化结果 envelope。
+若 schema 通过默认值、transform 或移除未知字段改变已批准参数，则在应用 handler
+执行前拒绝。严格 Pre 拒绝阻止 handler 进入。
+Post 回调失败时，直接注入严格 Post 路由会触发 Bridge 的拒绝结果交付防御；对应测试绕过配置准入。
+AW 配置当前只准入 `on_error: report` 的 Post 观察，严格 Post 的准入与原生验收仍由 #9069 跟进。
+MCP 子调用绑定原生 control request、精确的 server/tool/arguments 和所属 Query。
+固定版本 Worker 的 MCP 请求未提供来源模型工具 ID，父工具调用关联仍依赖上游接点。
+结果替换继续保持不支持，等待原生采用验证。
 
 需要在不重启 daemon 的情况下更新已有 Query 时，使用
 `aw run --config aw.yaml --agent sdk --reloadable` 显式启用。沿用同一个
@@ -953,13 +980,13 @@ AW 不保证修改后的策略执行和审计完整性。
 `CronCreate` 和 `run_in_background`
 工具，因为这些入口可以在准入边界之外调度工作。定时器触发的回合绕过输入迭代器，
 因此不支持创建定时唤醒或 cron 任务；`CronList` 和 `CronDelete` 仍可使用。
-Worker 1.1.74 的 `UpdateGoal` 只能完成或
+Worker 1.1.78 的 `UpdateGoal` 只能完成或
 阻塞已有 goal，不能激活 goal，因此仍可使用。
 创建 Query 时还会拒绝自定义 `agents` 中的 `background: true` 或 `isolation: "worktree"`。
 `Agent` 工具传入 `isolation: "worktree"` 也会在执行前被拒绝，因为 worktree 执行不属于
-支持的绑定边界。前台定义和默认隔离的 Agent 调用仍可使用。普通 `aw run` 保留原 SDK 路径。此接入不提供外部 PID attach/detach、按 session 独立选择 AW 策略或 steer。
+支持的绑定边界。前台定义和默认隔离的 Agent 调用仍可使用。普通 `aw run` 使用常驻 scope 路径并保留原生 goal API。此接入不提供外部 PID attach/detach、按 session 独立选择 AW 策略或 steer。
 
-普通模式下，Worker 1.1.74 的 worktree 子代理回调仍携带父 Query 的 `cwd` 和子代理
+普通模式下，Worker 1.1.78 的 worktree 子代理回调仍携带父 Query 的 `cwd` 和子代理
 `agent_id`，而工具实际在 worktree 中执行。AW 能观察到这些回调，但不会重建实际执行
 工作目录。依赖该目录的策略不支持 worktree 执行；普通模式不会在创建 Query 时拒绝它。
 可更新模式会按上述规则在执行前拒绝 worktree。
@@ -969,7 +996,7 @@ Worker 1.1.74 的 `UpdateGoal` 只能完成或
 若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
 丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
 
-上文 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
+可更新 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
 request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
 记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
 并发提交量；策略更新不会清空关联历史。

@@ -12,6 +12,27 @@ import native_acceptance
 
 
 class QoderSdkNativeTests(GateFixture):
+    def test_pinned_sdk_installs_its_worker_without_credentials(self) -> None:
+        row = load(AW)["agents"]["qoder-sdk"]
+        work, evidence = self.root / "work", self.root / "evidence"
+        work.mkdir()
+        evidence.mkdir()
+        commands = Commands(evidence, {})
+        observed = []
+
+        def run(argv, cwd, **kwargs):
+            self.assertNotIn("QODER_PERSONAL_ACCESS_TOKEN", commands.environment)
+            observed.append(argv)
+            return "{}"
+
+        with patch.object(commands, "run", side_effect=run):
+            native_acceptance.setup(row, work, commands)
+        install = next(index for index, argv in enumerate(observed) if argv[:2] == ["npm", "install"])
+        self.assertIn(row["npm_packages"][0], observed[install])
+        self.assertEqual(observed[install + 1], [
+            "node", str(work / "npm/node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs")
+        ])
+
     def test_sdk_runtime_alone_receives_the_pat_and_missing_pat_fails(self) -> None:
         manifest = load(AW)
         row = manifest["agents"]["qoder-sdk"]
@@ -25,7 +46,11 @@ class QoderSdkNativeTests(GateFixture):
                 return {"python": sys.executable, "npm": str(work / "npm")}
 
             def command(commands, argv, cwd, timeout=600, **kwargs):
-                if "crates/aw-cli/tests/fixtures/qoder_sdk/native.py" in argv:
+                if any(path in argv for path in (
+                    "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+                    "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+                    "crates/aw-cli/tests/fixtures/qoder_sdk/daemon-native.test.mjs",
+                )):
                     self.assertEqual(
                         commands.environment["QODER_PERSONAL_ACCESS_TOKEN"], credential
                     )
@@ -62,8 +87,8 @@ class QoderSdkNativeTests(GateFixture):
             ) as reports:
                 if credential:
                     native_acceptance.main()
-                    self.assertEqual(observed, ["setup", "native", "native"])
-                    self.assertEqual(reports.call_count, 2)
+                    self.assertEqual(observed, ["setup", "native", "native", "native", "native"])
+                    self.assertEqual(reports.call_count, 4)
                 else:
                     with self.assertRaisesRegex(ValueError, "requires.*Secret"):
                         native_acceptance.main()

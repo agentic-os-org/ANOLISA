@@ -11,6 +11,9 @@ use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) struct QoderSdk;
 struct Prepared {
     input: LaunchInput,
@@ -23,6 +26,10 @@ impl Adapter for QoderSdk {
         input: LaunchInput,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<Box<dyn PreparedLaunch>> {
+        if !input.options.reloadable && adapter::observation_enabled(&input.document, &input.target)
+        {
+            return Err("AW resident Qoder SDK does not support AgentSight evidence; set evidence.mode to off".into());
+        }
         if input.options.settings.is_some()
             || input.options.profile.is_some()
             || input.options.state_dir.is_some()
@@ -72,7 +79,7 @@ impl Adapter for QoderSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> AdapterCapabilities {
-        adapter::catalog::QODER_SDK.capabilities("1.0.54", "sdk-worker")
+        adapter::catalog::QODER_SDK.capabilities("1.0.56", "sdk-worker")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         if self.input.options.reloadable {
@@ -118,11 +125,40 @@ impl PreparedLaunch for Prepared {
             "reload.mjs",
             include_bytes!("../../native/qoder-sdk/reload.mjs"),
         )?;
+        for (name, bytes) in [
+            (
+                "mcp.mjs",
+                include_bytes!("../../native/qoder-sdk/mcp.mjs").as_slice(),
+            ),
+            (
+                "daemon.mjs",
+                include_bytes!("../../native/qoder-sdk/daemon.mjs").as_slice(),
+            ),
+            (
+                "resident.mjs",
+                include_bytes!("../../native/qoder-sdk/resident.mjs").as_slice(),
+            ),
+            (
+                "identity.mjs",
+                include_bytes!("../../native/qoder-sdk/identity.mjs").as_slice(),
+            ),
+            (
+                "scope.mjs",
+                include_bytes!("../../native/shared/scope.mjs").as_slice(),
+            ),
+            (
+                "transport.mjs",
+                include_bytes!("../../native/shared/transport.mjs").as_slice(),
+            ),
+        ] {
+            context.files.write(name, bytes)?;
+        }
         let config = context.files.write(
             "qoder-sdk.json",
             &serde_json::to_vec(&json!({
                 "executable":context.executable, "binding":context.binding_path, "sdk":self.sdk,
-                "reloadable":self.input.options.reloadable, "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
+                "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable,
+                "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
             }))?,
         )?;
         let mut command = self.input.command.clone();

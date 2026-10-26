@@ -178,7 +178,7 @@ gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
 ### 最小常驻测试容器
 
 新增必需的容器任务复用原生清单中全部 `tests/sdk_resident.py` 命令及其确切 JSON
-报告：当前为 24 个（Claude 16、Pi 8），来自全部 47 个原生套件，无凭据档为 42 个。
+报告：当前为 24 个（Claude 16、Pi 8），来自全部 49 个原生套件，无凭据档为 42 个。
 覆盖 1,280 次长会话、状态回收、资源增长断言、回调排空、session-store 和原生拒绝，
 保留既有生命周期/MCP 场景。model-relay 和 dispatch 合同入口继续由宿主原生任务验证。
 
@@ -323,7 +323,7 @@ Adapter 证据和工具事件运行样例 Provider，不代表原生 Agent 验�
 工具按预期执行或被阻断，以及返回效果已被 Agent 采用。验证命令和结果写入 PR，
 实验日志不放入 README。
 
-Qoder SDK 1.0.54 原生验收使用随包的 Worker 1.1.74 和托管 `auto` 模型，
+Qoder SDK 1.0.56 原生验收使用随包的 Worker 1.1.78 和托管 `auto` 模型，
 复用 `QODER_PERSONAL_ACCESS_TOKEN` Secret。依赖安装不接收凭据，SDK 运行阶段
 验证首请求拒绝、session Hook 隔离、成功/失败观察、原生权限拒绝和 daemon 不重启。
 

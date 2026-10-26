@@ -1612,9 +1612,9 @@
       "mode": "automated",
       "versions": {},
       "npm_packages": [
-        "@qoder-ai/qoder-agent-sdk@1.0.54"
+        "@qoder-ai/qoder-agent-sdk@1.0.56"
       ],
-      "boundary": "Real SDK 1.0.54 / bundled Worker 1.1.74 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy or result replacement.",
+      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy or result replacement. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 17-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Its strict Post case injects a bridge route below admission: tool.after admits only observe/report, and strict Post admission/native acceptance remain under #9069. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon and resident hot reload are unsupported. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Ordinary resident Queries require evidence mode off; launch admission rejects enabled AgentSight evidence. MCP schema parsing that changes approved arguments is rejected before handler execution.",
       "cases": [
         {
           "name": "daemon-hooks",
@@ -1647,7 +1647,8 @@
                   "denial-reason-preserved",
                   "permission-allow-aw-deny",
                   "native-goal-create-and-complete",
-                  "worktree-callback-cwd"
+                  "worktree-callback-cwd",
+                  "native-producer-identity"
                 ]
               }
             }
@@ -1697,6 +1698,31 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-parser",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"
+          ],
+          "timeout_seconds": 45,
+          "report": "tap",
+          "tests": 17
+        },
+        {
+          "name": "daemon-auth-drain",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/daemon-native.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/daemon-auth"
+          ],
+          "timeout_seconds": 90,
+          "report": "tap",
+          "tests": 6
         }
       ]
     }

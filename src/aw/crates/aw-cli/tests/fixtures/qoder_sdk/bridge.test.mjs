@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import * as bridge from "../../../../aw-adapter/native/qoder-sdk/bridge.mjs";
+import "./resident.test.mjs";
+import "./daemon.test.mjs";
 const { createQuery } = bridge;
 
 function fixture(t, mode = "allow") {
@@ -129,7 +131,7 @@ test("process runtime selectors fail before SDK query creation", async (t) => {
     assert(!fs.existsSync(path.join(f.root, "ready")));
   }
   process.env.QODERCLI_PATH = "/unverified/qodercli";
-  // Query-local env does not mask the inherited selector used by SDK 1.0.54.
+  // Query-local env does not mask the inherited selector used by SDK 1.0.56.
   for (const env of [undefined, {}, { QODERCLI_PATH: "" }]) {
     await assert.rejects(createQuery({ prompt: "first", options: { ...f.options, env } }),
       /QODERCLI_PATH/);
@@ -190,8 +192,17 @@ test("daemon launch admission rejects overrides and unregistered daemons", async
   delete process.env.QODERCLI_PATH;
   const launch = { auth: { type: "fixture" }, workerIdleTimeoutMs: 42,
     env: { QODER_HEADLESS_FAST_HOOKS: "false", APPLICATION_SETTING: "kept" } };
-  const daemon = await bridge.startDaemon(launch);
-  assert.deepEqual(daemon.options, launch);
+  const starting = bridge.startDaemon(launch);
+  launch.env.QODER_HEADLESS_FAST_HOOKS = "1";
+  launch.auth.type = "mutated";
+  const daemon = await starting;
+  assert.equal(daemon.options.env.QODER_HEADLESS_FAST_HOOKS, "false");
+  assert.equal(daemon.options.auth.type, "fixture");
+  launch.env.QODER_HEADLESS_FAST_HOOKS = "false";
+  launch.auth.type = "fixture";
+  assert.deepEqual(daemon.options.auth, launch.auth);
+  assert.equal(daemon.options.workerIdleTimeoutMs, launch.workerIdleTimeoutMs);
+  for (const [key, value] of Object.entries(launch.env)) assert.equal(daemon.options.env[key], value);
   assert(!fs.existsSync(f.config.ready_path), "daemon startup alone is not Query readiness");
   const q = await createQuery({ prompt: "first", options: { ...f.options, daemon } });
   assert.equal(q.options.daemon, daemon);

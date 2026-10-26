@@ -5,11 +5,13 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { invoke } from "./callback.mjs";
 import { Reload } from "./reload.mjs";
+import { Resident, bounded } from "./resident.mjs";
+import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
+import { managedMcpServer } from "./mcp.mjs";
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
 const copy = (value) => JSON.parse(JSON.stringify(value));
-const daemons = new WeakSet();
 
 function configuration() {
   const config = JSON.parse(readFileSync(process.env.AW_QODER_SDK_CONFIG, "utf8"));
@@ -39,11 +41,20 @@ function runtime(options) {
 /** Start the pinned daemon after admission; the caller still owns stop(). */
 export async function startDaemon(options) {
   const config = configuration();
+  const environment = { ...process.env, ...(options.env ?? {}) };
+  options = { ...options, env: { ...environment },
+    ...(options.auth ? { auth: credentialOptions(options.auth) } : {}) };
   runtime(options);
   const sdk = await import(pathToFileURL(config.sdk).href);
-  const daemon = await sdk.startDaemon(options);
-  daemons.add(daemon);
-  return daemon;
+  return await managedDaemon(sdk, options, config, bounded, environment);
+}
+
+/** Preserve SDK tool definitions while requiring one managed MCP server per Query. */
+export async function createSdkMcpServer(options) {
+  const config = configuration();
+  if (!config.resident) throw new Error("Managed MCP requires an AW resident Query");
+  const sdk = await import(pathToFileURL(config.sdk).href);
+  return managedMcpServer(sdk, options);
 }
 
 function compose(config, options) {
@@ -54,9 +65,8 @@ function compose(config, options) {
       options.hooks?.PermissionRequest?.length)
     throw new Error("AW Qoder SDK requires settingSources=[] and no settings, plugins, runtime or permission-hook overrides");
   runtime(options);
-  if (options.daemon !== undefined && !daemons.has(options.daemon))
-    throw new Error("AW Qoder SDK requires a daemon created by its startDaemon factory");
-  if (resolve(options.cwd ?? process.cwd()) !== config.cwd)
+  daemonOwner(options.daemon, config);
+  if (!config.resident && resolve(options.cwd ?? process.cwd()) !== config.cwd)
     throw new Error("Qoder Query cwd differs from the AW binding");
   const hooks = Object.fromEntries(Object.entries(options.hooks ?? {}).map(([event, groups]) =>
     [event, groups.map((group) => ({ ...group, hooks: group.hooks.map((callback) =>
@@ -83,6 +93,8 @@ function compose(config, options) {
           process.stderr.write(`AW ${event}/${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`);
           if (event === "tool.before" && hook.on_error === "block")
             return deny("AW hook failed; configured failure action blocked the tool");
+          if (config.resident && event === "tool.after" && hook.on_error === "block")
+            throw error;
         }
       }
       return {};
@@ -115,6 +127,10 @@ function ready(config) {
 /** Return the native Query after its initialization handshake accepts AW callbacks. */
 export async function createQuery({ prompt, options }) {
   const config = configuration();
+  if (config.resident) {
+    const resident = new Resident(config);
+    return await resident.create(prompt, options, compose, ready);
+  }
   const reload = config.reloadable ? new Reload(config) : undefined;
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);

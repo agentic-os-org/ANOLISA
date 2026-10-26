@@ -166,7 +166,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
 This runtime path is pinned to Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 with
-AgentScope 2.0.9 App, and Qoder SDK 1.0.54 / bundled Worker 1.1.74.
+AgentScope 2.0.9 App, and Qoder SDK 1.0.56 / bundled Worker 1.1.78.
 For SDK targets, use the [explicit daemon and Query factories](../../../developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker);
 all managed sessions in the instance must be idle, including native cleanup.
 For QwenPaw, use its configured target and initialized
@@ -315,6 +315,9 @@ failures; safety checks typically use `block`. Follow the
 both allowed and blocked calls.
 
 Resident Pi/Claude targets retain this configuration format. Select the resident entrypoint and public factory described in the [SDK worker reference](../../../developer-guide/en/aw/native-agents.md#resident-pi-and-claude-sdk-hosts).
+
+Each ordinary managed Query owns a child scope; daemon shutdown drains its Queries and original callbacks. Resident policy changes use a rolling restart. The separate `--reloadable` path retains its idle-update contract.
+Use the [native integration reference](../../../developer-guide/en/aw/native-agents.md) for the required factories and lifecycle boundaries.
 
 ## Attach to an already started native process
 

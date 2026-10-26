@@ -141,7 +141,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
 运行时路径支持已验证的 Qoder 1.1.73 TUI、QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，
-以及 Qoder SDK 1.0.54 / bundled Worker 1.1.74。SDK 目标使用
+以及 Qoder SDK 1.0.56 / bundled Worker 1.1.78。SDK 目标使用
 [显式 daemon 和 Query 工厂](../../../developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)；
 实例内所有受管 session 都须空闲，包括原生清理完成。
 QwenPaw 按原生接入参考选择配置目标并设置已初始化的 `QWENPAW_WORKING_DIR`。
@@ -263,6 +263,9 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 按[布尔规则教程](../../../developer-guide/zh/aw/integration.md)准备脚本并验证允许和阻断两种情况。
 
 Pi / Claude 常驻目标沿用同一配置格式，按 [SDK worker 说明](../../../developer-guide/zh/aw/native-agents.md#pi-和-claude-sdk-常驻宿主) 选择常驻入口及公共工厂。
+
+普通受管 Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。resident 策略变更采用滚动重启，独立的 `--reloadable` 路径保留空闲更新合同。
+所需工厂及生命周期边界见[原生接入说明](../../../developer-guide/zh/aw/native-agents.md)。
 
 ## 接入已启动的原生进程
 

@@ -1026,8 +1026,8 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
 
 ## Start a Qoder SDK worker
 
-Use `adapter: qoder-sdk` with `@qoder-ai/qoder-agent-sdk@1.0.54`, its bundled
-Worker 1.1.74 (global), and Node.js 22 or newer. Install the SDK in the worker's
+Use `adapter: qoder-sdk` with `@qoder-ai/qoder-agent-sdk@1.0.56`, its bundled
+Worker 1.1.78 (global), and Node.js 22 or newer. Install the SDK in the worker's
 application directory. Configure the target in your existing AW configuration:
 
 ```yaml
@@ -1075,21 +1075,59 @@ AW keeps the foreground-worker lifecycle and releases its binding on worker exit
 
 AW registers per-Query callbacks before initialization, then reports readiness
 after the SDK handshake. `tool.before` supports observation and denial;
-`tool.after` observes successful and failed native tool calls. Native permission
-denials retain precedence. Result replacement is rejected during admission.
+`tool.after` observes successful and failed native tool calls with `on_error: report`.
+Admission allows `on_error: block` only for `tool.before`. Native permission
+denials retain precedence. Result replacement and withholding are rejected
+during admission.
 Existing SDK hooks are retained; argument rewrites and permission-hook overrides
 are rejected so a tool cannot execute different arguments from those checked.
 
 Use `settingSources: []` and no `settings`, plugins, extra CLI flags or runtime
 transport overrides. Hook-disable flags are parsed with the bundled Worker's
 whitespace normalization and rejected in both process and launch environments.
-All managed Queries must use the bound working directory.
-Each Query gets its own callbacks; an ordinary SDK Query on the same daemon is
-unmodified and is **not protected by AW**. Managed Queries within one AW instance
-share its configured policy, not independently selectable per-session policies.
-Changing Hook routing through `applyFlagSettings` after registration is outside
-the supported contract; AW does not guarantee policy enforcement or complete
-auditing after such changes.
+Ordinary `createQuery()` opens an acknowledged resident scope for each Query,
+with its canonical working directory and a captured environment. Direct Queries
+can use distinct environments. A shared daemon owns one immutable environment
+and its current credentials; its Queries reject `env` and `auth` overrides.
+Use native `daemon.auth(payload)` to replace the daemon's credentials at runtime.
+`daemon.stop()` joins active credential callbacks from every installed payload,
+including callbacks still running after their credentials were replaced.
+Use separate daemons or direct Queries when native credentials must differ.
+Managed Queries share the configured policy. Native SDK Queries created outside
+the bridge remain **unprotected by AW**.
+
+Ordinary Queries require evidence `mode: off`: child scopes cannot inherit an
+AgentSight observation root. Launch admission rejects enabled evidence before
+readiness.
+
+The bridge returns a frozen public Query facade. Native parser, transport,
+callback maps and Hook-routing mutation methods are private. Worker partial
+output is enabled internally so model tool identities arrive before dispatch;
+`stream_event` messages are hidden unless `includePartialMessages: true` was
+requested. Callback data cannot register a tool identity. Completed tools retire
+after the native command queue barrier and original callback finalizers finish.
+Early return, cancellation and transport failure join native close and original
+Hook, permission, credential, model and MCP callbacks before retiring the scope.
+Memory generation/consumption and skill-evolution gate/result callbacks are also
+joined, along with in-flight `sendHostAction()` work, including its native
+fallback cleanup. Closing rejects new Host actions.
+Cleanup failures retain ownership until worker exit. Native authentication
+callbacks are supported; per-tool credential lease injection and Hook-visible
+credential redaction remain pending integration work.
+
+For in-process MCP, use `await bridge.createSdkMcpServer(options)` and provide a
+fresh managed server per Query. Native schemas, annotations, permission settings
+and structured result envelopes are retained. A schema that changes approved
+arguments through defaults, transforms or unknown-key stripping is rejected
+before the application handler. Strict Pre rejection prevents handler entry.
+On Post callback failure, the bridge rejects result delivery when directly supplied
+a strict Post route; this defensive branch is tested below configuration admission. AW configurations
+currently admit only Post observation with `on_error: report`; strict Post admission
+and native acceptance remain work under #9069. MCP child invocations bind
+the native control request, exact server/tool/arguments and owning Query. The
+pinned Worker does not expose the originating model tool ID in that MCP request;
+parent tool-invocation correlation remains an upstream dependency. Result
+replacement remains unsupported pending native adoption validation.
 To update existing Queries without restarting the daemon, opt in with
 `aw run --config aw.yaml --agent sdk --reloadable`. Keep using the same
 `createQuery` factory and caller-owned `startDaemon()`; an asynchronous input
@@ -1118,17 +1156,17 @@ Use prompt input or `streamInput` to submit work. Goal options, `setGoal`,
 `run_in_background` tools are rejected because they can schedule work outside
 that admission boundary. Timer-created turns bypass the input iterator, so
 creating a scheduled wakeup or cron job is unsupported; `CronList` and `CronDelete`
-remain available. Worker 1.1.74's `UpdateGoal` only completes or blocks an
+remain available. Worker 1.1.78's `UpdateGoal` only completes or blocks an
 existing goal; it does not activate one and remains available. Query creation also
 rejects custom `agents`
 definitions with `background: true` or `isolation: "worktree"`. The `Agent` tool's
 `isolation: "worktree"` input is denied before execution because worktree
 execution is outside the supported binding boundary. Foreground definitions and default-isolation
-Agent calls remain allowed. Ordinary `aw run` keeps the original SDK path.
+Agent calls remain allowed. Ordinary `aw run` uses the resident scope path and retains native goal APIs.
 External PID attach/detach, independently selected per-session AW policies and
 steer are not provided by this integration.
 
-In ordinary mode, Worker 1.1.74 sends worktree child callbacks with the parent
+In ordinary mode, Worker 1.1.78 sends worktree child callbacks with the parent
 Query's `cwd` and a child `agent_id`, although tools execute in the worktree.
 AW observes those callbacks; it does not reconstruct the actual execution
 working directory. Worktree execution is not supported for policies that depend
@@ -1142,7 +1180,7 @@ application stops consuming, stop submitting and await `close()` or `return()`;
 these discard buffered output and await native cleanup. This mode does not
 provide backpressure for an indefinitely paused consumer.
 
-The Qoder SDK path described above retains 1024
+The reloadable Qoder SDK path retains 1024
 Hook correlation entries per instance, and 64 active claims per request/tool
 claim set. Completed request claims are released; Hook correlation entries are
 retained until instance release. These are not a count of supported lifetime

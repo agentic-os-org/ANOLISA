@@ -99,7 +99,7 @@ export async function safety({ session, turn, prompt, results, root, reloadable,
       m.type === "tool_result" && m.tool_use_id === child.tool_use_id);
     assert(result && !result.is_error);
     assert(String(result.content).trim().startsWith(path.join(process.cwd(), ".qoder/worktrees/")));
-    const callbacks = events().filter((e) => e.tool.call_id === child.tool_use_id);
+    const callbacks = events().filter((e) => (e.native.aw_native_tool_use_id ?? e.tool.call_id) === child.tool_use_id);
     assert(callbacks.some((e) => e.name === "tool.before" && e.native.agent_id === child.agent_id));
     assert(callbacks.some((e) => e.name === "tool.after"));
     pass("worktree-callback-cwd", { cwd: process.cwd(), observed: worktree, messages: output });

@@ -149,7 +149,9 @@ Concurrent budgets live in `spec.daemon.limits`: bindings 64 (including roots),
 live events 128, Provider calls 64, connections 128 and active invocations per
 binding 256 by default. Each field accepts 1..4096; status exposes usage, peaks and
 rejection reasons. Preparing, idle and draining bindings count toward capacity.
-Resident Pi/Claude producers register strictly increasing invocation sequences.
+Resident Pi/Claude and ordinary Qoder SDK producers register strictly increasing
+invocation sequences. Each ordinary Qoder Query owns one acknowledged child scope;
+its native queue and original callbacks drain before invocation retirement and scope release.
 Protocol enable and legacy event admission share one lock. A binding that has
 admitted legacy work cannot switch protocols after that work completes.
 FinishInvocation fences new opens, drains workers and retires both phase claims;

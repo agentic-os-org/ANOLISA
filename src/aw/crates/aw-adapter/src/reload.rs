@@ -44,8 +44,8 @@ pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
         capabilities.entrypoint.as_str(),
     ) {
         ("qoder", "1.1.73", "tui") | ("qwenpaw", "2.2.2b4", "app")
-        | ("qoder-sdk", "1.0.54", "sdk-worker") => Ok(()),
-        _ => Err("runtime policy updates require Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 App or Qoder SDK 1.0.54".into()),
+        | ("qoder-sdk", "1.0.56", "sdk-worker") => Ok(()),
+        _ => Err("runtime policy updates require Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 App or Qoder SDK 1.0.56".into()),
     }
 }
 

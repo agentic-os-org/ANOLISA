@@ -3,20 +3,22 @@
 [English](../../en/runtime/policy-reload.md)
 
 AW 可以显式更新通过稳定桥接启动的空闲实例策略，原生宿主进程保持运行；忙碌实例拒绝更新。
-运行时路径通过 `aw run --reloadable` 显式启用，首批固定 Qoder 1.1.73 TUI 和
-QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，以及 Qoder SDK 1.0.54 / bundled Worker
-1.1.74。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
+运行时路径通过 `aw run --reloadable` 显式启用，固定 Qoder 1.1.73 TUI 和
+QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，以及 Qoder SDK 1.0.56 / bundled Worker
+1.1.78。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
 外部接入和 steer 仍在规划中。
-普通 `aw run` 保留现有注册路径。
+`qoder-sdk` 的普通 `aw run` 为每个受管 Query 建立常驻子 scope。
+常驻策略变更采用滚动重启；`--reloadable` 保留下述独立的空闲更新合同。
 
 ## Qoder SDK 请求准入
 
-Query 工厂仅在启用 `--reloadable` 时注册稳定工具路由并包装输入/输出。
+启用 `--reloadable` 时，Query 工厂注册稳定工具路由并包装输入/输出，
+使请求准入声明保留到原生清理完成。
 每条消息在提交 SDK 之前取得已有 AW 请求声明。同一绑定的受管 Query 共用活动策略，
 原生 daemon 仍由应用管理。关联进程是执行 SDK 回调的应用 Worker，而不是调用方任意
 提供的 daemon PID。
 
-Worker 1.1.74 可能在生成器清理完成前发出 command completion 和 result。
+Worker 1.1.78 可能在生成器清理完成前发出 command completion 和 result。
 其公开 `getContextUsage()` 控制请求会排在当前原生请求之后；桥接等待这一只读屏障
 完成，才释放对应命令的请求声明。这依赖实测的原生命令循环契约，不仅是版本比较或
 收到 `Stop`。屏障失败时，桥接关闭 Query，等待原生关闭握手与尚未完成的回调。
@@ -119,7 +121,7 @@ status、detach 和 update 使用记录的身份，不根据候选配置的 endp
 私有锁文件保留到运行时目录清理，避免并发锁 inode 被替换。新的显式 attach 可以接入重启后的
 服务，并在原生 readiness 之后、报告成功之前应用当前期望策略。每次 `aw run` 都在选择
 服务前检查已有连接。修改文件后重新启动需要先停止记录中的服务；活动实例使用
-`aw update`。原服务停止后，显式启动会刷新已有连接。没有连接记录的普通启动沿用原路径。
+`aw update`。原服务停止后，显式启动会刷新已有连接。没有连接记录的普通启动根据配置选择服务。
 
 用户只维护一份期望配置。文件编辑属于离线操作；更新失败或 busy 时，内存中的旧策略
 保持生效，不回写用户文件。现有服务快照和策略版本校验不变，不新增服务 RPC、

@@ -53,7 +53,7 @@ launcher 转发退出信号后，Agent 需要超过默认两秒的强制清理�
 此命令不更新运行中的实例。
 
 通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
-AgentScope 2.0.9 App，以及 Qoder SDK 1.0.54 / Worker 1.1.74
+AgentScope 2.0.9 App，以及 Qoder SDK 1.0.56 / Worker 1.1.78
 预装实验性空闲更新桥接。
 直接编辑同一份配置文件，再显式应用。
 `aw update --config aw.yaml --agent TARGET` 选择目标的唯一实例，
@@ -125,6 +125,8 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 覆盖的能力。支持版本、工具类型和文本替换范围见
 [原生 Agent 接入参考](../../docs/developer-guide/zh/aw/native-agents.md)。
 
+普通受管 Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。resident 策略变更采用滚动重启，独立的 `--reloadable` 路径保留空闲更新合同。
+
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
 | --- | --- | --- | --- | --- |
@@ -138,7 +140,7 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
-Qoder SDK 1.0.54 / Worker 1.1.74 使用 Bridge 的 daemon 和 Query 工厂校验
+Qoder SDK 1.0.56 / Worker 1.1.78 使用 Bridge 的 daemon 和 Query 工厂校验
 原生运行时，通过 `aw run` 显式注册每个 Query 的回调，
 可通过 `--reloadable` 显式启用已有 Query 的空闲策略更新；忙碌或清理未完成时返回 busy。
 参见 [SDK Worker 指南](../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)。

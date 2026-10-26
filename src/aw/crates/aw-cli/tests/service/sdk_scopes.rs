@@ -5,17 +5,20 @@ use aw_service::Binding;
 use std::os::unix::fs::PermissionsExt;
 
 fn callback(adapter: &str, after: bool, scenario: &str, cwd: &str) -> Value {
-    let mut value = if adapter == "pi" {
-        json!({"event":if after {"tool.after"} else {"tool.before"},
+    let mut value = match adapter {
+        "pi" => json!({"event":if after {"tool.after"} else {"tool.before"},
             "invocation_id":"8a3b4e83-aaba-40d1-af1a-cf062df04113", "session_id":"session",
             "tool_call":{"id":"call","name":"bash","input":{"command":"true"}},
             "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false},
-            "scenario":scenario})
-    } else {
-        json!({"hook_event_name":if after {"PostToolUse"} else {"PreToolUse"},
+            "scenario":scenario}),
+        "claude-sdk" => json!({"hook_event_name":if after {"PostToolUse"} else {"PreToolUse"},
             "cwd":cwd,"session_id":"session","tool_use_id":"call","tool_name":"Bash",
             "tool_input":{"command":"true"},"tool_response":{"stdout":"original","stderr":"","interrupted":false,"isImage":false},
-            "scenario":scenario})
+            "scenario":scenario}),
+        "qoder-sdk" => json!({"hook_event_name":if after {"PostToolUse"} else {"PreToolUse"},
+            "cwd":cwd,"session_id":"session","tool_use_id":"call","tool_name":"Bash",
+            "tool_input":{"command":"true"},"tool_response":"original","scenario":scenario}),
+        _ => panic!("missing SDK scope native fixture for {adapter}"),
     };
     if !after {
         value.as_object_mut().unwrap().remove("tool_response");
@@ -118,7 +121,7 @@ impl Drop for OwnedChild {
 
 #[test]
 fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
-    for adapter in ["pi", "claude-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk"] {
         for unrelated in [false, true] {
             let fixture = Fixture::new();
             let other =
@@ -192,7 +195,7 @@ fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
 
 #[test]
 fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
-    for adapter in ["pi", "claude-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk"] {
         let fixture = Fixture::new();
         let (service, parent, binding) = host(&fixture, adapter);
         let task = fixture.0.join("task");
@@ -306,7 +309,7 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
 
 #[test]
 fn expired_sdk_handoff_can_close_without_reviving_callbacks() {
-    for adapter in ["pi", "claude-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk"] {
         let fixture = Fixture::new();
         let (service, parent, binding) = host(&fixture, adapter);
         let input = json!({"pid":std::process::id(), "cwd":fixture.0,

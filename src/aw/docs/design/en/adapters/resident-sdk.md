@@ -9,6 +9,11 @@ or `--agent claude`. SYSOM integration stays in the image, startup and common
 client/MCP factories; the application owns scheduling, credentials, HTTP/SSE,
 business tools and conversation storage.
 
+Ordinary Qoder SDK 1.0.56 / Worker 1.1.78 Queries use the same child-scope and
+sequenced-invocation service contract. Each Query owns one execution until close;
+completed tool identities are retired while the Query remains open. Its
+`--reloadable` mode uses a separate request-admission path described below.
+
 ## Runtime ownership
 
 ```mermaid
@@ -28,8 +33,9 @@ flowchart LR
   Retire --> SDK
 ```
 
-A binding belongs to the client, an execution to one prompt/query response, and
-an invocation to one model-produced tool call. Native IDs can repeat across
+A binding belongs to a client or Qoder Query. For Pi and Claude, an execution
+belongs to one prompt/query response; for Qoder, it spans the Query lifetime.
+An invocation belongs to one model-produced tool call. Native IDs can repeat across
 executions. AW projects fresh UUIDs before native dispatch, freezes tool name and
 arguments, and registers a strictly increasing sequence within the binding.
 Matching names or arguments never create an identity at callback arrival.
@@ -43,6 +49,8 @@ Pi uses its public model stream and the produced tool object. Claude uses a priv
 loopback Anthropic Messages relay and the pinned SDK transport dispatch context.
 MCP `_meta.claudecode/toolUseId` links the native frame to that same identity before
 the SDK removes metadata from its public handler arguments.
+Qoder uses completed model tool blocks from the pinned Worker's private partial
+output and verifies each Hook against its native control-dispatch context.
 
 Only active details are retained. After result adoption, closing fences new Hook
 opens, cancels/joins unfinished Provider work, removes both phase correlations,
@@ -53,15 +61,15 @@ and managed MCP callbacks, including asynchronous `finally` after SDK cancellati
 Cancellation before callback entry reclaims only the pending dispatch ticket;
 the invocation keeps its replay guard until retirement. A cancelled ticket cannot
 enter later. Once entered, a callback remains pending until its cleanup finishes.
-A Result is delivered and the next query admitted only after drain. A new prompt
-cannot reuse a still-active execution. Native history remains SDK-owned.
+For Pi and Claude, a Result is delivered and the next query admitted only after
+drain. A new prompt cannot reuse a still-active execution. Native history remains SDK-owned.
 Pi opens one execution per prompt and fences new model production/registration
 before drain. Retirement transport errors latch failure and preserve the unacknowledged
 identity; bridge-local producer details are cleared even when drain fails.
 Delayed model results carry the producing execution generation and cannot enter
 a later prompt.
-The next model request also adopts explicit native `is_error: true` results after
-their callback dispatches drain. CLI input validation can emit no Hooks, and native
+The Claude relay also adopts explicit native `is_error: true` results in the next
+model request after their callback dispatches drain. CLI input validation can emit no Hooks, and native
 permission rules can emit PreTool without a failure Hook. Only issued or allowed
 calls can take this error path; successful results require completed AW PostTool,
 and any latched AW callback failure still stops delivery.
@@ -131,9 +139,48 @@ factory adds `close()`; `withSession` closes in `finally`. One session supports
 sequential prompts and SDK custom tools, including MCP clients exposed as tools.
 AW guards public model/tool callbacks; changing them requires a fresh session.
 
-Legacy direct task-worker entrypoints retain their original policy and retained
+Legacy Pi/Claude direct task-worker entrypoints retain their original policy and
 1,024-correlation boundary. Long-session reclamation is enabled by the explicit
 resident factories above. Pi rejects modules exporting both `run` and `runWorker`.
+
+### Ordinary Qoder SDK Queries
+
+The application selects the bridge's `startDaemon`, `createQuery` and
+`createSdkMcpServer` factories. `createQuery` opens and acknowledges a child scope
+with the canonical cwd and captured environment, then uses the shared scope
+transport to register, invoke and finish sequenced calls. Original application
+Hooks keep native IDs; AW callbacks receive the registered UUID. Native partial
+messages stay private unless `includePartialMessages: true` was requested.
+See the [worker guide](../../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
+for startup and supported options.
+
+Each Query returns a frozen public facade. The native command-queue barrier and
+original callback finalizers must finish before a completed tool is retired.
+Early return, cancellation and transport loss join native close, Hook, permission,
+credential, model, memory/evolution gate/result and MCP callbacks, plus in-flight
+`sendHostAction()` fallback cleanup, before releasing the scope. Cleanup failures
+retain ownership until worker exit. Daemon stop closes its Queries and joins
+active credential callbacks, including callbacks installed by runtime
+`daemon.auth(payload)` and callbacks still active from earlier credentials.
+The daemon keeps its captured environment; each Query rejects `env` and `auth`
+overrides. Use separate daemons or direct Queries for distinct credentials.
+
+Managed MCP uses a fresh server per Query, retains native schemas and result
+envelopes, and rejects schema changes to approved arguments before handler entry.
+Matching native MCP Hooks delegate policy execution to the managed control
+request, so each phase runs once. The child invocation binds the exact
+server/tool/arguments and Query; the pinned protocol supplies no parent model
+tool ID for that control request.
+
+Qoder admits `tool.before` observe/block and `tool.after` observe with
+`on_error: report`. Only `tool.before` admits `on_error: block`. Strict Post
+rejection is a bridge defense tested with an injected route below admission;
+strict Post admission and native acceptance remain under #9069. Result replacement
+and withholding remain unsupported. Ordinary Queries require evidence
+`mode: off`; launch admission rejects enabled AgentSight evidence because child
+scopes cannot inherit observation roots. Resident scopes reject policy reload.
+The separate [reloadable Qoder SDK path](../runtime/policy-reload.md#qoder-sdk-request-admission)
+retains its 1,024-correlation boundary and request/feature limits.
 
 ## Capacity, failure and deployment
 
@@ -153,8 +200,8 @@ count and reason counters. Memory for AW correlation grows with active work;
 audit disk and SDK conversation history require separate retention. Limits need
 production concurrency measurements; increasing them does not add lifetime turns.
 
-Callback/Provider/identity faults stop resident execution even under `on_error:
-report`. Normal policy denial and Tokenless retry suggestions remain native denials;
+For Pi and Claude, callback/Provider/identity faults stop resident execution even
+under `on_error: report`. Normal policy denial and Tokenless retry suggestions remain native denials;
 fresh retries traverse native permissions and PreTool again. Unsupported compression
 classified successfully preserves the result. Security denial keeps precedence.
 Pi fences callbacks/model sends before awaiting abort during close or public
@@ -205,14 +252,14 @@ search paths into that environment; tenant isolation needs a separate contract.
 
 Daily matrix cases cover 10,000 retired registrations with a slow active call,
 changed input/replay, resource overload/recovery, service Provider execution,
-configuration bounds, callback drain, owner death and audit failure. Both SDKs
+configuration bounds, callback drain, owner death and audit failure. Pi and Claude
 also cover atomic protocol selection and late close during retirement. Claude
 native acceptance covers partial text/tool stream interruption and client reuse,
 input-validation and permission-rule errors, plus numeric Hook/MCP round trips.
 Pi native barriers cover public abort before/after tool execution, waiting for
 retirement acknowledgement, and rejecting prompt/model/registration reuse after
-retirement rejection or transport timeout. Both SDKs verify reuse after ACK expiry. Native tests
-use pinned real SDKs and Tokenless: each retains one session for 1,280 calls over
+retirement rejection or transport timeout. Pi and Claude verify reuse after ACK
+expiry. Their native tests use pinned real SDKs and Tokenless: each retains one session for 1,280 calls over
 five executions, with 768 calls in one execution. Claude mixes 640 Bash and 640
 managed MCP calls and verifies compressed text in the next request. Reports include
 RSS, FD/thread counts, elapsed time, active state and final zero bindings/events.
@@ -221,11 +268,19 @@ subsequent reuse, and process-group termination when cleanup never completes.
 These fixtures measure regression behavior; production load targets need actual
 SYSOM traffic, image dependencies and endpoints.
 
+Qoder's 17-case pinned parser suite covers identity and callback drain, 1,280
+completed calls, transport loss, managed MCP schemas/envelopes and Hook delegation,
+unmanaged MCP contexts, memory/evolution gate/result callbacks, `sendHostAction`
+fallback cleanup and native invalid-option rejection. Strict Post coverage injects
+a route below admission. The [native inventory](../../../../tests/native-matrix.json)
+records daemon and hosted-Worker acceptance separately from parser checks.
+
 | Delivery | Boundary / remaining work |
 | --- | --- |
 | Owned scopes and resident factories (#8953/#8954) | Per-client context, owner death, bounded release, common startup |
 | Managed MCP (#8955) | Explicit handler source, native permissions, successful single-text adoption |
 | Long sessions (#8956) | Producer identity, callback drain, state reclamation, concurrent budgets |
+| Qoder resident adoption (#9069) | Strict Post admission and native acceptance, MCP parent tool correlation, per-tool credential leases and Hook-visible redaction remain pending; ordinary Queries require evidence `mode: off`. |
 | Schema / BeforeModel (#8952) | Admit a request event/effect; classify actual tools/context after resume/compaction; preserve routing and cache/signature semantics; prove model-visible adoption. The relay supplies a request location, not these contracts. |
 | Retrieve (#8952) | Register recovery before lossy output; authenticate markers; tenant/task storage, TTL/quota, byte-exact retrieval, no recompression. |
 

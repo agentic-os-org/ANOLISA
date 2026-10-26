@@ -230,7 +230,7 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
             ],
             AW,
         )
-    if "@qoder-ai/qoder-agent-sdk@1.0.54" in row.get("npm_packages", []):
+    if "@qoder-ai/qoder-agent-sdk@1.0.56" in row.get("npm_packages", []):
         commands.run(["node", str(npm / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs")], AW)
     if (npm / "package-lock.json").exists():
         shutil.copyfile(npm / "package-lock.json", commands.evidence / "npm-lock.json")

@@ -226,7 +226,7 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
                     target: "agent".into(),
                     capabilities: Capabilities {
                         adapter: adapter.into(),
-                        version: "1.0.54".into(),
+                        version: "1.0.56".into(),
                         entrypoint: "sdk-worker".into(),
                         events: BTreeMap::from([("tool.after".into(), vec!["observe".into()])]),
                     },

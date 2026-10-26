@@ -61,7 +61,7 @@ export async function lifecycle(config, phase, key = "") {
 }
 
 export async function invoke(config, hook, payload, signal) {
-  const { code, stdout } = await execute(config,
+  const { code, stdout } = config.scope ? await config.scope.invoke(hook, payload, signal) : await execute(config,
     ["hook", "--adapter", "qoder-sdk", "--binding", config.binding,
       "--event", hook.event, "--step", hook.step, "--on-error", hook.on_error],
     payload, signal, hook.budget_ms + 3000);

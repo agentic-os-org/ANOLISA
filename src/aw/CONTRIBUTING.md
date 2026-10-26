@@ -181,8 +181,8 @@ adopted descendants across sessions and removes containers carrying that command
 unique ownership label. It retains a cleanup report and fails the interrupted run.
 
 QwenPaw drives its stock App/API with a deterministic loopback OpenAI-compatible
-model, requiring no cloud key. Qoder CLI uses its real hosted Performance model; Qoder SDK 1.0.54 uses its
-bundled Worker 1.1.74 and hosted `auto` model. Both require
+model, requiring no cloud key. Qoder CLI uses its real hosted Performance model; Qoder SDK 1.0.56 uses its
+bundled Worker 1.1.78 and hosted `auto` model. Both require
 the repository `QODER_PERSONAL_ACCESS_TOKEN` Secret, as documented in
 [Qoder authentication](https://docs.qoder.com/cli/authentication). Dependency
 installation does not receive the Secret. The Qoder launcher and its native
@@ -223,7 +223,7 @@ gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
 
 The additional required container job reuses every `tests/sdk_resident.py` command
 and exact JSON report in the native inventory: currently 24 suites (16 Claude
-and eight Pi) out of 47 native suites (42 in the credential-free profile). They
+and eight Pi) out of 49 native suites (42 in the credential-free profile). They
 include 1,280-call sessions, state retirement, resource-growth assertions, callback
 drain, session-store reuse and native denial, alongside all earlier lifecycle/MCP
 cases. Model-relay and dispatch contract entrypoints remain in the host native lane.

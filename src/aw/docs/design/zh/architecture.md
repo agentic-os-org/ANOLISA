@@ -157,14 +157,16 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 
 Qoder SDK 接入通过每个 Query 的 `options.hooks` 注册回调。前台 Worker 选择
 Adapter 的 daemon 和 Query 工厂；daemon 工厂先校验启动参数并登记对象身份，
-Query 才能使用该 daemon。工具分发复用现有 CLI callback → service → Host → Provider 路径。
+Query 才能使用该 daemon。普通 Query 按自身 cwd/environment 建立已确认的子 scope；
+Adapter 在原生调度前登记模型产生的身份，等待原生命令队列和原始回调排空后回收。
+工具分发使用 CLI scope 传输 → service → Host → Provider 路径。
 应用保留 daemon 和 Query 的管理责任，不新增 SDK 专用服务操作或 Provider。
 
 可更新的 Qoder SDK Query 复用稳定分发器和服务策略准入锁。Adapter 负责消息准入与
 原生队列/关闭完成边界，CLI 通过已有桥接 RPC 传输生命周期消息。参见
 [策略更新契约](runtime/policy-reload.md#qoder-sdk-请求准入)。
 
-[常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi / Claude 的每客户端任务准入、回调路由、fail-close 与释放边界。
+[常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi、Claude 和普通 Qoder SDK Query 的每客户端任务准入、回调路由、fail-close 与释放边界。
 
 [Claude 受管 MCP handler](adapters/claude-mcp.md) 使用明确来源、任务所属调用身份和可靠成功状态，复用现有 Provider 链路采纳结果。
 

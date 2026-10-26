@@ -63,9 +63,10 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 For install and daily use, see the [user guide](../../../../../docs/user-guide/en/aw/index.md).
 
 [Qoder SDK worker integration](../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
-uses per-Query registration with the existing Adapter and service contracts.
+uses acknowledged child scopes, model-produced invocation identities and callback
+drain for ordinary Queries through the existing Adapter and service contracts.
 
-[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.
+[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi, Claude and ordinary Qoder SDK Queries.
 
 [Managed Claude MCP handlers](adapters/claude-mcp.md) add an explicit handler source, task-owned invocation identity and success-aware result adoption through the existing Provider path.
 

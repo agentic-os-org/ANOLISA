@@ -4,22 +4,24 @@
 
 AW can explicitly update the policy of an idle instance launched with a stable
 bridge. The native host process stays alive; busy instances reject the update.
-The runtime path is opt-in through `aw run --reloadable`, initially pinned to
+The runtime path is opt-in through `aw run --reloadable`, pinned to
 Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App and Qoder SDK
-1.0.54 / bundled Worker 1.1.74. External attachment supports the TUI and App
+1.0.56 / bundled Worker 1.1.78. External attachment supports the TUI and App
 through `aw agent connect --pid PID`; SDK daemon attachment and steer remain
-planned. Ordinary `aw run` keeps its existing registration path.
+planned. For `qoder-sdk`, ordinary `aw run` opens a resident child scope for each
+managed Query. Resident policy changes use a rolling restart; `--reloadable`
+retains the separate idle-update contract described below.
 
 ## Qoder SDK request admission
 
-The Query factory registers stable tool routes and wraps input/output only when
-`--reloadable` is selected. Every message acquires an existing AW request claim
-before SDK submission. All managed Queries in one binding share the active
-policy; native daemon ownership stays with the application. The associated
-process is the application worker, which issues the SDK callbacks, rather than
-an arbitrary daemon PID supplied by a caller.
+With `--reloadable`, the Query factory registers stable tool routes and wraps
+input/output to hold request admission through native cleanup. Every message
+acquires an existing AW request claim before SDK submission. All managed Queries
+in one binding share the active policy; native daemon ownership stays with the
+application. The associated process is the application worker, which issues the
+SDK callbacks, rather than an arbitrary daemon PID supplied by a caller.
 
-Worker 1.1.74 can emit command completion and result frames before its generator
+Worker 1.1.78 can emit command completion and result frames before its generator
 cleanup finishes. Its public `getContextUsage()` control is queued behind the
 active native turn; the bridge awaits that read-only barrier before releasing
 the completed command's claim. This depends on the tested native command-loop
@@ -117,7 +119,8 @@ policy after native readiness and before reporting success. Every `aw run`
 checks an existing connection before selecting a service. A changed-file relaunch
 requires stopping the recorded service first; use `aw update` for active instances.
 After that service stops, an explicit launch refreshes the existing association.
-An ordinary launch without an existing association keeps its original launch path.
+An ordinary launch without an existing association selects its service from the
+configuration.
 
 Users maintain one desired document. Editing is offline; failed/busy updates
 retain the old in-memory policy without rewriting the user's desired file. The

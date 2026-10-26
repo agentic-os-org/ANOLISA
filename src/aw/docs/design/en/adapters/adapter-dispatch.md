@@ -77,6 +77,8 @@ long-lived native hosts must expose that limit and their configured failure
 behavior. OS enforcement, portable approval and additional events remain outside
 this interface extraction.
 
-Resident Pi/Claude factories use the [sequenced invocation lifecycle](resident-sdk.md)
+Resident Pi/Claude factories and ordinary Qoder SDK Queries use the
+[sequenced invocation lifecycle](resident-sdk.md)
 to reclaim completed correlations; their capacity is concurrent rather than cumulative.
-The 1024-correlation boundary above applies to legacy bindings.
+The 1024-correlation boundary above applies to legacy bindings, including the
+separate reloadable Qoder SDK path.

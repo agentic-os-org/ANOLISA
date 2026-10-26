@@ -65,7 +65,7 @@ this does not update a running instance.
 
 Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
 Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App, or
-Qoder SDK 1.0.54 / Worker 1.1.74.
+Qoder SDK 1.0.56 / Worker 1.1.78.
 Edit the same configuration file, then explicitly apply it.
 `aw update --config aw.yaml --agent TARGET` selects the
 unique target instance, retains its process and rejects busy instances; see
@@ -147,6 +147,8 @@ It lists capabilities declared by the runtime and covered by CI contract tests.
 See the [native Agent integration reference](../../docs/developer-guide/en/aw/native-agents.md)
 for supported versions, tool types, and text replacement boundaries.
 
+Each ordinary managed Query owns a child scope; daemon shutdown drains its Queries and original callbacks. Resident policy changes use a rolling restart. The separate `--reloadable` path retains its idle-update contract.
+
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
 | --- | --- | --- | --- | --- |
@@ -160,7 +162,7 @@ for supported versions, tool types, and text replacement boundaries.
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
-Qoder SDK 1.0.54 / Worker 1.1.74 requires the bridge daemon and Query factories
+Qoder SDK 1.0.56 / Worker 1.1.78 requires the bridge daemon and Query factories
 to admit the native runtime and register per-Query callbacks through
 `aw run`; `--reloadable` enables explicit policy updates for idle existing Queries,
 returning busy during requests and native cleanup. See the [SDK worker guide](../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker).
