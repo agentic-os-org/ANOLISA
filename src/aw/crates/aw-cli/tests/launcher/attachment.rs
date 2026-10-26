@@ -316,6 +316,27 @@ fn external_install_creates_missing_native_settings_without_launching_an_agent()
 }
 
 #[test]
+fn external_install_succeeds_when_evidence_is_disabled() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["agents"]["qoder"]["evidence"] = json!({
+        "source_id": "fixture",
+        "endpoint": "http://127.0.0.1:1",
+        "query_timeout_ms": 1000,
+        "query_bytes": 1048576,
+        "max_items": 32,
+        "max_bytes": 262144,
+        "mode": "off"
+    });
+    let service = Service::start(&fixture, &document);
+    let (_process, pid) = native(&fixture);
+    let installed = success(install(&fixture, pid, false));
+    assert_eq!(installed["attached"], true);
+    success(install(&fixture, pid, true));
+    assert_eq!(service.status()["bindings"], 0);
+}
+
+#[test]
 fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection() {
     let _apps = QWENPAW_PROCESSES.lock().unwrap();
     let fixture = Fixture::new();
