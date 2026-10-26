@@ -109,6 +109,12 @@ Preview 包，验证真实 sec-core health、Tokenless/RTK 契约、安装、服
 可回滚的并存目录和卸载。并存验收使用同一候选构建，不认证跨版本数据迁移。
 原生任务复用该次构建的二进制，并校验提交 SHA 和文件摘要。
 
+无 Python 的包验收阶段使用 `scripts/check_packages.sh`，将测试并发限制为两个，
+保留真实 AW payload 和 CLI 单条命令的 30 秒期限。嵌套 runner 容器可能看到超过
+实际配额的 CPU 数量。每组 Cargo 测试另有 600 秒总期限；失败后停止后续组。
+始终上传的 `test-evidence/` 记录命令、耗时、退出码，以及执行前后的 cgroup
+CPU、内存和 I/O 数据。CLI 夹具失败时标明具体命令和工作目录，不输出环境变量。
+
 [tests/native-matrix.json](tests/native-matrix.json) 为每个已注册 Agent 记录固定
 版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。八种 Agent
 均有自动验收。OpenClaw 覆盖官方 Hook runner，完整 Gateway 模型流程仍需单独验收。

@@ -131,6 +131,14 @@ lifecycle, side-by-side prefixes for rollback, and uninstall. Side-by-side
 acceptance uses the same candidate build; it does not certify cross-version data
 migration. Native jobs reuse checksummed binaries from that exact build.
 
+The Python-free package stage uses `scripts/check_packages.sh` to cap test
+parallelism at two, retaining real AW payloads and the 30-second CLI deadline.
+Nested runner containers can expose more CPUs than their effective quota. Each
+Cargo suite has a 600-second outer deadline; failures stop later suites. The
+always-uploaded `test-evidence/` contains commands, elapsed times, exit codes and
+before/after cgroup CPU, memory and I/O counters. CLI fixture failures identify
+the exact command and working directory without dumping the environment.
+
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered
 Agent. The nightly job matrix is generated from this inventory. All eight Agents

@@ -129,7 +129,16 @@ pub(super) fn invoke(command: &Command) -> aw_exec::Output {
             environment.remove(name);
         }
     }
-    aw_exec::run(
+    let started = Instant::now();
+    let name = std::thread::current();
+    let test = name.name().unwrap_or("unnamed");
+    let arguments: Vec<_> = command.get_args().collect();
+    eprintln!(
+        "package-test start: test={test:?} program={:?} args={arguments:?} cwd={:?} deadline=30s",
+        command.get_program(),
+        command.get_current_dir(),
+    );
+    let result = aw_exec::run(
         &aw_exec::CommandSpec {
             program: command.get_program().into(),
             args: command.get_args().map(Into::into).collect(),
@@ -142,8 +151,19 @@ pub(super) fn invoke(command: &Command) -> aw_exec::Output {
             stdout_bytes: 65536,
             stderr_bytes: 65536,
         },
-        Instant::now() + Duration::from_secs(30),
+        started + Duration::from_secs(30),
         &AtomicBool::new(false),
-    )
-    .unwrap()
+    );
+    eprintln!(
+        "package-test finish: test={test:?} elapsed={:?}",
+        started.elapsed()
+    );
+    result.unwrap_or_else(|error| {
+        panic!(
+            "package command failed: program={:?} args={arguments:?} cwd={:?} elapsed={:?}: {error:?}",
+            command.get_program(),
+            command.get_current_dir(),
+            started.elapsed(),
+        )
+    })
 }

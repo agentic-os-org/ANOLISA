@@ -126,9 +126,7 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ! command -v python3
-          cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-package
-          cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-cli \
-            --test installation --test config_edit_cli --test standalone --test packages
+          bash src/aw/scripts/check_packages.sh "$AW_PREVIEW_DIR/test-evidence"
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
             --output "$AW_PREVIEW_DIR/packages" --component all
@@ -258,6 +256,7 @@ jobs:
         with:
           name: aw-preview-evidence-${{ needs.plan.outputs.sha }}
           path: |
+            ${{ env.AW_PREVIEW_DIR }}/test-evidence/*.log
             ${{ env.AW_PREVIEW_DIR }}/demo-manifest.json
             ${{ env.AW_PREVIEW_DIR }}/demo/result.json
             ${{ env.AW_PREVIEW_DIR }}/demo/*.log
