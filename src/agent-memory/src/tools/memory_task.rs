@@ -315,6 +315,12 @@ fn load_all_tasks(svc: &MemoryService) -> Result<Vec<Task>> {
 
 /// Save a task to the tasks/ directory.
 fn save_task(svc: &MemoryService, task: &Task) -> Result<()> {
+    // Single write chokepoint: `task.id` is caller-supplied on create, but on
+    // the update path it is re-parsed from the file's frontmatter (see
+    // `parse_task`), and `tasks/` is writable through `mem_write` — a planted
+    // `id: ../../…` would otherwise escape the mount. Enforce the same
+    // charset rule here that `memory_task_save` applies to caller ids.
+    validate_task_id(&task.id)?;
     let dir = svc.mount.root.join(TASKS_DIR);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.md", task.id));
@@ -358,7 +364,12 @@ pub fn memory_task_save(
             .join(format!("{existing_id}.md"));
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            parse_task(&content)?
+            let mut task = parse_task(&content)?;
+            // The write path is keyed by the caller-validated id, not by
+            // whatever the frontmatter happens to carry: a stale or planted
+            // `id:` line must never redirect the update to another file.
+            task.id = existing_id.to_string();
+            task
         } else {
             Task {
                 id: existing_id.to_string(),
@@ -835,5 +846,75 @@ mod tests {
 
         let resume = memory_task_resume(&svc, "custom-id-42").unwrap();
         assert!(resume.contains("Brand new task"));
+    }
+
+    #[test]
+    fn task_save_rejects_an_id_parsed_from_a_planted_frontmatter() {
+        let (_tmp, svc) = setup();
+        // `tasks/` is writable through `mem_write` (it is not a reserved
+        // first segment), so a planted file whose frontmatter carries a
+        // traversal id must not turn memory_task_save into a write outside
+        // the mount.
+        let tasks_dir = svc.mount.root.join(TASKS_DIR);
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("pwn.md"),
+            "---\nid: ../../../../outside\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let err = memory_task_save(
+            &svc,
+            "t",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("pwn"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidArgument(_)),
+            "expected InvalidArgument for the parsed traversal id, got {err:?}"
+        );
+        // Nothing may land outside the mount root.
+        assert!(!svc.mount.root.join("../outside.md").exists());
+    }
+
+    #[test]
+    fn task_update_keys_the_write_to_the_caller_id_not_the_frontmatter() {
+        let (_tmp, svc) = setup();
+        let tasks_dir = svc.mount.root.join(TASKS_DIR);
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        // A stale frontmatter id must not redirect the update to another file.
+        std::fs::write(
+            tasks_dir.join("a.md"),
+            "---\nid: b\ntitle: original\nstatus: in-progress\nprogress: 0\ncreated_at: x\nupdated_at: x\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        memory_task_save(
+            &svc,
+            "updated",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("a"),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(tasks_dir.join("a.md")).unwrap();
+        assert!(content.contains("updated"), "{content}");
+        assert!(
+            !tasks_dir.join("b.md").exists(),
+            "the frontmatter id must not redirect the write"
+        );
     }
 }
