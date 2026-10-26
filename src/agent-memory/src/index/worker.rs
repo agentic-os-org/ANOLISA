@@ -498,11 +498,12 @@ fn full_scan(
             seen.insert(rel);
         }
 
-        // Remove entries no longer on disk
+        // Each known path is a file row. A stale file may now be a directory
+        // whose children were just indexed, so remove only the exact row.
         let known = store.known_paths()?;
         for p in known {
             if !seen.contains(&p) {
-                if let Err(e) = store.remove(&p) {
+                if let Err(e) = store.remove_file(&p) {
                     tracing::warn!("index full-scan remove failed for {p}: {e}");
                 }
             }
@@ -768,6 +769,94 @@ mod tests {
             .expect("lock")
             .index_stat_for(rel)
             .unwrap_or_else(|| panic!("{rel} should be indexed"))
+    }
+
+    #[test]
+    fn full_scan_reopen_preserves_children_of_replaced_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mount = MountPoint::ensure(Namespace::user("tester").unwrap(), tmp.path()).unwrap();
+        let path = mount.root.join("notes");
+        fs::write(&path, "cobaltzebra old file").unwrap();
+        let original = super::super::IndexHandle::open(&mount, None, 0.0, 0.0, false).unwrap();
+        original
+            .store
+            .lock()
+            .unwrap()
+            .upsert_vec("notes", &[1.0, 0.0])
+            .unwrap();
+        assert_eq!(original.search("cobaltzebra", 10).unwrap().len(), 1);
+        drop(original);
+
+        // This replacement happens while the service is stopped, so reopening
+        // must reconcile the persistent rows without relying on watcher events.
+        fs::remove_file(&path).unwrap();
+        write(&mount.root, "notes/child.md", "heliotrope new child");
+        write(
+            &mount.root,
+            "notes/deep/grandchild.md",
+            "heliotrope nested child",
+        );
+        let reopened = super::super::IndexHandle::open(&mount, None, 0.0, 0.0, false).unwrap();
+        assert_eq!(reopened.search("heliotrope", 10).unwrap().len(), 2);
+        assert!(reopened.search("cobaltzebra", 10).unwrap().is_empty());
+        assert!(reopened.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
+        assert!(
+            reopened
+                .store
+                .lock()
+                .unwrap()
+                .index_stat_for("notes")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn full_scan_keeps_existing_child_text_and_vector_when_pruning_ancestor() {
+        let (_tmp, mount, store) = setup();
+        seed_file(&mount, &store, "notes/child.md");
+        // A tool may already have indexed a descendant before the next scan
+        // has reconciled the previous file at the ancestor path.
+        store
+            .lock()
+            .unwrap()
+            .upsert("notes", 0, 1, "old ancestor", None)
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .upsert_vec("notes", &[1.0, 0.0])
+            .unwrap();
+        full_scan(&mount, &store, None, None).unwrap();
+        let store = store.lock().unwrap();
+        assert!(store.index_stat_for("notes").is_none());
+        assert_eq!(
+            store.search("cobaltzebra", 10, false).unwrap()[0].path,
+            "notes/child.md"
+        );
+        let vectors = store.search_vec(&[1.0, 0.0], 10).unwrap();
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].0, "notes/child.md");
+    }
+
+    #[test]
+    fn full_scan_still_prunes_all_files_in_deleted_directory() {
+        let (_tmp, mount, store) = setup();
+        for path in ["notes/a.md", "notes/deep/b.md", "notes-alike/keep.md"] {
+            seed_file(&mount, &store, path);
+        }
+        fs::remove_dir_all(mount.root.join("notes")).unwrap();
+        full_scan(&mount, &store, None, None).unwrap();
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store.known_paths().unwrap(),
+            ["README.md", "notes-alike/keep.md"]
+        );
+        let hits = store.search("cobaltzebra", 10, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "notes-alike/keep.md");
+        let vectors = store.search_vec(&[1.0, 0.0], 10).unwrap();
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].0, "notes-alike/keep.md");
     }
 
     #[test]
