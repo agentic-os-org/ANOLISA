@@ -215,8 +215,7 @@ mod tests {
         os::unix::fs::PermissionsExt,
     };
 
-    #[test]
-    fn a_404_body_is_not_parsed_or_charged_as_source_evidence() {
+    fn serve_404(response: &'static [u8]) -> (Url, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -224,26 +223,50 @@ mod tests {
             let mut request = [0; 1024];
             let count = stream.read(&mut request).unwrap();
             assert!(count > 0);
-            stream
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+            stream.write_all(response).unwrap();
+        });
+        (
+            endpoint(&format!("http://127.0.0.1:{port}")).unwrap(),
+            server,
+        )
+    }
+
+    #[test]
+    fn a_404_body_is_not_parsed_or_charged_as_source_evidence() {
+        let cases: [(&[u8], usize); 4] = [
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                1024,
+            ),
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                1024,
+            ),
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                1,
+            ),
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                1024,
+            ),
+        ];
+        for (response, budget) in cases {
+            let (origin, server) = serve_404(response);
+            let transport = Transport::new(&origin, Path::new("")).unwrap();
+            let mut remaining = budget;
+            let (status, value) = transport
+                .get(
+                    origin.join("/api/trajectories/session").unwrap(),
+                    Instant::now() + std::time::Duration::from_secs(2),
+                    &mut remaining,
                 )
                 .unwrap();
-        });
-        let origin = endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
-        let transport = Transport::new(&origin, Path::new("")).unwrap();
-        let mut remaining = 1024;
-        let (status, value) = transport
-            .get(
-                origin.join("/api/trajectories/session").unwrap(),
-                Instant::now() + std::time::Duration::from_secs(2),
-                &mut remaining,
-            )
-            .unwrap();
-        assert_eq!(status, 404);
-        assert_eq!(value, Value::Null);
-        assert_eq!(remaining, 1024);
-        server.join().unwrap();
+            assert_eq!(status, 404);
+            assert_eq!(value, Value::Null);
+            assert_eq!(remaining, budget);
+            server.join().unwrap();
+        }
     }
 
     #[test]
