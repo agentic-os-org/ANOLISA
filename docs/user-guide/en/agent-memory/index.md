@@ -353,6 +353,12 @@ Import replaces ASCII control characters, including newlines, with spaces
 before storing frontmatter. Summary rankings reflect those normalized entries;
 control characters are not preserved by an AMA import round trip.
 
+A missing store root is an export error, not an empty archive. Scan and read failures include the affected mount-relative path and are audited best-effort; an unavailable store can also prevent audit persistence.
+
+`mem_export` stops with an error naming the affected path if it cannot scan a directory or read a Markdown file as UTF-8. It does not return a partial AMA archive as a successful export. Check file permissions or encoding and retry. Category and source filters require reading metadata, so a read failure can also block a filtered export. Metadata directories and non-Markdown files remain excluded.
+
+Rust API callers using `ExportFilter.include_tasks = false` exclude the `tasks/` subtree before traversal or reading, so unreadable task directories or files do not block the requested export. The MCP `mem_export` tool includes tasks and retains error reporting for them.
+
 ### Error code semantics
 
 | MCP code | Meaning |

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::audit::AuditEntry;
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::service::MemoryService;
 
 /// One exported memory entry.
@@ -64,7 +64,8 @@ pub struct ExportFilter {
     pub category: Option<String>,
     /// Filter by source ("auto-consolidation", "manual-observe"). None = all.
     pub source: Option<String>,
-    /// Include tasks in export. Default: true.
+    /// Include tasks in export. Default: true. When false, the `tasks/`
+    /// subtree is excluded without traversing directories or reading files.
     pub include_tasks: bool,
 }
 
@@ -124,22 +125,45 @@ pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, &str
 }
 
 /// Export the memory store to AMA JSON format.
+///
+/// Returns an error if an included directory cannot be traversed or a Markdown
+/// file cannot be read as UTF-8, rather than returning an incomplete archive.
+/// A missing mount root is an error, not an empty store. Failures are audited
+/// best-effort; an unavailable store may also prevent persisting the audit.
 pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<String> {
     let mut memories = Vec::new();
     let mut tasks = Vec::new();
     let mut stats = ExportStats::default();
 
     let meta_dir = svc.mount.meta_dir.clone();
+    let tasks_dir = svc.mount.root.join("tasks");
 
     for entry in WalkDir::new(&svc.mount.root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !e.path().starts_with(&meta_dir))
+        .filter_entry(|e| {
+            // Prune excluded subtrees before descent so their I/O failures
+            // cannot prevent exporting the requested memories.
+            !e.path().starts_with(&meta_dir)
+                && (filter.include_tasks || !e.path().starts_with(&tasks_dir))
+        })
     {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry = entry.map_err(|e| {
+            let path = e.path().unwrap_or(&svc.mount.root);
+            let relative = path.strip_prefix(&svc.mount.root).unwrap_or(path);
+            let relative = if relative.as_os_str().is_empty() {
+                ".".into()
+            } else {
+                relative.to_string_lossy().into_owned()
+            };
+            let kind = e.io_error().map_or(std::io::ErrorKind::Other, |e| e.kind());
+            let operation = if relative == "." && kind == std::io::ErrorKind::NotFound {
+                "mount root is missing"
+            } else {
+                "scan failed"
+            };
+            export_io_error(svc, &relative, operation, std::io::Error::new(kind, e))
+        })?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -154,10 +178,8 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
             .to_string_lossy()
             .to_string();
 
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| export_io_error(svc, &rel_path, "cannot read", e))?;
 
         let (frontmatter, body) = parse_frontmatter(&content);
 
@@ -227,6 +249,24 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
     );
 
     Ok(json)
+}
+
+fn export_io_error(
+    svc: &MemoryService,
+    path: &str,
+    operation: &str,
+    source: std::io::Error,
+) -> MemoryError {
+    let error = MemoryError::Io(std::io::Error::new(
+        source.kind(),
+        format!("mem_export: {operation} '{path}': {source}"),
+    ));
+    svc.audit_log(
+        AuditEntry::new("mem_export")
+            .path(path)
+            .error(error.to_string()),
+    );
+    error
 }
 
 #[cfg(test)]
