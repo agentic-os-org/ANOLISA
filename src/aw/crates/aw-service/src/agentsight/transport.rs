@@ -128,7 +128,10 @@ impl Transport {
         })?;
         let status = response.status().as_u16();
         match status {
-            200 | 404 => {}
+            200 => {}
+            // A 404 conflates source absence and missing data. Its body is not
+            // evidence and need not be JSON, so discard it without metering.
+            404 => return Ok((status, Value::Null)),
             401 | 403 => return Err(Error::Authentication),
             300..=399 => return Err(Error::Redirect),
             _ => return Err(Error::Http(status)),
@@ -163,12 +166,7 @@ impl Transport {
             return Err(Error::Limit);
         }
         *remaining -= bytes.len();
-        // A 404 from this API conflates source absence and missing data. Its body is not evidence.
-        let value = if status == 404 {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?
-        };
+        let value = serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?;
         Ok((status, value))
     }
 }
@@ -210,7 +208,43 @@ fn read_authorization(path: &Path) -> Result<HeaderValue, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::TcpListener,
+        os::unix::fs::PermissionsExt,
+    };
+
+    #[test]
+    fn a_404_body_is_not_parsed_or_charged_as_source_evidence() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let count = stream.read(&mut request).unwrap();
+            assert!(count > 0);
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                )
+                .unwrap();
+        });
+        let origin = endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
+        let transport = Transport::new(&origin, Path::new("")).unwrap();
+        let mut remaining = 1024;
+        let (status, value) = transport
+            .get(
+                origin.join("/api/trajectories/session").unwrap(),
+                Instant::now() + std::time::Duration::from_secs(2),
+                &mut remaining,
+            )
+            .unwrap();
+        assert_eq!(status, 404);
+        assert_eq!(value, Value::Null);
+        assert_eq!(remaining, 1024);
+        server.join().unwrap();
+    }
 
     #[test]
     fn credentials_are_loaded_and_attached_only_for_https() {
