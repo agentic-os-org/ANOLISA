@@ -5,7 +5,7 @@
 **OS-level security kernel for AI Agents.** Provides defense in depth for Agent
 workloads: prompt injection detection, code scanning, PII detection, skill
 integrity tracking, sandbox isolation, and a local security event store.
-Everything runs locally with no Token cost. Applicable to
+Local scanners run without model token costs. Applicable to
 Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
 listed below.
 
@@ -47,6 +47,10 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 The V2 source build installs `agent-sec-daemon` as the host-level
 `agent-sec-core.service` systemd unit. The V2 migration retains the hook-facing
 CLI command and integration capability surface through Rust implementations.
+
+## Optional Skill safety assessment
+
+The `agent-sec-cli skillsec score plan/run` component adds model-assisted planning, Docker execution and evidence-qualified scoring. Install its CLI and worker in the execution environment; the platform owns sandbox lifecycle and artifacts. It uses the original Harbor dependency and an ASC-owned egress sidecar through public Compose configuration. The preview standard `sec-core` raw package exposes scoring through the V2 CLI and bundles its private Python runtime; images are distributed separately. See the [installation, contract and validation guide](../../docs/user-guide/en/agent-sec-core/skill-score.md).
 
 ## V2 SkillSec and Policy CLI
 

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Reuse Harbor's installed Agent unchanged; only observe actual CLI executions.
+case "$1" in --version|-v|--help) exec /usr/bin/claude "$@" ;; esac
+mkdir -p /logs/artifacts/poc
+exec strace -ff -ttt -yy -s 2048 -e trace=%process,%file,%network \
+  -o /logs/artifacts/poc/trace /usr/bin/claude "$@"

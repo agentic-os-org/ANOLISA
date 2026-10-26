@@ -17,7 +17,7 @@ use clap::Parser;
 use commands::Command;
 pub use commands::{
     CapabilitiesCommand, EventsCommand, EventsRunError, EventsTransport, PiiOutputFormat,
-    PromptScanPlan, ScanPromptInputError,
+    PromptScanPlan, ScanPromptInputError, SkillScoreCommand,
 };
 
 /// Parsed invocation for one CLI command.
@@ -39,6 +39,8 @@ pub enum Plan<'a> {
     Local(&'a CapabilitiesCommand),
     /// Generate the observability record schema without a daemon endpoint.
     ObservabilitySchema,
+    /// Replace this process with the installed private assessment runtime, without a daemon.
+    SkillScore(&'a SkillScoreCommand),
     /// Sent to the daemon listening on `socket`.
     Daemon {
         /// Resolved absolute endpoint of the running daemon.
@@ -98,6 +100,21 @@ impl Cli {
         // V1 validates bootstrap context before help/command parsing.
         context::parse(None, trace_context_input.as_deref())?;
         let arguments = Arguments::try_parse_from(&argv)?;
+        if arguments.command.skill_score().is_some() {
+            for (option, present) in [
+                ("--socket", arguments.socket.is_some()),
+                ("--timeout-ms", arguments.timeout_ms.is_some()),
+                ("--otel-context", arguments.otel_context.is_some()),
+                ("--trace-context", trace_context_input.is_some()),
+            ] {
+                if present {
+                    return Err(clap::Error::raw(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        format!("{option} is not supported by local skillsec score commands"),
+                    ));
+                }
+            }
+        }
         // Clap propagates global values across subcommands using last-wins.
         // Scan text/code accept hyphen values, so their next token is data even
         // when it happens to spell a global option.
@@ -128,7 +145,8 @@ impl Cli {
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
             None if arguments.command.is_observability_schema()
-                || arguments.command.sandbox().is_some() =>
+                || arguments.command.sandbox().is_some()
+                || arguments.command.skill_score().is_some() =>
             {
                 None
             }
@@ -166,6 +184,9 @@ impl Cli {
     pub fn plan(&self) -> Plan<'_> {
         if let Some(command) = self.command.sandbox() {
             return Plan::Sandbox(command);
+        }
+        if let Some(command) = self.command.skill_score() {
+            return Plan::SkillScore(command);
         }
         if self.command.is_observability_schema() {
             return Plan::ObservabilitySchema;

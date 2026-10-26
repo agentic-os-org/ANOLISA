@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+score_prefix="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+exec "$score_prefix/bin/python3.11" -I -m agent_sec_cli.skill_score.entrypoint "$@"
