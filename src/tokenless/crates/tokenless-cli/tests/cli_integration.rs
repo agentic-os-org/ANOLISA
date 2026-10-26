@@ -2477,6 +2477,67 @@ fn compress_post_tool_reduces_and_restores_build_logs() {
 }
 
 #[test]
+fn compress_post_tool_unittest_logs_preserve_summary_and_recover_original() {
+    let fixture = TempDataDir::new().unwrap();
+    let mut content = (0..83)
+        .map(|index| format!("test_case_{index:03} (__main__.ExampleTests) ... ok\n"))
+        .collect::<String>();
+    content.push_str(
+        "\n----------------------------------------------------------------------\nRan 83 tests in 0.295s\n\nOK\n",
+    );
+    for (status, recovery, disposition) in [
+        ("success", "shell", "applied"),
+        ("success", "none", "no_savings"),
+        ("error", "shell", "tool_error"),
+    ] {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(&content, status, "unittest-log")).unwrap();
+        request["input"]["capabilities"]["recovery"]["kind"] = recovery.into();
+        request["input"]["command"] = "python -m unittest -v".into();
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(output.status.success(), "{:?}", output);
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["disposition"], disposition);
+        if disposition != "applied" {
+            assert_eq!(result["output"], content);
+            assert_eq!(result["applied_operations"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["recoverability"], "retrievable");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let compressed = result["output"].as_str().unwrap();
+        assert!(compressed.ends_with("Ran 83 tests in 0.295s\n\nOK\n"));
+        let hash = extract_hash(compressed).unwrap();
+        let retrieve = fixture.command().args(["retrieve", hash]).output().unwrap();
+        assert!(retrieve.status.success());
+        let marker = compressed.lines().find(|line| line.contains(hash)).unwrap();
+        assert_eq!(
+            compressed.replace(
+                &format!("{marker}\n"),
+                &String::from_utf8(retrieve.stdout).unwrap(),
+            ),
+            content
+        );
+    }
+}
+
+#[test]
 fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,

@@ -56,7 +56,7 @@ compress_value(value, depth)
 
 ### Build Log 领域
 
-`BuildLogCompressor` 识别 Cargo/rustc、pytest、npm/Jest、Go、Make/C，以及具有明确 Shell
+`BuildLogCompressor` 识别 Cargo/rustc、pytest、unittest/Django、npm/Jest、Go、Make/C，以及具有明确 Shell
 边界、带编号进度词和稳定重复模板的通用日志。检测只采样首尾各 100 行、总计最多 64 KiB；
 证据不足时直接透传，避免把普通 prose、源码或未知日志误判为 Build Log。
 
@@ -68,7 +68,9 @@ Rust、Go 和 .NET Stack Trace 状态机保护完整异常区间。只有同一 
 Retrieve Marker。Diagnostic、Summary、Phase、Unknown 和 Stack Trace 原样保留。
 
 方言规则只吸收可从原生输出可靠识别的语义，例如 Cargo 编译及成功测试进度、pytest verbose
-及 quiet 进度。npm Warning、Make 目录边界和非普通测试结果仍保持可见；压缩器不会为了获得
+及 quiet 进度，以及 unittest/Django verbose 输出中以 `... ok` 结束的单行测试记录。
+unittest/Django 的失败、错误、跳过、预期失败和意外成功记录、最终测试汇总、数据库准备输出
+及带多行描述的测试记录完整保留。npm Warning、Make 目录边界和非普通测试结果仍保持可见；压缩器不会为了获得
 结构化输出而修改命令参数，也不采用固定行数截断。
 
 单个日志出现超过 8 个遗漏区间时，压缩器在写 Stash 前放弃 Reduction Candidate，防止输出被
