@@ -151,9 +151,13 @@ impl ActiveFileProtection {
 
 impl Drop for ActiveFileProtection {
     fn drop(&mut self) {
+        if let Err(error) = self.deactivate_and_cleanup() {
+            log::error!("file-protection cleanup during drop failed: {error}");
+        }
         if self.retain_topology_on_drop
             && let Some(prepared) = self.prepared.take()
         {
+            // Retain held identities until exit; repeated backend reopen failures can accumulate them.
             std::mem::forget(prepared);
         }
     }
@@ -250,9 +254,9 @@ fn lower(
             tree_mask |= bit;
         }
         targets.push(FileProtectionTargetValue {
-            flags: u32::from(target.delete) * TARGET_DELETE
-                | u32::from(target.kind == FileProtectionTargetKind::DirectoryTree) * TARGET_TREE
-                | u32::from(target.ordinary_write) * TARGET_ORDINARY_WRITE,
+            flags: (u32::from(target.delete) * TARGET_DELETE)
+                | (u32::from(target.kind == FileProtectionTargetKind::DirectoryTree) * TARGET_TREE)
+                | (u32::from(target.ordinary_write) * TARGET_ORDINARY_WRITE),
             target_id,
             guard: TreeGuard {
                 flags: DELETE_GUARD_FLAGS,

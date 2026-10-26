@@ -910,6 +910,11 @@ fn structured_policy_classifier() {
     ] {
         fs::write(path, content).expect("classifier fixture file");
     }
+    let write_hardlink = files.outside.join("write-hardlink");
+    fs::hard_link(&write_only, &write_hardlink).expect("pre-existing outside exact hardlink");
+    let tree_entry = files.root.join("existing");
+    let tree_hardlink = files.outside.join("tree-hardlink");
+    fs::hard_link(&tree_entry, &tree_hardlink).expect("pre-existing outside tree hardlink");
     assert_eq!(
         worker.run("openfd", &[TreeFiles::text(&write_only)]),
         "ok",
@@ -1039,6 +1044,43 @@ fn structured_policy_classifier() {
         worker.run("pwrite", &[TreeFiles::text(&write_only)]),
         "errno=1"
     );
+    for (protected_path, outside_link) in [
+        (&write_only, &write_hardlink),
+        (&tree_entry, &tree_hardlink),
+    ] {
+        let identity = fs::metadata(protected_path)
+            .expect("protected hardlink inode")
+            .ino();
+        for operation in ["write", "pwrite"] {
+            let before = fs::read(protected_path).expect("protected content before alias write");
+            assert_eq!(
+                worker.run(operation, &[TreeFiles::text(outside_link)]),
+                "ok"
+            );
+            assert_eq!(
+                fs::metadata(protected_path)
+                    .expect("protected inode after write")
+                    .ino(),
+                identity
+            );
+            assert_ne!(
+                fs::read(protected_path).expect("protected content after alias write"),
+                before
+            );
+            assert_eq!(
+                worker.run(operation, &[TreeFiles::text(protected_path)]),
+                "errno=1"
+            );
+        }
+        assert_eq!(worker.run("unlink", &[TreeFiles::text(outside_link)]), "ok");
+        assert!(protected_path.exists());
+    }
+    for operation in ["write", "pwrite"] {
+        assert_eq!(
+            worker.run(operation, &[TreeFiles::text(&bind_alias.join("existing"))]),
+            "errno=1"
+        );
+    }
     fs::remove_file(&write_only).expect("replace exact write target");
     fs::write(&write_only, b"replacement").expect("recreate exact write target");
     assert_eq!(

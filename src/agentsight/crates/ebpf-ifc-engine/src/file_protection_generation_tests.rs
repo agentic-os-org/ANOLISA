@@ -405,6 +405,56 @@ fn failed_deactivation_preserves_active_maps_until_retry() {
 }
 
 #[test]
+fn active_drop_deactivates_before_cleanup() {
+    let writer = FakeWriter::default();
+    let active = stage_all(writer.clone(), 7)
+        .activate(domain())
+        .expect("activate");
+    drop(active);
+    let state = writer.0.lock().expect("state lock");
+    let deactivate = state
+        .operations
+        .iter()
+        .position(|op| *op == "deactivate")
+        .expect("deactivate");
+    assert_eq!(state.operations[deactivate + 1], "remove_target");
+    assert!(state.active.is_empty() && state.roots.is_empty() && state.slots.is_empty());
+}
+
+#[test]
+fn failed_active_drop_preserves_all_generation_entries() {
+    let writer = FakeWriter::default();
+    let active = stage_all(writer.clone(), 8)
+        .activate(domain())
+        .expect("activate");
+    writer.fail_once("deactivate");
+    drop(active);
+    let state = writer.0.lock().expect("state lock");
+    assert_eq!(state.active.get(&9), Some(&8));
+    assert!(state.roots.contains(&(identity(1), 9, 8)));
+    assert!(state.directories.contains(&(identity(1), 9, 8)));
+    assert!(state.stable.contains(&(identity(2), 9, 8)));
+    assert!(state.slots.contains(&(slot(), 9, 8)));
+    assert!(state.targets.contains(&(9, 8, 1)));
+    assert_eq!(state.operations.last(), Some(&"deactivate"));
+}
+
+#[test]
+fn failed_detach_retry_drop_keeps_maps_until_deactivation() {
+    let writer = FakeWriter::default();
+    let active = stage_all(writer.clone(), 9)
+        .activate(domain())
+        .expect("activate");
+    writer.fail_once("deactivate");
+    let failure = active.detach().expect_err("deactivation fails");
+    drop(failure.retry);
+    let state = writer.0.lock().expect("state lock");
+    assert_eq!(state.active.get(&9), Some(&9));
+    assert!(state.slots.contains(&(slot(), 9, 9)));
+    assert_eq!(state.operations.last(), Some(&"deactivate"));
+}
+
+#[test]
 fn capacities_target_limit_and_slot_boundaries_are_validated() {
     let writer = FakeWriter::default();
     writer
