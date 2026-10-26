@@ -36,17 +36,17 @@ DEFAULT_OPENCLAW_PROFILES_DIR = Path("output/run/openclaw-profiles")
 def _iter_jsonl(path: Path) -> Generator[dict[str, Any], None, None]:
     """Yield decoded records without retaining the entire raw transcript."""
     line_number = 0
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8", errors="surrogateescape") as handle:
         for physical_line in handle:
             # Preserve legacy splitlines boundaries and diagnostic numbering.
             for raw_line in physical_line.splitlines():
                 line_number += 1
-                line = raw_line.strip()
-                if not line:
-                    continue
                 try:
+                    line = raw_line.encode("utf-8", errors="surrogateescape").decode("utf-8").strip()
+                    if not line:
+                        continue
                     entry = json.loads(line)
-                except json.JSONDecodeError as exc:
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     logger.warning(
                         "Skipping malformed OpenClaw JSONL line file=%s line=%s error=%s", path, line_number, exc
                     )
