@@ -133,7 +133,7 @@ pub struct ApplyPolicy {
     /// Legacy ActPlane DSL compiled only by the privileged adapter.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub policy_dsl: String,
-    /// Structured product mode retained for API consumers.
+    /// Product mode; the ActPlane structured file backend requires explicit Enforce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_mode: Option<PolicyMode>,
     /// Versioned structured file protections, mutually exclusive with nonblank DSL.

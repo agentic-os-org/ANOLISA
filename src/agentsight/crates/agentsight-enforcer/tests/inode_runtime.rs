@@ -15,7 +15,7 @@ use agentsight_enforcement_protocol::{
     FileProtectionPolicy, FileProtectionTarget, FileProtectionTargetKind,
     FileProtectionTopologyMode, FileProtections, PolicyMode, SecurityEvent, SecurityEventKind,
 };
-use agentsight_enforcer::{ActPlaneBackend, EnforcementBackend, SubscriberClass};
+use agentsight_enforcer::{ActPlaneBackend, BackendError, EnforcementBackend, SubscriberClass};
 use ebpf_ifc_engine::{INODE_GUARD_RENAME, INODE_GUARD_TREE, INODE_GUARD_UNLINK};
 use uuid::Uuid;
 
@@ -899,6 +899,16 @@ fn structured_policy_classifier() {
     let delete_only_file = second_root.join("delete-only");
     let write_only = exact_parent.join("write-only");
     let ordinary_out_of_scope = exact_parent.join("ordinary-out-of-scope");
+    let mut explicit_parent = files.outside.clone();
+    for _ in 0..260 {
+        explicit_parent = explicit_parent.join("p");
+    }
+    let deep_exact = explicit_parent.join("exact");
+    let deep_root = explicit_parent.join("nearby-root");
+    fs::create_dir_all(&deep_root).expect("deep explicit tree");
+    fs::write(&deep_exact, b"deep exact").expect("deep exact fixture");
+    let deep_child = deep_root.join("child");
+    fs::write(&deep_child, b"deep child").expect("deep child fixture");
     for (path, content) in [
         (&exact, b"exact".as_slice()),
         (&exact_exclusion, b"excluded".as_slice()),
@@ -941,6 +951,36 @@ fn structured_policy_classifier() {
     assert!(!capabilities.complete_content_protection);
     let events = backend.subscribe(Uuid::new_v4(), SubscriberClass::Required);
     let binding_id = Uuid::new_v4();
+    for mode in [None, Some(PolicyMode::Audit), Some(PolicyMode::Observe)] {
+        let error = backend
+            .apply(ApplyPolicy {
+                binding_id,
+                agent_id: "structured-kernel-test".into(),
+                session_id: None,
+                root_pid: worker.pid(),
+                process_start_time: worker.start_time(),
+                policy_id: "structured-classifier-kernel".into(),
+                policy_revision: "1".into(),
+                policy_dsl: String::new(),
+                policy_mode: mode,
+                file_protection_policy: Some(FileProtectionPolicy {
+                    version: FILE_PROTECTION_POLICY_VERSION,
+                    topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                    targets: vec![protected(
+                        &write_only,
+                        FileProtectionTargetKind::ExactFile,
+                        true,
+                        true,
+                        vec![],
+                    )],
+                }),
+            })
+            .expect_err("non-enforcing structured request must fail");
+        assert!(matches!(error, BackendError::CompileFailure(message)
+            if message.contains("requires explicit policy_mode=enforce")));
+        assert!(backend.bindings().expect("no partial binding").is_empty());
+        assert_eq!(worker.run("write", &[TreeFiles::text(&write_only)]), "ok");
+    }
     let binding = backend
         .apply(ApplyPolicy {
             binding_id,
@@ -1015,6 +1055,20 @@ fn structured_policy_classifier() {
                         &ordinary_out_of_scope,
                         FileProtectionTargetKind::ExactFile,
                         false,
+                        true,
+                        vec![],
+                    ),
+                    protected(
+                        &deep_exact,
+                        FileProtectionTargetKind::ExactFile,
+                        true,
+                        true,
+                        vec![],
+                    ),
+                    protected(
+                        &deep_root,
+                        FileProtectionTargetKind::DirectoryTree,
+                        true,
                         true,
                         vec![],
                     ),
@@ -1401,6 +1455,37 @@ fn structured_policy_classifier() {
             ),
             "errno=1"
         );
+    }
+
+    let mut deep = files.root.clone();
+    for depth in 1..=260 {
+        deep = deep.join("d");
+        assert_eq!(worker.run("mkdir", &[TreeFiles::text(&deep)]), "ok");
+        if [254, 255, 260].contains(&depth) {
+            let entry = deep.join("entry");
+            fs::write(&entry, b"depth fixture").expect("depth file");
+            for operation in ["write", "pwrite"] {
+                assert_eq!(
+                    worker.run(operation, &[TreeFiles::text(&entry)]),
+                    if depth == 254 { "errno=1" } else { "ok" },
+                    "bounded ancestry at depth {depth} for {operation}"
+                );
+            }
+            assert_eq!(
+                worker.run("unlink", &[TreeFiles::text(&entry)]),
+                "errno=1",
+                "delete remains fail-closed at depth {depth}"
+            );
+        }
+    }
+    for entry in [&deep_exact, &deep_child] {
+        for operation in ["write", "pwrite", "unlink"] {
+            assert_eq!(
+                worker.run(operation, &[TreeFiles::text(entry)]),
+                "errno=1",
+                "deep explicit target or nearby root must still match"
+            );
+        }
     }
 
     let observed: Vec<_> = events.try_iter().collect();

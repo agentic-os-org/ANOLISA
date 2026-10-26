@@ -49,6 +49,11 @@ fn normalize_actplane_policy_payload(
     let Some(policy) = request.file_protection_policy.as_ref() else {
         return Ok(None);
     };
+    if request.policy_mode != Some(PolicyMode::Enforce) {
+        return Err(BackendError::CompileFailure(
+            "structured file protection requires explicit policy_mode=enforce; audit and observe are unsupported".into(),
+        ));
+    }
     let normalized = file_protection_policy::normalize(policy)
         .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
     Ok(Some(normalized))
@@ -1625,6 +1630,49 @@ mod tests {
                     exclusions: Vec::new(),
                 }],
             }),
+        }
+    }
+
+    #[test]
+    fn structured_policies_reject_non_enforcing_modes_before_path_resolution() {
+        for mode in [None, Some(PolicyMode::Observe), Some(PolicyMode::Audit)] {
+            for (delete, ordinary_write) in [(true, false), (false, true), (true, true)] {
+                let mut request = structured_policy_request("relative/invalid");
+                request.policy_mode = mode;
+                let protections = &mut request
+                    .file_protection_policy
+                    .as_mut()
+                    .expect("policy")
+                    .targets[0]
+                    .protections;
+                protections.delete = delete;
+                protections.ordinary_write = ordinary_write;
+                assert!(matches!(
+                    normalize_actplane_policy_payload(&request),
+                    Err(BackendError::CompileFailure(message))
+                        if message.contains("requires explicit policy_mode=enforce")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_dsl_payload_validation_keeps_existing_mode_behavior() {
+        let mut request = structured_policy_request("/fixture");
+        request.file_protection_policy = None;
+        request.policy_dsl = "source AGENT = exec \"**\"\n".into();
+        for mode in [
+            None,
+            Some(PolicyMode::Observe),
+            Some(PolicyMode::Audit),
+            Some(PolicyMode::Enforce),
+        ] {
+            request.policy_mode = mode;
+            assert!(
+                normalize_actplane_policy_payload(&request)
+                    .expect("DSL mode unchanged")
+                    .is_none()
+            );
         }
     }
 

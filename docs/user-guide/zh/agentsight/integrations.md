@@ -128,10 +128,15 @@ hook 并未挂载——引擎仍会以 `effect=block` 且 `blocked=false` 的 vi
 `file_protection_policy` 支持保护精确文件目录项或整个目录树（含未来子项），并按目标排除精确目录项
 或子目录树。`delete` 与 `ordinary_write` 独立选择。下发前通过 `/api/enforcement/health` 检查
 `file_entry_delete_protection`、`directory_tree_delete_protection`、`ordinary_write_protection`
-和 `static_mount_topology` 是否支持相应能力。
+和 `static_mount_topology` 是否支持相应能力。ActPlane 后端要求结构化策略显式设置
+`policy_mode: "enforce"`；省略模式或设置 `audit/observe` 会在拓扑准备和内核修改前被拒绝，
+不改变旧 DSL 的处理方式。
 
 - 普通写保护阻止通过受保护路径执行的 `write/pwrite`，包括策略生效前已打开的 FD；读取和打开
   可写 FD 仍允许。
+- 每次祖先遍历最多 256 步，挂载切换也占用步数；预算内无法确定保护时分类为 UNKNOWN，
+  普通写放行，而删除和重命名保守拒绝。因此过深的子项可能可写；同样深度下的显式文件目标
+  或附近的目录树保护根仍可命中，并非所有深路径都会放行。
 - 策略范围外、未被其他目标保护的硬链接仍可写入同一 inode，从而改变受保护文件内容；需要保护
   该别名时应显式加入目标。删除外部硬链接仍允许，因为它不会删除受保护的目录项。
 - 即使文件受保护，`truncate/ftruncate`、`O_TRUNC`、共享可写 `mmap/mprotect` 和 `fallocate` 打洞
