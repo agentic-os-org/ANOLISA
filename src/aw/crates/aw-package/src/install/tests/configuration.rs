@@ -237,7 +237,6 @@ fn configure_rejects_damaged_payloads_and_allows_retry() {
     for split in [false, true] {
         for name in [
             "bin/aw",
-            "bin/aw-package",
             "libexec/aw/providers/sec-core/aw-provider-sec-core",
             "libexec/aw/providers/sec-core/agent-sec-cli",
             "libexec/aw/providers/sec-core/agent-sec-daemon",
@@ -278,10 +277,23 @@ fn configure_rejects_damaged_payloads_and_allows_retry() {
                     node: Some(Path::new("/bin/true")),
                     openclaw: Some(Path::new("/bin/true")),
                 };
-                assert!(crate::configure(&settings)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("modified or missing"));
+                let error = crate::configure(&settings).unwrap_err().to_string();
+                let reason = match damage {
+                    "bytes" => "checksum mismatch",
+                    "missing" => "modified or missing",
+                    _ => "mode mismatch",
+                };
+                let package = if name == "bin/aw" {
+                    "aw-core"
+                } else {
+                    "aw-provider-sec-core"
+                };
+                assert!(
+                    error.contains(reason)
+                        && error.contains(&path.display().to_string())
+                        && error.contains(&format!("package {package}")),
+                    "split={split} damage={damage} file={name}: {error}"
+                );
                 assert!(!config.exists());
                 assert_eq!(receipts(&f.prefix).unwrap(), before);
                 fs::write(&path, original).unwrap();

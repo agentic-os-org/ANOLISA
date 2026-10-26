@@ -164,6 +164,30 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Oct 23 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.6.0-1
+- Added CI prebuilt packages for ws-ckpt
+- Added pagination to snapshot listings
+- Added reconciliation of interrupted cleanup operations
+- Improved startup rollback recovery: restore rollback head, finish interrupted rollbacks, and limit repeated daemon restarts
+- Fixed non-termination when the parent chain contains a cycle
+- Cleaned up stranded config temp files
+- Raised the openclaw CLI capture limit past 1 MiB
+- Blocked btrfs creates under storage pressure
+- Hardened cron locking: require the lock before writes and keep removal with its owner
+- Logged failed recovery index saves
+- Reused generated checkpoint identifiers
+- Translated confirm prompts to English
+- Isolated returned schedule arrays
+- Refused line breaks in cron-interpolated values
+- Parsed metadata before snapshotting
+- Refused cwd-inside workspace updates in both plugins and surfaced init failures
+- Hardened diff snapshot handling: isolate temp snapshots, preserve escaped paths, and reject malformed snapshot lists
+- Re-armed the write watcher after rollback
+- Preserved workspace metadata
+- Bounded cleanup counts to the u32 range
+- Improved test coverage of the ops-log record writer
+- Updated the English ws-ckpt README with restored sections
+
 * Tue Sep 22 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.5.0-1
 - Unified workspace path identity and recovery of interrupted init/unregister
 - Added guarded rollback V2 protocol variants used by cosh-ng governed tasks

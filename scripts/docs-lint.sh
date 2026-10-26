@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Documentation lint — enforces specs/documentation-standard.md:
 #   1. Chinese docs must use the `_zh.md` suffix (no _CN/_cn/-CN/.zh variants).
-#   2. docs/user-guide en/ and zh/ trees must mirror each other.
+#   2. User, developer, and contribution guides must mirror en/ and zh/ trees.
 #
 # Files awaiting translation may be listed in .github/docs-lint-exemptions.txt
 # (paths relative to docs/user-guide/<lang>/, one per line, `#` for comments).
@@ -47,5 +47,17 @@ if [ "$en_tree" != "$zh_tree" ]; then
 else
   echo "✓ en/zh tree parity OK"
 fi
+
+for directory in docs/developer-guide contribute; do
+  en_tree=$(cd "$directory/en" && find . -name '*.md' | sort)
+  zh_tree=$(cd "$directory/zh" && find . -name '*.md' | sort)
+  if [ "$en_tree" != "$zh_tree" ]; then
+    echo "✗ $directory en/zh trees are not mirrored:"
+    diff <(echo "$en_tree") <(echo "$zh_tree") | sed 's/^/    /' || true
+    fail=1
+  else
+    echo "✓ $directory en/zh tree parity OK"
+  fi
+done
 
 exit $fail

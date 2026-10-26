@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/cli",
-  "version": "0.3.18",
+  "version": "0.3.19",
   "description": "ANOLISA CLI — Agentic OS component lifecycle manager",
   "type": "module",
   "license": "Apache-2.0",
@@ -37,9 +37,9 @@
     "darwin"
   ],
   "optionalDependencies": {
-    "@anolisa/cli-linux-x64": "0.3.18",
-    "@anolisa/cli-linux-arm64": "0.3.18",
-    "@anolisa/cli-darwin-arm64": "0.3.18",
-    "@anolisa/cli-darwin-x64": "0.3.18"
+    "@anolisa/cli-linux-x64": "0.3.19",
+    "@anolisa/cli-linux-arm64": "0.3.19",
+    "@anolisa/cli-darwin-arm64": "0.3.19",
+    "@anolisa/cli-darwin-x64": "0.3.19"
   }
 }

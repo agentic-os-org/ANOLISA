@@ -1,5 +1,11 @@
 //! Transactional owned-file installation; existing components and user data are preserved.
 
+use aw_exec::PackageLock;
+mod report;
+pub use report::{
+    MutationFailure, MutationNotice, MutationReport, MutationResult, NoticeCode, RecoveryState,
+};
+
 use crate::{filesystem as paths, inspect, require, Component, Result};
 use std::{
     collections::BTreeMap,
@@ -77,16 +83,17 @@ pub(crate) fn verified_files(
     Ok(owned)
 }
 
-struct Transaction {
+struct Transaction<'a> {
     files: Vec<PathBuf>,
     directories: Vec<PathBuf>,
     prefix: Option<PathBuf>,
     // Keep ownership through Drop so rollback cannot race another installer.
-    lock: Option<File>,
+    lock: Option<PackageLock>,
     committed: bool,
+    report: &'a mut MutationReport,
 }
 
-impl Transaction {
+impl Transaction<'_> {
     fn directory(&mut self, path: &Path) -> Result<()> {
         if path.exists() {
             return Ok(());
@@ -113,31 +120,40 @@ impl Transaction {
     }
 }
 
-impl Drop for Transaction {
+impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if self.committed {
             return;
         }
-        let mut complete = true;
+        if self.files.is_empty() && self.directories.is_empty() && self.prefix.is_none() {
+            return;
+        }
+        self.report.recovery = RecoveryState::Complete;
         for path in self.files.iter().rev() {
             if let Err(error) = fs::remove_file(path) {
-                eprintln!(
-                    "aw-package: rollback could not remove {}: {error}",
-                    path.display()
+                self.report.notice(
+                    NoticeCode::RollbackRemoveFailed,
+                    path.clone(),
+                    Some(error.kind()),
                 );
-                complete = false;
+                self.report.recovery = RecoveryState::Incomplete;
             }
         }
         for path in self.directories.iter().rev() {
             if let Err(error) = fs::remove_dir(path) {
-                eprintln!(
-                    "aw-package: rollback could not remove {}: {error}",
-                    path.display()
+                self.report.notice(
+                    NoticeCode::RollbackRemoveFailed,
+                    path.clone(),
+                    Some(error.kind()),
                 );
-                complete = false;
+                self.report.recovery = RecoveryState::Incomplete;
             }
         }
-        if let Some(prefix) = self.prefix.as_ref().filter(|_| complete) {
+        if let Some(prefix) = self
+            .prefix
+            .as_ref()
+            .filter(|_| self.report.recovery == RecoveryState::Complete)
+        {
             let cleanup = if self.lock.is_some() {
                 fs::remove_file(prefix.join(".aw-install.lock"))
                     .and_then(|()| fs::remove_dir(prefix))
@@ -146,10 +162,12 @@ impl Drop for Transaction {
                 fs::remove_dir(prefix)
             };
             if let Err(error) = cleanup {
-                eprintln!(
-                    "aw-package: rollback could not retire {}: {error}",
-                    prefix.display()
+                self.report.notice(
+                    NoticeCode::RollbackRetireFailed,
+                    prefix.clone(),
+                    Some(error.kind()),
                 );
+                self.report.recovery = RecoveryState::Incomplete;
             }
         }
     }
@@ -164,7 +182,16 @@ pub fn install(bundle: &Path, prefix: &Path) -> Result<()> {
 /// Install with cooperative cancellation, rolling back before committing receipts.
 /// The caller owns signal handling; cancellation never interrupts rollback.
 pub fn install_cancellable(bundle: &Path, prefix: &Path, cancel: &AtomicBool) -> Result<()> {
-    install_using(bundle, prefix, cancel, paths::lock, |source, output| {
+    legacy(install_reported(bundle, prefix, cancel))
+}
+
+/// Install a Preview bundle and return observed commit and recovery facts.
+/// This API never prints diagnostics; the caller owns presentation and cancellation.
+///
+/// # Errors
+/// Retains the primary validation, I/O or cancellation error alongside cleanup notices.
+pub fn install_reported(bundle: &Path, prefix: &Path, cancel: &AtomicBool) -> MutationResult {
+    install_reported_using(bundle, prefix, cancel, paths::lock, |source, output| {
         let mut source = File::open(source)?;
         let mut buffer = [0; 65536];
         loop {
@@ -179,18 +206,43 @@ pub fn install_cancellable(bundle: &Path, prefix: &Path, cancel: &AtomicBool) ->
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<()> {
-    require(
-        !cancel.load(Ordering::Relaxed),
-        "package operation interrupted",
-    )
+    if cancel.load(Ordering::Relaxed) {
+        Err(crate::Error::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
+#[cfg(test)]
 fn install_using(
     bundle: &Path,
     prefix: &Path,
     cancel: &AtomicBool,
-    lock: impl FnOnce(&Path) -> Result<File>,
+    lock: impl FnOnce(&Path) -> Result<PackageLock>,
+    copy: impl FnMut(&Path, &mut File) -> Result<()>,
+) -> Result<()> {
+    legacy(install_reported_using(bundle, prefix, cancel, lock, copy))
+}
+
+fn install_reported_using(
+    bundle: &Path,
+    prefix: &Path,
+    cancel: &AtomicBool,
+    lock: impl FnOnce(&Path) -> Result<PackageLock>,
+    copy: impl FnMut(&Path, &mut File) -> Result<()>,
+) -> MutationResult {
+    let mut report = MutationReport::default();
+    let result = install_into(bundle, prefix, cancel, lock, copy, &mut report);
+    report.finish(result)
+}
+
+fn install_into(
+    bundle: &Path,
+    prefix: &Path,
+    cancel: &AtomicBool,
+    lock: impl FnOnce(&Path) -> Result<PackageLock>,
     mut copy: impl FnMut(&Path, &mut File) -> Result<()>,
+    report: &mut MutationReport,
 ) -> Result<()> {
     check_cancel(cancel)?;
     let manifest = inspect(bundle)?;
@@ -203,6 +255,7 @@ fn install_using(
         prefix: None,
         lock: None,
         committed: false,
+        report,
     };
     if created_prefix {
         fs::create_dir(prefix)?;
@@ -278,6 +331,7 @@ fn install_using(
     }
     check_cancel(cancel)?;
     transaction.committed = true;
+    transaction.report.committed = true;
     Ok(())
 }
 
@@ -290,7 +344,16 @@ pub fn uninstall(prefix: &Path) -> Result<()> {
 /// Uninstall with cooperative cancellation, restoring removed files before returning.
 /// The caller owns signal handling; cancellation never interrupts restoration.
 pub fn uninstall_cancellable(prefix: &Path, cancel: &AtomicBool) -> Result<()> {
-    uninstall_using(
+    legacy(uninstall_reported(prefix, cancel))
+}
+
+/// Remove one Preview installation and report commit, recovery and backup cleanup.
+/// This API never prints diagnostics and does not add crash recovery or runtime checks.
+///
+/// # Errors
+/// Preserves the primary failure even when restoring tracked files also fails.
+pub fn uninstall_reported(prefix: &Path, cancel: &AtomicBool) -> MutationResult {
+    uninstall_reported_using(
         prefix,
         cancel,
         |path| fs::remove_file(path),
@@ -298,11 +361,33 @@ pub fn uninstall_cancellable(prefix: &Path, cancel: &AtomicBool) -> Result<()> {
     )
 }
 
+#[cfg(test)]
 fn uninstall_using(
+    prefix: &Path,
+    cancel: &AtomicBool,
+    remove: impl FnMut(&Path) -> std::io::Result<()>,
+    cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    legacy(uninstall_reported_using(prefix, cancel, remove, cleanup))
+}
+
+fn uninstall_reported_using(
+    prefix: &Path,
+    cancel: &AtomicBool,
+    remove: impl FnMut(&Path) -> std::io::Result<()>,
+    cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> MutationResult {
+    let mut report = MutationReport::default();
+    let result = uninstall_from(prefix, cancel, remove, cleanup, &mut report);
+    report.finish(result)
+}
+
+fn uninstall_from(
     prefix: &Path,
     cancel: &AtomicBool,
     mut remove: impl FnMut(&Path) -> std::io::Result<()>,
     cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+    report: &mut MutationReport,
 ) -> Result<()> {
     check_cancel(cancel)?;
     paths::owned_directory(prefix)?;
@@ -318,12 +403,12 @@ fn uninstall_using(
     let backup = tempfile::Builder::new()
         .prefix("uninstall-")
         .tempdir_in(prefix)?;
-    for (index, path) in owned.iter().enumerate() {
-        check_cancel(cancel)?;
-        fs::hard_link(path, backup.path().join(index.to_string()))?;
-    }
     let mut removed = 0;
     let result = (|| -> Result<()> {
+        for (index, path) in owned.iter().enumerate() {
+            check_cancel(cancel)?;
+            fs::hard_link(path, backup.path().join(index.to_string()))?;
+        }
         for path in &owned {
             check_cancel(cancel)?;
             remove(path)?;
@@ -332,33 +417,75 @@ fn uninstall_using(
         check_cancel(cancel)
     })();
     if let Err(error) = result {
-        let mut complete = true;
+        // Backup creation itself owns temporary resources, even before any removal.
+        report.recovery = RecoveryState::Complete;
         for (previous, path) in owned[..removed].iter().enumerate() {
             if let Err(restore) = fs::hard_link(backup.path().join(previous.to_string()), path) {
-                eprintln!(
-                    "aw-package: rollback could not restore {}: {restore}",
-                    path.display()
+                report.notice(
+                    NoticeCode::RollbackRestoreFailed,
+                    path.clone(),
+                    Some(restore.kind()),
                 );
-                complete = false;
+                report.recovery = RecoveryState::Incomplete;
             }
         }
-        if !complete {
-            eprintln!(
-                "aw-package: retained uninstall backup at {}",
-                backup.keep().display()
-            );
+        if report.recovery == RecoveryState::Incomplete {
+            report.notice(NoticeCode::BackupRetained, backup.keep(), None);
+        } else {
+            let location = backup.path().to_path_buf();
+            if let Err(cleanup) = backup.close() {
+                report.notice(
+                    NoticeCode::BackupCleanupFailed,
+                    location,
+                    Some(cleanup.kind()),
+                );
+                report.recovery = RecoveryState::Incomplete;
+            }
         }
         return Err(error);
     }
     // Payload/receipt removal has committed; partial backup cleanup cannot undo it.
+    report.committed = true;
     let backup = backup.keep();
     if let Err(error) = cleanup(&backup) {
-        eprintln!(
-            "aw-package: uninstall completed; backup cleanup failed at {}: {error}; remove this backup manually",
-            backup.display()
-        );
+        report.notice(NoticeCode::BackupCleanupFailed, backup, Some(error.kind()));
     }
     Ok(())
+}
+
+fn legacy(result: MutationResult) -> Result<()> {
+    let report = match &result {
+        Ok(report) => report,
+        Err(failure) => &failure.report,
+    };
+    for notice in &report.notices {
+        let path = notice.path.display();
+        let kind = notice
+            .io_kind
+            .map(|kind| format!("{kind:?}"))
+            .unwrap_or_default();
+        match notice.code {
+            NoticeCode::RollbackRemoveFailed => {
+                eprintln!("aw: rollback could not remove {path}: {kind}");
+            }
+            NoticeCode::RollbackRestoreFailed => {
+                eprintln!("aw: rollback could not restore {path}: {kind}");
+            }
+            NoticeCode::RollbackRetireFailed => {
+                eprintln!("aw: rollback could not retire {path}: {kind}");
+            }
+            NoticeCode::BackupRetained => {
+                eprintln!("aw: retained uninstall backup at {path}");
+            }
+            NoticeCode::BackupCleanupFailed if report.committed => {
+                eprintln!("aw: uninstall completed; backup cleanup failed at {path}: {kind}; remove this backup manually");
+            }
+            NoticeCode::BackupCleanupFailed => {
+                eprintln!("aw: backup cleanup failed at {path}: {kind}; retained resources may require manual cleanup");
+            }
+        }
+    }
+    result.map(|_| ()).map_err(|failure| failure.error)
 }
 
 #[cfg(test)]

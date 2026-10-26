@@ -1,6 +1,7 @@
 //! Owned-path validation and nonblocking installation locks.
 
 use crate::{require, Result};
+use aw_exec::PackageLock;
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -85,11 +86,14 @@ fn write_private_using(
     Ok(())
 }
 
-pub(crate) fn lock(prefix: &Path) -> Result<File> {
+pub(crate) fn lock(prefix: &Path) -> Result<PackageLock> {
     lock_using(prefix, |file, path| lock_file(file, path, libc::LOCK_EX))
 }
 
-fn lock_using(prefix: &Path, acquire: impl FnOnce(File, &Path) -> Result<File>) -> Result<File> {
+fn lock_using(
+    prefix: &Path,
+    acquire: impl FnOnce(File, &Path) -> Result<PackageLock>,
+) -> Result<PackageLock> {
     let path = prefix.join(".aw-install.lock");
     match OpenOptions::new()
         .read(true)
@@ -109,7 +113,7 @@ fn lock_using(prefix: &Path, acquire: impl FnOnce(File, &Path) -> Result<File>) 
     }
 }
 
-pub(crate) fn shared_lock(prefix: &Path) -> Result<File> {
+pub(crate) fn shared_lock(prefix: &Path) -> Result<PackageLock> {
     absolute(prefix)?;
     let path = prefix.join(".aw-install.lock");
     let file = OpenOptions::new()
@@ -119,11 +123,12 @@ pub(crate) fn shared_lock(prefix: &Path) -> Result<File> {
     lock_file(file, &path, libc::LOCK_SH)
 }
 
-fn lock_file(file: File, path: &Path, operation: i32) -> Result<File> {
+fn lock_file(file: File, path: &Path, operation: i32) -> Result<PackageLock> {
     // SAFETY: the file descriptor is owned and remains open throughout flock.
     if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    let file = PackageLock::from_locked(file);
     let held = file.metadata()?;
     let current = fs::symlink_metadata(path)?;
     require(

@@ -35,7 +35,7 @@ grants the plugin's declared capabilities by default. Set
 consent the install then fails until consent is granted interactively. Set
 `AGENT_MEMORY_SAFE_INSTALL=1` to decline the unsafe-install bypass on hosts
 that would still receive one. Full reference:
-[user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
+[user guide](../../docs/user-guide/en/agent-memory/index.md).
 
 ```bash
 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
@@ -99,7 +99,7 @@ The OpenClaw plugin uses `anolisa_memory_search` and `anolisa_memory_get` for
 ANOLISA memories, alongside `memory_observe` and `memory_get_context`. Update
 old tool-name references in prompts and allowlists when upgrading, restart the
 gateway, and start a new conversation. Internal MCP names and stored data stay
-unchanged. See the [user guide](../../docs/user-guide/en/token-saving/agent-memory.md)
+unchanged. See the [user guide](../../docs/user-guide/en/agent-memory/index.md)
 for migration from installers that disabled `memory-core`. The manifest keeps
 all four plugin tools in OpenClaw 2026.9.2's `coding` conversation profile. Custom
 allowlists, sandbox policies, and hosts that ignore this metadata need explicit
@@ -152,6 +152,10 @@ The packager does not build or execute binaries. It renders the raw installation
 contract from `.anolisa/component.raw.toml.in` and Cargo.toml; the RPM contract
 remains separate. Both installation modes leave the user service stopped.
 Run `python3 tests/test_raw_packaging.py` for packaging regressions.
+
+## Smoke validation
+
+Run `make smoke` with Python 3.8+ to validate the release MCP server in a temporary namespace. `make smoke SMOKE_TIMEOUT=10` overrides the default 30-second protocol deadline; process cleanup is bounded separately to two seconds. See the [testing guide](../../docs/user-guide/en/getting-started/testing.md).
 
 ## License
 

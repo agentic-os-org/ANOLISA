@@ -796,3 +796,88 @@ fn scan_once_rejects_non_hermes_sqlite_without_affecting_other_sources() {
     scan_once(&store, &config);
     assert_eq!(store.count().unwrap(), 0);
 }
+
+#[test]
+fn hermes_parallel_results_keep_explicit_call_ids() {
+    assert_hermes_result_identity(false);
+}
+
+#[test]
+fn hermes_late_results_find_the_earlier_exact_call() {
+    assert_hermes_result_identity(true);
+}
+
+fn assert_hermes_result_identity(separate_steps: bool) {
+    let base = tmp_dir(if separate_steps {
+        "late-results"
+    } else {
+        "parallel-results"
+    });
+    let writer = create_hermes_db(&base);
+    writer.execute("DELETE FROM messages", []).unwrap();
+    let calls = if separate_steps {
+        vec![
+            r#"[{"id":"call-a","function":{"name":"read_file","arguments":{"path":"a.txt"}}}]"#,
+            r#"[{"id":"call-b","function":{"name":"read_file","arguments":{"path":"b.txt"}}}]"#,
+        ]
+    } else {
+        vec![
+            r#"[{"id":"call-a","function":{"name":"read_file","arguments":{"path":"a.txt"}}},{"id":"call-b","function":{"name":"read_file","arguments":{"path":"b.txt"}}}]"#,
+        ]
+    };
+    for tool_calls in calls {
+        writer.execute(
+            "INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?1, 'assistant', ?2, 1781517601)",
+            params![SESSION_ID, tool_calls],
+        ).unwrap();
+    }
+    // Reverse result order exercises both exact call lookup and repeated tool names.
+    for (id, content) in [("call-b", "contents of b"), ("call-a", "contents of a")] {
+        writer.execute(
+            "INSERT INTO messages (session_id, role, tool_call_id, tool_name, content, timestamp) VALUES (?1, 'tool', ?2, 'read_file', ?3, 1781517602)",
+            params![SESSION_ID, id, content],
+        ).unwrap();
+    }
+    let store = TrajectoryStore::new_with_path(&base.join("output.db")).unwrap();
+    let outcome = hermes::collect_database(&store, &base.join("state.db"), 0).unwrap();
+    assert_eq!(outcome.ingested, 1);
+    let record = store.get(&stored_id(&base, SESSION_ID)).unwrap().unwrap();
+    let document: serde_json::Value = serde_json::from_str(&record.atif_json).unwrap();
+    let steps = document["steps"].as_array().unwrap();
+    let mut observed = std::collections::HashSet::new();
+    for step in steps {
+        for call in step["tool_calls"].as_array().unwrap() {
+            let id = call["tool_call_id"].as_str().unwrap();
+            assert!(observed.insert(id.to_string()), "call IDs must stay unique");
+            let path = call["arguments"]["path"].as_str().unwrap();
+            assert_eq!(id, if path == "a.txt" { "call-a" } else { "call-b" });
+            assert_eq!(
+                call["extra"]["result_timestamp"],
+                "2026-06-15T10:00:02.000Z"
+            );
+            let results = step["observation"]["results"].as_array().unwrap();
+            let result = results
+                .iter()
+                .find(|result| result["source_call_id"] == id)
+                .unwrap();
+            assert_eq!(
+                result["content"],
+                if id == "call-a" {
+                    "contents of a"
+                } else {
+                    "contents of b"
+                }
+            );
+        }
+    }
+    assert_eq!(observed.len(), 2);
+    assert_eq!(
+        hermes::collect_database(&store, &base.join("state.db"), 0)
+            .unwrap()
+            .ingested,
+        0
+    );
+    drop(store);
+    drop(writer);
+    std::fs::remove_dir_all(base).unwrap();
+}

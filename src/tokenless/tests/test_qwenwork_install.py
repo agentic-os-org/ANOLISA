@@ -243,12 +243,12 @@ class QwenWorkInstallTests(unittest.TestCase):
         self.assertTrue(self.target.is_dir())
         self.assertFalse((self.bin / "request.json").exists(), "detect must not invoke binaries")
 
-    def test_non_darwin_rejects_install(self) -> None:
+    def test_unsupported_platform_rejects_install(self) -> None:
         before = snapshot(self.root)
         with mock.patch.object(lifecycle.platform, "system", return_value="Linux"):
             for action in (("detect",), ("install",), ("install", "--dry-run")):
                 _, error = self.run_action(*action, success=False)
-                self.assertIn("Darwin", error)
+                self.assertIn("supports macOS and Windows only", error)
         self.assertEqual(snapshot(self.root), before)
 
     def test_runtime_manifest_and_shared_resources_required(self) -> None:

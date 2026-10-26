@@ -1376,7 +1376,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "thiserror",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "csv",
  "html5ever",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1449,9 +1449,9 @@ dependencies = [
 
 [[package]]
 name = "toon-format"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f89570c1a68d73941f728cca32a4345b2ffca36667ad921af336c60309a3e7e"
+checksum = "ee91127810858e0dbcecb2947a0074a7d18bd191d56bcb581f5962374aed9fb8"
 dependencies = [
  "indexmap",
  "serde",

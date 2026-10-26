@@ -548,10 +548,9 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
     measurement.joinpath("fault-results.json").write_text(
         json.dumps(
             {
-                "outcomes": {
-                    name: {"handled": 1} for name in campaign_evidence.FAULT_CASES
-                },
+                "outcomes": {name: {"handled": 1} for name in campaign_evidence.FAULT_CASES},
                 "server_healthy_after": True,
+                "sse_truncation_verified": True,
                 "process_alive_before": True,
                 "process_alive_after": True,
             }
@@ -751,6 +750,7 @@ def test_quality_gates_require_usable_measurements(
                 {
                     "outcomes": {name: {"handled": 1} for name in campaign_evidence.FAULT_CASES},
                     "server_healthy_after": True,
+                    "sse_truncation_verified": True,
                     "process_alive_before": True,
                     "process_alive_after": True,
                 }
@@ -850,6 +850,7 @@ def test_fault_evidence_classifies_malformed_artifacts(tmp_path: Path) -> None:
         return {
             "outcomes": outcomes,
             "server_healthy_after": True,
+            "sse_truncation_verified": True,
             "process_alive_before": True,
             "process_alive_after": True,
             **extra,

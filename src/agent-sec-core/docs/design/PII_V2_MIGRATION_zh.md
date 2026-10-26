@@ -64,7 +64,7 @@ JWT 扩展与反例。差分只排除耗时、V2 新增元数据及明确升级�
 既有大输入、Unicode、重叠脱敏、回溯及发现数量限制测试继续约束效果和执行成本。
 
 2.0.1 及保留的 Python 检测器先校验完整卡号表达式的分组、网络前缀/长度组合，再执行 Luhn。
-七个支持网络与表达式边界见[用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md#支持的银行卡格式)。
+七个支持网络与表达式边界见[用户指南](../../../../docs/user-guide/zh/agent-sec-core/pii-checker.md#支持的银行卡格式)。
 `tests/fixtures/credit_cards.json` 由 Python 与 Rust 质量测试共用，包含原始良性 Host 输出；
 历史 V1 oracle 保持不变。
 

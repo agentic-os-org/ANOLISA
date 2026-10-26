@@ -390,6 +390,7 @@ def write_recovery(
         "| --- | ---: | ---: | ---: | ---: | --- |",
     ]
     outcomes: dict[tuple[str, int], dict[str, Any]] = {}
+    diagnostics = []
     for (version, repetition), phases in sorted(grouped.items()):
         overload = (
             campaign_evidence.summary_of_phase(phases, "overload")
@@ -403,6 +404,11 @@ def write_recovery(
         )
         outcome = campaign_evidence.recovery_outcome(phases, settings, thresholds)
         outcomes[(version, repetition)] = outcome
+        if outcome["missing"]:
+            diagnostics.append(
+                f"- {version}/{repetition}: unproven recovery gates: "
+                + ", ".join(outcome["missing"])
+            )
         seconds = outcome["seconds"]
         lines.append(
             f"| {version}/{repetition} | "
@@ -417,6 +423,8 @@ def write_recovery(
         )
     if not grouped:
         lines.append("| — | — | — | — | — | NOT EXECUTED |")
+    if diagnostics:
+        lines.extend(["", *diagnostics])
     (results / "recovery-report.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )
@@ -636,13 +644,15 @@ def change_conclusion(
 
 
 def headline_lines(
-    comparison: dict[str, Any], *, aa_calibration: bool = False
+    comparison: dict[str, Any], *, aa_calibration: bool = False, claims_allowed: bool = True
 ) -> list[str]:
     """Render the approved human-readable improvement summary."""
 
     def conclusion(delta: float | None, subject: str, *, lower_is_better: bool) -> str:
         if aa_calibration:
             return "A/A 测量波动" if delta is not None else "证据不足"
+        if not claims_allowed:
+            return "证据不足"
         return change_conclusion(delta, subject, lower_is_better=lower_is_better)
 
     highest = comparison["highest_common_qps"]
@@ -818,8 +828,7 @@ def write_final(
         f"**总判定：{'PASS' if complete else 'INCONCLUSIVE'}**",
         "",
         (
-            "**测试类型：A/A 测量稳定性校准。所有差值均视为测量波动，"
-            "不得用于声明优化效果。**"
+            "**测试类型：A/A 测量稳定性校准。所有差值均视为测量波动，" "不得用于声明优化效果。**"
             if aa_calibration
             else "**测试类型：A/B 优化前后对比。**"
         ),
@@ -832,7 +841,7 @@ def write_final(
         "",
         "### 核心波动摘要" if aa_calibration else "### 核心改进摘要",
         "",
-        *headline_lines(comparison, aa_calibration=aa_calibration),
+        *headline_lines(comparison, aa_calibration=aa_calibration, claims_allowed=complete),
         "",
         (
             "> A/A 模式中 baseline 和 optimized 来自同一版本，表中变化用于"
@@ -924,7 +933,7 @@ def write_final(
         "schema_version": 1,
         "verdict": "PASS" if complete else "INCONCLUSIVE",
         "comparison_mode": comparison_mode,
-        "optimization_claim_allowed": not aa_calibration,
+        "optimization_claim_allowed": complete and not aa_calibration,
         "issues": issues,
         "comparison": comparison,
     }

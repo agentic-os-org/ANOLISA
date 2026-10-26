@@ -179,4 +179,4 @@ budgets, traffic-free hard timeouts, partial responses, fragmented compressed SS
 equivalence with and without raw export, and FFI reservation lifetimes. RSS and throughput benchmarks
 remain separate from these correctness checks. Byte budgets do not guarantee a process RSS ceiling.
 
-See the [runtime configuration reference](../../../../docs/user-guide/en/agent-observability/agentsight/configuration.md#runtime-limits).
+See the [runtime configuration reference](../../../../docs/user-guide/en/agentsight/configuration.md#runtime-limits).

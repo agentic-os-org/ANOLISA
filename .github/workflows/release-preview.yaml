@@ -84,9 +84,11 @@ jobs:
         id: plan-prebuilt
         env:
           COMPONENT: ${{ inputs.component }}
+          TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}
         run: |
           python3 .github/actions/prebuilt-rust-common/plan_matrix.py \
-            --component "$COMPONENT" >> "$GITHUB_OUTPUT"
+            --component "$COMPONENT" \
+            --tokenless-source-root "$TOKENLESS_SOURCE_ROOT" >> "$GITHUB_OUTPUT"
 
       - name: Package source archive
         uses: ./.github/actions/package-source
@@ -280,6 +282,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout Tokenless source tag
+        if: inputs.tokenless_source_tag != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tokenless_source_tag) }}
+          path: tokenless-source
+          persist-credentials: false
+
       - name: Download precompiled packages
         uses: actions/download-artifact@v4
         with:
@@ -290,12 +300,14 @@ jobs:
         env:
           COMPONENT: ${{ inputs.component }}
           VERSION: ${{ inputs.version }}
+          TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}
         run: |
           python3 .github/actions/prebuilt-rust-common/verify-artifacts.py \
             --directory /tmp/prebuilt-preview \
             --component "$COMPONENT" \
             --version "$VERSION" \
-            --layout actions
+            --layout actions \
+            --tokenless-source-root "$TOKENLESS_SOURCE_ROOT"
 
       - name: Download Tokenless Python wheels
         if: inputs.component == 'tokenless'
@@ -309,9 +321,11 @@ jobs:
         if: inputs.component == 'tokenless'
         env:
           VERSION: ${{ inputs.version }}
+          TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}
         run: |
           python3 .github/actions/build-tokenless-prebuilt/verify-wheels.py \
             --directory /tmp/python-wheels-preview \
             --version "$VERSION" \
             --layout aggregate \
+            --tokenless-source-root "$TOKENLESS_SOURCE_ROOT" \
             --write-checksums /tmp/python-wheels-preview/SHA256SUMS-python-wheels.txt

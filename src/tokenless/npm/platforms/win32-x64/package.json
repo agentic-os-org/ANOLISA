@@ -1,0 +1,16 @@
+{
+  "name": "@anolisa/tokenless-win32-x64",
+  "version": "0.9.0",
+  "private": true,
+  "description": "Token-Less native binaries for Windows x86_64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alibaba/anolisa",
+    "directory": "src/tokenless"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin/"],
+  "preferUnplugged": true
+}

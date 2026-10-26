@@ -90,12 +90,14 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "channel_dropped": [],
     }
     final_metrics = read_internal_metrics(directory / "internal-metrics.prom")
+    invalid_counters: set[str] = set()
     for key in drop_samples:
         value = numeric(final_metrics.get(key))
         if value is not None and value >= 0:
             drop_samples[key].append(value)
+        elif key in final_metrics:
+            invalid_counters.add(key)
     counter_samples = {"eviction_count": evictions, **drop_samples}
-    invalid_counters: set[str] = set()
     metrics = directory / "metrics.csv"
     if metrics.exists():
         with metrics.open(newline="") as handle:

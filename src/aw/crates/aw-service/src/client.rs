@@ -151,6 +151,64 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn discovery_rejects_daemons_without_idle_unbind_semantics() {
+        use std::os::unix::fs::PermissionsExt;
+        for version in [
+            "aw-service/v1alpha4",
+            "aw-service/v1alpha5",
+            "aw-service/v1alpha6",
+            VERSION,
+        ] {
+            let directory = tempfile::tempdir_in("/tmp").unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let state = directory.path().join("state");
+            let endpoint = crate::endpoint::Endpoint::bind(&state).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            std::thread::scope(|scope| {
+                let responder = scope.spawn(|| {
+                    let mut stream = loop {
+                        match endpoint.listener().accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline, "discovery did not connect");
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(error) => panic!("discovery accept: {error}"),
+                        }
+                    };
+                    let request: Request = ipc::read(&mut stream, deadline).unwrap();
+                    assert!(matches!(request.operation, Operation::Status));
+                    ipc::write(
+                        &mut stream,
+                        &Response {
+                            api_version: version.into(),
+                            identity: Identity {
+                                generation: "fixture-generation".into(),
+                                config_revision: "a".repeat(64),
+                            },
+                            result: Some(serde_json::json!({"bindings": 0})),
+                            error: None,
+                            audit_key: None,
+                        },
+                        deadline,
+                    )
+                    .unwrap();
+                });
+                let result = Client::connect(state.join("aw.sock"), deadline);
+                if version != VERSION {
+                    assert!(
+                        matches!(result, Err(crate::Error::Rejected(code)) if code == "protocol_version")
+                    );
+                } else {
+                    assert!(result.is_ok(), "current daemon must remain connectable");
+                }
+                responder.join().unwrap();
+            });
+        }
+    }
+
+    #[test]
     fn deep_native_values_are_rejected_before_serialization_or_connection() {
         let mut value = Value::Null;
         for _ in 0..256 {

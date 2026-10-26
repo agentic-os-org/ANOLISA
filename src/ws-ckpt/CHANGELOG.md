@@ -2,6 +2,36 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.6.0
+
+### Added
+- CI prebuilt packages for ws-ckpt (#7106)
+- Pagination for snapshot listings (#3451)
+- Reconciliation of interrupted cleanup operations (#3450)
+
+### Changed
+- Updated the English ws-ckpt README with restored sections (#6157)
+- Improved test coverage of the ops-log record writer (#3738)
+
+### Fixed
+- Fixed startup rollback recovery: restore rollback head, finish interrupted rollbacks, and limit repeated daemon restarts (#8570)
+- Fixed non-termination when the parent chain contains a cycle (#8467)
+- Cleaned up stranded config temp files (#3764)
+- Raised the openclaw CLI capture limit past 1 MiB (#4040)
+- Fixed btrfs creates under storage pressure (#7888)
+- Hardened cron locking: require the lock before writes and keep removal with its owner (#8273, #3755)
+- Logged failed recovery index saves (#3605)
+- Reused generated checkpoint identifiers (#4780)
+- Translated confirm prompts to English (#3930)
+- Isolated returned schedule arrays (#4674)
+- Refused line breaks in cron-interpolated values (#6774)
+- Parsed metadata before snapshotting (#6956)
+- Refused cwd-inside workspace updates in both plugins and surfaced init failures (#6216, #6217)
+- Hardened diff snapshot handling: isolate temp snapshots, preserve escaped paths, and reject malformed snapshot lists (#6198, #3558, #5695)
+- Re-armed the write watcher after rollback (#5054)
+- Preserved workspace metadata (#6930)
+- Bounded cleanup counts to the u32 range (#3808)
+
 ## 0.5.0
 
 ### Added

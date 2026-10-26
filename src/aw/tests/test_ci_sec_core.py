@@ -18,7 +18,7 @@ from native_qoder import validate_pin
 from native_acceptance import redact_logs
 from native_cleanup import remove_containers
 
-FIXTURE = AW / "crates/aw-service/tests/fixtures/sec_core"
+FIXTURE = AW / "crates/aw-cli/tests/fixtures/sec_core"
 sys.path.insert(0, str(FIXTURE))
 SPEC = importlib.util.spec_from_file_location("aw_sec_native", FIXTURE / "native.py")
 NATIVE = importlib.util.module_from_spec(SPEC)
@@ -372,6 +372,10 @@ class SecurityInventoryTests(GateFixture):
         for key in ("qoder_cli", "qoder_reload_cli"):
             pin = pins[key]
             validate_pin(pin)
+            for malformed in ([], {**pin, "downloads": {"x86_64": [], "aarch64": {}}}):
+                with self.subTest(key=key, malformed=malformed):
+                    with self.assertRaisesRegex(ValueError, "Qoder"):
+                        validate_pin(malformed)
             for mutation in ("checksum", "version", "url"):
                 edited = copy.deepcopy(pin)
                 if mutation == "version":

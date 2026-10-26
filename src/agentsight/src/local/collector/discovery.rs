@@ -70,6 +70,14 @@ static SESSION_SOURCES: &[SessionSource] = &[
         layout: Layout::PerProject,
         scan_subdirs: &[],
     },
+    SessionSource {
+        agent_id: "gemini-cli",
+        agent_name: "Gemini CLI",
+        icon: "✨",
+        dirs: &[".gemini/tmp"],
+        layout: Layout::PerProject,
+        scan_subdirs: &["chats"],
+    },
 ];
 
 /// A discovered local agent session file
@@ -285,6 +293,10 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
         let is_user = trimmed.contains(r#""type":"user""#) || trimmed.contains(r#""type": "user""#);
         let is_assistant =
             trimmed.contains(r#""type":"assistant""#) || trimmed.contains(r#""type": "assistant""#);
+        // Gemini CLI records name the assistant side `gemini` instead of
+        // `assistant`.
+        let is_gemini =
+            trimmed.contains(r#""type":"gemini""#) || trimmed.contains(r#""type": "gemini""#);
         // Codex rollouts are envelope records: the authoritative user input is
         // an event_msg/user_message payload and the assistant text rides in
         // response_item/message payloads with role "assistant".
@@ -298,6 +310,7 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
 
         if !is_user
             && !is_assistant
+            && !is_gemini
             && !is_codex_user
             && !is_codex_legacy_user
             && !is_codex_assistant
@@ -452,28 +465,39 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
 /// Extract the human-readable text of a user message event, with
 /// `<system-reminder>` blocks stripped.
 ///
-/// Two session schemas reach the listing: Claude-style `user` events carry
+/// Session schemas reaching the listing: Claude-style `user` events carry
 /// `message.content` (a string, or an array whose `text` blocks hold the
-/// input), while Codex `event_msg`/`user_message` envelopes carry
-/// `payload.message`. Legacy Codex role=user response items carry text blocks
-/// in `payload.content`. The caller decides whether that fallback is eligible.
+/// input), Gemini CLI user records carry top-level `content`, Codex
+/// `event_msg`/`user_message` envelopes carry `payload.message`. Legacy
+/// Codex role=user response items carry text blocks in `payload.content`.
+/// The caller decides whether that fallback is eligible.
 fn user_event_text(event: &serde_json::Value) -> Option<String> {
     let event_type = event.get("type").and_then(|v| v.as_str())?;
     match event_type {
         "user" => {
-            let content = event.pointer("/message/content")?;
+            let content = event
+                .pointer("/message/content")
+                // Gemini CLI user records carry the content at the top level
+                // instead of under `message`.
+                .or_else(|| gemini_user_content(event))?;
             match content {
                 serde_json::Value::String(s) => {
                     let stripped = strip_system_context(s);
-                    (!stripped.is_empty()).then_some(stripped)
+                    (!is_injected_user_text(&stripped)).then_some(stripped)
                 }
                 serde_json::Value::Array(blocks) => blocks.iter().find_map(|block| {
-                    if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+                    // Claude blocks are `{"type":"text","text":...}` while
+                    // Gemini parts are bare `{"text":...}`.
+                    if block
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t != "text")
+                    {
                         return None;
                     }
                     let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
                     let stripped = strip_system_context(text);
-                    (!stripped.is_empty()).then_some(stripped)
+                    (!is_injected_user_text(&stripped)).then_some(stripped)
                 }),
                 _ => None,
             }
@@ -506,6 +530,20 @@ fn user_event_text(event: &serde_json::Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Top-level `content` of a Gemini CLI user record, distinguished from
+/// Claude-style events by the record `id` and the missing `message` wrapper.
+fn gemini_user_content(event: &serde_json::Value) -> Option<&serde_json::Value> {
+    (event.get("id").is_some_and(|v| v.is_str()) && event.get("message").is_none())
+        .then(|| event.get("content"))
+        .flatten()
+}
+
+/// User text the CLI injects on its own (session/hook context) rather than
+/// typed by the human; such records must not become the listed first message.
+fn is_injected_user_text(text: &str) -> bool {
+    text.is_empty() || text.starts_with("<session_context>") || text.starts_with("<hook_context>")
 }
 
 /// Strip `<system-reminder>...</system-reminder>` blocks from text.
@@ -685,6 +723,68 @@ mod tests {
         unsafe { std::env::set_var("HOME", &home) };
         let sessions = discover_local_sessions();
         assert!(sessions.iter().any(|s| s.agent_id == "codex"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_discover_local_sessions_with_gemini_chats() {
+        let home = std::env::temp_dir().join("agentsight_disc_gemini_home");
+        let project = home.join(".gemini/tmp/demo-slug");
+        let chats = project.join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(project.join(".project_root"), "/home/u/demo-app\n").unwrap();
+        let session_file = chats.join("session-2026-08-03T10-00-ab12cd34.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"sessionId\":\"s-g1\",\"projectHash\":\"h\",\"startTime\":\"2026-08-03T10:00:00.000Z\"}\n",
+                "{\"id\":\"m1\",\"timestamp\":\"2026-08-03T10:00:01.000Z\",\"type\":\"user\",\"content\":\"review the auth flow\"}\n",
+                "{\"id\":\"m2\",\"timestamp\":\"2026-08-03T10:00:02.000Z\",\"type\":\"gemini\",\"content\":\"on it\"}\n",
+            ),
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded test, no other thread reads HOME.
+        unsafe { std::env::set_var("HOME", &home) };
+        let sessions = discover_local_sessions();
+        let session = sessions
+            .iter()
+            .find(|s| s.agent_id == "gemini-cli")
+            .expect("gemini session must be listed");
+        assert_eq!(session.session_id, "s-g1");
+        assert_eq!(session.agent_name, "Gemini CLI");
+        assert_eq!(session.first_message, "review the auth flow");
+        // One user record plus one gemini record.
+        assert_eq!(session.message_count, 2);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn gemini_listing_skips_injected_session_context() {
+        // The CLI logs an injected `<session_context>` user record before the
+        // first human turn; the listing must preview the real question instead.
+        let home = std::env::temp_dir().join("agentsight_disc_gemini_ctx_home");
+        let chats = home.join(".gemini/tmp/demo-slug/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(
+            chats.join("session-2026-08-03T11-00-ab12cd34.jsonl"),
+            concat!(
+                "{\"sessionId\":\"s-g2\",\"projectHash\":\"h\"}\n",
+                "{\"id\":\"c1\",\"timestamp\":\"2026-08-03T11:00:00.000Z\",\"type\":\"user\",\"content\":\"<session_context>workspace mounted</session_context>\"}\n",
+                "{\"id\":\"u1\",\"timestamp\":\"2026-08-03T11:00:01.000Z\",\"type\":\"user\",\"content\":\"real question\"}\n",
+            ),
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded test, no other thread reads HOME.
+        unsafe { std::env::set_var("HOME", &home) };
+        let sessions = discover_local_sessions();
+        let session = sessions
+            .iter()
+            .find(|s| s.agent_id == "gemini-cli")
+            .expect("the real user turn must keep the session listed");
+        assert_eq!(session.first_message, "real question");
+        assert_eq!(session.message_count, 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(all(test, target_os = "linux"))]
+mod package_leases;
+
 /// Collect configured Provider cards and optional public statistics in one snapshot.
 ///
 /// The trusted caller supplies the same user context as Agent launches. Only
@@ -202,7 +205,7 @@ fn query(
     let argv = registration["transport"]["argv"]
         .as_array()
         .ok_or("query_failed")?;
-    let command = aw_exec::CommandSpec {
+    let mut command = aw_exec::CommandSpec {
         program: argv[0].as_str().ok_or("query_failed")?.into(),
         args: argv[1..]
             .iter()
@@ -211,6 +214,8 @@ fn query(
         cwd: context.cwd.clone(),
         environment: context.environment.clone(),
     };
+    let _package_leases =
+        aw_exec::PackageLeases::acquire([&mut command]).map_err(|_| "query_failed")?;
     let exchange = |operation: &str| -> std::result::Result<Value, &'static str> {
         if Instant::now() >= deadline {
             return Err("query_timeout");

@@ -7,6 +7,9 @@ mod fixture;
 #[path = "host/timing.rs"]
 mod timing;
 
+#[path = "host/package_leases.rs"]
+mod package_leases;
+
 use aw_host::{Error, Failure, FailureAction, Host, Method};
 use fixture::{
     add_second_step, capabilities, event, Fixture, CLEANUP_ALLOWANCE, LITERAL_ARGUMENT, TIMEOUT,

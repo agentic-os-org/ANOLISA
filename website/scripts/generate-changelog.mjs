@@ -1,9 +1,9 @@
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
-import {exists, repoRoot, toPosix, walkFiles, writeGenerated} from './lib.mjs';
+import {exists, repoRoot, stripCopilotShellNavigation, toPosix, walkFiles, writeGenerated} from './lib.mjs';
 
 const componentChangelogs = [];
-for (const sourceRoot of ['src', 'distribution', 'deprecated']) {
+for (const sourceRoot of ['src', 'distribution']) {
   const root = path.join(repoRoot, sourceRoot);
   if (!(await exists(root))) continue;
   componentChangelogs.push(
@@ -24,7 +24,7 @@ function stripSourceLocaleLink(markdown) {
 }
 
 async function document(source, language) {
-  const markdown = stripSourceLocaleLink(await readFile(path.join(repoRoot, source), 'utf8'));
+  const markdown = stripCopilotShellNavigation(stripSourceLocaleLink(await readFile(path.join(repoRoot, source), 'utf8')));
   if (sourceLocaleLink.test(markdown)) {
     throw new Error(`${source}: source locale link leaked into generated changelog`);
   }

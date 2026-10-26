@@ -376,7 +376,7 @@ test-qwenwork-hooks:
 	python3 tests/test_resolve_agent_id.py
 
 test-qwenwork-install:
-	@echo "==> Testing QwenWork macOS sideloading..."
+	@echo "==> Testing QwenWork sideloading..."
 	python3 tests/test_qwenwork_install.py
 
 # The L1 runner records an `rtk_version` in benchmark_identity.json through a
@@ -813,7 +813,7 @@ npm-package: prepare-npm-native-binaries \
 	@echo "==> Packaging anolisa-tokenless for npm (current platform)..."
 	node npm/scripts/package-npm.js
 
-# Package all four prebuilt target directories from target/npm-prebuilt.
+# Package all five prebuilt target directories from target/npm-prebuilt.
 npm-package-all:
 	@echo "==> Packaging anolisa-tokenless for npm (all platforms)..."
 	node npm/scripts/package-npm.js --all
@@ -834,7 +834,7 @@ NPM_REGISTRY ?= https://registry.npmjs.org/
 npm-publish: npm-package-all
 	@echo "==> Publishing anolisa-tokenless packages to $(NPM_REGISTRY) (platform packages first, root last)..."
 	@set -e; \
-	for pkg in tokenless-linux-x64 tokenless-linux-arm64 tokenless-darwin-x64 tokenless-darwin-arm64 tokenless; do \
+	for pkg in tokenless-linux-x64 tokenless-linux-arm64 tokenless-darwin-x64 tokenless-darwin-arm64 tokenless-win32-x64 tokenless; do \
 		dir=npm/dist/$$pkg; \
 		name=$$(node -p "require('./$$dir/package.json').name"); \
 		ver=$$(node -p "require('./$$dir/package.json').version"); \

@@ -2,7 +2,7 @@
 
 [English](../../en/aw/native-agents.md)
 
-本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/README.md)。
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/aw/index.md)。
 
 AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互界面。在 `aw.yaml`
 中声明程序和事件后，AW 启动或复用本地服务，接通受支持的原生 Hook，并在 Agent
@@ -15,16 +15,16 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
-安装请从 [Preview 包指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)开始；源码构建与无需模型的策略验证见
+安装请从 [Preview 包指南](../../../user-guide/zh/aw/installation.md)开始；源码构建与无需模型的策略验证见
 [组件接入教程](integration.md)。随后使用下方共用配置验证
 原生工具行为。字段定义集中在[配置参考](configuration.md)。
 
 
-可选生命周期观测参见[通过 aw run 接入 AgentSight](../../../user-guide/zh/user-entrypoint/aw/observability.md)。
+可选生命周期观测参见[通过 aw run 接入 AgentSight](../../../user-guide/zh/aw/observability.md)。
 
 ## 安装 Preview
 
-使用 [Preview 包](../../../user-guide/zh/user-entrypoint/aw/installation.md) 安装并演示 AW + sec-core，无需编译。
+使用 [Preview 包](../../../user-guide/zh/aw/installation.md) 安装并演示 AW + sec-core，无需编译。
 下方源码构建说明面向开发者；Preview 尚非稳定发行。
 
 ## 当前支持范围
@@ -46,7 +46,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 | 通过 AW 启动 AgentScope SDK | ✅ 单个前台 Python worker 中[显式接线的公共工厂](#启动-agentscope-sdk) |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
 | 其他事件、跨框架 `ask`、输入改写或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
-| 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)，尚非稳定发行 |
+| 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](../../../user-guide/zh/aw/installation.md)，尚非稳定发行 |
 
 对于 Qoder，`tool.after` 映射到成功调用后的 `PostToolUse`。Qoder 的 `PostToolUseFailure`
 是独立事件，本 Adapter 尚未接入。原生 Hook 命令仍按 Qoder 的响应语义处理。
@@ -174,7 +174,7 @@ QwenPaw 正常退出时删除自己的临时插件。Hermes 保留已安装插�
 
 保留审计证据后，按[教程的清理步骤](integration.md#5-验证原生效果并清理)
 删除演示目录。框架 profile 单独保留。包卸载见
-[Preview 指南](packages.md#6-停止升级与卸载)。
+[Preview 指南](../../../user-guide/zh/aw/packages.md#6-停止升级与卸载)。
 
 ## 构建并启动 Qoder
 
@@ -183,7 +183,7 @@ AW 尚未通过 `anolisa install` 或 RPM 发布。开发者可以在 Linux 上�
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 qodercli --version
 target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
@@ -257,7 +257,7 @@ false（没有 block 命中），after 返回 true（observe）。把 before 命
 已有应用在**每个**公共工厂中使用 `AwBridge().create_agent(...)`，原样传入已有
 middleware 列表。可信参数注入应先于追加的 AW middleware。readiness 回执只
 覆盖所构造的 Agent，不覆盖其他工厂或直接 dispatch 路由。
-[工厂合同](../../../../src/aw/docs/design/agentscope-adapter_zh.md)说明顺序、预算、
+[工厂合同](../../../../src/aw/docs/design/zh/adapters/agentscope-adapter.md)说明顺序、预算、
 调用身份与覆盖边界。
 
 before 等待并可在工具副作用前阻断；after 等待一次 final `ToolResponse`，保留
@@ -278,7 +278,7 @@ native 和观察 Hook 不替换响应；只有最后一个已准入的结构化�
 PreTool 拒绝原始调用，向模型返回完整重试参数；每次新尝试重新经过原生权限和
 sec-core。带 RTK 归属的重试即使使用新 call ID 也不会重复压缩。PreTool 需独立安装
 RTK，PostTool 不依赖 RTK。文本槽适用条件、故障处理和遥测配置见
-[Tokenless 行为](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。无效的最终响应替换指令会报告故障并保留原结果。
+[Tokenless 行为](../../../user-guide/zh/aw/tokenless.md)。无效的最终响应替换指令会报告故障并保留原结果。
 
 ## 启动 QwenPaw
 
@@ -336,7 +336,7 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 
 ## 升级服务
 
-本版本使用本地协议 `aw-service/v1alpha4`。旧版 daemon 会在 Agent 绑定和回调前
+本版本使用本地协议 `aw-service/v1alpha7`。旧版 daemon 会在 Agent 绑定和回调前
 被拒绝，返回 `protocol_version`。替换可执行文件前，先退出其 Agent 会话，再用
 **旧版** `aw stop --config FILE`（或 `--socket ABSOLUTE_PATH`）停止每个旧服务；
 随后一起更新 CLI 和 daemon，再次启动。不要删除仍在使用的 socket 或审计历史。
@@ -373,11 +373,11 @@ event = json.load(sys.stdin)
 print(json.dumps(contains(event["tool"]["input"])))
 ```
 
-沿用[安装指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)中的前缀与路径，由工具生成完整 YAML，无需手工拼装
+沿用[安装指南](../../../user-guide/zh/aw/installation.md)中的前缀与路径，由工具生成完整 YAML，无需手工拼装
 Provider 和步骤。只提供所需 Agent 入口；本例声明两个框架：
 
 ```bash
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw-command.yaml" --state-dir "$AW_DEMO/command-state" \
   --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW" \
   --provider command --check /usr/bin/python3 --effect block \
@@ -432,7 +432,7 @@ Provider 协议，无需迁移。切换自定义规则时，将 transport argv �
 放到步骤中。切换配置前退出旧 Agent 会话并停止旧服务。旧 AW 二进制不接受新的
 缺省形式，回滚时保留原配置。
 
-`configure` 只新建私有文件，不覆盖已有文件。移除策略时，不传 `--provider`
+`aw config init` 只新建私有文件，不覆盖已有文件。移除策略时，不传 `--provider`
 （或传 `--provider none`）生成新的基础文档，退出旧 Agent、停止其服务后显式切换
 配置。Provider 与关联步骤一起移除；修改运行服务的文件不会触发重新加载。
 通用的已有 YAML 编辑不属于此命令。
@@ -455,7 +455,7 @@ Git 在工作目录与 checkout 中须解析为同一规范可执行文件。两
 或 `python -m` 入口。AW 使用该解释器进入同一个原生 CLI 进程，保留参数与工作
 目录。原生 profile 加载决定生效的 `HERMES_SAFE_MODE`，包括 profile `.env` 的
 覆盖；AW 拒绝 safe mode，并在 chat 调度工具前要求插件完成注册。先通过 Hermes 初始化 profile
-与模型账号。`aw install` 是显式的一次性原生 AW 插件安装：启用前备份原始配置，
+与模型账号。`aw agent connect` 是显式的一次性原生 AW 插件安装：启用前备份原始配置，
 保留未知配置字段，拒绝覆盖同名非 AW 插件。原生 YAML 写入器修改私有候选文件，
 AW 再与真实配置原子交换。命令报告初始字节备份 `backup` 与永久保留的
 `displaced` 文件（`<backup>.displaced`）；后者保留原 inode，包括已打开描述符
@@ -481,7 +481,7 @@ chat 的 `--help`/`-h` 会在插件就绪前退出，因此 AW 会在原生探�
 
 AW 升级可能改变随附插件的字节内容。启动或安装报告插件不匹配或缺少文件时，先停止
 Hermes 会话与插件写入者，检查 `<profile>/plugins/aw-native-hooks`，并将该目录
-移到 `<profile>/plugins` 之外备份。重新执行相同的 `aw install` 命令安装匹配文件；
+移到 `<profile>/plugins` 之外备份。重新执行相同的 `aw agent connect` 命令安装匹配文件；
 保留的目录可用于检查或回退。
 
 当 `providers` 和 `events` 为空时，AW 注册零个回调并正常启动。已有原生 Hook
@@ -501,7 +501,7 @@ Hermes 会话与插件写入者，检查 `<profile>/plugins/aw-native-hooks`，�
 同时必须留在原生回调超时范围内。
 
 ```bash
-target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+target/debug/aw agent connect --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
 target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -581,7 +581,7 @@ AW 保留该文件的其他字段和 Hook 条目，加入自己的回调，再�
 并且指向同一个 `aw.sock` 位置。
 
 服务保留启动配置快照，编辑 `aw.yaml` 不会热更新它。显式启用稳定桥接的实例可使用
-[空闲策略更新](../../../user-guide/zh/user-entrypoint/aw/configuration.md#更新预热实例)，更换实例 Host，服务身份不变。停用某份配置前，用原文件或
+[空闲策略更新](../../../user-guide/zh/aw/configuration.md#更新预热实例)，更换实例 Host，服务身份不变。停用某份配置前，用原文件或
 socket 停止相应服务；修改配置后的 auto 路径可能指向另一个服务。退出 Agent 不会
 停止其他会话或共享 daemon。本地端点是同用户访问边界，不提供 sandbox。
 
@@ -589,7 +589,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | --- | --- |
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 不支持 |
+| `aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 不支持 |
 | `aw update --config CURRENT --agent TARGET --policy NEXT` | 更新已启用稳定桥接的空闲实例；busy 拒绝且不排队 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
@@ -600,20 +600,23 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.9
 和 Hermes 官方提交 `952c941e` Adapter，以及显式 Claude SDK 0.2.88、Pi SDK 0.84.2
 与 AgentScope SDK 2.0.6 worker。
-`aw install` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，
+`aw agent connect` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，
 Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 拒绝此命令。
-该命令不安装 AW 包或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。
+该命令不安装 AW 包或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `agent connect`。
+旧的 `aw install --config FILE --agent TARGET [--native-profile PROFILE]` 语法
+保留相同的原生注册行为。软件安装使用 `aw install --prefix ABS_DIR --bundle ABS_DIR`；
+两组参数不能混用。
 
 | Adapter 专用参数 | 命令 | 当前支持情况 |
 | --- | --- | --- |
 | `--native-settings JSON_FILE` | `run` | Qoder：可选的附加 JSON 配置，与生成的 Hook 合并，原文件保持不变。OpenClaw：必填的现有原生 JSON 配置 |
-| `--native-profile PROFILE` | `run`、`install` | Hermes：`run` 和 `install` 必填的已有 profile 绝对路径。Qoder 和 OpenClaw 拒绝此参数 |
+| `--native-profile PROFILE` | `run`、`agent connect` | Hermes：`run` 和 `agent connect` 必填的已有 profile 绝对路径。Qoder 和 OpenClaw 拒绝此参数 |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw：必填的原生状态目录绝对路径。Qoder 拒绝此参数，它不是 AW 服务的 `--state-dir` |
 
 公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。Pi、Claude SDK
 和 AgentScope SDK 拒绝这些原生覆盖参数。QwenPaw 也拒绝它们，使用 `QWENPAW_WORKING_DIR`。
 受支持的 AW 参数放在 `--` 前，之后的参数
-按字面量交给 Agent；`install` 不接受 Agent 参数。用 `aw --help` 查看命令格式
+按字面量交给 Agent；`agent connect` 不接受 Agent 参数。用 `aw --help` 查看命令格式
 和当前支持范围。
 
 源码构建时将 `aw` 替换为 `target/debug/aw`。`aw hook` 是启动器生成的内部回调，
@@ -635,7 +638,7 @@ profile，并通过 `aw run` 启动所选 Agent；Dockerfile 无法保留活跃�
 | `<state_dir>/journal/` | 需要跨容器重建保留执行历史时持久化；本版本审计固定开启且仅保存元数据 |
 | Socket、锁、`launch-*` 和会话绑定 | 属于运行时产物，不能恢复会话；每次服务/Agent 启动建立新的运行状态 |
 | 原生 profile、凭据、会话与工作区 | 按所选框架的要求保留，不属于 AW 审计数据 |
-| sec-core 后端数据 | 由 sec-core 独立管理，见 [Preview 后端配置](packages.md#2-按需安装并启动-sec-core) |
+| sec-core 后端数据 | 由 sec-core 独立管理，见 [Preview 后端配置](../../../user-guide/zh/aw/packages.md#2-按需安装并启动-sec-core) |
 
 即使不跨容器保留历史，AW 也需要可写的本地状态目录。需要持久历史时，将
 `daemon.state_dir` 设置为支持 `fsync` 的本地持久文件系统上的绝对路径，保留
@@ -713,12 +716,12 @@ rm -r -- "$AW_DEMO_ROOT"
 或重放旧事件。
 
 [配置参考](configuration.md)列出完整字段和事件名。
-[本地服务合同](../../../../src/aw/docs/design/local-service_zh.md)面向 Adapter 开发者，
+[本地服务合同](../../../../src/aw/docs/design/zh/runtime/local-service.md)面向 Adapter 开发者，
 说明操作 JSON、截止时间和生命周期。
 
-sec-core 扫描通过独立的 `aw-provider-sec-core` 接入，见[配置与使用](../../../user-guide/zh/user-entrypoint/aw/security.md)。
+sec-core 扫描通过独立的 `aw-provider-sec-core` 接入，见[配置与使用](../../../user-guide/zh/aw/security.md)。
 
-模型可见的 PostTool 压缩使用可选的 [Tokenless Provider](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。
+模型可见的 PostTool 压缩使用可选的 [Tokenless Provider](../../../user-guide/zh/aw/tokenless.md)。
 
 ## 启动 Pi SDK worker
 
@@ -768,7 +771,7 @@ Tokenless 使用[共享优化示例](https://github.com/agentic-os-org/ANOLISA/b
 文本块并保留 SDK metadata；report 故障保留原结果。原生 Hook 不能提供替换。
 AW 每次生成 invocation UUID 配对，原工具 ID 保留于 `native`，提前拒绝时关闭事件。
 精确 callback、身份、取消、容量与可
-复现的 SDK 验收见 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/pi-adapter_zh.md)。
+复现的 SDK 验收见 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/pi-adapter.md)。
 修改策略前退出 Agent 并停止原服务；审计状态按同样的本地服务清理流程保留或删除。
 
 ## 启动 Claude SDK worker
@@ -826,7 +829,7 @@ launcher binding 中运行多个 SDK clients/任务；Gunicorn 和业务部署�
 CLI 2.1.161 对 SDK MCP `isError: true` 响应仍发 `PostToolUse`，callback 数据不含
 该 flag，因此 after 观察不能分类所有业务失败。原生 Bash 执行失败使用
 `PostToolUseFailure`。身份、取消与验证限制见
-[Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/claude-sdk-adapter_zh.md)。
+[Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-sdk-adapter.md)。
 
 无模型的原生采纳验证使用真实 SDK/bundled CLI，连接本地确定 HTTP fixture。
 先构建 AW，再运行测试；测试创建独立 profile，私有 UDS 目录也位于 output 下，
@@ -842,9 +845,9 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py --aw target/de
 工厂要求 `setting_sources=[]`、无 `settings` 覆盖、无 CLI plugins。`extra_args`
 仅允许 `strict-mcp-config: None`；SDK 原生 `strict_mcp_config` 也保留。模型和认证
 配置不变。通过 settings sources 发现项目 skills 的应用，需要先明确接入设计才能
-使用该首版受限 Bridge。每个前台 worker 只允许创建一个 client。
+使用该首版受限 Bridge。直接任务 worker 模式每进程只允许一个 client；多个任务客户端使用下文显式常驻入口。
 
-当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw install` 对该
+当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
 
 ### 启用 Bash PreTool 与 PostTool 优化
@@ -852,12 +855,12 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
 选择 `claude` target，替换 executable、worker 与状态目录的绝对路径。源码示例
 `claude-worker.py` 除 echo 工具外显式开放并允许原生 Bash；组合业务工厂时保留应用
-自己的权限策略。Provider 安装、RTK 要求与统计设置见 [Tokenless 指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。
+自己的权限策略。Provider 安装、RTK 要求与统计设置见 [Tokenless 指南](../../../user-guide/zh/aw/tokenless.md)。
 
 PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
 PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一
 最终 `replace_result` 前，看到原始结果；stderr 与其余原生字段保留。失败/report
-保留原始结果。MCP tools 仍可观察，但原生回调不能可靠报告业务错误状态，因此不压缩。
+保留原始结果。该原生回调路径的 MCP tools 仍可观察，缺少可靠业务错误状态；使用下文受管 MCP 工厂获得结果压缩接点。
 
 构建 AW、其 Tokenless Provider 与当前 Tokenless Protocol v2 CLI 后，扩展原生验收
 （PATH 中需要 RTK）：
@@ -869,3 +872,170 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless ../tokenless/target/debug/tokenless \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
+
+## 启动 Qoder SDK Worker
+
+使用 `adapter: qoder-sdk`、`@qoder-ai/qoder-agent-sdk@1.0.54`、随包提供的
+Worker 1.1.74（国际版）和 Node.js 22 或更新版本。将 SDK 安装到 Worker 的应用目录，
+在现有 AW 配置中设置目标：
+
+```yaml
+agents:
+  sdk:
+    adapter: qoder-sdk
+    argv: [node, /absolute/application/worker.mjs]
+```
+
+Worker 显式选择 AW 的 daemon 和 Query 工厂；同一个 Worker 也可以通过 Node 和原生 SDK 工厂独立启动：
+
+```javascript
+import { startDaemon, query, accessTokenFromEnv } from "@qoder-ai/qoder-agent-sdk";
+import { pathToFileURL } from "node:url";
+
+const prompt = process.argv[2];
+if (!prompt) throw new Error("A prompt is required");
+const bridge = process.env.AW_QODER_SDK_BRIDGE
+  ? await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE)) : undefined;
+const makeQuery = bridge ? bridge.createQuery : async (request) => query(request);
+const makeDaemon = bridge ? bridge.startDaemon : startDaemon;
+const daemon = await makeDaemon({ auth: accessTokenFromEnv() });
+let current;
+try {
+  current = await makeQuery({ prompt, options: {
+    daemon, cwd: process.cwd(), settingSources: [],
+  } });
+  for await (const message of current) console.log(JSON.stringify(message));
+} finally {
+  await current?.return();
+  await daemon.stop();
+}
+```
+
+执行 `aw run --config aw.yaml --agent sdk -- "你的请求"`，或执行
+`node /absolute/application/worker.mjs "你的请求"` 走不启用 AW 的原生启动方式。
+沿用 SDK 认证方式，不把凭据写入配置文件。调用方启动和停止 daemon，并关闭每个 Query。
+通过 AW 启动时，使用 Bridge 的两个工厂：`startDaemon()` 在启动固定版本 daemon 前
+校验运行时选择和禁用 Hook 的环境变量；`createQuery()` 拒绝原生 SDK 直接创建的
+daemon，因为无法核验它的启动配置。仅启动 daemon 不会报告 Query 就绪。
+AW 沿用前台 Worker 生命周期，在 Worker 退出时释放自己的绑定。
+
+AW 在 Query 初始化前注册回调，SDK 握手成功后报告就绪。
+`tool.before` 支持观察和拒绝；`tool.after` 观察原生工具成功和失败的结果。
+原生权限拒绝保留优先级，结果替换在准入时拒绝。现有 SDK Hook 保留；参数改写和权限
+Hook 覆盖不受支持，防止实际执行参数与检查参数不同。
+
+使用 `settingSources: []`，不要传入 `settings`、插件、额外 CLI 参数或运行时 transport
+覆盖。进程环境和启动环境中的 Hook 禁用标志按 bundled Worker 的去除首尾空白
+语义解析并拒绝。所有接入 AW 的 Query 使用绑定的工作目录。回调按 Query 注册；同一 daemon 上
+直接使用原生 SDK 创建的 Query 不受修改，**也不受 AW 保护**。同一 AW 实例内接入的
+Query 共用配置的策略，不支持分别选择 session 策略。注册后通过 `applyFlagSettings` 修改 Hook 路由不在支持范围内；
+AW 不保证修改后的策略执行和审计完整性。
+
+需要在不重启 daemon 的情况下更新已有 Query 时，使用
+`aw run --config aw.yaml --agent sdk --reloadable` 显式启用。沿用同一个
+`createQuery` 工厂和调用方管理的 `startDaemon()`；异步输入迭代器可让 Query
+在请求之间保持可用。使用 `aw update --config aw.yaml --agent sdk --policy desired.yaml`
+显式激活完整候选策略；不增加 SDK 专用命令或服务 RPC。
+
+实例内所有受管 Query 必须空闲。已提交或排队的消息、模型等待、原生回调、Query 关闭
+清理期间，实例都保持 busy。结果消息本身不是空闲确认：可检查
+`aw service status --config aw.yaml`，在 requests 回到零后重新显式更新。
+失败的更新保留原活动策略。即使初始策略没有 Hook，也会注册稳定回调；新增和移除
+会作用于已有 Query 的下一次请求，原生权限保持优先。
+
+可更新 Query 要求显式 daemon 和 `msg_lifecycle_v1` 能力。桥接等待原生命令队列
+完成后释放请求准入；提前 return 或出错时，等待原生 `close()` 和仍在执行的回调结束。
+普通 Bash 命令超时后可能自动转入后台。子进程退出且原生完成通知回合清理结束之前，
+对应请求持续保持 busy。提前关闭 Query 时，先通过原生 `stopTask()` 停止这些任务，
+再释放请求准入。
+通过 prompt 输入或 `streamInput` 提交工作。此模式拒绝 goal 选项、`setGoal`、
+`resumeGoal`、host-action 调度、`backgroundTasks`、`CreateGoal`、`ScheduleWakeup`、
+`CronCreate` 和 `run_in_background`
+工具，因为这些入口可以在准入边界之外调度工作。定时器触发的回合绕过输入迭代器，
+因此不支持创建定时唤醒或 cron 任务；`CronList` 和 `CronDelete` 仍可使用。
+Worker 1.1.74 的 `UpdateGoal` 只能完成或
+阻塞已有 goal，不能激活 goal，因此仍可使用。
+创建 Query 时还会拒绝自定义 `agents` 中的 `background: true` 或 `isolation: "worktree"`。
+`Agent` 工具传入 `isolation: "worktree"` 也会在执行前被拒绝，因为 worktree 执行不属于
+支持的绑定边界。前台定义和默认隔离的 Agent 调用仍可使用。普通 `aw run` 保留原 SDK 路径。此接入不提供外部 PID attach/detach、按 session 独立选择 AW 策略或 steer。
+
+普通模式下，Worker 1.1.74 的 worktree 子代理回调仍携带父 Query 的 `cwd` 和子代理
+`agent_id`，而工具实际在 worktree 中执行。AW 能观察到这些回调，但不会重建实际执行
+工作目录。依赖该目录的策略不支持 worktree 执行；普通模式不会在创建 Query 时拒绝它。
+可更新模式会按上述规则在执行前拒绝 worktree。
+
+可更新桥接会持续读取原生输出，以便在应用暂停读取时仍能观察清理完成。
+输出缓冲区没有固定上限：提交工作期间应持续消费 Query 输出，收到 result 后也应继续读取。
+若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
+丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
+
+上文 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
+request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
+记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
+并发提交量；策略更新不会清空关联历史。
+
+## Pi 和 Claude SDK 常驻宿主
+
+镜像安装相互匹配的 AW、Provider 和固定版本 SDK。使用
+[共用配置示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.resident-sdk.yaml)，
+替换部署路径后选择目标：
+
+```bash
+aw run --config /etc/aw/aw.yaml --agent claude
+aw run --config /etc/aw/aw.yaml --agent pi
+```
+
+Claude target argv 使用应用的 Python 解释器，后接 `-m aw_claude -- -m application`。
+前台 Gunicorn 可使用 `-m aw_claude -- -m gunicorn -c conf/gunicorn.py main:app`，客户端
+在 fork 后的 worker 内创建。公共工厂接入方式：
+
+```python
+from aw_claude import create_client
+
+client = create_client(options)
+try:
+    await client.connect()
+    await client.query(prompt)
+    async for message in client.receive_response():
+        yield message
+finally:
+    await client.disconnect()
+```
+
+每轮响应和回调排空后可在同一客户端继续 query，保留会话；resume/session-store 继续可用。
+并发工作使用独立客户端，分别使用自己的 cwd/env。每次 query 接受字符串或单消息的有限 AsyncIterable，多消息输入在发送前被拒绝；连续轮次逐次 query。
+`receive_response()` 和 `receive_messages()` 都在回调排空后交付 `ResultMessage`；
+缺少该消息的 EOF 会报错。保留 `finally` 中的 `disconnect()`，确保未完成的 query 执行 interrupt。
+
+进程内 MCP 同时从 `aw_claude` 导入 `create_sdk_mcp_server`，每客户端创建新 server，
+保留 SDK tool 定义和业务闭包。[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md) 说明成功单文本替换、可靠错误状态及明确关联。
+
+常驻 Pi 和 Claude host 会在发布 ready 前拒绝启用 AgentSight evidence 的配置。
+常驻 host 可设置 evidence `mode: off`；旧的任务模式继续支持 evidence。
+
+Pi 保留已有 SDK session 工厂，增加常驻入口：
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd /* application model/tools/options */ });
+}
+export async function runWorker({ withSession }) {
+  await serveRequests(async (request) => {
+    return withSession({ cwd: request.workspace, environment: request.environment },
+      async (session) => session.prompt(request.prompt));
+  });
+}
+```
+
+serveRequests 为业务服务，在工厂返回前配置业务回调。任务完成即关闭 session，同一 session
+并发 prompt 会被拒绝；其他路径也必须经过公共工厂。
+
+示例组合自定义 Hook、sec-core Bash 扫描及 Tokenless PreTool/PostTool。需要单独启动
+sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要明确的安全语义。常驻模式
+在回调错误时停止任务，包括 on_error: report；正常策略拒绝沿用原生语义。Claude 中断无法
+确认时会终止 AW 的自有前台进程组，部署需配置监督器重启。发送退出信号前先排空请求，
+并设置目标的 `shutdown_grace_ms` 为应用剩余清理留出时间。外层 launcher 从首次转发
+退出信号到开始强制清理，默认给予两秒宽限期。
+作用范围和限制见[退出宽限期](../../../user-guide/zh/aw/configuration.md#设置-agent-退出宽限期)。
+Schema/BeforeModel、Retrieve 的请求/效果准入和授权依赖见
+[常驻合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/resident-sdk.md)。

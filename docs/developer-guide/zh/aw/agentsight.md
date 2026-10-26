@@ -2,7 +2,7 @@
 
 [English](../../en/aw/agentsight.md)
 
-本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/observability.md)。
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/aw/observability.md)。
 
 配置一次可选 AgentSight 来源，随后使用 `aw run` 自动关联原生回调并读取有界证据。
 不要求动作 Provider 或 eBPF。来源不可用时，AW 仍保留本地审计。本功能不启用语义评估。
@@ -12,13 +12,13 @@ Pi 保留已有原生策略能力；其纯观测回调及可信来源关联需�
 
 ## 前提与配置
 
-按 [Preview 安装指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)安装 AW。client、回调与 daemon 必须来自支持
-`aw-service/v1alpha4` 的同一构建。升级前先退出所属会话，用旧二进制停止旧 daemon，
+按 [Preview 安装指南](../../../user-guide/zh/aw/installation.md)安装 AW。client、回调与 daemon 必须来自支持
+`aw-service/v1alpha7` 的同一构建。升级前先退出所属会话，用旧二进制停止旧 daemon，
 保留 Journal 历史。Provider stdio 仍使用 `aw-provider/v1alpha1`。
 
 AgentSight 查询服务由外部独立管理，并已开启认证。两种传输均校验公共 auth-status
 响应和 ATIF-v1.7，不调用 `/health`，不按产品版本准入；来源产品版本未知，为 null。查询服务在线不能证明采集器或 eBPF 探针就绪，参见
-[AgentSight 部署](../../../user-guide/zh/agent-observability/agentsight/deployment.md)。
+[AgentSight 部署](../../../user-guide/zh/agentsight/deployment.md)。
 
 在现有 `spec.agents.<target>` 下增加以下块。来源配置属于该 target，回调请求不能
 替换它。以下字段除 `mode` 外均为必填，省略 mode 时使用 `auto`。HTTPS 还要求
@@ -57,7 +57,7 @@ HTTPS 需增加 `token_file: /absolute/private/agentsight-token`。文件必须�
 ## 运行与查看
 
 正常启动配置目标，在另一终端查看同一个服务。示例使用已有 Qoder target，其他框架
-沿用各自的[原生启动参数](../../../user-guide/zh/user-entrypoint/aw/README.md)。
+沿用各自的[原生启动参数](../../../user-guide/zh/aw/index.md)。
 
 ```bash
 aw run --config ./aw.yaml --agent qoder
@@ -74,7 +74,7 @@ session 在可信回调到达后关联，没有回调的运行可以成功退出
 
 每个实例只有一个 worker、两个排队候选和一个有界投影。每个实例最多观测 256 个
 回调，超额进入 `gaps`，已有动作继续执行。查询还受原始回调截止时间限制。重复
-回调不增加读取。历史按精确原生 session 和[明确的框架名称合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/evidence-context_zh.md#身份关联)关联，不推断进程身份。
+回调不增加读取。历史按精确原生 session 和[明确的框架名称合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/runtime/evidence-context.md#身份关联)关联，不推断进程身份。
 并发冲突实例得到 `source_session_conflict`；首个实例完成收尾后，恢复运行可以将
 同一 session 关联为历史证据。
 

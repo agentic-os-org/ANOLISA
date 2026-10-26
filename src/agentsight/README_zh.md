@@ -353,7 +353,7 @@ Dashboard 访问信息时需要使用 `sudo`。启动前台 tracer 前也要先�
 如需在 Kubernetes 中进行节点级采集，使用 `src/agentsight/packaging/` 下的
 DaemonSet 清单与运行时镜像（`k8s/daemonset.yaml` 与 `docker/Dockerfile`）。
 前置条件与验证步骤见
-[部署指南](../../docs/user-guide/zh/agent-observability/agentsight/deployment.md#kubernetes-daemonset节点级)。
+[部署指南](../../docs/user-guide/zh/agentsight/deployment.md#kubernetes-daemonset节点级)。
 
 ### 从源码构建
 
@@ -454,7 +454,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 通过 checkpoint gate 后才按容量淘汰；物理占用超过阈值时，以逻辑占用降至 90% 为目标。自动维护不执行
 `VACUUM`，释放页留在 freelist 供后续写入复用。Dashboard 设置页会展示策略、容量、覆盖范围与 worker
 健康状态，但不返回数据库路径。详见
-[配置指南](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#sqlite-存储策略)。
+[配置指南](../../docs/user-guide/zh/agentsight/configuration.md#sqlite-存储策略)。
 
 ### 功能开关（`features`）
 
@@ -502,7 +502,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 `metadata_only=true`；硬字节上限仍可强制回收。Probe 与 FFI 队列同时执行条数和字节限额，
 并记录被拒绝的事件数。这些预算约束保留的 payload；评估进程 RSS 时，
 还应计入 ring buffer、解码器工作内存及 allocator 开销。超时、raw 捕获与过载语义见
-[配置参考](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#运行时上限)。
+[配置参考](../../docs/user-guide/zh/agentsight/configuration.md#运行时上限)。
 
 配置 schema v5 随包提供上述默认值。启动升级时会备份并整体替换旧配置，自定义规则与设置需从备份恢复。
 实现说明见 [HTTP payload 所有权与内存限额](docs/design/payload-memory_zh.md)。
@@ -544,7 +544,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 ## ATIF 导出
 
 使用 `scripts/batch-analyze.py --export-atif DIRECTORY` 可在本地保存转换后的 Claude/Qoder ATIF，无需启动分析器。
-用法和限制见 [CLI 参考](../../docs/user-guide/zh/agent-observability/agentsight/cli-reference.md)。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
 
 ## 支持的 LLM 提供商
 
@@ -558,7 +558,7 @@ Token 解析支持多种 LLM API 格式：
 ## 批量分析并发
 
 批处理脚本可显式启用 `--jobs 1..8`（默认 1），限制并发调用数，并按原始顺序输出结果。
-用法和限制见 [CLI 参考](../../docs/user-guide/zh/agent-observability/agentsight/cli-reference.md)。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
 
 ## 项目起源
 
@@ -568,4 +568,4 @@ Token 解析支持多种 LLM API 格式：
 
 Apache License 2.0 — 详见 [LICENSE](../../LICENSE)。
 
-可通过可选的 `tokenless_api` 配置记录远程 Tokenless 统计数据，详见[配置](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#tokenless-统计-api)。
+可通过可选的 `tokenless_api` 配置记录远程 Tokenless 统计数据，详见[配置](../../docs/user-guide/zh/agentsight/configuration.md#tokenless-统计-api)。

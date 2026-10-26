@@ -50,10 +50,13 @@ pub fn detect_provider_from_path(path: &str) -> Option<Provider> {
 /// Whether a message carries a content block only the Anthropic schema has.
 ///
 /// `tool_result`, `tool_use`, `thinking` and `redacted_thinking` are Anthropic
-/// Messages block types; the OpenAI-compatible schema spells the same
-/// information with `tool_calls`, `tool_call_id` and plain `text` /
-/// `image_url` parts, so one of these blocks is proof of the protocol no
-/// matter which path carried it.
+/// Messages block types, and so are the provider-side spellings the message
+/// parser aliases onto them (`server_tool_use`, `mcp_tool_use`,
+/// `web_search_tool_result`, `web_fetch_tool_result`, the code-execution
+/// results, `tool_search_tool_result`, `mcp_tool_result`); the
+/// OpenAI-compatible schema spells the same information with `tool_calls`,
+/// `tool_call_id` and plain `text` / `image_url` parts, so one of these blocks
+/// is proof of the protocol no matter which path carried it.
 fn has_anthropic_block(message: &Value) -> bool {
     message
         .get("content")
@@ -62,7 +65,21 @@ fn has_anthropic_block(message: &Value) -> bool {
             blocks.iter().any(|block| {
                 matches!(
                     block.get("type").and_then(|t| t.as_str()),
-                    Some("tool_result" | "tool_use" | "thinking" | "redacted_thinking")
+                    Some(
+                        "tool_result"
+                            | "tool_use"
+                            | "thinking"
+                            | "redacted_thinking"
+                            | "server_tool_use"
+                            | "mcp_tool_use"
+                            | "web_search_tool_result"
+                            | "web_fetch_tool_result"
+                            | "code_execution_tool_result"
+                            | "bash_code_execution_tool_result"
+                            | "text_editor_code_execution_tool_result"
+                            | "tool_search_tool_result"
+                            | "mcp_tool_result"
+                    )
                 )
             })
         })
@@ -291,6 +308,76 @@ mod tests {
             detect_provider("/compatible-mode/v1/messages", Some(&request)),
             Some(Provider::Anthropic)
         );
+    }
+
+    /// The server-tool spellings are Anthropic block types too, and they are
+    /// the ones a search-only turn is made of: the assistant turn holds
+    /// `server_tool_use` and the user turn holds the matching
+    /// `web_search_tool_result`. The block list here omitted them, so on a
+    /// compatible-mode path such a request fell through to the OpenAI
+    /// default; the OpenAI reader knows only `text` parts, so the whole
+    /// search round — the call and the result the answer was built from —
+    /// vanished from the extracted token data.
+    #[test]
+    fn test_detect_provider_from_json_server_tool_without_system() {
+        let request = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "search for rust 2026"},
+                {"role": "assistant", "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                     "input": {"query": "rust 2026"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+                     "content": [{"type": "web_search_result", "url": "https://example.com"}]}
+                ]}
+            ]
+        });
+        assert_eq!(
+            detect_provider_from_json(&request),
+            Some(Provider::Anthropic),
+            "a server-tool block in a system-less request still names the protocol"
+        );
+        assert_eq!(
+            detect_provider("/compatible-mode/v1/messages", Some(&request)),
+            Some(Provider::Anthropic)
+        );
+    }
+
+    /// Each server-tool spelling names the protocol on its own: a request
+    /// whose only protocol-specific block is that one still detects as
+    /// Anthropic through the whole detector.
+    #[test]
+    fn test_detect_provider_from_json_each_server_tool_block() {
+        for block_type in [
+            "server_tool_use",
+            "mcp_tool_use",
+            "web_search_tool_result",
+            "web_fetch_tool_result",
+            "code_execution_tool_result",
+            "bash_code_execution_tool_result",
+            "text_editor_code_execution_tool_result",
+            "tool_search_tool_result",
+            "mcp_tool_result",
+        ] {
+            let request = serde_json::json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "user", "content": "go on"},
+                    {"role": "assistant", "content": [
+                        {"type": block_type, "id": "srvtoolu_1"}
+                    ]}
+                ]
+            });
+            assert_eq!(
+                detect_provider("/compatible-mode/v1/messages", Some(&request)),
+                Some(Provider::Anthropic),
+                "a lone {block_type} block names the protocol"
+            );
+        }
     }
 
     #[test]

@@ -219,6 +219,19 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "unpacked wheel"):
                 self.sdk()
 
+    def test_packaged_rtk_uses_the_platform_executable_name(self) -> None:
+        package = Path(self.temporary_directory.name) / "package"
+        (package / "_bin").mkdir(parents=True)
+        for platform, name in (("win32", "rtk.exe"), ("linux", "rtk"), ("darwin", "rtk")):
+            with self.subTest(platform=platform):
+                executable = package / "_bin" / name
+                executable.touch(mode=0o755)
+                with patch("sys.platform", platform), patch(
+                    "anolisa_tokenless.sdk.files", return_value=package
+                ):
+                    self.assertEqual(self.sdk()._rtk_path, executable)
+                executable.unlink()
+
     async def test_pre_tool_uses_core_rewrite_and_preserves_input(self) -> None:
         sdk = self.sdk()
         original_arguments = {"command": "grep needle file.txt", "other": [1]}

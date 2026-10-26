@@ -46,7 +46,7 @@
 # runs. The shared adapter directory is only recorded in the receipt when this
 # installer owns it; a tree an anolisa component install or a direct
 # `npm install -g` put there is restored untouched and stays out of the receipt.
-# See docs/user-guide/{en,zh}/token-saving/tokenless/QUICKSTART.md for the
+# See docs/user-guide/{en,zh}/tokenless/index.md for the
 # adapter-enable path that matches each method.
 
 set -euo pipefail

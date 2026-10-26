@@ -2,15 +2,15 @@
 
 use crate::{
     adapter::{
-        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        NativeContext, PreparedLaunch, Readiness,
+        self, Adapter, HookOutput, LaunchContext, LaunchInput, LaunchPlan, NativeContext,
+        PreparedLaunch, Readiness,
     },
     Exit, Result,
 };
 use aw_provider::admission::AdapterCapabilities as Capabilities;
 use aw_provider::admission::AdmittedStep;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, time::Duration};
+use std::{fs, time::Duration};
 
 pub(crate) struct ClaudeSdk;
 struct Prepared {
@@ -46,51 +46,12 @@ impl Adapter for ClaudeSdk {
         Ok(Box::new(Prepared { input }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
-        let name = native["hook_event_name"].as_str();
-        if !matches!(
-            (event, name),
-            ("tool.before", Some("PreToolUse"))
-                | ("tool.after", Some("PostToolUse" | "PostToolUseFailure"))
-        ) {
-            return Err("Claude SDK event differs from its callback route".into());
+        if native.get("aw_source").is_some() {
+            return super::claude_mcp::normalize(binding, event, native);
         }
-        let id = |value: &Value| -> Result<String> {
-            value
-                .as_str()
-                .filter(|s| !s.trim().is_empty() && s.len() <= 512)
-                .map(str::to_owned)
-                .ok_or_else(|| "Claude SDK requires bounded native identities".into())
-        };
-        let session = id(&native["session_id"])?;
-        let call = id(&native["tool_use_id"])?;
-        let tool = id(&native["tool_name"])?;
-        if native["cwd"].as_str() != binding.cwd.to_str() || !native["tool_input"].is_object() {
-            return Err("Claude SDK callback requires bound cwd and object tool_input".into());
-        }
-        let result = match name {
-            Some("PostToolUse") => native
-                .get("tool_response")
-                .ok_or("Claude success callback requires tool_response")?
-                .clone(),
-            Some("PostToolUseFailure") => {
-                if !native["error"].is_string() {
-                    return Err("Claude failure callback requires error".into());
-                }
-                json!({"is_error": true, "error": native["error"], "is_interrupt": native["is_interrupt"]})
-            }
-            _ => Value::Null,
-        };
-        let standard = match tool.as_str() {
-            "Bash" => "bash",
-            "Read" => "file_read",
-            "Write" | "Edit" => "file_write",
-            _ => &tool,
-        };
-        Ok(
-            json!({"name": event, "agent": {"adapter": "claude-sdk", "binding_id": binding.target, "instance_id": binding.instance_id}, "session_id": session,
-            "tool": {"name": standard, "native_name": tool, "call_id": call, "input": native["tool_input"], "result": result}, "native": native}),
-        )
+        super::sdk_tools::normalize_tools(binding, event, native, "claude-sdk")
     }
+
     fn reply(&self, blocked: bool) -> HookOutput {
         HookOutput {
             exit: Exit::Code(if blocked { 2 } else { 0 }),
@@ -104,10 +65,10 @@ impl PreparedLaunch for Prepared {
         super::super::adapter::catalog::CLAUDE_SDK.capabilities("0.2.88", "sdk-worker")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        routes(&self.input.document, steps).map(|_| ())
+        super::sdk_tools::routes(&self.input.document, steps).map(|_| ())
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (events, hooks) = routes(&self.input.document, context.steps)?;
+        let (events, hooks) = super::sdk_tools::routes(&self.input.document, context.steps)?;
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
@@ -116,7 +77,36 @@ impl PreparedLaunch for Prepared {
             "aw_claude.py",
             include_bytes!("../../native/claude-sdk/aw_claude.py"),
         )?;
-        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "hooks": hooks}))?)?;
+        context.files.write(
+            "aw_scope.py",
+            include_bytes!("../../native/claude-sdk/aw_scope.py"),
+        )?;
+        context.files.write(
+            "aw_resident.py",
+            include_bytes!("../../native/claude-sdk/aw_resident.py"),
+        )?;
+        context.files.write(
+            "aw_mcp.py",
+            include_bytes!("../../native/claude-sdk/aw_mcp.py"),
+        )?;
+        context.files.write(
+            "aw_invocations.py",
+            include_bytes!("../../native/claude-sdk/aw_invocations.py"),
+        )?;
+        context.files.write(
+            "aw_model.py",
+            include_bytes!("../../native/claude-sdk/aw_model.py"),
+        )?;
+        context.files.write(
+            "aw_model_stream.py",
+            include_bytes!("../../native/claude-sdk/aw_model_stream.py"),
+        )?;
+        context.files.write(
+            "aw_transport.py",
+            include_bytes!("../../native/claude-sdk/aw_transport.py"),
+        )?;
+        let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
+        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "hooks": hooks}))?)?;
         let mut command = self.input.command.clone();
         let mut paths = vec![context.files.directory().to_path_buf()];
         if let Some(existing) = command.environment.get(std::ffi::OsStr::new("PYTHONPATH")) {
@@ -147,46 +137,6 @@ impl PreparedLaunch for Prepared {
         })
     }
 }
-fn routes(
-    document: &Value,
-    steps: &[AdmittedStep],
-) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
-    let mut events = BTreeMap::new();
-    let mut hooks = Vec::new();
-    for event in ["tool.before", "tool.after"] {
-        let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
-        if selected.is_empty() {
-            continue;
-        }
-        let budget = document["spec"]["events"][event]
-            .get("budget_ms")
-            .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
-            .as_f64()
-            .ok_or("invalid Claude event budget")? as u64;
-        if !(1..=55000).contains(&budget) {
-            return Err("Claude SDK hook budgets must be 1..55000 ms".into());
-        }
-        for step in &selected {
-            hooks.push(json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget, "replace_result": step.execution.replaces_result()}));
-        }
-        events.insert(
-            event.into(),
-            HookEvent {
-                budget_ms: budget,
-                replacement_step: selected
-                    .iter()
-                    .find(|step| step.execution.replaces_result())
-                    .map(|step| step.step_id.clone()),
-                steps: selected
-                    .into_iter()
-                    .map(|step| (step.step_id.clone(), step.on_error.clone()))
-                    .collect(),
-            },
-        );
-    }
-    Ok((events, hooks))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

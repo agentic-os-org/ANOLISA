@@ -21,14 +21,19 @@ REPO = AW.parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def run(command: list[str], cwd: Path, timeout: float = 600, capture: bool = False) -> str:
+def run(
+    command: list[str], cwd: Path, timeout: float = 600, capture: bool = False,
+    umask: int = -1,
+) -> str:
     """Run a bounded command and reap its owned process group on interruption."""
-    print("+ " + " ".join(command), flush=True)
+    permissions = f"umask={umask:04o} " if umask >= 0 else ""
+    print("+ " + permissions + " ".join(command), flush=True)
     with subprocess.Popen(
         command,
         cwd=cwd,
         text=True,
         start_new_session=True,
+        umask=umask,
         stdout=subprocess.PIPE if capture else None,
     ) as process:
         try:
@@ -169,6 +174,23 @@ sys.exit(not result.wasSuccessful())
     )
 
 
+def package_permissions() -> None:
+    """Exercise package readers, transactions and leases under child-local umasks."""
+    commands = [
+        ["cargo", "test", "--locked", "-p", "aw-package", "--test", "database"],
+        ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "inventory"],
+        ["cargo", "test", "--locked", "-p", "aw-package", "--lib"],
+        ["cargo", "test", "--locked", "-p", "aw-package", "--test", "management"],
+        ["cargo", "test", "--locked", "-p", "aw-host", "--test", "host", "package_leases"],
+        ["cargo", "test", "--locked", "-p", "aw-service", "--lib", "inspect::package_leases"],
+        ["cargo", "test", "--locked", "-p", "aw-exec", "--test", "packages"],
+        ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "packages"],
+    ]
+    for mask in (0o022, 0o002):
+        for command in commands:
+            run(command, AW, timeout=120, umask=mask)
+
+
 def check() -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
@@ -195,9 +217,13 @@ def check() -> None:
     structure(metadata, AW)
     for root in [AW, *provider_roots]:
         run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], root)
+    from check_legacy_cli import prepare_legacy_cli
+
+    os.environ["AW_LEGACY_PACKAGE_CLI"] = str(prepare_legacy_cli(AW, REPO, run))
     check_inventory(metadata)
     for root in [AW, *provider_roots]:
-        run(["cargo", "test", "--workspace", "--locked"], root)
+        run(["cargo", "test", "--workspace", "--locked", "--no-fail-fast"], root)
+    package_permissions()
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
     for root in [AW, *provider_roots]:
         run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)

@@ -147,11 +147,8 @@ impl Selection {
     }
 
     fn builds(self, repo: &Path) -> Vec<(PathBuf, Vec<&'static str>)> {
-        let mut aw = vec!["aw-package"];
-        if matches!(self, Self::Core | Self::All) {
-            aw.push("aw-service");
-        }
-        let mut builds = vec![(repo.join("src/aw"), aw)];
+        // Every archive includes the installer frontend; Core also stages `aw`.
+        let mut builds = vec![(repo.join("src/aw"), vec!["aw-cli"])];
         if matches!(self, Self::SecCore | Self::All) {
             builds.push((
                 repo.join("providers/agent-sec-core"),
@@ -312,16 +309,7 @@ fn stage(
         let root = stage.path().join(name);
         let mut files = BTreeMap::new();
         if *name == "aw-core" {
-            for binary in ["aw", "aw-package"] {
-                add(
-                    &root,
-                    &format!("bin/{binary}"),
-                    &aw.join(binary),
-                    true,
-                    &mut files,
-                    cancel,
-                )?;
-            }
+            add(&root, "bin/aw", &aw.join("aw"), true, &mut files, cancel)?;
         } else if *name == "aw-provider-tokenless" {
             for (binary, directory) in [
                 (
@@ -444,37 +432,29 @@ fn stage(
                 components: selected,
             })?,
         )?;
-        copy(&aw.join("aw-package"), &root.join("aw-package"), cancel)?;
+        copy(&aw.join("aw"), &root.join("aw"), cancel)?;
         for (language, name) in [("en", "README.md"), ("zh", "README_zh.md")] {
-            let mut text = fs::read_to_string(repo.join(format!(
-                "docs/user-guide/{language}/user-entrypoint/aw/installation.md"
-            )))?
-            .replace(
-                "../../../zh/user-entrypoint/aw/installation.md",
-                "README_zh.md",
-            )
-            .replace(
-                "../../../en/user-entrypoint/aw/installation.md",
-                "README.md",
-            );
+            let mut text = fs::read_to_string(
+                repo.join(format!("docs/user-guide/{language}/aw/installation.md")),
+            )?
+            .replace("../../zh/aw/installation.md", "README_zh.md")
+            .replace("../../en/aw/installation.md", "README.md");
             // The archive contains the installation page only; follow-up guides live online.
             let locale = if language == "zh" { "/zh" } else { "" };
             for (source, route) in [
                 ("configuration.md", "aw/configuration"),
-                ("tokenless.md", "aw-tokenless"),
-                ("security.md", "aw-sec-core"),
+                ("tokenless.md", "aw/tokenless"),
+                ("security.md", "aw/security"),
                 ("operations.md", "aw/operations"),
             ] {
                 text = text.replace(
                     &format!("]({source})"),
-                    &format!(
-                        "](https://agentic-os.sh{locale}/docs/user-guide/user-entrypoint/{route}/)"
-                    ),
+                    &format!("](https://agentic-os.sh{locale}/docs/user-guide/{route}/)"),
                 );
             }
             text = text.replace(
-                &format!("../../../../developer-guide/{language}/aw/building.md"),
-                &format!("https://agentic-os.sh{locale}/docs/developer-guide/aw/building/"),
+                &format!("../../../../contribute/{language}/aw/building.md"),
+                &format!("https://agentic-os.sh{locale}/docs/contribute/aw/building/"),
             );
             fs::write(root.join(name), text)?;
         }

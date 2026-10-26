@@ -326,7 +326,7 @@ mod tests {
             Err(PathPolicyError::NotAbsolute { .. })
         ));
         assert!(matches!(
-            validate_data_dir(Path::new("/tmp/../var/tokenless")),
+            validate_data_dir(&std::env::temp_dir().join("../var/tokenless")),
             Err(PathPolicyError::ParentTraversal { .. })
         ));
     }
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn data_dir_rejects_root_and_existing_file() {
         assert!(matches!(
-            validate_data_dir(Path::new("/")),
+            validate_data_dir(std::env::temp_dir().ancestors().last().unwrap()),
             Err(PathPolicyError::RootDataDirectory { .. })
         ));
         let dir = tempfile::tempdir().unwrap();

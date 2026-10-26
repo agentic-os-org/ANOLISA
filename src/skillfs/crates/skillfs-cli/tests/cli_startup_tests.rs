@@ -3149,10 +3149,23 @@ fn managed_mount_parses_and_rejects_missing_source() {
 #[test]
 fn stop_is_idempotent_when_nothing_mounted() {
     // `stop` on a path with no managed instance and nothing mounted must
-    // succeed (idempotent teardown).
-    let mount = tempfile::tempdir().expect("mount tempdir");
+    // succeed, including removal of a frozen config left before state save.
+    let parent = tempfile::tempdir().expect("mount parent");
+    let mount = parent.path().join("mount");
+    std::fs::create_dir(&mount).expect("create mountpoint");
+    let normalized = mount.canonicalize().expect("canonical mountpoint");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let dir = runtime.path().join("skillfs");
+    std::fs::create_dir(&dir).expect("create runtime directory");
+    let instance_id = legacy_instance_id(&normalized);
+    let frozen = dir.join(format!("{instance_id}.mount.toml"));
+    std::fs::write(&frozen, "orphaned frozen config").expect("write orphaned config");
+    let original = parent.path().join("original.toml");
+    std::fs::write(&original, "user config unchanged").expect("write original config");
     let out = Command::new(bin_path())
-        .args(["stop", mount.path().to_str().unwrap()])
+        .arg("stop")
+        .arg(&mount)
+        .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
         .expect("invoke skillfs");
     assert!(
@@ -3169,6 +3182,15 @@ fn stop_is_idempotent_when_nothing_mounted() {
     assert!(
         combined.contains("no managed mount") || combined.contains("already stopped"),
         "expected idempotent no-op message, got: {combined}"
+    );
+    assert!(
+        !frozen.exists(),
+        "stop must remove the orphaned frozen config"
+    );
+    assert!(!dir.join(format!("{instance_id}.state.json")).exists());
+    assert_eq!(
+        std::fs::read_to_string(&original).expect("read original config"),
+        "user config unchanged"
     );
 }
 
@@ -4114,7 +4136,11 @@ fn mount_file_rejects_invalid_configuration_and_option_mixing() {
             "unknown field",
         ),
         (valid.clone(), vec!["--security"], "cannot be combined"),
-        (valid.clone(), vec!["--managed"], "cannot be combined"),
+        (
+            valid.clone(),
+            vec!["--managed", "--security"],
+            "cannot be combined",
+        ),
         (
             valid.clone(),
             vec!["--skill-layout", "hermes"],
@@ -4142,6 +4168,520 @@ fn mount_file_rejects_invalid_configuration_and_option_mixing() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(!mount.exists());
+    }
+}
+
+#[test]
+fn managed_mount_file_validates_all_sources_before_creating_resources() {
+    let temp = tempfile::tempdir().expect("mount fixture");
+    let source = temp.path().join("source");
+    let missing = temp.path().join("missing-source");
+    let mount = temp.path().join("mount");
+    let runtime = temp.path().join("runtime");
+    let config = temp.path().join("mount.toml");
+    std::fs::create_dir(&source).expect("create source");
+    let canary = source.join("keep.txt");
+    std::fs::write(&canary, "source must stay untouched\n").expect("write source canary");
+    // The second root must be checked before the managed client creates state
+    // or detaches a supervisor; validating only sources[0] is insufficient.
+    let body = format!(
+        "mountpoint = {:?}\nsources = [{:?}, {:?}]\n",
+        mount, source, missing
+    );
+    std::fs::write(&config, &body).expect("write mount config");
+
+    let out = Command::new(bin_path())
+        .args(["mount", "--managed", "--config"])
+        .arg(&config)
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .output()
+        .expect("invoke skillfs");
+    let mount_created = mount.exists();
+    let runtime_created = runtime.exists();
+    // Clean up before asserting if a regression unexpectedly started a mount.
+    if mount_created || runtime_created {
+        let _ = Command::new(bin_path())
+            .arg("stop")
+            .arg(&mount)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .output();
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "expected source validation failure");
+    assert!(
+        stderr.contains("cannot resolve source")
+            && stderr.contains(missing.to_str().expect("UTF-8 fixture path")),
+        "expected missing second source error, got: {stderr}"
+    );
+    assert!(!mount_created, "validation must not create the mountpoint");
+    assert!(!runtime_created, "validation must not create managed state");
+    assert!(!missing.exists(), "validation must not create source roots");
+    assert_eq!(
+        std::fs::read_to_string(&canary).expect("read source canary"),
+        "source must stay untouched\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config).expect("read original config"),
+        body
+    );
+}
+
+#[test]
+fn managed_mount_file_startup_failure_cleans_frozen_config() {
+    for blocked in ["supervisor.log", "state.json"] {
+        let temp = tempfile::tempdir().expect("mount fixture");
+        let source = temp.path().join("source");
+        let mount = temp.path().join("mount");
+        let runtime = temp.path().join("runtime");
+        let dir = runtime.join("skillfs");
+        std::fs::create_dir(&source).expect("create source");
+        std::fs::create_dir(&mount).expect("create mountpoint");
+        std::fs::create_dir_all(&dir).expect("create runtime directory");
+        let normalized = mount.canonicalize().expect("canonical mountpoint");
+        let instance_id = legacy_instance_id(&normalized);
+        let obstacle = dir.join(format!("{instance_id}.{blocked}"));
+        // A directory fails log opening or state publication before any child
+        // can start, independently of FUSE availability and user privileges.
+        std::fs::create_dir(&obstacle).expect("create publication obstacle");
+        let canary = source.join("keep.txt");
+        std::fs::write(&canary, "source must stay untouched\n").expect("write source canary");
+        let config = temp.path().join("original.toml");
+        let body = format!("mountpoint = {:?}\nsources = [{:?}]\n", normalized, source);
+        std::fs::write(&config, &body).expect("write original config");
+
+        let out = Command::new(bin_path())
+            .args(["mount", "--managed", "--config"])
+            .arg(&config)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("invoke skillfs");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{blocked} must reject startup");
+        let expected = if blocked == "supervisor.log" {
+            "failed to open supervisor log"
+        } else {
+            "Is a directory"
+        };
+        assert!(stderr.contains(expected), "{blocked}: {stderr}");
+        assert!(obstacle.is_dir(), "the pre-existing directory must remain");
+        assert!(
+            !dir.join(format!("{instance_id}.mount.toml")).exists(),
+            "{blocked} must clean up the frozen config"
+        );
+        if blocked == "supervisor.log" {
+            assert!(!dir.join(format!("{instance_id}.state.json")).exists());
+        }
+        for suffix in ["supervisor.pid", "worker.pid"] {
+            assert!(!dir.join(format!("{instance_id}.{suffix}")).exists());
+        }
+        assert_eq!(
+            std::fs::read_to_string(&canary).expect("read source canary"),
+            "source must stay untouched\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("read original config"),
+            body
+        );
+    }
+}
+
+#[test]
+fn managed_worker_log_failure_returns_promptly() {
+    let mut timings = Vec::new();
+    for config_mode in [false, true] {
+        let temp = tempfile::tempdir().expect("mount fixture");
+        let source = temp.path().join("source");
+        let mount = temp.path().join("mount");
+        let runtime = temp.path().join("runtime");
+        let dir = runtime.join("skillfs");
+        std::fs::create_dir(&source).expect("create source");
+        std::fs::create_dir(&mount).expect("create mountpoint");
+        std::fs::create_dir_all(&dir).expect("create runtime directory");
+        let normalized = mount.canonicalize().expect("canonical mountpoint");
+        let instance_id = legacy_instance_id(&normalized);
+        let obstacle = dir.join(format!("{instance_id}.worker.log"));
+        // Fail after the detached supervisor starts but before it spawns a
+        // worker, without depending on FUSE availability or privileges.
+        std::fs::create_dir(&obstacle).expect("create worker log obstacle");
+        let config = temp.path().join("original.toml");
+        let body = format!("mountpoint = {:?}\nsources = [{:?}]\n", normalized, source);
+        std::fs::write(&config, &body).expect("write original config");
+
+        let mut command = Command::new(bin_path());
+        command.args(["mount", "--managed"]);
+        if config_mode {
+            command.arg("--config").arg(&config);
+        } else {
+            command.arg(&source).arg(&mount);
+        }
+        let started = std::time::Instant::now();
+        let out = command
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("invoke skillfs");
+        let elapsed = started.elapsed();
+        eprintln!("worker log failure: config_mode={config_mode}, elapsed={elapsed:?}");
+        timings.push((config_mode, elapsed));
+
+        assert!(
+            !out.status.success(),
+            "worker log failure must reject startup"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("did not become ready"), "{stderr}");
+        // The supervisor reports its error after removing the readiness files.
+        let log_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let supervisor_log =
+                std::fs::read_to_string(dir.join(format!("{instance_id}.supervisor.log")))
+                    .expect("read supervisor log");
+            if supervisor_log.contains("failed to open worker log") {
+                break;
+            }
+            assert!(std::time::Instant::now() < log_deadline, "{supervisor_log}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(obstacle.is_dir(), "the pre-existing directory must remain");
+        for suffix in ["state.json", "mount.toml", "supervisor.pid", "worker.pid"] {
+            assert!(
+                !dir.join(format!("{instance_id}.{suffix}")).exists(),
+                "config_mode={config_mode}: startup failure must clean up {suffix}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("read original config"),
+            body
+        );
+    }
+    for (config_mode, elapsed) in timings {
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "config_mode={config_mode}: startup failure took {elapsed:?}"
+        );
+    }
+}
+
+#[test]
+fn managed_mount_file_recovers_from_frozen_config_and_stays_stopped() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot exercise managed worker recovery");
+        return;
+    }
+
+    // Run FUSE reads out of process too: a broken endpoint must fail this test
+    // within a deadline instead of hanging the test harness on read(2).
+    fn bounded(
+        command: &mut Command,
+        timeout: Duration,
+    ) -> std::io::Result<(std::process::ExitStatus, String)> {
+        use std::os::unix::process::CommandExt;
+        let log = tempfile::NamedTempFile::new()?;
+        let output = log.reopen()?;
+        let mut child = command
+            .process_group(0)
+            .stdout(output.try_clone()?)
+            .stderr(output)
+            .spawn()?;
+        let deadline = std::time::Instant::now() + timeout;
+        let result = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Err(error) => break Err(error),
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "managed lifecycle command timed out",
+                    ));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        if result.is_err() {
+            // The shell's content readers share this private process group.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+        }
+        let output = std::fs::read_to_string(log.path())?;
+        result.map(|status| (status, output))
+    }
+
+    fn process_identity(pid: i32) -> Option<(i32, String)> {
+        if pid <= 1 {
+            return None;
+        }
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+        if fields.first() == Some(&"Z") {
+            return None;
+        }
+        Some((pid, fields.get(19)?.to_string()))
+    }
+
+    fn recorded_process(path: &Path) -> Option<(i32, String)> {
+        process_identity(std::fs::read_to_string(path).ok()?.trim().parse().ok()?)
+    }
+
+    struct ManagedMount {
+        mount: std::path::PathBuf,
+        redirect: std::path::PathBuf,
+        runtime: std::path::PathBuf,
+        processes: Vec<(i32, String)>,
+    }
+    impl ManagedMount {
+        fn remember_processes(&mut self) {
+            if let Ok(entries) = std::fs::read_dir(self.runtime.join("skillfs")) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().is_some_and(|ext| ext == "pid") {
+                        if let Some(identity) = recorded_process(&entry.path()) {
+                            if !self.processes.contains(&identity) {
+                                self.processes.push(identity);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    impl Drop for ManagedMount {
+        fn drop(&mut self) {
+            self.remember_processes();
+            for mount in [&self.mount, &self.redirect] {
+                let _ = bounded(
+                    Command::new(bin_path())
+                        .arg("stop")
+                        .arg(mount)
+                        .env("XDG_RUNTIME_DIR", &self.runtime),
+                    Duration::from_secs(15),
+                );
+            }
+            self.remember_processes();
+            for identity in &self.processes {
+                if process_identity(identity.0).as_ref() == Some(identity) {
+                    // Never signal a PID reused after one of our workers exits.
+                    unsafe { libc::kill(identity.0, libc::SIGKILL) };
+                }
+            }
+            force_unmount(&self.mount);
+            force_unmount(&self.redirect);
+        }
+    }
+
+    fn content(mount: &Path, winner: &str, active: &str, hidden: &str) -> bool {
+        let script = r#"
+set -eu
+test "$(cat "$1/skills/demo/resource.txt")" = "$2"
+grep -Fx -- "$2" "$1/skills/demo/SKILL.md"
+test ! -e "$1/skills/demo/low-only.txt"
+test "$(cat "$1/skills/$3/resource.txt")" = "$3 from lower source"
+ls -1 "$1/skills" | grep -Fx -- "$3"
+if ls -1 "$1/skills" | grep -Fx -- "$4"; then exit 1; fi
+grep -F -- "$1/skills/$4" "$1/skills/skill-discover/SKILL.md"
+"#;
+        match bounded(
+            Command::new("sh")
+                .args(["-c", script, "managed-content"])
+                .arg(mount)
+                .args([winner, active, hidden]),
+            Duration::from_secs(5),
+        ) {
+            Ok((status, _)) => status.success(),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => false,
+            Err(error) => panic!("mounted content probe failed: {error}"),
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("managed recovery fixture");
+    let root = temp.path().canonicalize().expect("canonical fixture root");
+    let high = root.join("high");
+    let low = root.join("low");
+    let redirected_source = root.join("redirected-source");
+    for (source, name, body) in [
+        (&high, "demo", "winner"),
+        (&low, "demo", "shadowed"),
+        (&low, "other", "other from lower source"),
+        (&low, "reserve", "reserve from lower source"),
+        (&redirected_source, "demo", "redirected"),
+    ] {
+        std::fs::create_dir_all(source.join(name)).expect("create skill");
+        std::fs::write(
+            source.join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: fixture\n---\n{body}\n"),
+        )
+        .expect("write skill");
+        std::fs::write(source.join(name).join("resource.txt"), body).expect("write resource");
+    }
+    std::fs::write(low.join("demo/low-only.txt"), "must not merge").unwrap();
+    let views = |active: &str, hidden: &str| {
+        format!(
+            "[[view]]\nname = 'default'\ndefault = true\nskills = ['demo', '{active}']\n\
+             [[view]]\nname = 'secondary'\nskills = ['{hidden}']\n"
+        )
+    };
+    std::fs::write(high.join("skillfs-views.toml"), views("other", "reserve")).unwrap();
+    // An alternate lower-root view must not override the primary root's views.
+    std::fs::write(
+        low.join("skillfs-views.toml"),
+        "[[view]]\nname = 'default'\ndefault = true\nskills = []\n",
+    )
+    .unwrap();
+    let mut instance = ManagedMount {
+        mount: root.join("mount"),
+        redirect: root.join("redirected-mount"),
+        runtime: root.join("runtime"),
+        processes: Vec::new(),
+    };
+    let original = root.join("original.toml");
+    std::fs::write(
+        &original,
+        format!(
+            "mountpoint = {:?}\nsources = [{:?}, {:?}]\n",
+            instance.mount, high, low
+        ),
+    )
+    .unwrap();
+    let (status, output) = bounded(
+        Command::new(bin_path())
+            .args(["mount", "--managed", "--config"])
+            .arg(&original)
+            .env("XDG_RUNTIME_DIR", &instance.runtime),
+        Duration::from_secs(45),
+    )
+    .expect("bounded managed startup");
+    assert!(status.success(), "managed startup failed: {output}");
+    assert!(output.contains("managed mount ready"), "{output}");
+    instance.remember_processes();
+    assert!(is_mounted(&instance.mount));
+    assert!(content(&instance.mount, "winner", "other", "reserve"));
+
+    let runtime = instance.runtime.join("skillfs");
+    let state_paths: Vec<_> = std::fs::read_dir(&runtime)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".state.json"))
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(state_paths.len(), 1, "one isolated managed instance");
+    let state_path = &state_paths[0];
+    let state_bytes = std::fs::read(state_path).unwrap();
+    let state: serde_json::Value = serde_json::from_slice(&state_bytes).unwrap();
+    let id = state["instance_id"].as_str().unwrap();
+    let frozen = runtime.join(format!("{id}.mount.toml"));
+    let worker_file = runtime.join(format!("{id}.worker.pid"));
+    let supervisor_file = runtime.join(format!("{id}.supervisor.pid"));
+    let frozen_bytes = std::fs::read(&frozen).unwrap();
+    assert_eq!(state["mountpoint"], instance.mount.to_str().unwrap());
+    assert_eq!(state["desired_state"], "mounted");
+    assert_eq!(
+        state["mount_config"],
+        serde_json::json!({"sources": [high, low], "allow_other": false, "read_only": true})
+    );
+    assert_eq!(
+        state["worker_args"],
+        serde_json::json!(["mount", "--foreground", "--config", frozen, "--read-only"])
+    );
+    let supervisor = recorded_process(&supervisor_file).expect("live supervisor");
+    let mut worker = recorded_process(&worker_file).expect("live worker");
+    let redirected_config = format!(
+        "mountpoint = {:?}\nsources = [{:?}]\n",
+        instance.redirect, redirected_source
+    );
+
+    for (delete_config, winner, active, hidden) in [
+        (false, "winner after edit", "reserve", "other"),
+        (true, "winner after deletion", "other", "reserve"),
+    ] {
+        if delete_config {
+            std::fs::remove_file(&original).unwrap();
+        } else {
+            std::fs::write(&original, &redirected_config).unwrap();
+        }
+        std::fs::write(high.join("demo/resource.txt"), winner).unwrap();
+        std::fs::write(
+            high.join("demo/SKILL.md"),
+            format!("---\nname: demo\ndescription: fixture\n---\n{winner}\n"),
+        )
+        .unwrap();
+        std::fs::write(high.join("skillfs-views.toml"), views(active, hidden)).unwrap();
+        assert_eq!(process_identity(worker.0).as_ref(), Some(&worker));
+        // Kill the real worker while leaving its supervisor and stale FUSE
+        // endpoint in place, exactly as an unexpected worker crash does.
+        assert_eq!(unsafe { libc::kill(worker.0, libc::SIGKILL) }, 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        loop {
+            instance.remember_processes();
+            if let Some(replacement) = recorded_process(&worker_file) {
+                if replacement != worker
+                    && process_identity(worker.0).as_ref() != Some(&worker)
+                    && is_mounted(&instance.mount)
+                    && content(&instance.mount, winner, active, hidden)
+                {
+                    worker = replacement;
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not recover (original config deleted: {delete_config}); {}",
+                std::fs::read_to_string(runtime.join(format!("{id}.worker.log")))
+                    .unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            recorded_process(&supervisor_file).as_ref(),
+            Some(&supervisor)
+        );
+        assert_eq!(std::fs::read(state_path).unwrap(), state_bytes);
+        assert_eq!(std::fs::read(&frozen).unwrap(), frozen_bytes);
+        assert!(!is_mounted(&instance.redirect));
+        assert!(
+            !instance.redirect.exists(),
+            "must not follow redirected config"
+        );
+        if delete_config {
+            assert!(!original.exists(), "must not recreate the user config");
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(&original).unwrap(),
+                redirected_config
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(high.join("demo/resource.txt")).unwrap(),
+            winner
+        );
+        assert_eq!(
+            std::fs::read_to_string(high.join("skillfs-views.toml")).unwrap(),
+            views(active, hidden)
+        );
+    }
+
+    let (status, output) = bounded(
+        Command::new(bin_path())
+            .arg("stop")
+            .arg(&instance.mount)
+            .env("XDG_RUNTIME_DIR", &instance.runtime),
+        Duration::from_secs(15),
+    )
+    .expect("bounded managed stop");
+    assert!(status.success(), "managed stop failed: {output}");
+    assert!(output.contains("stopped managed mount"), "{output}");
+    // Exceed the supervisor's five-second maximum backoff so a delayed
+    // resurrection cannot pass as a successful stop.
+    let deadline = std::time::Instant::now() + Duration::from_secs(7);
+    loop {
+        assert!(!is_mounted(&instance.mount));
+        assert!(!is_mounted(&instance.redirect));
+        for path in [state_path, &frozen, &worker_file, &supervisor_file] {
+            assert!(!path.exists(), "stop left runtime file {}", path.display());
+        }
+        for identity in &instance.processes {
+            assert_ne!(process_identity(identity.0).as_ref(), Some(identity));
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

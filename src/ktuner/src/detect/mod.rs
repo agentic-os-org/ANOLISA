@@ -2073,14 +2073,40 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
 /// first name run is `consul`. A node that only runs the sidecar reported
 /// Consul and took the cache program (swappiness, the dirty limits, THP off,
 /// `vm.vfs_cache_pressure`, the busy-poll pair).
+/// `envoy-gateway` is the same shape for Envoy: it is the Envoy Gateway
+/// project's control plane, which provisions the Envoy data planes as
+/// separate Deployments and never runs the proxy itself. Its comm keeps
+/// `envoy` as the first name run, so a node running only the control plane
+/// reported Envoy, took the classifier's web class and the busy-poll pair
+/// meant for a request-path proxy.
+///
+/// `consul-k8s-control-plane` is the same shape for the other half of the
+/// Kubernetes integration: it is the control plane that configures the Consul
+/// servers (running elsewhere) and injects the sidecars, never the KV server
+/// itself, but its comm truncates to `consul-k8s-cont` and its first name run
+/// is `consul`. A control-plane-only node reported Consul and took the cache
+/// program. `consul-terraform-sync` is the same client-side shape: it
+/// reconciles Terraform resources against a Consul cluster running elsewhere,
+/// exactly like `consul-template` renders from one.
 const SERVICE_COMPANION_TOOLS: &[&str] = &[
     "consul-template",
     "consul-dataplane",
     "consul-esm",
+    "consul-k8s-control-plane",
+    "consul-terraform-sync",
     "grafana-agent",
+    "envoy-gateway",
     "clickhouse-keeper",
     "oracle-cloud-agent",
     "oracle-cloud-agent-updater",
+    // The Kubernetes control planes for three comm-named services: each one
+    // provisions its service as separate pods and never runs it, but its name
+    // still carries the service's first run (`grafana`, `clickhouse`,
+    // `postgres`) with a `-` boundary. A node whose only process from that
+    // family is the operator reported the service and ran its rules.
+    "grafana-operator",
+    "clickhouse-operator",
+    "postgres-operator",
 ];
 
 /// Whether the program `program` is a *tool* of a service rather than the
@@ -4841,7 +4867,22 @@ mod tests {
             // The Kubernetes data-plane sidecar: a separate client-side
             // program that talks to Consul servers, not the KV server itself.
             ("consul-dataplane", "consul", "Consul"),
+            // The Kubernetes control plane of the same integration: it
+            // configures the Consul servers (which run elsewhere) and injects
+            // the sidecars, but never runs the KV server itself. Its comm
+            // truncates to `consul-k8s-cont`, whose first name run is
+            // `consul`, so a control-plane-only node reported Consul and
+            // took the cache program.
+            ("consul-k8s-control-plane", "consul", "Consul"),
+            // Terraform sync is a client of a Consul cluster running
+            // elsewhere: it reconciles Terraform resources against the
+            // cluster's catalog, exactly like consul-template renders from it.
+            ("consul-terraform-sync", "consul", "Consul"),
             ("grafana-agent", "grafana", "Grafana"),
+            // Envoy Gateway's control plane: it provisions Envoy data planes
+            // as separate Deployments and never runs the proxy itself, but
+            // its comm keeps `envoy` as the first name run.
+            ("envoy-gateway", "envoy", "Envoy"),
             // ClickHouse's coordination daemon: `has_process("clickhouse")` is
             // satisfied by its first name run, and the whole database program
             // (including `vm.nr_hugepages` and `kernel.shmmni`) then ran on a
@@ -4852,7 +4893,23 @@ mod tests {
             // platform's default agents reported an Oracle database.
             ("oracle-cloud-agent", "oracle", "Oracle"),
             ("oracle-cloud-agent-updater", "oracle", "Oracle"),
+            // The Kubernetes control planes: each provisions its service as
+            // separate pods and never runs it, but keeps the service's first
+            // name run (`grafana`, `clickhouse`, `postgres`).
+            ("grafana-operator", "grafana", "Grafana"),
+            ("clickhouse-operator", "clickhouse", "ClickHouse"),
+            ("postgres-operator", "postgres", "PostgreSQL"),
         ] {
+            // `has_process` is host-wide, so a machine that already runs the
+            // service cannot tell whether this case was filtered. Say so and
+            // move on instead of failing on the host's own state.
+            if gather_system_info()
+                .expect("gather system info")
+                .has_process(service)
+            {
+                eprintln!("skip {name}: the host already runs {service}");
+                continue;
+            }
             let path = root.join(name);
             fs::copy("/bin/sleep", &path).expect("copy sleep to the companion's name");
             let mut command = std::process::Command::new(&path);
@@ -4990,6 +5047,11 @@ mod tests {
             "spark-submit",
             "hadoop-daemon.sh",
             "elasticsearch-keystore",
+            // Kubernetes operators: control planes of a service that runs in
+            // separate pods, never the service itself.
+            "grafana-operator",
+            "clickhouse-operator",
+            "postgres-operator",
         ] {
             assert!(
                 program_names_service_tool(tool),

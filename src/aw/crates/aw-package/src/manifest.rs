@@ -98,7 +98,12 @@ pub fn inspect(bundle: &Path) -> Result<Manifest> {
             "incompatible platform or Provider protocol",
         )?;
         let required = if component.component == "aw-core" {
-            vec!["bin/aw", "bin/aw-package"]
+            let mut files = vec!["bin/aw"];
+            if component.files.contains_key("bin/aw-package") {
+                // Existing bundles retain ownership and executable checks for the removed CLI.
+                files.push("bin/aw-package");
+            }
+            files
         } else if component.component == "aw-provider-tokenless" {
             require(
                 component.requires.get("aw-core") == Some(&component.version),

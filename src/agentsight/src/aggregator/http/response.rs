@@ -159,6 +159,31 @@ impl AggregatedResponse {
     }
 }
 
+/// Output-item types the Responses protocol uses for a tool call.
+///
+/// `function_call` and `custom_tool_call` carry their name in `name`; a Codex
+/// `local_shell_call` keeps its argv in an `action` object and names the tool
+/// implicitly, the shape the message parser folds into a `shell` call. The
+/// first-output scan used to know only the first two spellings, so a turn whose
+/// first output was a shell call kept its TTFT empty.
+fn response_item_carries_a_call(item: &serde_json::Value) -> bool {
+    matches!(
+        item.get("type").and_then(serde_json::Value::as_str),
+        Some("function_call" | "custom_tool_call" | "local_shell_call")
+    )
+}
+
+/// Content-block types the Anthropic wire format uses for a tool call.
+///
+/// `tool_use` is the classic spelling; `server_tool_use` and `mcp_tool_use` are
+/// the same call made by a tool the provider runs on its side (web search, code
+/// execution, the MCP connector). They carry the identical `id` / `name` /
+/// `input` payload — the message parser reads all three as one block type (see
+/// `AnthropicContentBlock`) — so the first-output scan must recognise them too.
+fn is_anthropic_call_block(block_type: &str) -> bool {
+    matches!(block_type, "tool_use" | "server_tool_use" | "mcp_tool_use")
+}
+
 fn non_empty_string(value: Option<&serde_json::Value>) -> bool {
     value
         .and_then(serde_json::Value::as_str)
@@ -190,17 +215,20 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                 let block = value.get("content_block");
                 return non_empty_string(block.and_then(|item| item.get("text")))
                     || non_empty_string(block.and_then(|item| item.get("thinking")))
-                    || (block.and_then(|item| item.get("type"))
-                        == Some(&serde_json::Value::String("tool_use".to_string()))
+                    || (block
+                        .and_then(|item| item.get("type"))
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_anthropic_call_block)
                         && non_empty_string(block.and_then(|item| item.get("name"))));
             }
             "response.output_item.added" => {
                 let item = value.get("item");
-                return matches!(
-                    item.and_then(|item| item.get("type"))
-                        .and_then(serde_json::Value::as_str),
-                    Some("function_call" | "custom_tool_call")
-                ) && non_empty_string(item.and_then(|item| item.get("name")));
+                let Some(item) = item else { return false };
+                return response_item_carries_a_call(item)
+                    && (non_empty_string(item.get("name"))
+                        // A Codex `local_shell_call` names its tool implicitly;
+                        // the argv in `action` is what says it is a call.
+                        || item.get("action").is_some_and(|action| !action.is_null()));
             }
             _ => {}
         }
@@ -535,6 +563,94 @@ mod latency_tests {
         assert!(event_has_meaningful_output(Some(&anthropic)));
         assert!(event_has_meaningful_output(Some(&chat)));
         assert!(event_has_meaningful_output(Some(&refusal)));
+    }
+
+    /// Anthropic runs some tools on its own side: the model calls
+    /// `server_tool_use` (web search, code execution, the MCP connector) and
+    /// the provider answers with `web_search_tool_result` and friends. The
+    /// blocks carry the identical `id` / `name` / `input` payload as a
+    /// `tool_use` block, and the message parser reads all three as one block
+    /// type, but the first-output scan compared the type against the literal
+    /// `"tool_use"` only. A stream whose first output is a server-side call
+    /// therefore kept its first-output timestamp empty, so its TTFT was
+    /// missing from the latency stats while the same turn with a classic tool
+    /// call recorded one.
+    #[test]
+    fn recognizes_a_server_tool_call_as_output() {
+        let server_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "server_tool_use", "id": "srvtoolu_1",
+                              "name": "web_search", "input": {}}
+        });
+        let mcp_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "mcp_tool_use", "id": "mcptoolu_1",
+                              "name": "list_issues", "input": {}}
+        });
+        let classic = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_1",
+                              "name": "read_file", "input": {}}
+        });
+        // A block that opens without a name carries no call yet.
+        let unnamed = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "server_tool_use", "id": "srvtoolu_2",
+                              "name": "", "input": {}}
+        });
+
+        assert!(event_has_meaningful_output(Some(&classic)));
+        assert!(
+            event_has_meaningful_output(Some(&server_tool)),
+            "a server_tool_use call is output like a tool_use call"
+        );
+        assert!(
+            event_has_meaningful_output(Some(&mcp_tool)),
+            "an mcp_tool_use call is output like a tool_use call"
+        );
+        assert!(!event_has_meaningful_output(Some(&unnamed)));
+    }
+
+    /// A Codex `local_shell_call` announces itself as an output item that
+    /// names its tool implicitly: the type says "shell", the argv rides in an
+    /// `action` object, and there is no `name` field to read. The message
+    /// parser already folds that item into a `shell` tool call, but the
+    /// first-output scan matched the type against `function_call` /
+    /// `custom_tool_call` and required a non-empty `name`, so a turn whose
+    /// first output was a shell call kept TTFT empty.
+    #[test]
+    fn recognizes_a_codex_shell_call_as_output() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "local_shell_call", "id": "lsc_1", "call_id": "call_ls",
+                     "action": {"type": "exec", "command": ["ls", "-l"]}}
+        });
+        // The same item with no argv yet carries no call.
+        let empty = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "local_shell_call", "id": "lsc_2", "call_id": "call_ls2"}
+        });
+        // The classic spellings keep their behavior.
+        let function_added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "name": "read_file"}
+        });
+        let unnamed_function = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "call_id": "call_x"}
+        });
+
+        assert!(event_has_meaningful_output(Some(&function_added)));
+        assert!(!event_has_meaningful_output(Some(&unnamed_function)));
+        assert!(
+            event_has_meaningful_output(Some(&added)),
+            "a Codex shell call is output like a function call"
+        );
+        assert!(!event_has_meaningful_output(Some(&empty)));
     }
 
     /// The DashScope/Bailian native envelope nests its payload under `output`

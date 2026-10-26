@@ -200,19 +200,26 @@ fn parse_arguments(value: Value) -> Value {
 
 fn attach_tool_result(steps: &mut Vec<Step>, message: &HermesMessage) {
     let result_id = message.tool_call_id.clone();
-    let target = steps.iter_mut().rev().find(|step| {
-        step.source == StepSource::Agent
-            && step.tool_calls.as_ref().is_some_and(|calls| {
-                calls.iter().any(|call| {
-                    result_id
-                        .as_deref()
-                        .is_some_and(|id| call.tool_call_id == id)
-                        || message
-                            .tool_name
-                            .as_deref()
-                            .is_some_and(|name| call.function_name == name)
-                })
-            })
+    // An older explicit call outranks a newer call to the same tool. Name
+    // fallback remains necessary when Hermes omits the assistant's call ID.
+    let exact = result_id.as_deref().and_then(|id| {
+        steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == id))
+        })
+    });
+    let target = exact.or_else(|| {
+        let name = message.tool_name.as_deref()?;
+        steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.function_name == name))
+        })
     });
     let result = ObservationResult {
         source_call_id: result_id.clone(),
@@ -220,7 +227,7 @@ fn attach_tool_result(steps: &mut Vec<Step>, message: &HermesMessage) {
         subagent_trajectory_ref: None,
         extra: None,
     };
-    if let Some(step) = target {
+    if let Some(step) = target.map(|index| &mut steps[index]) {
         align_result_id(step, message, result_id.as_deref());
         step.observation
             .get_or_insert_with(|| Observation {
@@ -254,13 +261,18 @@ fn align_result_id(step: &mut Step, message: &HermesMessage, result_id: Option<&
     let (Some(id), Some(calls)) = (result_id, step.tool_calls.as_mut()) else {
         return;
     };
-    let Some(call) = calls.iter_mut().find(|call| {
-        call.tool_call_id == id
-            || message
-                .tool_name
-                .as_deref()
-                .is_some_and(|name| call.function_name == name)
-    }) else {
+    let position = calls
+        .iter()
+        .position(|call| call.tool_call_id == id)
+        .or_else(|| {
+            calls.iter().position(|call| {
+                message
+                    .tool_name
+                    .as_deref()
+                    .is_some_and(|name| call.function_name == name)
+            })
+        });
+    let Some(call) = position.map(|index| &mut calls[index]) else {
         return;
     };
     call.tool_call_id = id.to_string();
