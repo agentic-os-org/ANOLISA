@@ -3820,6 +3820,18 @@ mod tests {
         );
     }
 
+    /// Serializes the cycle tests below. `tracing`'s per-callsite interest
+    /// cache is process-global, while each test installs its recorder through
+    /// the thread-local `with_default`. When one test's scope is dropped the
+    /// resulting interest rebuild can mark the shared `warn!` callsite as
+    /// disabled while another test's recorder is already installed, so the
+    /// macro fast path drops that test's events and `warnings()` comes back
+    /// empty (the intermittent "the silent repair must be reported: []" flake).
+    /// Holding one lock across "install recorder -> emit -> read warnings"
+    /// keeps the rebuilds of one test from interleaving with another test's
+    /// capture window.
+    static CYCLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Captures `tracing` events for the cycle tests. `tracing` without a
     /// subscriber drops events, and this crate does not depend on
     /// `tracing-subscriber`; a minimal recorder keeps that dependency out while
@@ -3877,6 +3889,7 @@ mod tests {
         // a ↔ b form a cycle entirely inside the deleted set, and c hangs off b.
         // Reparenting c has no surviving ancestor to find, so the walk must stop
         // rather than follow the cycle forever.
+        let _cycle_guard = CYCLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
         idx.snapshots.insert("a".into(), meta(Some("b"), vec!["b"]));
         idx.snapshots.insert("b".into(), meta(Some("a"), vec!["c"]));
@@ -3918,6 +3931,7 @@ mod tests {
     fn prune_chain_terminates_when_the_head_is_inside_a_cycle() {
         // The head itself carries the cycle, so the head fix-up walk is the one
         // that has to stop.
+        let _cycle_guard = CYCLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
         idx.snapshots.insert("a".into(), meta(Some("b"), vec!["b"]));
         idx.snapshots
@@ -3949,6 +3963,7 @@ mod tests {
     #[test]
     fn prune_chain_terminates_on_a_self_parented_snapshot() {
         // The degenerate cycle: a snapshot whose parent is itself.
+        let _cycle_guard = CYCLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
         idx.snapshots.insert("a".into(), meta(Some("a"), vec!["c"]));
         idx.snapshots
