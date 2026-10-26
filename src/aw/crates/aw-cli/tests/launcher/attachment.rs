@@ -319,15 +319,8 @@ fn external_install_creates_missing_native_settings_without_launching_an_agent()
 fn external_install_succeeds_when_evidence_is_disabled() {
     let fixture = Fixture::new();
     let mut document = fixture.document();
-    document["spec"]["agents"]["qoder"]["evidence"] = json!({
-        "source_id": "fixture",
-        "endpoint": "http://127.0.0.1:1",
-        "query_timeout_ms": 1000,
-        "query_bytes": 1048576,
-        "max_items": 32,
-        "max_bytes": 262144,
-        "mode": "off"
-    });
+    fixture.observation(&mut document, "qoder");
+    document["spec"]["agents"]["qoder"]["evidence"]["mode"] = json!("off");
     let service = Service::start(&fixture, &document);
     let (_process, pid) = native(&fixture);
     let installed = success(install(&fixture, pid, false));
