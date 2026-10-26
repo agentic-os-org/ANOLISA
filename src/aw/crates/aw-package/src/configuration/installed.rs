@@ -112,23 +112,34 @@ mod tests {
         let prefix = root.join("installed");
         fs::create_dir_all(prefix.join(".aw-packages")).unwrap();
         fs::write(prefix.join(".aw-install.lock"), b"").unwrap();
-        let receipt = json!({
-            "format": 1,
-            "component": "aw-core",
-            "version": "1.2.3",
-            "source_commit": "0".repeat(40),
-            "os": "linux",
-            "arch": std::env::consts::ARCH,
-            "provider_protocol": "aw-provider/v1alpha1",
-            "requires": {},
-            "files": {"/etc/passwd": {"sha256": "0".repeat(64), "mode": 420}}
-        });
-        fs::write(
-            prefix.join(".aw-packages/aw-core.json"),
-            serde_json::to_vec(&receipt).unwrap(),
-        )
-        .unwrap();
-        assert!(Selection::read(&prefix, &["aw-core"]).is_err());
+        let receipt = |name: &str| {
+            let mut receipt = json!({
+                "format": 1,
+                "component": "aw-core",
+                "version": "1.2.3",
+                "source_commit": "0".repeat(40),
+                "os": "linux",
+                "arch": std::env::consts::ARCH,
+                "provider_protocol": "aw-provider/v1alpha1",
+                "requires": {},
+                "files": {}
+            });
+            receipt["files"][name] = json!({"sha256": "0".repeat(64), "mode": 420});
+            receipt
+        };
+        let write = |value: &serde_json::Value| {
+            fs::write(
+                prefix.join(".aw-packages/aw-core.json"),
+                serde_json::to_vec(value).unwrap(),
+            )
+            .unwrap();
+        };
+        for name in ["/etc/passwd", "../escape", "bin/../../escape"] {
+            write(&receipt(name));
+            assert!(Selection::read(&prefix, &["aw-core"]).is_err(), "{name}");
+        }
+        write(&receipt("bin/aw"));
+        assert!(Selection::read(&prefix, &["aw-core"]).is_ok());
     }
 
     #[test]
