@@ -103,6 +103,35 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
 
     #[test]
+    fn legacy_receipt_files_stay_inside_the_prefix() {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/configuration");
+        fs::create_dir_all(&target).unwrap();
+        let temporary = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
+        let root = temporary.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        let prefix = root.join("installed");
+        fs::create_dir_all(prefix.join(".aw-packages")).unwrap();
+        fs::write(prefix.join(".aw-install.lock"), b"").unwrap();
+        let receipt = json!({
+            "format": 1,
+            "component": "aw-core",
+            "version": "1.2.3",
+            "source_commit": "0".repeat(40),
+            "os": "linux",
+            "arch": std::env::consts::ARCH,
+            "provider_protocol": "aw-provider/v1alpha1",
+            "requires": {},
+            "files": {"/etc/passwd": {"sha256": "0".repeat(64), "mode": 420}}
+        });
+        fs::write(
+            prefix.join(".aw-packages/aw-core.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        assert!(Selection::read(&prefix, &["aw-core"]).is_err());
+    }
+
+    #[test]
     fn registered_configuration_holds_both_read_locks_through_publication() {
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/configuration");
         fs::create_dir_all(&target).unwrap();
