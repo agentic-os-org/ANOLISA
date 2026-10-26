@@ -3,14 +3,16 @@
 //! These tests need the inotify/FSEvents watcher; they sleep briefly to give
 //! events time to land. Time budgets are conservative (≤ 2s per case).
 
+mod common;
+
+use common::KeywordEmbedding;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use tempfile::tempdir;
 
 use agent_memory::config::AppConfig;
-use agent_memory::embedding::{Embedding, EmbeddingProvider};
 use agent_memory::error::MemoryError;
 use agent_memory::index::IndexHandle;
 use agent_memory::service::MemoryService;
@@ -566,32 +568,6 @@ fn search_category_filter_is_case_sensitive() {
 // std::thread. This test configures a mock provider and asserts both that
 // vectors land in the store and that search returns hits without panicking.
 
-/// Deterministic embedding: maps a keyword to a basis vector so cosine
-/// similarity cleanly separates "rust" docs from "python" docs.
-struct KeywordEmbedding {
-    dim: usize,
-}
-
-#[async_trait]
-impl EmbeddingProvider for KeywordEmbedding {
-    async fn embed(&self, text: &str) -> agent_memory::Result<Embedding> {
-        let mut v = vec![0.0_f32; self.dim];
-        let t = text.to_lowercase();
-        if t.contains("rust") {
-            v[0] = 1.0;
-        } else if t.contains("python") {
-            v[1] = 1.0;
-        } else {
-            v[2] = 1.0;
-        }
-        Ok(Embedding { vector: v })
-    }
-
-    fn dimensions(&self) -> usize {
-        self.dim
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn vector_and_hybrid_search_with_provider_hit_without_panic() {
     let tmp = tempdir().unwrap();
@@ -605,7 +581,7 @@ async fn vector_and_hybrid_search_with_provider_hit_without_panic() {
     // Inject the mock provider into the service and rebuild the index so
     // the worker holds both the provider and a runtime handle captured on
     // this thread (we are inside a multi-thread tokio runtime here).
-    let mock = Arc::new(KeywordEmbedding { dim: 8 });
+    let mock = Arc::new(KeywordEmbedding::honest(8));
     svc.embedding = Some(mock.clone());
     let new_index = IndexHandle::open(&svc.mount, Some(mock), 0.01, 0.3, true).unwrap();
     svc.index = Some(Arc::new(new_index));
@@ -694,7 +670,7 @@ async fn full_scan_backfills_vectors_for_preexisting_files() {
     // IndexHandle::open's startup full_scan must backfill vectors for the
     // pre-existing files without any new modify events.
     let mut svc = MemoryService::new(cfg).unwrap();
-    let mock = Arc::new(KeywordEmbedding { dim: 8 });
+    let mock = Arc::new(KeywordEmbedding::honest(8));
     svc.embedding = Some(mock.clone());
     let new_index = IndexHandle::open(&svc.mount, Some(mock), 0.01, 0.3, true).unwrap();
     svc.index = Some(Arc::new(new_index));
