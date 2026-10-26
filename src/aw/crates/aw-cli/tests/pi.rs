@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, process::Command};
 use support::{Fixture, Service};
 
+#[path = "pi/tool_scope.rs"]
+mod tool_scope;
+
 fn setup(fixture: &Fixture) -> Value {
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|p| p.join("node"))

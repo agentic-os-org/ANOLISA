@@ -26,6 +26,8 @@ fn action(event: &str) -> AdmittedStep {
         event: event.into(),
         step_id: "record".into(),
         provider: "fixture".into(),
+        event_tools: vec!["*".into()],
+        step_tools: vec!["*".into()],
         on_error: "report".into(),
         execution: StepExecution::Provider {
             operation: "record".into(),

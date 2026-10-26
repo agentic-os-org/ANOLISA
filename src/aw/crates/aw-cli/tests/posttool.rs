@@ -12,6 +12,15 @@ use serde_json::{json, Value};
 use std::fs;
 use support::{Fixture, Service};
 
+#[path = "posttool/openclaw_scope.rs"]
+mod openclaw_scope;
+#[allow(dead_code)]
+#[path = "regression/tool_scope.rs"]
+mod scope;
+
+#[path = "posttool/tool_scope.rs"]
+mod tool_scope;
+
 #[test]
 fn optional_projection_does_not_remove_large_results_from_the_journal() {
     for bytes in [340_000, 400_000] {

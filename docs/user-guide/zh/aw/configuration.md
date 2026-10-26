@@ -48,6 +48,43 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 YAML 中的路径须写成真实绝对路径，AW 不展开 `$HOME` 等变量。
 完整编辑命令和自定义规则示例见[配置工具参考](packages.md#编辑已有-provider-与-hook-配置)。
 
+## 为 Hook 步骤选择工具
+
+在已有步骤上设置 `match.tools`，限定哪些工具会调用其 Provider。
+已声明 `security` Provider，以及使用 `qoder` 和 `openclaw` Adapter 的 Agent
+目标时，以下事件片段检查 Qoder 的 `Bash` 和 OpenClaw 的 `exec`；其他工具跳过扫描步骤。
+
+```yaml
+tool.before:
+  enabled: true
+  required: true
+  match: {tools: ["*"]}
+  steps:
+    - id: scan-code
+      provider: security
+      operation: scan_code
+      match: {tools: ["native:qoder:Bash", "native:openclaw:exec"]}
+      effects: [observe, block]
+      on_error: block
+```
+
+事件和步骤选择器必须同时匹配。任一层省略选择器或使用 `["*"]` 时，该层选择
+全部工具。标准名称 `bash`、`file_read`、`file_write` 匹配 Adapter 规范化的工具名；
+精确的 `native:<adapter>:<name>` 使用 Adapter ID 和 Adapter 保留的
+`event.tool.native_name`，区分大小写。每个 native 选择器的 Adapter ID 都须出现在
+`spec.agents[*].adapter` 中。校验采用全部已配置目标的 Adapter 并集，因此声明了
+Qoder 和 OpenClaw 后，两者的选择器可以共用事件或步骤。列表须非空且无重复，
+`*` 必须单独使用；不支持正则或 glob 模式。
+
+OpenClaw 在 `tool.after` 的 `event.tool.name` 中将 `bash` 规范化为 `exec`、`apply-patch`
+规范化为 `apply_patch`、`cron` 规范化为 `automations`；`event.tool.native_name`
+保留回调传入的名称。结果替换与完成观察分别回调时，AW 从替换快照恢复已保存的
+原始名称。独立的完成事件使用其自身回调传入的名称。
+
+未匹配步骤记录 `kind: skipped`，不调用 Provider。其他步骤保留原有顺序和选择
+条件，观察或压缩步骤仍可继续执行。启动时仍检查 Provider 准备和配置。
+原生权限提示和拒绝继续生效。sec-core 的输入映射须另行配置，见[安全检查](security.md)。
+
 ## 设置 Agent 退出宽限期
 
 应用的退出处理需要更多时间关闭请求和 SDK 客户端时，在所选 Agent 的配置中设置

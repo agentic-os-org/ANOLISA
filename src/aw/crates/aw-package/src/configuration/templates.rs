@@ -33,19 +33,22 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
         Policy::SecCore { socket } | Policy::SecCoreTokenless { socket } => {
             let provider = settings.prefix.join("libexec/aw/providers/sec-core");
             let mut tools = json!({});
+            let mut selectors = Vec::new();
             if settings.qoder.is_some() {
+                selectors.push("native:qoder:Bash");
                 tools["Bash"] = json!({"language":"bash","input_pointer":"/command"});
             }
             if settings.openclaw.is_some() {
+                selectors.push("native:openclaw:exec");
                 tools["exec"] = json!({"language":"bash","input_pointer":"/command"});
             }
             value["spec"]["providers"]["security"] = json!({
                 "protocol":"aw-provider/v1alpha1",
                 "transport":{"type":"stdio","location":"agent","argv":[provider.join("aw-provider-sec-core"),"--cli",provider.join("agent-sec-cli"),"--socket",socket]},
                 "timeout_ms":2000,"max_output_bytes":4096,
-                "config":{"version":1,"mode":"block","tools":tools}});
+                "config":{"version":1,"mode":"block","unmapped_tool":"error","tools":tools}});
             value["spec"]["events"] = json!({
-                "tool.before":{"enabled":true,"required":true,"steps":[{"id":"scan-code","provider":"security","operation":"scan_code","effects":["observe","block"],"on_error":"block"}]},
+                "tool.before":{"enabled":true,"required":true,"steps":[{"id":"scan-code","match":{"tools":selectors},"provider":"security","operation":"scan_code","effects":["observe","block"],"on_error":"block"}]},
                 "tool.after":{"enabled":true,"required":true,"steps":[{"id":"observe-completion","provider":"security","operation":"observe_tool","effects":["observe"],"on_error":"report"}]}});
         }
         Policy::Command {

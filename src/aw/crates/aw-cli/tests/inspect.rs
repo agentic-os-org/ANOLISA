@@ -329,3 +329,46 @@ fn inspect_cli_accepts_only_explicit_read_configuration_and_json() {
     assert!(f.calls("invoke").is_empty());
     f.assert_reaped();
 }
+
+#[test]
+fn inspection_retains_skipped_steps_without_reporting_provider_execution() {
+    let f = Fixture::new();
+    let mut doc = document(&f, "ok");
+    doc["spec"]["events"]["tool.before"]["steps"][0]["match"] = json!({"tools":["bash"]});
+    let service = Running::start(&f, &doc);
+    let binding = f.bind(&service.client);
+    let before = open(
+        &service.client,
+        &binding,
+        event(&binding, "tool.before", "block"),
+    );
+    let reply = service
+        .client
+        .call(invoke(&before, "check"), Instant::now() + TIMEOUT)
+        .unwrap();
+    assert_eq!(reply["kind"], "skipped");
+    close(&service.client, &before);
+    let mut result = snapshot(&f, &doc, TIMEOUT);
+    let items = result["recent_execution"]["data"]["items"]
+        .as_array()
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["kind"], "skipped");
+    assert_eq!(items[0]["status"], "ok");
+    assert_eq!(items[0]["policy_block"], false);
+    assert!(f.calls("invoke").is_empty());
+    let protocol = view::Protocol::new().unwrap();
+    result["recent_execution"]["data"]["items"][0]["kind"] = json!("unknown");
+    assert!(protocol
+        .check_panel(&serde_json::to_vec(&result).unwrap())
+        .is_err());
+    result["recent_execution"]["data"]["items"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("kind");
+    assert!(protocol
+        .check_panel(&serde_json::to_vec(&result).unwrap())
+        .is_ok());
+    drop(service);
+    f.assert_reaped();
+}

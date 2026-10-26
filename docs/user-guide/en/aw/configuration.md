@@ -52,6 +52,50 @@ AW does not expand variables such as `$HOME`.
 For all editor commands and a custom rule example, see the
 [configuration tool reference](packages.md#edit-existing-provider-and-hook-configuration).
 
+## Select tools for a Hook step
+
+Set `match.tools` on an existing step to limit which tools invoke its Provider.
+With a declared `security` Provider and Agent targets using the `qoder` and
+`openclaw` Adapters, this event fragment checks Qoder `Bash` and OpenClaw `exec`;
+other tools skip the scan step.
+
+```yaml
+tool.before:
+  enabled: true
+  required: true
+  match: {tools: ["*"]}
+  steps:
+    - id: scan-code
+      provider: security
+      operation: scan_code
+      match: {tools: ["native:qoder:Bash", "native:openclaw:exec"]}
+      effects: [observe, block]
+      on_error: block
+```
+
+The event and step selectors must both match. Omitting either selector, or using
+`["*"]`, selects all tools at that level. Standard names `bash`, `file_read` and
+`file_write` match the Adapter's normalized tool name. Exact
+`native:<adapter>:<name>` selectors use the Adapter ID and the Adapter-retained
+`event.tool.native_name`, with case-sensitive matching. Each native selector's
+Adapter ID must appear in `spec.agents[*].adapter`. Validation uses the union of
+all configured targets, so Qoder and OpenClaw selectors can share an event or
+step when both Adapters are declared. Lists are nonempty and unique; `*` must
+stand alone. Regex and glob patterns are unsupported.
+
+For `tool.after`, OpenClaw normalizes `bash` to `exec`, `apply-patch` to
+`apply_patch`, and `cron` to `automations` in `event.tool.name`;
+`event.tool.native_name` preserves the
+callback's supplied spelling. When result replacement and completion observation
+arrive separately, AW restores the original name saved in the replacement
+snapshot. A standalone completion uses the name supplied by its own callback.
+
+An unmatched step records `kind: skipped` without invoking the Provider. Other
+steps keep their order and selection, so an observer or compression step can
+still run. Provider preparation and configuration checks still apply at launch.
+Native permission prompts and denials remain in force. Configure sec-core's
+input mappings separately; see [security checks](security.md).
+
 ## Set the Agent shutdown grace period
 
 Set `spec.agents.<target>.shutdown_grace_ms` in the selected Agent's configuration

@@ -108,12 +108,7 @@ fn matches_native(
                 return false;
             };
             let name = if after {
-                match name.trim().to_lowercase().as_str() {
-                    "bash" => "exec".into(),
-                    "apply-patch" => "apply_patch".into(),
-                    "cron" => "automations".into(),
-                    other => other.to_owned(),
-                }
+                crate::adapters::openclaw::policy_name(name)
             } else {
                 name.to_owned()
             };
@@ -133,11 +128,21 @@ fn matches_native(
         }
         _ => return false,
     };
+    let native_name = if adapter == "openclaw" && after {
+        let Some(retained) = identifier(&tool["native_name"]) else {
+            return false;
+        };
+        // A correlated observation retains its replacement's exact spelling,
+        // while the native completion can supply the runtime's policy alias.
+        json!(crate::adapters::openclaw::policy_name(retained))
+    } else {
+        tool["native_name"].clone()
+    };
     seam && identifier(&session).is_some()
         && identifier(&call).is_some()
         && event["session_id"] == session
         && tool["call_id"] == call
-        && tool["native_name"] == name
+        && native_name == name
         && tool["name"] == name
         && tool["input"] == input
         && tool["result"] == result

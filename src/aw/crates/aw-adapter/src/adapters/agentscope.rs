@@ -225,6 +225,8 @@ mod tests {
                 event: "tool.after".into(),
                 step_id: id.into(),
                 provider: id.into(),
+                event_tools: vec!["*".into()],
+                step_tools: vec!["*".into()],
                 on_error: "report".into(),
                 execution: if id == "user" {
                     StepExecution::Native

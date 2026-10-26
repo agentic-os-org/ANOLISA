@@ -23,8 +23,9 @@ For the general component integration path, start with the
 and daemon remain an independently managed backend; the AW service owns AW
 audit storage. See [container persistence](../native-agents.md#containers-and-persistent-data).
 The Preview generator maps Qoder `Bash` and OpenClaw `exec` inputs. Before using
-QwenPaw or Hermes, add and validate their actual tool names and input pointers
-in `config.tools`; an unmapped tool is observed without scanning.
+QwenPaw or Hermes, add and validate their normalized tool names and input pointers
+in `config.tools`. Select tools separately with standard names or exact native
+selectors in the security step's `match.tools`, as described below.
 
 ## Prerequisites and build
 
@@ -111,9 +112,21 @@ has no automatic service installation, upgrade or removal bridge.
 Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)
 to `aw.sec-core.yaml` and replace its executable and socket paths. The sample
 starts in `mode: observe` with `on_error: report` so local evaluation does not
-request blocking. For blocking, set `mode: block` and admit `[observe, block]`
-in the before step. `on_error: block` separately requests blocking on execution
-failure; a failure is never reported as a scanner risk verdict.
+request blocking. The before step selects synthetic Qoder `shell` and `python`
+events with `native:qoder:shell` and `native:qoder:python`; other tools skip that
+step without invoking this Provider.
+Step selection and event-level selection both apply when configured.
+For required security, set `mode: block`, admit `[observe, block]` and use
+`on_error: block` in the before step. Missing mappings, invalid extraction input
+and backend failures then block the selected call through the Host's error
+policy. Scanner risks retain their separate `code_risk` result.
+
+Host selectors accept `*`, standard names `bash`, `file_read`, `file_write`, or
+`native:<adapter>:<native_name>`. A native selector matches the event's Adapter
+and retained `event.tool.native_name`. Provider `config.tools` independently
+uses normalized `event.tool.name` keys, so configure both against the Adapter's
+event fields. For example, a native Qoder `Bash` call can be selected with
+`native:qoder:Bash`; its Provider mapping uses the normalized tool name.
 
 The Provider's private `config` accepts:
 
@@ -121,15 +134,25 @@ The Provider's private `config` accepts:
 | --- | --- |
 | `version` | Required, exactly `1` |
 | `mode` | Required, `observe` or `block`; only affects `scan_code` |
+| `unmapped_tool` | Optional, `error` (default) or `observe`; controls `scan_code` for a selected tool with no mapping |
 | `tools` | Required object with 1–128 exact normalized tool names |
 | `tools.<name>.language` | `bash` or `python` |
 | `tools.<name>.input_pointer` | JSON Pointer into `event.tool.input`; the selected value must be a string |
 
 Unknown fields, unsupported languages and invalid pointers are rejected.
 An empty pointer selects a root string. `/command` selects a field;
-`/items/0` selects an array element. Names are case-sensitive. Unmapped tools
-produce `observe/tool_unmapped`, which means they were not scanned. A mapped tool
-with missing or non-string code fails with `invalid_tool_input`.
+`/items/0` selects an array element. Names are case-sensitive and use
+`event.tool.name`; `native_name` does not select a mapping. A selected unmapped
+tool returns the Provider error `tool_unmapped` by default, without candidate
+effects. This strict default also applies to existing configurations that omit
+`unmapped_tool`. To retain observation without scanning for such tools, set
+`unmapped_tool: observe` explicitly; the result is `observe/tool_unmapped`.
+
+`mode: observe` records mapped scan results without blocking on risk. It does
+not suppress missing-mapping, extraction or backend errors. A mapped tool with
+missing or non-string code fails with `invalid_tool_input`, including when
+`unmapped_tool: observe` is set. Keep observation-only error handling explicit
+with `on_error: report`.
 
 | Operation | Event | Result |
 | --- | --- | --- |

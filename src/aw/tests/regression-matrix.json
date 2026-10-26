@@ -674,6 +674,42 @@
     "pi-execution-drain": {
       "target": "aw-cli/test/pi",
       "test": "execution_drain_fences_registration_and_transport_failures"
+    },
+    "scope-native-skips": {
+      "target": "aw-cli/test/pretool",
+      "test": "tool_scope::all_native_dialects_close_skipped_callbacks_without_failure_blocks"
+    },
+    "scope-qoder-sdk-order": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "tool_scope::scoped_callbacks_keep_skips_neutral_and_later_denials_authoritative"
+    },
+    "scope-qoder-sdk-close": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "tool_scope::all_skipped_callbacks_close_and_preserve_existing_native_vetoes"
+    },
+    "scope-pi-order": {
+      "target": "aw-cli/test/pi",
+      "test": "tool_scope::scoped_callbacks_preserve_names_skips_and_later_denials"
+    },
+    "scope-pi-close": {
+      "target": "aw-cli/test/pi",
+      "test": "tool_scope::all_skipped_callbacks_close_and_native_permissions_keep_precedence"
+    },
+    "scope-pi-result": {
+      "target": "aw-cli/test/pi",
+      "test": "tool_scope::skipped_final_replacement_preserves_native_envelope_and_failure"
+    },
+    "scope-sdk-result": {
+      "target": "aw-cli/test/posttool",
+      "test": "tool_scope::skipped_replacement_is_neutral_for_claude_and_qwen_callbacks"
+    },
+    "scope-openclaw-names": {
+      "target": "aw-cli/test/posttool",
+      "test": "openclaw_scope::exact_native_selectors_preserve_standalone_callback_names"
+    },
+    "scope-openclaw-completion": {
+      "target": "aw-cli/test/posttool",
+      "test": "openclaw_scope::exact_native_selectors_preserve_replacement_completion_identity"
     }
   },
   "agents": {
@@ -698,10 +734,12 @@
       },
       "lifecycle": [
         "agentscope-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
         "final-replacement"
@@ -726,7 +764,8 @@
           ],
           "replace_result": [
             "final-replacement",
-            "claude-managed-mcp-ownership"
+            "claude-managed-mcp-ownership",
+            "scope-sdk-result"
           ]
         }
       },
@@ -749,14 +788,17 @@
         "invocation-numbers",
         "invocation-enable-race",
         "invocation-legacy-used",
-        "invocation-retire-close-race"
+        "invocation-retire-close-race",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
         "final-replacement",
-        "claude-managed-mcp"
+        "claude-managed-mcp",
+        "scope-sdk-result"
       ]
     },
     "hermes": {
@@ -780,10 +822,12 @@
       },
       "lifecycle": [
         "hermes-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
         "final-replacement"
@@ -810,23 +854,29 @@
       },
       "lifecycle": [
         "openclaw-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "scope-openclaw-names",
+        "scope-openclaw-completion"
       ]
     },
     "pi": {
       "events": {
         "tool.before": {
           "observe": [
-            "security-retry"
+            "security-retry",
+            "scope-pi-order"
           ],
           "block": [
-            "security-retry"
+            "security-retry",
+            "scope-pi-order"
           ]
         },
         "tool.after": {
@@ -834,7 +884,8 @@
             "final-replacement"
           ],
           "replace_result": [
-            "final-replacement"
+            "final-replacement",
+            "scope-pi-result"
           ]
         }
       },
@@ -858,13 +909,18 @@
         "invocation-numbers",
         "invocation-enable-race",
         "invocation-legacy-used",
-        "invocation-retire-close-race"
+        "invocation-retire-close-race",
+        "scope-native-skips",
+        "scope-pi-close"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips",
+        "scope-pi-order"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "scope-pi-result"
       ]
     },
     "qoder": {
@@ -905,10 +961,12 @@
         "ordinary-connection-conflict",
         "attach-rollback-confirmed",
         "attach-relocated-group",
-        "attach-relative-script"
+        "attach-relative-script",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
         "final-replacement"
@@ -929,7 +987,8 @@
             "final-replacement"
           ],
           "replace_result": [
-            "final-replacement"
+            "final-replacement",
+            "scope-sdk-result"
           ]
         }
       },
@@ -957,23 +1016,28 @@
         "attach-dotenv-explicit",
         "attach-dotenv-disabled",
         "attach-dotenv-home",
-        "attach-dotenv-empty"
+        "attach-dotenv-empty",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "scope-sdk-result"
       ]
     },
     "qoder-sdk": {
       "events": {
         "tool.before": {
           "observe": [
-            "security-retry"
+            "security-retry",
+            "scope-qoder-sdk-order"
           ],
           "block": [
-            "security-retry"
+            "security-retry",
+            "scope-qoder-sdk-order"
           ]
         },
         "tool.after": {
@@ -986,10 +1050,14 @@
         "qoder-sdk-lifecycle",
         "cancel-initialization",
         "qoder-sdk-reload",
-        "qoder-sdk-single-config"
+        "qoder-sdk-single-config",
+        "scope-native-skips",
+        "scope-qoder-sdk-close"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips",
+        "scope-qoder-sdk-order"
       ],
       "tokenless": [
         "security-retry",

@@ -149,15 +149,28 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 | `ask`、输入替换、执行后阻断 | 拒绝 |
 | 启用两个工具事件以外的事件 | 拒绝，`required: false` 也不例外 |
 | `security.violation` 等 guard | 拒绝，本模型尚未实现最后一道检查的顺序保证 |
-| 精确工具选择器或高于 `native_hook` 的保证 | 拒绝 |
+| 事件与步骤的 `match.tools` | 接受；Host 仅调用同时匹配两层选择器的工具 |
+| 高于 `native_hook` 的保证 | 拒绝 |
 | 缺少 Provider、操作、能力或匹配的配置校验证据 | 拒绝，并给出明确原因 |
 
 工具执行前的 `on_error` 支持 `report`；Adapter 支持阻断时，也可以使用 `block`。
 工具执行后的失败动作只支持 `report`，其他失败动作拒绝准入。
 
-`required: false` 不允许静默丢弃已启用但不受支持的步骤。通配选择器覆盖全部工具，
-Provider 可以在自身操作中检查工具名和参数。词表中存在 `permission.request`，
-不表示任何具体框架或入口都具备交互式审批界面。
+`required: false` 不允许静默丢弃已启用但不受支持的步骤。所有启用的结构化
+Provider 仍须在运行时选择工具之前提供发现证据和精确的配置校验证据。
+
+事件与步骤选择器取交集；任一层省略或使用 `["*"]` 时，该层覆盖全部工具。
+标准选择器 `bash`、`file_read`、`file_write` 匹配规范化的 `event.tool.name`；
+精确的 `native:<adapter>:<name>` 匹配 `event.agent.adapter` 和保留的
+`event.tool.native_name`。名称区分大小写，不提供 glob 或正则模式，见
+[配置参考](../configuration.md#事件效果与工具选择)。回调归一化、绑定检查和单次
+执行占用之后，未匹配步骤返回 Host 生成的跳过结果，不调用 Provider，也不产生
+效果。事件校验、共享期限、取消、顺序和完成审计仍生效。
+Provider 只接收选中的调用，负责私有的输入提取和后端策略。
+
+原生拒绝和待确认权限请求优先于中立或跳过结果；不受支持的参数改写仍被拒绝。
+Provider 结果不授予原生权限。`permission.request` 保留为词汇，AW 尚未实现
+对应的交互审批。
 
 `aw-host` 在本地执行时落实超时、事件预算和输出限制。离线准入本身无法落实耗时
 限制、进程回收、原生调度或失败处理。因此，准入通过只是建立可运行原生绑定的
@@ -228,12 +241,13 @@ AW 提供协议校验、准入和本地有界 Host，后续增加服务生命周
 结构化 `tool.after` 操作在可信 Adapter 能力支持时可以请求 `replace_result`，并且
 必须是事件最后一个启用步骤；之前可保留观察、布尔 Hook 和原生 Hook。第二个替换
 步骤或替换之后还有启用步骤时，准入会拒绝。布尔 Hook 不能请求该效果。Provider 与 Adapter 证据仍
-分别检查。只有已准入的替换步骤获得可选投影，既有观察步骤保持原事件形态。Adapter 可提供 `event.tool.result_projection`，包含 `text`、`status`、
+分别检查。工具选择器保留这一准入顺序；未匹配的替换步骤返回跳过，保留原始结果。
+只有已准入的替换步骤获得可选投影，既有观察步骤保持原事件形态。Adapter 可提供 `event.tool.result_projection`，包含 `text`、`status`、
 `content_origin` 及可选 Shell `command`。原 `result` 和原生载荷保留，并参与请求绑定。
 
 `replace_result` 效果要求字符串 `text`；`block` 可携带非空、有界的 `text` 原因，其他效果拒绝该字段。响应最多包含一个
 替换，且要求输入中存在投影。缺少投影时只允许不替换的结果。Adapter 替换选定文本
-槽并保留原生 envelope。这是候选效果，不证明模型已消费；AW Journal 不记录文本。
+槽并保留原生 envelope 和失败状态。这是候选效果，不证明模型已消费；AW Journal 不记录文本。
 Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须来自同一 Preview
 构建；旧实现会拒绝不支持的投影或效果，不会静默忽略。
 
@@ -246,7 +260,7 @@ AW 将完整的建议参数作为模型可见阻断原因返回，不输出 `upd
 `modify`、审批指令，也不执行 Shell。Passthrough 必须保持原参数；直接替换动作、
 修改非 command 字段或非法响应均作为 Provider 故障。
 
-模型必须发起新调用才能采用建议。原调用和重试均经过既有 sec-core before 步骤及
+模型必须发起新调用才能采用建议。原调用和重试均经过选中的 sec-core before 步骤及
 原生权限链；Tokenless 的中立结果不能覆盖安全拒绝或扫描故障时的 fail-closed。
 联合模板先保留扫描，再追加 PreTool；完成观察仍位于最终 PostTool 步骤之前。
 AW 不改变外部 Hook 的顺序；外部改写 Hook 仍遵循宿主自己的权限合同。

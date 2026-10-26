@@ -286,6 +286,9 @@ fn exact_native_selectors_cover_custom_tools_without_regex_semantics() {
         ]),
     ] {
         let mut value = example();
+        for adapter in ["qwenpaw", "agentscope", "hermes", "openclaw"] {
+            value["spec"]["agents"][adapter] = json!({"adapter":adapter,"argv":["/bin/true"]});
+        }
         value["spec"]["events"]["tool.before"]["match"]["tools"] = tools;
         assert!(parse(&value).is_ok());
     }

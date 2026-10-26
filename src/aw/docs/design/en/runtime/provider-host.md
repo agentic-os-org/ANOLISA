@@ -63,7 +63,7 @@ adopted a policy. The admitted surface remains:
 | `tool.before` | `observe`, `block` | `report`, or `block` with Adapter support |
 | `tool.after` | `observe`, `replace_result` | `report` |
 
-Enabled unsupported events, exact tool selectors, guards, `ask`, input-replacement
+Enabled unsupported events, guards, `ask`, input-replacement
 effects and guarantees beyond `native_hook` are rejected. The
 [protocol design](../../../../../../docs/developer-guide/en/aw/providers/protocol.md) defines the complete admission contract.
 
@@ -141,6 +141,23 @@ It changes neither event identity nor deadline, and is not included in stdin or
 execution reports. Invalid snapshots consume the step claim and fail visibly.
 
 Use `Event::steps()` to select retained steps, then `Event::invoke(step_id)`.
+The iterator retains all admitted steps in configuration order, including steps
+whose tool selectors will miss. Within `invoke`, event-level and step-level
+`match.tools` intersect after normalization, binding checks and the once-only
+claim. Omission or `["*"]` matches all tools at that level. Standard selectors
+match normalized `tool.name`; `native:<adapter>:<name>` compares `agent.adapter`
+and retained `tool.native_name` exactly. Matching is case-sensitive, without
+glob or regex patterns.
+
+An unmatched invocation validates the normalized event and checks cancellation
+and the shared deadline before returning `StepOutput::Skipped`. It starts no
+Provider or Hook invocation process and emits no candidate effects. Enabled
+structured Providers still complete preparation discovery and configuration
+validation. Skipped steps keep their claim, correlated record and ordinary
+completion path, allowing successor steps and terminal cleanup to proceed.
+The service records `kind: skipped` in its completed metadata audit. Invalid,
+expired or cancelled events remain failures under the configured `on_error`.
+
 Step order is available to the caller, which owns serial or parallel scheduling
 according to its native callback contract. Calls on the same Event share the
 deadline even when concurrent. Each step can be claimed once per Event,
@@ -160,6 +177,12 @@ see [bounded command execution](bounded-execution.md).
 ## Interpret reports
 
 `Invocation.result` retains either a `StepOutput` or the original `Failure`.
+`StepOutput::Skipped` records a selector miss with no command process or effects;
+the Adapter returns a neutral native reply and preserves pending permission
+requests and denials. Unsupported input rewrites remain rejected. Tokenless
+PreTool suggestions require a fresh call through selected security and native
+permission checks. PostTool replacement remains confined to the final authorized
+text slot, retaining the native envelope and failure status.
 `StepOutput::Provider` contains the checked structured outcome;
 `StepOutput::Native` contains stdout, stderr and native process status. A native
 nonzero exit is a result for the Adapter to interpret, not a structured Provider

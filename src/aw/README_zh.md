@@ -91,6 +91,11 @@ aw stop --config "$HOME/aw/aw.yaml"
 core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需要启动 sec-core
 后端；这些能力都要通过配置启用。AW 不安装 Agent，也不配置模型凭据。
 
+通过事件和步骤的 `match.tools` 选择哪些工具调用进入各个 Provider。
+未匹配步骤保留跳过审计记录；生成的 sec-core 检查选择 Qoder `Bash` 和
+OpenClaw `exec`，选中调用的检查失败时阻断。见
+[工具选择](../../docs/user-guide/zh/aw/configuration.md#为-hook-步骤选择工具)。
+
 对于独立启动的 Qoder TUI 或 QwenPaw App，在首请求前执行
 `aw agent connect --config current.yaml --agent TARGET --pid PID`；添加 `--remove`
 可在空闲时移除挂载。原生启动与进程生命周期仍由调用者管理。QwenPaw peer 的启动

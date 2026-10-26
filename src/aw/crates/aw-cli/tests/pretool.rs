@@ -19,6 +19,9 @@ use std::{
 };
 use support::{Fixture, Service};
 
+#[path = "pretool/tool_scope.rs"]
+mod tool_scope;
+
 fn blocked(adapter: &str, output: &std::process::Output) -> bool {
     match adapter {
         "qoder-sdk" | "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" => {

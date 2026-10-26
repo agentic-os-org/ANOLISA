@@ -402,6 +402,31 @@ fn private_configuration_rejects_typos_and_ambiguous_mappings() {
 }
 
 #[test]
+fn unmapped_tool_configuration_is_explicit_and_validated_offline() {
+    for policy in [
+        json!("error"),
+        json!("observe"),
+        json!("block"),
+        json!(null),
+        json!(true),
+    ] {
+        let mut config = config();
+        config["unmapped_tool"] = policy.clone();
+        let reply = run(
+            json!({"api_version":VERSION,"method":"validate_config",
+                "request_id":"v","config":config}),
+            Path::new("/absent-cli"),
+        );
+        if policy == "error" || policy == "observe" {
+            assert_eq!(reply["status"], "ok");
+        } else {
+            assert_eq!(reply["status"], "error");
+            assert_eq!(reply["error_code"], "invalid_config");
+        }
+    }
+}
+
+#[test]
 fn risk_is_a_successful_block_only_with_explicit_mode_and_admission() {
     for (mode, verdict, effect, reason) in [
         ("block", "pass", "observe", "code_pass"),
@@ -409,18 +434,23 @@ fn risk_is_a_successful_block_only_with_explicit_mode_and_admission() {
         ("block", "deny", "block", "code_risk"),
         ("observe", "warn", "observe", "code_risk"),
     ] {
-        let mut request = invocation();
-        request["config"]["mode"] = json!(mode);
-        let reply = cli_response(request, json!({"stdout":{"ok":true,"verdict":verdict}}));
-        assert_eq!(reply["status"], "ok");
-        assert_eq!(
-            reply["effects"],
-            json!([{"type":effect,"reason_code":reason}])
-        );
-        assert!(reply["input_digest"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:"));
+        for policy in [None, Some("observe")] {
+            let mut request = invocation();
+            request["config"]["mode"] = json!(mode);
+            if let Some(policy) = policy {
+                request["config"]["unmapped_tool"] = json!(policy);
+            }
+            let reply = cli_response(request, json!({"stdout":{"ok":true,"verdict":verdict}}));
+            assert_eq!(reply["status"], "ok");
+            assert_eq!(
+                reply["effects"],
+                json!([{"type":effect,"reason_code":reason}])
+            );
+            assert!(reply["input_digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:"));
+        }
     }
 }
 
@@ -462,6 +492,7 @@ fn failed_or_invalid_scans_never_become_policy_blocks() {
         (json!({"stderr_repeat":65537}), "cli_output_limit"),
     ] {
         let reply = cli_response(invocation(), response);
+        assert_eq!(reply["status"], "error");
         assert_eq!(reply["error_code"], code);
         assert!(reply.get("effects").is_none());
         assert!(reply.get("input_digest").is_none());
@@ -478,15 +509,6 @@ fn failed_or_invalid_scans_never_become_policy_blocks() {
 fn selection_and_admission_failures_are_not_silent_scan_successes() {
     let socket = Path::new("/absent.sock");
     let mut request = invocation();
-    request["event"]["tool"]["name"] = json!("unmapped");
-    assert_eq!(
-        run(request, socket)["effects"][0]["reason_code"],
-        "tool_unmapped"
-    );
-    let mut request = invocation();
-    request["event"]["tool"]["input"] = json!({"different": "echo safe"});
-    assert_eq!(run(request, socket)["error_code"], "invalid_tool_input");
-    let mut request = invocation();
     request["allowed_effects"] = json!(["observe"]);
     assert_eq!(run(request, socket)["error_code"], "block_not_admitted");
     let mut request = invocation();
@@ -495,6 +517,85 @@ fn selection_and_admission_failures_are_not_silent_scan_successes() {
         run(request, socket)["error_code"],
         "unsupported_operation_event"
     );
+}
+
+#[test]
+fn unmapped_tools_fail_by_default_and_observation_requires_explicit_policy() {
+    let directory = support::Directory::new(json!({"stdout":{"ok":true,"verdict":"pass"}}));
+    for mode in ["block", "observe"] {
+        for policy in [None, Some("error"), Some("observe")] {
+            let mut request = invocation();
+            request["config"]["mode"] = json!(mode);
+            if mode == "observe" {
+                request["allowed_effects"] = json!(["observe"]);
+            }
+            if let Some(policy) = policy {
+                request["config"]["unmapped_tool"] = json!(policy);
+            }
+            request["event"]["tool"]["name"] = json!("unmapped");
+            // Only the normalized name selects a mapping, even if the native
+            // name happens to match a configured entry.
+            request["event"]["tool"]["native_name"] = json!("shell");
+            let reply = run(request, &directory.cli());
+            if policy == Some("observe") {
+                assert_eq!(reply["status"], "ok");
+                assert_eq!(
+                    reply["effects"],
+                    json!([{
+                        "type":"observe","reason_code":"tool_unmapped"
+                    }])
+                );
+                assert!(reply["input_digest"].as_str().is_some());
+            } else {
+                assert_eq!(reply["status"], "error");
+                assert_eq!(reply["error_code"], "tool_unmapped");
+                assert!(reply.get("effects").is_none());
+                assert!(reply.get("input_digest").is_none());
+            }
+        }
+    }
+    assert!(!directory.0.join("cli.pid").exists());
+}
+
+#[test]
+fn mapping_policy_preserves_mapped_input_and_backend_errors() {
+    for policy in [None, Some("observe")] {
+        let directory = support::Directory::new(json!({"exit":1,"stderr":"private backend error"}));
+        for mode in ["block", "observe"] {
+            for input in [
+                json!({}),
+                json!({"command":null}),
+                json!({"command":17}),
+                json!({"command":["echo safe"]}),
+                json!({"command":{"code":"echo safe"}}),
+            ] {
+                let mut request = invocation();
+                request["config"]["mode"] = json!(mode);
+                if let Some(policy) = policy {
+                    request["config"]["unmapped_tool"] = json!(policy);
+                }
+                request["event"]["tool"]["input"] = input;
+                let reply = run(request, &directory.cli());
+                assert_eq!(reply["status"], "error");
+                assert_eq!(reply["error_code"], "invalid_tool_input");
+                assert!(reply.get("effects").is_none());
+                assert!(!directory.0.join("cli.pid").exists());
+            }
+        }
+        for mode in ["block", "observe"] {
+            let mut request = invocation();
+            request["config"]["mode"] = json!(mode);
+            if let Some(policy) = policy {
+                request["config"]["unmapped_tool"] = json!(policy);
+            }
+            let reply = run(request, &directory.cli());
+            assert_eq!(reply["status"], "error");
+            assert_eq!(reply["error_code"], "cli_failed");
+            assert!(reply.get("effects").is_none());
+            assert!(!reply.to_string().contains("private backend error"));
+            directory.assert_stopped();
+        }
+    }
 }
 
 #[test]

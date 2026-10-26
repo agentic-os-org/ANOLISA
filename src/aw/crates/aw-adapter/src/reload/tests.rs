@@ -14,6 +14,8 @@ fn steps(event: &str, replacement: bool) -> Vec<AdmittedStep> {
             event: event.into(),
             step_id: id.into(),
             provider: id.into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["*".into()],
             on_error: "report".into(),
             execution: StepExecution::Provider {
                 operation: "record".into(),

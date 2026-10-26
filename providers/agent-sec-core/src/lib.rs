@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use aw_provider::{Protocol, Request, MAX_MESSAGE_BYTES, VERSION};
 use serde_json::{json, Value};
 
-use self::config::{Config, Mode};
+use self::config::{Config, Mode, UnmappedTool};
 
 /// Processes one EOF-terminated AW request and writes one JSON response.
 ///
@@ -96,7 +96,10 @@ fn dispatch(
             }
             let tool = event["tool"]["name"].as_str().ok_or("invalid_tool")?;
             match config.tools.get(tool) {
-                None => ("observe", "tool_unmapped"),
+                None => match config.unmapped_tool {
+                    UnmappedTool::Error => return Err("tool_unmapped"),
+                    UnmappedTool::Observe => ("observe", "tool_unmapped"),
+                },
                 Some(mapping) => {
                     let code = event["tool"]["input"]
                         .pointer(&mapping.input_pointer)

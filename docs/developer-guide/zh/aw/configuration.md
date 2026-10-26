@@ -42,6 +42,7 @@ CLI 版本，要求 >=1.1.64 而不固定一个版本；OpenClaw、QwenPaw、Her
 | `events.tool.before.guard` | 可选引用已声明的 `security.violation`，before 启用时被引用事件也须启用 |
 | `steps[].id`、`steps[].enabled` | ID 在事件内唯一；enabled 默认 `true` |
 | `steps[].provider` | 已声明的 Provider ID，协议必须与步骤形态匹配 |
+| `steps[].match.tools` | 工具前后步骤可填的工具选择器数组；与事件选择器取交集；省略表示全部工具 |
 | `steps[].operation` | 布尔 Hook 缺省为 `invoke`（唯一支持值）；结构化 Provider 必填操作名，与发现结果校验 |
 | `steps[].native` | 空对象，选择原生回调执行；与 `operation`、`effects` 互斥 |
 | `steps[].effects` | 必填非空、不重复列表；布尔命中时请求全部效果，结构化 Provider 用作准入上限；原生步骤不填 |
@@ -82,8 +83,8 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 
 当前运行时准入工具前 `observe`/`block`、工具后 `observe` 或唯一且最后的结构化
 `replace_result`，以及这两个点位的原生步骤。布尔/原生步骤不能请求结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
-接通失败工具。其他已识别事件、精确选择器、guard 和更强执行保证均不代表已有
-运行支持。Qoder、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6 工厂均有启动 Adapter；
+接通失败工具。运行时仍拒绝其他已识别事件、guard 和更强执行保证。
+Qoder、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6 工厂均有启动 Adapter；
 受支持版本、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
 
 ## 事件、效果与工具选择
@@ -124,10 +125,28 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 边界，只修改历史记录不足以满足要求。必需的安全隐藏不能使用 `report`。
 服务在准入时拒绝尚不能落实的效果与失败动作。
 
-选择器为 `*`、`bash`、`file_read`、`file_write` 或已声明适配器 ID 对应的
-`native:<adapter>:<精确名称>`。原生选择器依赖宿主，不是跨框架语义。除单独
-`*` 外不提供正则或 glob 匹配。全部工具路由包括原生自定义工具并保留输入，
-不表示每个 Provider 都能理解每种工具。
+工具事件及其步骤均可配置 `match.tools`。工具必须同时匹配事件和步骤的列表，
+才会执行该步骤；单个列表内任一条目匹配即可。任一层省略选择器或使用 `["*"]`
+时，该层选择全部工具。列表须非空且无重复，`*` 必须单独使用。
+结构化 Provider、布尔 Hook 和原生命令均遵循这一规则。
+
+选择器区分大小写，支持 `*`、`bash`、`file_read`、`file_write` 或
+`native:<adapter>:<exact-name>`。标准名称匹配规范化的 `event.tool.name`；
+原生选择器匹配 `event.agent.adapter` 中已注册的 Adapter ID 和保留的
+`event.tool.native_name`。Adapter ID 与配置的目标名称分开使用，例如
+`native:qoder:Bash` 精确选择 Qoder 的 `Bash`。不支持正则或 glob 模式，
+唯一通配符为 `*`。Provider 私有工具映射独立配置。
+
+共享 Host 在回调归一化、绑定检查和步骤单次占用之后执行选择。
+未匹配步骤以 `kind: skipped` 完成，没有效果，也不启动调用进程；仍校验规范化
+事件、检查取消及共享截止时间，并保留步骤顺序、关联和完成状态。
+即使后续工具未匹配，启用的结构化 Provider 仍须在准备阶段完成 `describe`
+和 `validate_config`。
+
+跳过或中立结果不授予权限。原生拒绝和待确认的权限请求保持优先，
+不受支持的参数改写仍被拒绝。Tokenless PreTool 建议须由新调用重新经过选中的
+安全步骤和原生权限检查。PostTool 替换仍仅作用于末尾获准的文本槽，
+保留原生 envelope 与失败状态。
 
 `required: false` 不能授权丢弃启用的控制效果或失败处置。运行时准入
 将启用步骤与 Provider 声明、实现及宿主能力对照，拒绝不支持的必需控制。

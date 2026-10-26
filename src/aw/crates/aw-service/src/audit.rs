@@ -99,7 +99,7 @@ impl Audit {
                 // so concurrent completions retain durable order; readers clone 20 items.
                 if let Ok(mut recent) = self.recent.lock() {
                     let call = &record["call"];
-                    recent.push_front(json!({"provider":call["provider"],"step_id":call["step_id"],
+                    recent.push_front(json!({"kind":record["kind"],"provider":call["provider"],"step_id":call["step_id"],
                         "method":call["method"],"elapsed_ms":call["elapsed_ms"],
                         "status":record["status"],"failure":record["failure"],
                         "failure_action":record["failure_action"],"policy_block":record["policy_block"]}));
@@ -176,9 +176,11 @@ pub(crate) fn call(record: &CallRecord) -> Value {
 
 pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let metadata = call(&value.record);
-    let native = value.record.method == Method::NativeHook;
+    let skipped = matches!(value.result, Ok(StepOutput::Skipped));
+    let native = !skipped && value.record.method == Method::NativeHook;
     let mut native_output = Value::Null;
     let (status, effects, failure) = match value.result {
+        Ok(StepOutput::Skipped) => ("ok", json!([]), None),
         Ok(StepOutput::Provider(outcome)) => ("ok", outcome.as_value()["effects"].clone(), None),
         Ok(StepOutput::Native(output)) => {
             use std::os::unix::process::ExitStatusExt;
@@ -206,7 +208,13 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let blocked = effects
         .as_array()
         .is_some_and(|effects| effects.iter().any(|effect| effect["type"] == "block"));
-    let kind = if native { "native" } else { "provider" };
+    let kind = if skipped {
+        "skipped"
+    } else if native {
+        "native"
+    } else {
+        "provider"
+    };
     let record = json!({"kind": kind, "phase": "completed", "call": metadata, "status": status, "failure": failure,
         "failure_action": action, "policy_block": if native { None } else { Some(blocked) }});
     let mut result = json!({"kind": kind, "status": status, "failure": failure,
@@ -229,6 +237,10 @@ pub(crate) fn preparation(error: &aw_host::Error) -> Value {
         _ => Value::Null,
     }
 }
+
+#[cfg(test)]
+#[path = "audit/tool_matching.rs"]
+mod tool_matching;
 
 #[cfg(test)]
 mod tests {

@@ -461,7 +461,7 @@ fn replace_effects_and_result_withholding_remain_explicitly_unsupported() {
 }
 
 #[test]
-fn all_tools_is_accepted_while_exact_selectors_and_guards_are_rejected() {
+fn tool_selectors_are_admitted_while_guards_are_rejected() {
     let mut document = document();
     document["spec"]["events"]["tool.before"]["match"] = json!({"tools": ["*"]});
     let adapter = capabilities("qoder");
@@ -469,7 +469,7 @@ fn all_tools_is_accepted_while_exact_selectors_and_guards_are_rejected() {
     assert!(admit(&configuration(&document), "qoder", &adapter, &providers).is_ok());
     for tool in ["bash", "native:qoder:custom_tool"] {
         document["spec"]["events"]["tool.before"]["match"] = json!({"tools": [tool]});
-        assert!(admit(&configuration(&document), "qoder", &adapter, &providers).is_err());
+        assert!(admit(&configuration(&document), "qoder", &adapter, &providers).is_ok());
     }
     document["spec"]["events"]["tool.before"]["match"] = json!({"tools": ["*"]});
     document["spec"]["events"]["tool.before"]["guard"] = json!("security.violation");

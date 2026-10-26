@@ -180,17 +180,33 @@ preserved; admission does not schedule distinct events or choose parallelism.
 | `ask`, input replacement or a block after execution | Rejected |
 | An enabled event outside the two tool events | Rejected, including when `required: false` |
 | A guard such as `security.violation` | Rejected; final-check ordering is not implemented by this profile |
-| Exact tool selectors or a guarantee beyond `native_hook` | Rejected |
+| Event and step `match.tools` | Accepted; the Host invokes only tools matching both selectors |
+| A guarantee beyond `native_hook` | Rejected |
 | A missing Provider, operation, capability or matching configuration validation | Rejected with an explicit reason |
 
 Before-tool `on_error` may be `report`, or `block` when the Adapter supports
 blocking. After-tool failures support `report`. Other failure actions are rejected.
 
 `required: false` does not authorize silently dropping an enabled unsupported
-step. All configured tools are eligible through the wildcard selector; the
-Provider can inspect tool names and arguments in its own operation. The presence
-of `permission.request` in the vocabulary does not imply support for an
-interactive approval UI in any particular framework or entrypoint.
+step. Every enabled structured Provider still supplies discovery and exact
+configuration-validation evidence before runtime tool selection.
+
+Event and step selectors intersect; omission or `["*"]` covers all tools at
+that level. Standard selectors `bash`, `file_read` and `file_write` match
+normalized `event.tool.name`. Exact `native:<adapter>:<name>` selectors match
+`event.agent.adapter` and retained `event.tool.native_name`; names are
+case-sensitive and no glob or regex patterns apply. See the
+[configuration reference](../configuration.md#events-effects-and-tool-selection).
+After normalization, binding checks and the once-only claim, an unmatched step
+returns a Host-owned skipped result with no Provider invocation or effects.
+Event validation, shared deadlines, cancellation, ordering and completion audit
+still apply. The Provider receives only selected invocations and owns its
+private tool extraction and backend policy.
+
+Native denial and pending permission requests retain precedence over neutral
+or skipped steps. Unsupported argument rewrites remain rejected; a Provider
+result grants no native permission. `permission.request` remains vocabulary
+without an AW interactive approval implementation.
 
 `aw-host` enforces timeout, event budget and output-limit fields during local
 execution. Offline admission itself cannot enforce elapsed time, process cleanup,
@@ -279,6 +295,8 @@ Adapter evidence supports it. It must be the event's last enabled step; earlier
 observers, boolean Hooks and native Hooks are retained. A second replacement or
 any enabled step after replacement is rejected. Boolean Hooks cannot request
 replacement. Provider and Adapter evidence remain separately checked.
+Tool selectors preserve this admission order. An unmatched replacement step
+returns skipped and leaves the original result intact.
 Only the admitted replacement step receives the optional projection; existing
 observers keep their original event shape. The Adapter supplies `event.tool.result_projection` containing `text`,
 `status`, `content_origin` and an optional shell `command`. The original `result`
@@ -287,7 +305,8 @@ and native payload remain available and participate in the request binding.
 A `replace_result` effect requires a string `text`. A `block` effect may include
 a nonempty bounded `text` reason; all other effect types reject that field. Responses allow at most one replacement and require an input
 projection. A missing projection permits only a no-replacement result. The
-Adapter replaces its selected slot and preserves the native envelope. This is a
+Adapter replaces its authorized text slot and preserves the native envelope and
+failure status. This is a
 candidate, not proof that a model consumed it; AW's journal excludes the text.
 The schema additions retain the experimental v1alpha1 protocol. Deploy matching
 CLI, service and Providers from the same Preview build; older implementations
@@ -304,7 +323,7 @@ Passthrough must preserve the original arguments. A direct-replacement action,
 changes to non-command fields or an invalid response is a Provider failure.
 
 The model must submit a fresh call to use the suggestion. Both the original and
-retry traverse the existing sec-core before step and native permission pipeline;
+retry traverse selected sec-core before steps and the native permission pipeline;
 Tokenless neutrality cannot override a denial or a fail-closed scanner error.
 The combined template retains scanning first, appends PreTool, and retains its
 completion observer before the final PostTool step. AW does not reorder external

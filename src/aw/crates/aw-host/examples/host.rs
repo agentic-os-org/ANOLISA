@@ -54,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for step in event.steps() {
         let invocation = event.invoke(&step.step_id)?;
         let (effects, failure) = match invocation.result {
+            Ok(aw_host::StepOutput::Skipped) => (json!([]), None),
             Ok(aw_host::StepOutput::Provider(outcome)) => {
                 (outcome.as_value()["effects"].clone(), None)
             }

@@ -529,6 +529,13 @@
             "boolean",
             "null"
           ]
+        },
+        "kind": {
+          "enum": [
+            "provider",
+            "native",
+            "skipped"
+          ]
         }
       },
       "required": [

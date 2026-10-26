@@ -18,7 +18,8 @@ sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调�
 CLI 和 daemon 仍是独立管理的后端，AW 审计存储由 AW 服务负责，见
 [容器持久化说明](../native-agents.md#容器与持久化数据)。Preview 生成器映射 Qoder `Bash` 和
 OpenClaw `exec` 输入。使用 QwenPaw 或 Hermes 前，须在 `config.tools` 中补充并
-验证其实际工具名称和输入指针；未映射工具只观察，不扫描。
+验证其规范化工具名称和输入指针。安全步骤的 `match.tools` 另行使用标准名称或
+精确的原生选择器选择工具，具体语法见下文。
 
 ## 前置条件与构建
 
@@ -92,9 +93,20 @@ AW 卸载只移除本包回执拥有的 helper/模板，保留独立管理的系
 
 复制[完整示例](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)为
 `aw.sec-core.yaml`，替换可执行文件与 socket 路径。示例使用 `mode: observe` 和
-`on_error: report`，本地评估不会请求阻断。需要阻断时，将 `mode` 改为 `block`，
-并在 before 步骤中准入 `[observe, block]`。`on_error: block` 单独控制执行故障时
-是否请求阻断；执行故障始终不会被解释为扫描器发现风险。
+`on_error: report`，本地评估不会请求阻断。before 步骤通过 `native:qoder:shell`
+和 `native:qoder:python` 选择合成的 Qoder `shell`、`python` 事件；
+其他工具跳过该步骤，不调用此 Provider。
+同时配置步骤和事件选择条件时，两者都须匹配。
+必需的安全检查使用 `mode: block`，并在 before 步骤中准入 `[observe, block]`、
+设置 `on_error: block`。缺少映射、无效提取输入和后端失败均通过 Host 的错误策略
+阻断选中的调用；扫描器发现的风险保留独立的 `code_risk` 结果。
+
+Host 选择器支持 `*`、标准名称 `bash`、`file_read`、`file_write`，以及
+`native:<adapter>:<native_name>`。原生选择器匹配事件的 Adapter 和保留的
+`event.tool.native_name`。Provider `config.tools` 独立使用规范化的
+`event.tool.name` 作为键，配置时须核对 Adapter 的这两个事件字段。
+例如，Qoder 原生 `Bash` 调用可通过 `native:qoder:Bash` 选择，
+对应的 Provider 映射使用规范化工具名称。
 
 Provider 的私有 `config` 接受以下字段：
 
@@ -102,14 +114,22 @@ Provider 的私有 `config` 接受以下字段：
 | --- | --- |
 | `version` | 必填，固定为 `1` |
 | `mode` | 必填，`observe` 或 `block`，只影响 `scan_code` |
+| `unmapped_tool` | 可选，`error`（默认）或 `observe`，控制 `scan_code` 对已选中但没有映射的工具的处理 |
 | `tools` | 必填，包含 1–128 个规范化工具名称的对象，按名称精确匹配 |
 | `tools.<name>.language` | `bash` 或 `python` |
 | `tools.<name>.input_pointer` | 指向 `event.tool.input` 内部的 JSON Pointer，所选值必须为字符串 |
 
 未知字段、不支持的语言和非法指针会被拒绝。空指针选择根字符串，`/command`
-选择字段，`/items/0` 选择数组元素。工具名区分大小写。未映射的工具返回
-`observe/tool_unmapped`，表示没有扫描；已映射的工具缺少代码或代码不是字符串时，
-返回 `invalid_tool_input` 错误。
+选择字段，`/items/0` 选择数组元素。工具名区分大小写，使用 `event.tool.name`；
+`native_name` 不参与映射选择。已选中但未映射的工具默认返回 Provider 错误
+`tool_unmapped`，没有候选效果。省略 `unmapped_tool` 的已有配置也采用此严格默认值。
+需要为这些工具保留只观察、不扫描的行为时，显式配置 `unmapped_tool: observe`，
+返回结果为 `observe/tool_unmapped`。
+
+`mode: observe` 记录已映射工具的扫描结果，发现风险时返回观察效果。
+缺少映射、提取失败和后端错误仍返回错误。已映射工具缺少代码或代码不是字符串时，
+返回 `invalid_tool_input`；配置 `unmapped_tool: observe` 时也执行这一校验。
+仅观察的错误处理策略须显式使用 `on_error: report`。
 
 | 操作 | 事件 | 结果 |
 | --- | --- | --- |

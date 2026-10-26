@@ -110,6 +110,11 @@ Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.
 
+Use event and step `match.tools` to select which tool calls invoke each Provider.
+Unmatched steps retain a skipped audit record; generated sec-core checks select
+Qoder `Bash` and OpenClaw `exec` and block selected calls when checking fails.
+See [tool selection](../../docs/user-guide/en/aw/configuration.md#select-tools-for-a-hook-step).
+
 For an independently started Qoder TUI or QwenPaw App, use
 `aw agent connect --config current.yaml --agent TARGET --pid PID` before its first request;
 add `--remove` to detach at idle. Native startup and process ownership stay with

@@ -35,6 +35,23 @@ pub(crate) struct Transport<'a> {
 }
 
 impl Transport<'_> {
+    pub fn skipped(
+        &self,
+        mut record: CallRecord,
+        event: &Value,
+    ) -> (CallRecord, Result<StepOutput, Failure>) {
+        let started = Instant::now();
+        let result = (|| {
+            check(self.deadline, self.cancelled)?;
+            self.protocol.validate_event(event)?;
+            // Validation cannot turn an expired or cancelled event into a skip.
+            check(self.deadline, self.cancelled)?;
+            Ok(StepOutput::Skipped)
+        })();
+        record.elapsed = started.elapsed();
+        (record, result)
+    }
+
     pub fn native(
         &self,
         mut record: CallRecord,

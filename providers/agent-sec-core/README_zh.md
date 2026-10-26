@@ -4,6 +4,12 @@
 
 通过现有 sec-core CLI 提供命令安全检查。本目录维护桥接实现，后端由对应组件提供。
 
+通过 Hook 步骤的 `match.tools` 选择代码工具，使用 `bash` 等标准名称或精确的
+`native:<adapter>:<name>` 选择器。Provider `config.tools` 按规范化的
+`event.tool.name` 映射输入。
+选中的工具缺少映射时默认返回错误；显式配置 `unmapped_tool: observe` 可只观察而不扫描。
+必需的安全步骤使用 `mode: block` 和 `on_error: block`，阻断风险和检查失败。
+
 维护人按 [CODEOWNERS](../../.github/CODEOWNERS) 由 @kongche-jbw 负责。
 桥接代码使用 [Apache-2.0](../../LICENSE)，后端来源见 [agent-sec-core](../../src/agent-sec-core/README_zh.md)。
 

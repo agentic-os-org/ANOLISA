@@ -521,24 +521,7 @@
           "maxItems": 128
         },
         "match": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "tools"
-          ],
-          "properties": {
-            "tools": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 256
-              },
-              "minItems": 1,
-              "maxItems": 128,
-              "uniqueItems": true
-            }
-          }
+          "$ref": "#/$defs/toolMatch"
         }
       }
     },
@@ -569,24 +552,7 @@
           "maxItems": 128
         },
         "match": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "tools"
-          ],
-          "properties": {
-            "tools": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 256
-              },
-              "minItems": 1,
-              "maxItems": 128,
-              "uniqueItems": true
-            }
-          }
+          "$ref": "#/$defs/toolMatch"
         },
         "guard": {
           "const": "security.violation"
@@ -650,6 +616,9 @@
           "not": {
             "pattern": "[^A-Za-z0-9_.-]"
           }
+        },
+        "match": {
+          "$ref": "#/$defs/toolMatch"
         }
       },
       "oneOf": [
@@ -683,6 +652,26 @@
           }
         }
       ]
+    },
+    "toolMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tools"
+      ],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      }
     }
   }
 }

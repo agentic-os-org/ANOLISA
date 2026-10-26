@@ -47,6 +47,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `events.tool.before.guard` | Optional reference to a declared `security.violation` event, enabled when this before event is enabled |
 | `steps[].id`, `steps[].enabled` | ID unique within its event; enabled defaults to `true` |
 | `steps[].provider` | Declared Provider ID whose protocol must match the step form |
+| `steps[].match.tools` | Optional tool selector array for a tool-before/after step; intersects the event selector; omitted means all tools |
 | `steps[].operation` | Defaults to `invoke` for boolean Hooks (the only supported value); structured Providers require an explicit operation checked against discovery |
 | `steps[].native` | Empty object selecting native callback execution; mutually exclusive with `operation` and `effects` |
 | `steps[].effects` | Required nonempty unique list; all requested on a boolean match, an admitted upper bound for structured Providers; omit for native steps |
@@ -99,7 +100,7 @@ Runtime currently admits `tool.before` with `observe`/`block` and `tool.after`
 with `observe` or a single final structured `replace_result`, plus native steps
 at these points. Boolean/native steps cannot request result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
-Other recognized events, exact selectors, guards and stronger execution guarantees
+Other recognized events, guards and stronger execution guarantees
 are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope 2.0.6 factories have launch Adapters;
 their supported versions, entrypoints and
 after-event coverage are listed in the [native Agent reference](native-agents.md).
@@ -147,11 +148,33 @@ continues. Withholding requires a verified model-consumption boundary; replacing
 a history entry is insufficient. Required redaction must not use `report`.
 The service must enforce these requirements at admission and execution.
 
-Selectors are `*`, `bash`, `file_read`, `file_write`, or
-`native:<adapter>:<exact-name>` for any declared adapter ID. Native selectors
-are host-specific, not portable tool semantics. There are no regex/glob selectors
-other than the single `*`. All-tools routing includes native custom tools and
-preserves their input; it does not make every Provider understand every tool.
+Both tool events and their steps accept `match.tools`. A step runs only when
+the tool matches both lists; entries within one list are alternatives. Omitting
+either selector, or using `["*"]`, selects all tools at that level. Lists must
+be nonempty and unique; `*` must stand alone. The rule applies to structured
+Providers, boolean Hooks and native commands.
+
+Selectors are case-sensitive `*`, `bash`, `file_read`, `file_write`, or
+`native:<adapter>:<exact-name>`. Standard names match normalized
+`event.tool.name`. Native selectors match the registered Adapter ID in
+`event.agent.adapter` and the retained `event.tool.native_name`; the Adapter ID
+is separate from the configured target name. For example, `native:qoder:Bash`
+selects Qoder's exact `Bash` name. There are no regex or glob patterns; `*` is the
+only wildcard. Provider-private tool mappings remain independently configured.
+
+Selection occurs in the shared Host after callback normalization, binding checks
+and the once-only step claim. An unmatched step completes with `kind: skipped`,
+no effects and no invocation process. It still validates the normalized event,
+checks cancellation and the shared deadline, and retains step order, correlation
+and completion accounting. Enabled structured Providers still complete
+`describe` and `validate_config` during preparation, even when a later tool
+does not match.
+
+A skipped or neutral step grants no permission. Native denial and pending
+permission requests retain precedence; unsupported argument rewrites remain
+rejected. A Tokenless PreTool suggestion requires a fresh call through selected
+security steps and native permission checks. PostTool replacement remains one
+final authorized text slot, preserving the native envelope and failure status.
 
 `required: false` cannot authorize dropping an active control effect or its
 failure action. Runtime admission checks every enabled step against

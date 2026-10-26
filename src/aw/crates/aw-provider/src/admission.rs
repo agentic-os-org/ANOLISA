@@ -52,6 +52,34 @@ pub struct AdmittedStep {
     pub execution: StepExecution,
     /// The Host action required when Provider execution fails.
     pub on_error: String,
+    /// Event-level tool selectors; intersected with the step selectors.
+    pub event_tools: Vec<String>,
+    /// Step-level tool selectors; omitted configuration admits all tools.
+    pub step_tools: Vec<String>,
+}
+
+impl AdmittedStep {
+    /// Match a validated normalized event against both configured tool selectors.
+    ///
+    /// Standard selectors compare `tool.name`; exact native selectors compare the
+    /// Adapter ID and retained `tool.native_name`. No aliases or globs are inferred.
+    /// A mismatch still consumes the step and participates in ordered completion.
+    pub fn matches_tool(&self, event: &Value) -> bool {
+        let matches = |selectors: &[String]| {
+            selectors.iter().any(|selector| {
+                if selector == "*" {
+                    return true;
+                }
+                if let Some(native) = selector.strip_prefix("native:") {
+                    return native.split_once(':').is_some_and(|(adapter, name)| {
+                        event["agent"]["adapter"] == adapter && event["tool"]["native_name"] == name
+                    });
+                }
+                event["tool"]["name"] == *selector
+            })
+        };
+        matches(&self.event_tools) && matches(&self.step_tools)
+    }
 }
 
 /// Execution contract selected by the configured protocol or its documented default.
@@ -91,7 +119,7 @@ impl StepExecution {
 ///
 /// # Errors
 /// Rejects missing or mismatched evidence, unsupported events or effects, guards,
-/// exact tool selectors and unsupported failure actions. Success establishes
+/// and unsupported failure actions. Success establishes
 /// capability admission only, not installed hooks or a complete runtime binding.
 pub fn admit(
     config: &aw_config::Configuration,
@@ -168,15 +196,6 @@ pub fn preflight(
             event.get("guard").is_none(),
             "event guards are not supported",
         )?;
-        if let Some(selector) = event.get("match") {
-            let tools = selector["tools"]
-                .as_array()
-                .ok_or(Error::Invalid("tool selector must be an array"))?;
-            require(
-                tools.len() == 1 && tools[0] == "*",
-                "exact tool selectors are not supported",
-            )?;
-        }
         let enabled: Vec<_> = event["steps"]
             .as_array()
             .ok_or(Error::Invalid("event steps must be an array"))?
@@ -274,6 +293,8 @@ fn preflight_step(
         provider: provider_name.to_owned(),
         execution,
         on_error: on_error.to_owned(),
+        event_tools: tool_selectors(&spec["events"][event])?,
+        step_tools: tool_selectors(step)?,
     })
 }
 
@@ -345,5 +366,17 @@ fn require(condition: bool, reason: &'static str) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::Invalid(reason))
+    }
+}
+
+fn tool_selectors(value: &Value) -> Result<Vec<String>, Error> {
+    match value["match"].get("tools") {
+        None => Ok(vec!["*".into()]),
+        Some(tools) => tools
+            .as_array()
+            .ok_or(Error::Invalid("tool selectors must be an array"))?
+            .iter()
+            .map(|tool| string(tool).map(str::to_owned))
+            .collect(),
     }
 }
