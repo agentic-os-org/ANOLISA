@@ -334,6 +334,24 @@ expect_line "a HOME-less dry run reports the skipped codex registration" \
     "DRY-RUN: no codex CLI found, so the registration and the marketplace directory are both skipped" \
     "$nohome_out"
 
+# Scenario 1 in real mode: the dry run above can only catch the shared
+# precheck aborting, so its exit-code assertion proves little. #8771 reported
+# the REAL run reaching the install.sh "codex CLI not found" exit — assert
+# that path directly: same shape without ANOLISA_DRY_RUN.
+nohome_real_out="$(env -i PATH="$NOHOME_BIN_DIR:/usr/bin:/bin" \
+    CODEX_BIN="$SANDBOX/bin/missing-codex" bash "$INSTALL_SH" 2>&1)"
+nohome_real_rc=$?
+if [ "$nohome_real_rc" -eq 0 ]; then
+    pass "a HOME-less real run with the binary on PATH exits cleanly"
+else
+    fail "a HOME-less real run with the binary on PATH: expected exit 0, got $nohome_real_rc: ${nohome_real_out}"
+fi
+expect_no_line "a HOME-less real run never trips an unbound variable" \
+    "unbound variable" "$nohome_real_out"
+expect_line "a HOME-less real run reports the skipped codex registration" \
+    "codex CLI not found — skipping plugin registration." \
+    "$nohome_real_out"
+
 # Scenarios 2-4 need a host with no absolute tokenless fallback.
 if [ -n "$HOST_BIN" ]; then
     skip "host has $HOST_BIN, so the HOME-less no-binary scenarios cannot be exercised here"
