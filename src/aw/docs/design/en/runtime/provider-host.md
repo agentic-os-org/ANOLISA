@@ -43,8 +43,12 @@ unchanged. Construct a new Host when any of them changes. This pins values, not
 executable files or dependencies: their trust and stability remain the caller's
 responsibility.
 
-Preparation parses configuration and calls `admission::preflight` for all enabled
-requirements before starting any Provider. Each referenced structured Provider then runs
+Preparation parses the complete configuration, then calls `admission::preflight`
+for enabled requirements whose event/step selector intersection can match the
+selected Adapter, before starting any Provider. Provably inactive target steps
+are absent from the plan; uncertain normalized/native intersections remain
+strictly admitted. Host preparation and native registration consume the same
+projection, while revision identity retains the complete document. Each referenced structured Provider then runs
 `describe` and `validate_config` in separate processes. Native command Providers
 are admitted through the explicit native step contract without those calls.
 Boolean hooks (omitted `protocol` or `aw-hook/v1alpha1`) also skip those calls;

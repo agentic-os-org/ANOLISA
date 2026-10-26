@@ -4,6 +4,10 @@ use crate::{Description, Error, ValidatedConfig};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+mod selection;
+
+pub use selection::{projected_out_steps, ProjectedOutStep};
+
 /// Protocol-checked evidence supplied by the caller for one configured Provider.
 ///
 /// The caller owns discovery and must associate both responses with the same
@@ -114,8 +118,9 @@ impl StepExecution {
 
 /// Admits enabled tool steps using explicit Provider and trusted Adapter evidence.
 ///
-/// Native commands and disabled steps require no Provider discovery. Enabled events
-/// must be supported even when `required` is false or their step list is empty.
+/// Native commands, disabled steps and steps that cannot select this Adapter
+/// require no Provider discovery. Applicable enabled events must be supported
+/// even when `required` is false or their step list is empty.
 /// Step order within each event is preserved; the result does not order distinct
 /// events or choose serial versus parallel execution.
 ///
@@ -141,7 +146,8 @@ pub fn admit(
 ///
 /// Checks the configured target, implementation and trusted Adapter capabilities,
 /// transport, selectors and failure actions. Disabled events and steps are
-/// skipped; enabled events require support even when optional or empty. Step
+/// skipped, as are selector intersections proven impossible for this Adapter.
+/// Applicable enabled events require support even when optional or empty. Step
 /// order within each event is preserved without choosing execution scheduling.
 ///
 /// Returned steps are candidates, not Provider-admitted steps. Hosts must still
@@ -194,6 +200,27 @@ pub fn preflight(
         if event["enabled"] != true {
             continue;
         }
+        let event_tools = tool_selectors(event)?;
+        if !selection::overlap(&event_tools, &["*".into()], &capabilities.adapter) {
+            continue;
+        }
+        let mut enabled = Vec::new();
+        let mut has_enabled_steps = false;
+        for step in event["steps"]
+            .as_array()
+            .ok_or(Error::Invalid("event steps must be an array"))?
+        {
+            if step["enabled"] == false {
+                continue;
+            }
+            has_enabled_steps = true;
+            if selection::overlap(&event_tools, &tool_selectors(step)?, &capabilities.adapter) {
+                enabled.push(step);
+            }
+        }
+        if has_enabled_steps && enabled.is_empty() {
+            continue;
+        }
         require(
             supported_event(event_name),
             "enabled event is not supported",
@@ -206,12 +233,6 @@ pub fn preflight(
             event.get("guard").is_none(),
             "event guards are not supported",
         )?;
-        let enabled: Vec<_> = event["steps"]
-            .as_array()
-            .ok_or(Error::Invalid("event steps must be an array"))?
-            .iter()
-            .filter(|step| step["enabled"] != false)
-            .collect();
         if let Some(index) = enabled.iter().position(|step| {
             step["effects"]
                 .as_array()
@@ -219,16 +240,10 @@ pub fn preflight(
         }) {
             require(
                 index + 1 == enabled.len(),
-                "result replacement must be the last enabled event step",
+                "result replacement must be the last applicable enabled event step",
             )?;
         }
-        for step in event["steps"]
-            .as_array()
-            .ok_or(Error::Invalid("event steps must be an array"))?
-        {
-            if step["enabled"] == false {
-                continue;
-            }
+        for step in enabled {
             candidates.push(preflight_step(
                 spec,
                 event_name,

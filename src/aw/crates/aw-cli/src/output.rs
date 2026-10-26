@@ -7,6 +7,7 @@ use std::{
 };
 
 mod plans;
+pub(crate) mod projection;
 mod queries;
 mod terminal;
 
@@ -49,6 +50,8 @@ pub(crate) enum Outcome {
     },
     ConfigurationChecked {
         policy_update_scope: bool,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        projected_out_steps: Vec<projection::ProjectedOutStep>,
     },
     PackagesListed {
         inventory: aw_package::database::Inventory,
@@ -173,6 +176,7 @@ mod mutation;
 pub(crate) enum ValidationError {
     Io(std::io::Error),
     Configuration(aw_config::Error),
+    Projection(aw_provider::Error),
 }
 
 struct Failure {
@@ -261,9 +265,11 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
         Outcome::ConfigurationEdited { changed: false } => "Configuration unchanged".into(),
         Outcome::ConfigurationChecked {
             policy_update_scope: false,
+            ..
         } => "configuration valid".into(),
         Outcome::ConfigurationChecked {
             policy_update_scope: true,
+            ..
         } => "policy update scope valid; runtime activation is not checked".into(),
         Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. } => {
             return queries::human(outcome, options);
@@ -274,6 +280,13 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
     };
     let colored = terminal::use_color(options.color, stdout.is_terminal());
     writeln!(stdout, "{}", terminal::styled(&summary, colored, false))?;
+    if let Outcome::ConfigurationChecked {
+        projected_out_steps,
+        ..
+    } = outcome
+    {
+        projection::human(projected_out_steps, &mut stdout)?;
+    }
     if options.verbose {
         let detail = match outcome {
             Outcome::Installed { .. } => {
@@ -356,6 +369,11 @@ pub(crate) fn complete_validation(
             ValidationError::Configuration(error) => (
                 ErrorCode::InvalidConfiguration,
                 "Configuration validation failed",
+                error.to_string(),
+            ),
+            ValidationError::Projection(error) => (
+                ErrorCode::InvalidConfiguration,
+                "Configuration projection failed",
                 error.to_string(),
             ),
         };

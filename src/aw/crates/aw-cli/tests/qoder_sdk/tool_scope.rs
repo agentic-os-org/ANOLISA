@@ -33,7 +33,8 @@ fn scoped_callbacks_keep_skips_neutral_and_later_denials_authoritative() {
                 behavior,
             );
         }
-        document["spec"]["events"]["tool.before"]["match"] = json!({"tools":["bash"]});
+        document["spec"]["events"]["tool.before"]["match"] =
+            json!({"tools":["native:qoder-sdk:Bash"]});
         scope::step(
             &fixture,
             &mut document,
@@ -68,12 +69,7 @@ fn scoped_callbacks_keep_skips_neutral_and_later_denials_authoritative() {
             assert_eq!(request["event"]["tool"]["name"], "bash");
             assert_eq!(request["event"]["tool"]["native_name"], "Bash");
         }
-        let mut before = vec![
-            ("first", true),
-            ("observe", false),
-            ("middle", true),
-            ("decision", false),
-        ];
+        let mut before = vec![("first", true), ("observe", false), ("decision", false)];
         if !denied {
             before.push(("last", true));
         }
@@ -104,7 +100,13 @@ fn all_skipped_callbacks_close_and_preserve_existing_native_vetoes() {
                     &mut document,
                     event,
                     id,
-                    &[if event_mismatch { "bash" } else { "file_read" }],
+                    // Native/normalized aliases remain runtime decisions; provably
+                    // disjoint selectors are removed before native registration.
+                    &[if event_mismatch {
+                        "native:qoder-sdk:Bash"
+                    } else {
+                        "file_read"
+                    }],
                     "native-error",
                 );
             }

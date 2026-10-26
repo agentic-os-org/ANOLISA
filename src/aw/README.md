@@ -94,6 +94,8 @@ for versioned command metadata. `aw completion bash` prints a completion script;
 Zsh, Fish, PowerShell and Elvish are also supported. Scripts are not installed
 automatically. See [command discovery](../../docs/user-guide/en/aw/operations.md#command-discovery-and-completion).
 
+Configuration validation reports steps projected out for each declared target,
+helping check security coverage in shared multi-target files.
 Local package install/uninstall, `config init`, `config validate`, and offline configuration edits
 accept `--json` for a versioned management result. Human summaries remain the
 default; existing service and protocol JSON is unchanged. See

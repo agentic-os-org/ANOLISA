@@ -79,6 +79,7 @@ aw stop --config "$HOME/aw/aw.yaml"
 命令元数据。`aw completion bash` 输出补全脚本，也支持 Zsh、Fish、PowerShell
 和 Elvish；不会自动安装脚本。详见[命令发现与补全](../../docs/user-guide/zh/aw/operations.md#命令发现与补全)。
 
+配置验证按每个已声明 target 报告投影排除的步骤，便于核对多 target 共享配置的安全覆盖。
 本地包安装/卸载、`config init`、`config validate` 和离线配置编辑支持 `--json`，返回带版本的管理结果。
 默认仍为人类摘要，已有服务和协议 JSON 保持不变。
 

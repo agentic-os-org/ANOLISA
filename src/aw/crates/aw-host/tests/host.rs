@@ -64,6 +64,46 @@ fn preparation_deduplicates_enabled_providers_and_skips_disabled_references() {
 }
 
 #[test]
+fn foreign_target_requirements_never_prepare_a_provider() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["agents"]["app"] =
+        json!({"adapter":"qwenpaw","argv":["/no-agent-is-started"]});
+    document["spec"]["providers"]["foreign"] = document["spec"]["providers"]["policy"].clone();
+    document["spec"]["providers"]["foreign"]["transport"]["argv"] =
+        json!(["/foreign-provider-must-not-run"]);
+    document["spec"]["events"]["tool.after"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"foreign", "provider":"foreign", "operation":"record",
+            "effects":["observe"], "on_error":"withhold_result",
+            "match":{"tools":["native:qwenpaw:execute_shell_command"]}
+        }));
+    let host = fixture.prepare(&document);
+    assert_eq!(host.steps().len(), 2);
+    assert!(host.steps().iter().all(|step| step.provider == "policy"));
+    assert_eq!(host.configuration().as_value(), &document);
+    assert_eq!(host.preparation().len(), 2);
+    assert_eq!(fixture.calls("describe").len(), 1);
+    assert_eq!(fixture.calls("validate_config").len(), 1);
+
+    document["spec"]["events"]["tool.after"]["steps"][1]["match"]["tools"] =
+        json!(["native:qoder:Bash"]);
+    let result = Host::prepare(
+        &serde_json::to_vec(&document).unwrap(),
+        "target",
+        capabilities(),
+        fixture.context(),
+        Instant::now() + TIMEOUT,
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(result, Err(Error::Admission(_))));
+    assert_eq!(fixture.calls("describe").len(), 1);
+    fixture.assert_reaped();
+}
+
+#[test]
 fn unsupported_configuration_is_rejected_before_any_provider_side_effect() {
     let fixture = Fixture::new();
     for (pointer, replacement) in [

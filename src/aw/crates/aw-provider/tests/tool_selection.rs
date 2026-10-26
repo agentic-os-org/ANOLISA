@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 fn selected(
     event_tools: Option<Value>,
     step_tools: Option<Value>,
-) -> aw_provider::admission::AdmittedStep {
+    adapter: &str,
+) -> Option<aw_provider::admission::AdmittedStep> {
     let validator = aw_config::Validator::new().unwrap();
     let mut value = validator
         .parse(include_bytes!("../../aw-config/examples/aw.minimal.yaml"))
@@ -35,7 +36,7 @@ fn selected(
         .unwrap();
     let caps = AdapterCapabilities {
         failure_actions: Default::default(),
-        adapter: "qoder".into(),
+        adapter: adapter.into(),
         version: "fixture".into(),
         entrypoint: "fixture".into(),
         events: BTreeMap::from([
@@ -43,11 +44,10 @@ fn selected(
             ("tool.after".into(), vec!["observe".into()]),
         ]),
     };
-    preflight(&config, "qoder", &caps)
+    preflight(&config, adapter, &caps)
         .unwrap()
         .into_iter()
         .find(|step| step.step_id == "check")
-        .unwrap()
 }
 
 #[test]
@@ -68,12 +68,21 @@ fn selectors_intersect_and_match_only_exact_identity() {
         (None, Some(json!(["native:claude-sdk:bash"])), false),
         (None, Some(json!(["native:claude-sdk:Bash:extra"])), false),
     ] {
-        assert_eq!(selected(outer, inner).matches_tool(&event), expected);
+        assert_eq!(
+            selected(outer, inner, "claude-sdk").is_some_and(|step| step.matches_tool(&event)),
+            expected
+        );
     }
     // The CLI keeps its native tool name; an SDK's canonical mapping is not inferred.
     let cli = json!({"agent":{"adapter":"qoder"},"tool":{"name":"Bash","native_name":"Bash"}});
-    assert!(!selected(None, Some(json!(["bash"]))).matches_tool(&cli));
-    assert!(selected(None, Some(json!(["native:qoder:Bash"]))).matches_tool(&cli));
+    assert!(!selected(None, Some(json!(["bash"])), "qoder")
+        .unwrap()
+        .matches_tool(&cli));
+    assert!(selected(None, Some(json!(["native:qoder:Bash"])), "qoder")
+        .unwrap()
+        .matches_tool(&cli));
     let custom = json!({"agent":{"adapter":"pi"},"tool":{"name":"x:y","native_name":"x:y"}});
-    assert!(selected(None, Some(json!(["native:pi:x:y"]))).matches_tool(&custom));
+    assert!(selected(None, Some(json!(["native:pi:x:y"])), "pi")
+        .unwrap()
+        .matches_tool(&custom));
 }

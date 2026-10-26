@@ -37,8 +37,10 @@ Core 的最终执行约束。
 都需要创建新的 Host。这固定的是值，不是可执行文件或依赖内容；调用方仍需负责
 它们的可信性与稳定性。
 
-准备阶段先解析配置，并对全部启用需求调用 `admission::preflight`，之后才启动
-Provider。每个被引用的结构化 Provider 分别启动进程执行 `describe` 和
+准备阶段先解析完整配置，再对事件/步骤选择器交集可能匹配所选 Adapter 的启用
+需求调用 `admission::preflight`，之后才启动 Provider。确定不适用于当前目标的
+步骤不进入计划；无法确定的标准名/原生名交集继续严格准入。Host 准备和原生注册
+使用同一组步骤，revision 身份仍保留完整文档。每个被引用的结构化 Provider 分别启动进程执行 `describe` 和
 `validate_config`；原生命令按显式原生步骤合同准入，不执行这两项调用。布尔 Hook
 （省略 `protocol` 或填写 `aw-hook/v1alpha1`）同样跳过这两项调用，preflight 在本地
 准入配置的命中效果，不执行脚本。仅被禁用项

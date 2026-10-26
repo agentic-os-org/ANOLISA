@@ -90,7 +90,15 @@ callback's supplied spelling. When result replacement and completion observation
 arrive separately, AW restores the original name saved in the replacement
 snapshot. A standalone completion uses the name supplied by its own callback.
 
-An unmatched step records `kind: skipped` without invoking the Provider. Other
+At launch, AW excludes a step only when its event/step selector intersection
+cannot match the selected Adapter. For example, a QwenPaw-only step does not
+require its Provider or effects when launching Qoder SDK from the same file.
+Configuration structure, references and selector spelling are still validated
+across the whole file. Wildcards and uncertain normalized/native intersections
+retain strict capability checks. The remaining steps drive Provider preparation,
+native routes and final-replacement ordering together.
+
+An unmatched admitted step records `kind: skipped` without invoking the Provider. Other
 steps keep their order and selection, so an observer or compression step can
 still run. Provider preparation and configuration checks still apply at launch.
 Native permission prompts and denials remain in force. Configure sec-core's
@@ -140,6 +148,17 @@ It does not run Providers, modify files, check native readiness or update a
 running Agent. Use explicit idle updates below for a reloadable instance;
 otherwise use the stop/edit/run workflow above.
 Plain `aw validate --config FILE` still prints `configuration valid`.
+Both validation entrypoints also list enabled steps whose event/step selectors
+cannot overlap for each declared target. For example,
+`target sdk: projected out tool.after/app-result (tool selectors do not overlap)`
+means that this step will not run for `sdk`. Review these informational lines
+against the intended security coverage of a shared configuration; validation
+continues to accept deliberate cross-target selections. Ambiguous native aliases
+remain applicable. `aw config validate --json` includes nonempty diagnostics in
+`result.projected_out_steps`, with `target`, `event` and `step_id` fields;
+`--quiet` suppresses the human-readable lines. With `--against`, the diagnostics
+describe the candidate configuration. These are offline projection results;
+they do not create runtime audit events or invoke Providers.
 
 `aw config validate` is equivalent to `aw validate`, including `--against` and
 relative file paths; it does not enforce the editor's ownership checks. The

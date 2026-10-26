@@ -81,7 +81,13 @@ OpenClaw 在 `tool.after` 的 `event.tool.name` 中将 `bash` 规范化为 `exec
 保留回调传入的名称。结果替换与完成观察分别回调时，AW 从替换快照恢复已保存的
 原始名称。独立的完成事件使用其自身回调传入的名称。
 
-未匹配步骤记录 `kind: skipped`，不调用 Provider。其他步骤保留原有顺序和选择
+启动时，AW 仅排除事件与步骤选择器交集确定无法匹配当前 Adapter 的步骤。
+例如，同一配置中的 QwenPaw 专属步骤，不会让 Qoder SDK 启动时准备该 Provider
+或要求对应效果能力。配置结构、引用和选择器拼写仍对整个文件校验；通配符以及
+无法确定的标准名/原生名交集继续严格检查能力。剩余步骤共同决定 Provider 准备、
+原生路由及末尾结果替换顺序。
+
+已准入但未匹配当前工具的步骤记录 `kind: skipped`，不调用 Provider。其他步骤保留原有顺序和选择
 条件，观察或压缩步骤仍可继续执行。启动时仍检查 Provider 准备和配置。
 原生权限提示和拒绝继续生效。sec-core 的输入映射须另行配置，见[安全检查](security.md)。
 
@@ -119,6 +125,13 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 比较不运行 Provider、不修改文件、不检查原生就绪，也不更新运行中的 Agent。
 启用稳定桥接的实例可使用下述显式空闲更新；其他实例使用前述停止、编辑、启动流程。
 原有 `aw validate --config FILE` 继续打印 `configuration valid`。
+两个验证入口还会按每个已声明 target 列出事件与步骤选择器无法重叠的已启用步骤。
+例如 `target sdk: projected out tool.after/app-result (tool selectors do not overlap)`
+表示该步骤不会对 `sdk` 执行。应据此核对共享配置的预期安全覆盖；有意配置的跨 target
+选择仍然合法，无法静态判断的原生别名保留适用。
+`aw config validate --json` 在诊断非空时输出 `result.projected_out_steps`，
+每项包含 `target`、`event` 和 `step_id`；`--quiet` 隐藏人类可读的提示行。
+使用 `--against` 时，诊断描述候选配置。离线投影不会生成运行时审计事件或调用 Provider。
 
 `aw config validate` 与 `aw validate` 等价，支持 `--against` 和相对文件路径，
 不执行编辑器的所有权检查。独立 `aw-package` 命令及其更严格的编辑器验证已删除。

@@ -71,12 +71,8 @@ fn scoped_callbacks_preserve_names_skips_and_later_denials() {
             assert_eq!(request["event"]["tool"]["name"], "test");
             assert_eq!(request["event"]["tool"]["native_name"], "test");
         }
-        let mut before = vec![
-            ("first", true),
-            ("observe", false),
-            ("middle", true),
-            ("decision", false),
-        ];
+        let mut before = vec![("first", true), ("observe", false), ("decision", false)];
+        // The foreign SDK step is removed at admission, before a Pi event exists.
         if !denied {
             before.push(("last", true));
         }
