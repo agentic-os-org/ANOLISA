@@ -749,6 +749,9 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
     finished_tasks = 0
 
     for tid, tr in task_results.items():
+        # Reports label rounds by list position, so grader completion order
+        # must not be treated as trial identity.
+        tr["trials"].sort(key=lambda trial: trial["trial"])
         trials_list = tr["trials"]
         n = len(trials_list)
         c = sum(1 for t in trials_list if t["passed"])
