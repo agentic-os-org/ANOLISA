@@ -308,6 +308,8 @@ impl<W: FileProtectionMapWriter> Drop for FileProtectionStaging<W> {
 
 impl<W: FileProtectionMapWriter> ActiveFileProtectionGeneration<W> {
     /// Deactivates first and then removes only this generation's staged keys.
+    // Keep the retry owner inline instead of allocating another owner on cleanup failure.
+    #[allow(clippy::result_large_err)]
     pub fn detach(mut self) -> Result<(), FileProtectionDetachError<W>> {
         let (domain, generation) = (self.staging.domain, self.staging.generation);
         if let Err(error) = self
@@ -357,6 +359,7 @@ impl<W: FileProtectionMapWriter> Drop for ActiveFileProtectionGeneration<W> {
                     generation.get()
                 );
                 let retained = take_staging(&mut self.staging);
+                // Exit reclaims this owner, not pinned maps; cleanup must never precede deactivation.
                 std::mem::forget(retained);
                 self.active = false;
             }
@@ -366,6 +369,8 @@ impl<W: FileProtectionMapWriter> Drop for ActiveFileProtectionGeneration<W> {
 
 impl<W: FileProtectionMapWriter> InactiveFileProtectionGeneration<W> {
     /// Retries deactivation when needed, then idempotently retries partial cleanup.
+    // Keep the retry owner inline instead of allocating another owner on cleanup failure.
+    #[allow(clippy::result_large_err)]
     pub fn retry_cleanup(mut self) -> Result<(), FileProtectionDetachError<W>> {
         if self.needs_deactivation {
             let (domain, generation) = (self.staging.domain, self.staging.generation);
@@ -402,6 +407,7 @@ impl<W: FileProtectionMapWriter> Drop for InactiveFileProtectionGeneration<W> {
                 self.staging.generation.get()
             );
             let retained = take_staging(&mut self.staging);
+            // One failed owner is retained per drop; repeated failures are not process-lifetime bounded.
             std::mem::forget(retained);
         }
     }

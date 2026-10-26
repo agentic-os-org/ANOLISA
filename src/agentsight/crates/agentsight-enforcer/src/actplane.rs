@@ -54,6 +54,22 @@ fn normalize_actplane_policy_payload(
     Ok(Some(normalized))
 }
 
+fn source_label(compiled: Option<&Compiled>) -> Result<u64, BackendError> {
+    match compiled {
+        Some(compiled) => compiled
+            .labels
+            .get("COMMAND")
+            .or_else(|| compiled.labels.get("AGENT"))
+            .copied()
+            .ok_or_else(|| {
+                BackendError::CompileFailure(
+                    "policy must declare a COMMAND or AGENT source label".into(),
+                )
+            }),
+        None => Ok(1),
+    }
+}
+
 // Compile-time guard: compiler and engine must agree on CConfig ABI size.
 // If this fails, one crate's CRule definition was modified without updating the other.
 const _: () = assert!(
@@ -298,16 +314,7 @@ impl ActPlaneBackend {
                 request.binding_id
             );
         }
-        if compiled
-            .labels
-            .get("COMMAND")
-            .or_else(|| compiled.labels.get("AGENT"))
-            .is_none()
-        {
-            return Err(BackendError::CompileFailure(
-                "policy must declare a COMMAND or AGENT source label".into(),
-            ));
-        }
+        source_label(Some(&compiled))?;
         let inode_policy = InodePolicy::prepare(
             &request.policy_dsl,
             &compiled,
@@ -335,16 +342,7 @@ impl ActPlaneBackend {
             inode_policy,
             file_protection,
         } = prepared;
-        let label = compiled
-            .as_ref()
-            .and_then(|compiled| {
-                compiled
-                    .labels
-                    .get("COMMAND")
-                    .or_else(|| compiled.labels.get("AGENT"))
-            })
-            .copied()
-            .unwrap_or(1);
+        let label = source_label(compiled.as_ref())?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
         let structured_target_count = file_protection
             .as_ref()
@@ -1582,6 +1580,27 @@ mod tests {
     use super::*;
 
     const _: fn(&PinnedEngine) -> std::io::Result<usize> = PinnedEngine::drain_pending_events;
+
+    #[test]
+    fn source_label_rejects_unrelated_dsl_labels_but_accepts_structured_policies() {
+        let unrelated = compile_str("source UNRELATED = exec \"**\"\n").expect("compile label");
+        assert!(matches!(
+            source_label(Some(&unrelated)),
+            Err(BackendError::CompileFailure(message))
+                if message == "policy must declare a COMMAND or AGENT source label"
+        ));
+        assert_eq!(source_label(None).expect("structured domain label"), 1);
+        for name in ["COMMAND", "AGENT"] {
+            let compiled = compile_str(&format!(
+                "source A = exec \"/other\"\nsource {name} = exec \"**\"\n"
+            ))
+            .expect("compile domain source");
+            assert_eq!(
+                source_label(Some(&compiled)).expect("declared source"),
+                compiled.labels[name]
+            );
+        }
+    }
 
     fn structured_policy_request(path: &str) -> ApplyPolicy {
         ApplyPolicy {
