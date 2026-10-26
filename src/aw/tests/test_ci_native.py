@@ -158,7 +158,7 @@ class NativeTests(GateFixture):
     def test_missing_entrypoint_and_empty_suites_fail(self) -> None:
         from unittest.mock import patch
 
-        for mode in ("missing", "empty", "manual", "unpinned", "deadline"):
+        for mode in ("missing", "empty", "manual", "unpinned", "deadline", "excessive-timeout"):
             manifest = copy.deepcopy(self.manifest)
             row = manifest["agents"]["agentscope"]
             if mode == "missing":
@@ -170,7 +170,7 @@ class NativeTests(GateFixture):
             elif mode == "unpinned":
                 row["requirements"] = ["agentscope>=2"]
             else:
-                row["cases"][0]["timeout_seconds"] = 0
+                row["cases"][0]["timeout_seconds"] = 2401 if mode == "excessive-timeout" else 0
             original = Path.read_text
 
             def read(path: Path, *args: object, **kwargs: object) -> str:
@@ -211,7 +211,7 @@ class NativeTests(GateFixture):
     def test_qoder_reload_rejects_missing_credential_before_launch(self) -> None:
         import importlib.util
 
-        source = AW / "crates/aw-service/tests/fixtures/qoder/reload.py"
+        source = AW / "crates/aw-cli/tests/fixtures/qoder/reload.py"
         spec = importlib.util.spec_from_file_location("aw_qoder_reload", source)
         fixture = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixture)
@@ -328,7 +328,8 @@ class NativeTests(GateFixture):
                         elif mode == "renamed":
                             rows[0][spec["key"]] = "unexpected-case"
                         elif mode == "duplicate":
-                            rows[0] = rows[1]
+                            # Single-case reports need an extra row to form a duplicate.
+                            rows[:] = [rows[0]] * max(2, len(rows))
                         elif spec.get("values"):
                             rows[0][next(iter(spec["values"]))] = False
                         else:
@@ -360,7 +361,7 @@ class NativeTests(GateFixture):
                     verify_case(case, output, directory)
 
     def test_real_pi_fixture_with_empty_cases_fails_acceptance(self) -> None:
-        fixture = AW / "crates/aw-service/tests/fixtures/pi"
+        fixture = AW / "crates/aw-cli/tests/fixtures/pi"
         source = (fixture / "public-smoke.py").read_text()
         assignment = next(
             node

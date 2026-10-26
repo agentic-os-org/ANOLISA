@@ -9,6 +9,7 @@
 pub mod append;
 pub mod diff;
 pub mod edit;
+pub mod frontmatter;
 pub mod grep;
 pub mod list;
 pub mod mem_log;

@@ -442,6 +442,44 @@ fn completion_memory_heap_sample() {
 }
 
 #[test]
+fn blocked_gemini_sse_survives_capture_and_analysis_with_both_retention_modes() {
+    use crate::interruption::{InterruptionDetector, InterruptionType};
+
+    for retain_raw in [false, true] {
+        let result = captured_with_retention(
+            "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}]}),
+            json!([{"candidates":[{"finishReason":"SAFETY","index":0}]}]),
+            true,
+            retain_raw,
+        );
+        let analyzed = Analyzer::new().analyze_for_delivery(&result, retain_raw);
+        let (output, pending) = GenAIBuilder::new().build_for_delivery(
+            &analyzed,
+            &ResponseSessionMapper::new(),
+            &HashMap::new(),
+            false,
+        );
+        assert!(pending.is_none());
+        let [GenAISemanticEvent::LLMCall(call)] = output.events.as_slice() else {
+            panic!("expected a semantic call");
+        };
+        assert_eq!(call.response.messages.len(), 1);
+        assert!(call.response.messages[0].parts.is_empty());
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("SAFETY")
+        );
+        let events = InterruptionDetector::default().detect(call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
+        );
+    }
+}
+
+#[test]
 fn raw_export_and_unknown_paths_keep_serialized_http_bodies() {
     for (path, retain_raw) in [("/v1/chat/completions", true), ("/unknown", false)] {
         let result = captured(

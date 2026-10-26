@@ -245,6 +245,15 @@ WAL/SHM sidecar 受私有目录保护。绑定 UDS 前必须实际打开 JSONL�
 失败即非零退出；JSONL 失败只输出告警，daemon 仍启动并对该副本保持 best-effort 写入。成功
 启动后单侧瞬时写失败仍保持独立 fail-open，不改变 capability 的业务结果。
 
+Policy 存储独立执行 DPROC-023 路径选择：显式非空 `AGENT_SEC_DATA_DIR` 为固定路径，
+否则候选 A 为 `/var/log/agent-sec/policy-state.db`，B 为
+`/var/lib/agent-sec/policy/policy-state.db`。先检查两处已有状态，再按目录安全性优先选择 A，
+A 的祖先不安全时选择安全的 B。祖先安全且已有叶目录归 daemon 所有时，先将叶目录修复为 `0700`；
+叶目录属主错误或修复失败直接报错。两处都有库，或选址会绕过另一处已有库时拒绝启动并列出路径与原因。
+不能把读取错误视为不存在，也不因数据库损坏、schema、锁或 I/O 错误换库。
+预检查不创建文件、不改变祖先权限、不迁移数据；无冲突时才打开或初始化所选库，最终打开再次验证目录。
+`0700` 私有目录及 `0600` 文件要求保持不变，安全事件和可观测路径不随 Policy fallback 改变。
+
 scan composition root 还注入共享 telemetry sink。`AGENT_SEC_TELEMETRY_LOG_PATH` 沿用 V1，
 默认 uploader-owned JSONL。路径中的 `~` 优先使用 `HOME`，未设置时查询当前 UID 的系统
 用户数据库；`~user` 查询指定用户的 home，保持 V1 `Path.expanduser()` 对已有用户的展开行为。
@@ -409,6 +418,23 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 PAP 持久化、readiness/持续健康检查和 OTel 不在本次交付范围；
 SkillSec 持久化与激活恢复见第 11 节。
 
+**DPROC-V2-SOURCE-BUILD-1（2026-09-29）**：仓库级
+`./scripts/build-all.sh --component sec-core` 源码安装改为 V2 交付。它构建 Rust
+`agent-sec-cli`、`agent-sec-daemon` 和 `linux-sandbox`，以 root 安装到
+`/usr/local/bin`，并在 `/etc/systemd/system/agent-sec-core.service` 渲染 V2
+host-level unit；不创建 wheel、venv、Python wrapper 或 user unit。默认模式仍将
+现有 Agent integration assets 安装在调用用户路径，`--system` 则安装 system 路径。
+安装器在 active systemd host 上必须 daemon-reload、enable 与 restart 服务；没有
+active systemd 的构建环境只安装文件，并明确要求操作者在 systemd host 启用服务。
+
+**DPROC-V2-SOURCE-BUILD-2（2026-10-20）**：source-build 的 V2 验收不再要求
+Security Baseline 迁移。`harden`、`verify` 和 `log-sandbox` 按 `CHANGELOG.md` 1.0.0
+记录的版本化退役契约不再由 V2 CLI 提供；依赖这些命令的脚本必须在切换安装器前
+更新。`verify` 的发行资产校验由 Skill Ledger 的 Ed25519 签名承担。Prompt、PII、
+Skill Ledger、Observability 和 Security Events 仍须具备对应的 Rust command/RPC、
+兼容输出和端到端 fixture 后才能切换。RPM 和 raw 安装路径不由该变更修改。
+回退本变更时恢复目标 revision 的安装器与文档，不恢复已退役命令。
+
 RuntimeLease 是 binary 私有实现；目录 fd 仅用于验证/openat，锁 fd 保留至进程退出。
 V2 不继承 V1 的 PID 文件内容契约，单实例判断依赖非阻塞 flock。
 
@@ -493,6 +519,7 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 | DPROC-017 | state migrator 完成 V1 per-user 到 system-owned state 的 owner-safe 迁移和回滚 |
 | DPROC-018 | CLI/TUI 不直读 SQLite；query 必须经过 daemon authorization |
 | DPROC-019 | raw/RPM/container/systemd/Helm 生成 checksum、SBOM 和 build metadata |
+| DPROC-023 | Policy 默认目录安全性选择与已有状态冲突拒绝；已有自有叶目录修复为 `0700`，仅祖先不安全触发回退；显式数据根不回退，不修改已有数据库；fixture 为 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs` 和 `v2/apps/asc-daemon/tests/bootstrap.rs` 的同名测试及叶目录修复回归 |
 
 每个 DPROC ID 必须映射到机器可执行 fixture 或真实部署证据。Rust unit test 不能代替安装后
 service/package、server-side admission 或真实 Kubernetes rollout 验证。

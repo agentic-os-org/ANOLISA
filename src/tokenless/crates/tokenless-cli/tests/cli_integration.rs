@@ -77,21 +77,46 @@ struct TempDataDir {
 }
 
 impl TempDataDir {
-    fn new() -> Option<Self> {
-        let home = get_home_dir();
+    /// Use system-wide temporary storage so rejection tests also run when the
+    /// default temporary directory is inside the trusted user profile.
+    fn new_external() -> Option<Self> {
+        #[cfg(windows)]
+        let base = std::path::PathBuf::from(std::env::var_os("SystemRoot")?).join("Temp");
+        #[cfg(unix)]
+        let base = std::path::PathBuf::from("/tmp");
         let temp_dir = tempfile::Builder::new()
-            .prefix("tokenless-external-data-dir-integration-")
+            .prefix("tokenless-external-data-dir-")
+            .tempdir_in(&base)
+            .inspect_err(|error| {
+                eprintln!(
+                    "external-root fixture unavailable at {}: {error}",
+                    base.display()
+                )
+            })
+            .ok()?;
+        let root = temp_dir.path().canonicalize().ok()?;
+        let home = get_home_dir();
+        if !home.is_empty() && root.starts_with(std::path::Path::new(&home).canonicalize().ok()?) {
+            eprintln!(
+                "external-root fixture is inside the trusted home: {}",
+                root.display()
+            );
+            return None;
+        }
+        let data_dir = root.join("databases");
+        Some(Self {
+            _temp_dir: temp_dir,
+            root,
+            data_dir,
+        })
+    }
+
+    fn new() -> Option<Self> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("tokenless-data-dir-integration-")
             .tempdir()
             .ok()?;
         let root = temp_dir.path().to_path_buf();
-        if !home.is_empty()
-            && root
-                .canonicalize()
-                .ok()?
-                .starts_with(std::path::Path::new(&home).canonicalize().ok()?)
-        {
-            return None;
-        }
         let data_dir = root.join("databases");
         Some(Self {
             _temp_dir: temp_dir,
@@ -251,7 +276,7 @@ fn valid_stats_db_override_wins_over_invalid_data_dir() {
 
 #[test]
 fn stats_db_override_cannot_escape_selected_data_dir() {
-    let fixture = match TempDataDir::new() {
+    let fixture = match TempDataDir::new_external() {
         Some(fixture) => fixture,
         None => return,
     };
@@ -267,6 +292,26 @@ fn stats_db_override_cannot_escape_selected_data_dir() {
     assert!(!outside_db.exists());
     assert!(fixture.data_dir.join("stats.db").is_file());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
+}
+
+#[test]
+fn stats_db_override_allows_trusted_home_outside_selected_data_dir() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let data = tempfile::tempdir().unwrap();
+    let outside_db = fixture.dir.join("home-stats.db");
+    let output = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", data.path())
+        .env("TOKENLESS_STATS_DB", &outside_db)
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(outside_db.is_file());
+    assert!(!data.path().join("stats.db").exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
 }
 
 #[test]
@@ -306,6 +351,86 @@ fn compress_schema_from_file() {
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["function"]["name"], "f");
+}
+
+/// Run a tokenless subcommand with `input` on stdin and capture its output.
+/// Stats and SLS stay off so the assertions see only the emitted payload.
+fn run_stdin_command(
+    fixture: &TempDataDir,
+    compression_enabled: &str,
+    args: &[&str],
+    input: &str,
+) -> std::process::Output {
+    fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", compression_enabled)
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap()
+}
+
+/// `compress-schema` shares the byte-exact stdout contract of `compress-toon`
+/// and `retrieve`: the payload is emitted verbatim, so a passthrough run
+/// reproduces the input byte-for-byte (no LF appended, none doubled) and an
+/// encoded run emits exactly the candidate the stats recorder measures.
+#[test]
+fn compress_schema_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let schema = r#"{"function":{"name":"test","description":"A test function","parameters":{"type":"object","properties":{"x":{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}"#;
+
+    // Dry-run passthrough emits the input unchanged; the trailing-LF variant
+    // catches a doubled newline just as the bare variant catches an added one.
+    for payload in [schema.to_string(), format!("{schema}\n")] {
+        let output = run_stdin_command(&fixture, "0", &["compress-schema", "--no-stash"], &payload);
+        assert!(
+            output.status.success(),
+            "compress-schema failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-schema must reproduce the input byte-for-byte"
+        );
+    }
+
+    // With compression on, stdout is exactly the emitted candidate: compact
+    // JSON from the schema compressor, with no LF appended.
+    let long_desc = "Run a shell command in the workspace. ".repeat(20);
+    let schema = format!(
+        r#"{{"function":{{"name":"test","description":"{long_desc}","parameters":{{"type":"object","properties":{{"x":{{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}}}}}}"#
+    );
+    let output = run_stdin_command(&fixture, "1", &["compress-schema", "--no-stash"], &schema);
+    assert!(
+        output.status.success(),
+        "compress-schema failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(&schema).unwrap();
+    let expected =
+        serde_json::to_string(&tokenless_schema::SchemaCompressor::new().compress(&value)).unwrap();
+    assert_ne!(
+        expected, schema,
+        "fixture must compress, otherwise the run is a passthrough"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        expected,
+        "compress-schema stdout must equal the emitted candidate byte-for-byte"
+    );
 }
 
 #[test]
@@ -461,8 +586,10 @@ fn compress_response_from_stdin() {
         .unwrap();
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(result.get("data").is_some());
-    assert!(result.get("debug").is_none());
+    assert_eq!(
+        result,
+        serde_json::from_str::<serde_json::Value>(response).unwrap()
+    );
 }
 
 #[test]
@@ -507,10 +634,44 @@ fn compress_response_cli_matches_runtime_library() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        expected.output,
-    );
+    // Exact equality with the runtime library output: no `trim_end()`, so an
+    // appended trailing newline fails the comparison.
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected.output);
+}
+
+/// `compress-response` shares the byte-exact stdout contract of
+/// `compress-toon` and `retrieve`: a passthrough run must reproduce the input
+/// verbatim, so automation can detect the passthrough by comparing stdout with
+/// the input payload. The runs here are dry-run with statistics off, so they
+/// assert the emitted bytes only - equality with the recorded `after` text
+/// holds in active mode alone (see the CLI reference).
+#[test]
+fn compress_response_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let input = r#"{"data":"value","debug":"remove"}"#;
+    // The trailing-LF variant catches a doubled newline just as the bare
+    // variant catches an added one.
+    for payload in [input.to_string(), format!("{input}\n")] {
+        let output = run_stdin_command(
+            &fixture,
+            "0",
+            &["compress-response", "--no-stash"],
+            &payload,
+        );
+        assert!(
+            output.status.success(),
+            "compress-response failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-response must reproduce the input byte-for-byte"
+        );
+    }
 }
 
 #[test]
@@ -561,10 +722,10 @@ fn compress_response_stats_use_unicode_aware_estimates() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].before_tokens, estimate_tokens(&response));
-    assert_eq!(
-        records[0].after_tokens,
-        estimate_tokens(compressed.trim_end())
-    );
+    // The recorded `after` is measured on exactly the emitted bytes: no
+    // compensating trim, so an LF the CLI appended but the recorder did not
+    // measure fails here.
+    assert_eq!(records[0].after_tokens, estimate_tokens(&compressed));
 }
 
 #[test]
@@ -592,8 +753,9 @@ fn dry_run_no_savings_keeps_the_no_savings_warning() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        response
+        output.stdout,
+        response.as_bytes(),
+        "dry-run passthrough must reproduce the input byte-for-byte"
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("response compression did not reduce size"));
@@ -1958,7 +2120,7 @@ fn post_tool_request_json(content: &str, recovery_available: bool, session_id: &
 }
 
 fn debug_laden_content() -> String {
-    serde_json::to_string(&serde_json::json!({
+    serde_json::to_string_pretty(&serde_json::json!({
         "url": "https://registry.example.com/packages",
         "status": 200,
         "debug": "cache=miss upstream=registry-04 trace=9f2e11c0 backend_latency_ms=184 retries=0",
@@ -2004,6 +2166,11 @@ fn compress_post_tool_uses_the_v2_result_envelope() {
     );
     assert_eq!(response["result"]["recoverability"], "lossless");
     assert_eq!(response["result"]["content_type"], "json");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(response["result"]["output"].as_str().unwrap())
+            .unwrap(),
+        serde_json::from_str::<serde_json::Value>(&content).unwrap()
+    );
 }
 
 #[test]
@@ -2116,6 +2283,14 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
         .into_iter()
         .map(Into::into)
         .collect();
+        #[cfg(windows)]
+        paths.retain(|path| {
+            !path.to_string_lossy().ends_with(' ')
+                && !path
+                    .to_string_lossy()
+                    .chars()
+                    .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+        });
         // With quotePath=false these bytes are emitted raw, outside the
         // text input accepted by the compression API.
         #[cfg(unix)]
@@ -2412,6 +2587,7 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 }
 
 #[test]
+#[cfg(unix)]
 fn compress_pre_tool_resolves_the_independent_rtk_binary() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -2598,6 +2774,191 @@ fn compress_toon_min_chars_zero_encodes_short_payload() {
     assert_eq!(emitted, "a: short", "expected TOON object encoding");
 }
 
+/// 40 uniform records keyed by ID. TOON spec v4.4 encodes this shape as a
+/// keyed tabular map, which is shorter than compact JSON; 0.5.0 expanded every
+/// entry into an indented block and never reached the encoder.
+fn keyed_record_map(ratio: &str) -> String {
+    let entries = (0..40)
+        .map(|index| {
+            let ratio = if index == 3 { ratio } else { "0.5" };
+            format!(r#""u{index}":{{"name":"user{index}","active":true,"ratio":{ratio}}}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"users":{{{entries}}}}}"#)
+}
+
+/// TOON's numeric domain is narrower than JSON's. Spec v4.4 brought keyed
+/// object maps inside the size gate, so the direct `compress-toon` entry has to
+/// apply the same fidelity gate the PostTool JSON domain applies instead of
+/// silently writing `1e-400` as the integer `0`.
+#[test]
+fn compress_toon_keeps_original_json_when_numbers_would_not_survive() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    // Control: the same shape without an offending literal is still encoded,
+    // so the passthroughs below are the numeric gate and not a size accident.
+    let clean = keyed_record_map("0.5");
+    let output = run_compress_toon(&fixture, &clean, "1", "toon-numeric-clean", &[]);
+    assert!(
+        output.status.success(),
+        "compress-toon failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let encoded = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        encoded.starts_with("users[40:]{name,active,ratio}:"),
+        "expected a keyed tabular map, got {encoded:?}"
+    );
+
+    // `1e-400` is caught by the literal scan; `-0.0` and `1e3` survive the
+    // scan and are caught by the decode round trip, which sees the lost sign
+    // and the float-to-integer type change.
+    for ratio in ["1e-400", "-0.0", "1e3"] {
+        let input = keyed_record_map(ratio);
+        let output = run_compress_toon(&fixture, &input, "1", "toon-numeric-lossy", &[]);
+        assert!(
+            output.status.success(),
+            "compress-toon failed for ratio {ratio}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let emitted = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            emitted, input,
+            "ratio {ratio} must pass through byte-for-byte"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot retain") && stderr.contains("skipping encoding"),
+            "expected the numeric skip note for ratio {ratio}, got {stderr:?}"
+        );
+    }
+
+    // A declined payload books no savings, same as the length gate.
+    let stats_db = fixture.data_dir.join("stats.db");
+    if stats_db.exists() {
+        let recorder = StatsRecorder::new(stats_db).unwrap();
+        let records = recorder
+            .records_by_session("toon-numeric-lossy", None)
+            .unwrap();
+        assert!(records.is_empty());
+    }
+}
+
+/// Every advisory note on the `compress-toon` path is emitted after the payload
+/// and through a write whose failure is discarded. `eprintln!` panics when the
+/// write fails, so stderr redirected to a full filesystem used to turn a
+/// documented "exit 0, original JSON on stdout" passthrough into exit code 101
+/// with an empty stdout.
+#[test]
+fn compress_toon_passthrough_survives_an_unwritable_stderr() {
+    // `/dev/full` accepts the write and then reports ENOSPC, which is what a
+    // full log filesystem looks like to the process. Nothing portable
+    // reproduces it, so hosts without the device skip the case.
+    let dev_full = std::path::Path::new("/dev/full");
+    if !dev_full.exists() {
+        return;
+    }
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    // One case per advisory note. Each payload is a documented passthrough, so
+    // stdout has to reproduce it byte for byte whatever stderr does.
+    struct Case {
+        label: &'static str,
+        input: String,
+        args: &'static [&'static str],
+        compression_enabled: &'static str,
+    }
+    let cases = [
+        Case {
+            label: "numeric gate",
+            input: keyed_record_map("1e3"),
+            args: &[],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "length gate",
+            input: r#"{"a":"short"}"#.to_owned(),
+            args: &[],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "no savings",
+            input: "{}".to_owned(),
+            args: &["--min-toon-chars", "0"],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "dry run",
+            input: keyed_record_map("0.5"),
+            args: &[],
+            compression_enabled: "0",
+        },
+    ];
+
+    for case in cases {
+        let stderr = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dev_full)
+            .unwrap();
+        let output = fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", case.compression_enabled)
+            .env("TOKENLESS_STATS_ENABLED", "1")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args([
+                "compress-toon",
+                "--agent-id",
+                "integration-agent",
+                "--session-id",
+                "toon-unwritable-stderr",
+            ])
+            .args(case.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::from(stderr))
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(case.input.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: an unwritable stderr must not fail compress-toon, got {:?}",
+            case.label,
+            output.status
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            case.input,
+            "{}: the payload must still reach stdout byte for byte",
+            case.label
+        );
+    }
+
+    // Control: with a writable stderr the notes are still there, so the cases
+    // above prove the write is tolerated and not that it was dropped.
+    let numeric = keyed_record_map("1e3");
+    let output = run_compress_toon(&fixture, &numeric, "1", "toon-writable-stderr", &[]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot retain"),
+        "the advisory note must still be printed when stderr is writable"
+    );
+}
+
 #[test]
 fn html_extraction_is_env_gated_and_recovers_the_original_page() {
     let temp = tempfile::tempdir().unwrap();
@@ -2743,11 +3104,15 @@ fn stats_open_warning_survives_an_unwritable_stderr() {
     assert_eq!(output.stdout, baseline.stdout);
 }
 
-/// A compressible response: dropping the debug/trace fields yields token
+/// A compressible response: compacting indentation yields token
 /// savings, so the stats/SLS recording tail of the command runs.
 #[cfg(target_os = "linux")]
-const COMPRESSIBLE_RESPONSE: &str =
-    r#"{"data":"value","debug":"remove","trace":"remove","empty_field":""}"#;
+const COMPRESSIBLE_RESPONSE: &str = r#"{
+    "data": "value",
+    "debug": "diagnostic context",
+    "trace": "request trace",
+    "empty_field": ""
+}"#;
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -3099,8 +3464,8 @@ fn stats_list_maps_an_unwritable_stdout_to_an_operation_error() {
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
-/// The payload path: a healthy run keeps the bytes `println!` wrote (the
-/// compressed output plus one LF), and an unwritable stdout becomes an
+/// The payload path: a healthy run emits the compressed output byte-exact (the
+/// writer appends no LF any more), and an unwritable stdout becomes an
 /// operation error instead of a panic.
 #[test]
 #[cfg(target_os = "linux")]
@@ -3131,11 +3496,17 @@ fn compress_response_maps_an_unwritable_stdout_to_an_operation_error() {
             .unwrap()
     };
 
+    // Control: the healthy run wrote its payload through the same writer the
+    // unwritable run below exercises. `compress-response` is byte-exact, so the
+    // single trailing LF `println!` used to append is part of what this checks
+    // is gone - the assertion follows the emitted bytes, not the old newline.
     let healthy = run(std::process::Stdio::piped());
     assert!(healthy.status.success(), "{healthy:?}");
+    assert!(!healthy.stdout.is_empty(), "no payload was written");
     assert!(
-        healthy.stdout.ends_with(b"\n"),
-        "the payload still carries the single trailing LF println! added"
+        !healthy.stdout.ends_with(b"\n"),
+        "the payload is emitted byte-exact, so the writer appends no LF: {}",
+        String::from_utf8_lossy(&healthy.stdout)
     );
 
     let full = run(std::process::Stdio::from(dev_full()));
@@ -3230,6 +3601,7 @@ fn stats_clear_prompt_fails_without_clearing_when_the_consumer_stopped_reading()
 
 /// A response above the 500-character TOON minimum, so `compress-toon`
 /// actually encodes it instead of taking the passthrough branch.
+#[cfg(target_os = "linux")]
 fn toon_encodable_response() -> String {
     let rows: Vec<String> = (0..24)
         .map(|index| format!(r#"{{"id":{index},"name":"row-{index}","note":"padding-{index}"}}"#))
@@ -3491,7 +3863,7 @@ fn stashable_tool_schema(name: &str) -> String {
     .to_string()
 }
 
-/// A clean, compact JSON object: `json_cleanup` has nothing to drop, so the
+/// A clean, compact JSON object: `json_cleanup` has nothing to compact, so the
 /// hook re-emits it byte-for-byte and reports no savings.
 #[cfg(target_os = "linux")]
 fn clean_json_object(keys: usize) -> String {
@@ -3576,7 +3948,7 @@ fn response_no_savings_notice_survives_an_unwritable_stderr() {
 }
 
 /// With compression disabled every run prints the dry-run notice, and a
-/// payload with nothing to drop adds the no-savings one; both precede the
+/// payload with nothing to compact adds the no-savings one; both precede the
 /// original payload on stdout.
 #[test]
 #[cfg(target_os = "linux")]
@@ -3652,10 +4024,10 @@ fn post_tool_no_savings_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
-    // The fixture root is never under the real home (`TempDataDir::new`
+    // The fixture root is never under the real home (`TempDataDir::new_external`
     // refuses that case), so this path is outside both trusted roots.
     let rejected = fixture.root.join("rejected-stats.db");
     assert_notices_survive_unwritable_stderr(
@@ -3678,7 +4050,7 @@ fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
     let rejected = fixture.root.join("rejected-stash.db");
@@ -3701,7 +4073,7 @@ fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_env_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
     let rejected = fixture.root.join("rejected-stash.db");

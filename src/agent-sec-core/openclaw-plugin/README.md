@@ -26,7 +26,7 @@ The installable package declares the OpenClaw compatibility boundary in `package
 
 Package entrypoints follow the current OpenClaw plugin contract: both `openclaw.extensions` and `openclaw.runtimeExtensions` point at the built JavaScript entry. `openclaw.plugin.json` keeps its legacy `extensions` declaration pointed at the same built runtime entry for older manifest readers.
 
-Deployment & upgrade guide: [OpenClaw Compatibility Deployment & Upgrade Guide](../../../docs/user-guide/en/agent-security/agent-sec-core/openclaw-deploy.md) ([中文版](../../../docs/user-guide/zh/agent-security/agent-sec-core/openclaw-deploy.md)).
+Deployment & upgrade guide: [OpenClaw Compatibility Deployment & Upgrade Guide](../../../docs/user-guide/en/agent-sec-core/openclaw-deploy.md) ([中文版](../../../docs/user-guide/zh/agent-sec-core/openclaw-deploy.md)).
 
 ---
 
@@ -478,7 +478,7 @@ Skill Ledger global `activationPolicy` belongs to SkillFS/daemon activation. Ope
 Skill call first runs idempotent `init --no-baseline`; only then does it run `show`. Initialization
 does not scan or rotate keys and ignores legacy HOME keys. Failed initialization stops that check
 with a diagnostic. Registration and unmatched calls do not initialize; later calls retry after a
-daemon restart. See the [V2 Hook contract](../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration).
+daemon restart. See the [V2 Hook contract](../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md#agent-hook-integration).
 
 ---
 

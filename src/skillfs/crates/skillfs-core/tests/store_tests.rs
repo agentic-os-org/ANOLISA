@@ -279,6 +279,98 @@ fn is_kebab_case_skill_name(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
+/// The length limit is counted in characters, not UTF-8 bytes, and only the
+/// production path can tell the two apart: the ASCII grammar rejects a
+/// multi-byte name for its own sake, so a boolean helper over that grammar
+/// answers `false` either way and cannot say why.
+///
+/// 64 CJK characters are 64 characters but 192 bytes. The parser counts
+/// characters, so that name is within the limit and the only diagnostic it
+/// produces is the grammar one. If the limit were counted in bytes instead,
+/// the same name would also report "name too long" -- so the absence of that
+/// diagnostic is what pins the unit.
+#[test]
+fn adopt_directory_name_counts_the_length_limit_in_characters() {
+    let within_limit = "\u{6280}".repeat(64);
+    assert_eq!(within_limit.chars().count(), 64);
+    assert!(
+        within_limit.len() > 64,
+        "the byte length must exceed the limit, or the case proves nothing"
+    );
+
+    let mut entry = make_entry(skillfs_core::ParseStatus::Ok);
+    skillfs_core::store::adopt_directory_name(&mut entry, &within_limit);
+    assert!(entry.parse_status.is_degraded());
+    let msg = entry.parse_status.message();
+    assert!(
+        msg.contains("kebab"),
+        "the grammar diagnostic must be reported: {msg}"
+    );
+    assert!(
+        !msg.contains("name too long"),
+        "64 characters are within the limit, so the length diagnostic must not appear: {msg}"
+    );
+}
+
+/// One character past the limit is reported as too long, on the same
+/// production path, so the two assertions above and here describe one
+/// boundary rather than two unrelated checks.
+#[test]
+fn adopt_directory_name_reports_the_length_limit_one_character_past() {
+    let over_limit = "\u{6280}".repeat(65);
+    assert_eq!(over_limit.chars().count(), 65);
+
+    let mut entry = make_entry(skillfs_core::ParseStatus::Ok);
+    skillfs_core::store::adopt_directory_name(&mut entry, &over_limit);
+    assert!(entry.parse_status.is_degraded());
+    let msg = entry.parse_status.message();
+    assert!(
+        msg.contains("name too long"),
+        "65 characters are over the limit, so the length diagnostic must appear: {msg}"
+    );
+}
+
+/// The ASCII boundary of the same limit, on the same production path. A
+/// name of 64 ASCII characters is within the limit and 65 are not, and
+/// neither trips the grammar.
+#[test]
+fn adopt_directory_name_accepts_the_documented_ascii_boundary() {
+    let mut entry = make_entry(skillfs_core::ParseStatus::Ok);
+    skillfs_core::store::adopt_directory_name(&mut entry, &"a".repeat(64));
+    assert!(
+        entry.parse_status.is_ok(),
+        "64 ASCII characters are a valid name: {}",
+        entry.parse_status.message()
+    );
+
+    let mut entry = make_entry(skillfs_core::ParseStatus::Ok);
+    skillfs_core::store::adopt_directory_name(&mut entry, &"a".repeat(65));
+    let msg = entry.parse_status.message();
+    assert!(
+        msg.contains("name too long"),
+        "65 ASCII characters are over the limit: {msg}"
+    );
+}
+
+/// Names outside the grammar are rejected on the production path too, which
+/// is the same set of rules the parser applies.
+#[test]
+fn adopt_directory_name_rejects_names_outside_the_grammar() {
+    for name in ["", "-leading", "trailing-", "Uppercase", "with_underscore"] {
+        let mut entry = make_entry(skillfs_core::ParseStatus::Ok);
+        skillfs_core::store::adopt_directory_name(&mut entry, name);
+        assert!(
+            entry.parse_status.is_degraded(),
+            "{name:?} is outside the grammar and must be degraded"
+        );
+        assert!(
+            entry.parse_status.message().contains("kebab"),
+            "{name:?} must be reported as a grammar problem: {}",
+            entry.parse_status.message()
+        );
+    }
+}
+
 #[test]
 fn invalid_directory_name_degrades_the_skill() {
     let source_dir = tempfile::tempdir().unwrap();

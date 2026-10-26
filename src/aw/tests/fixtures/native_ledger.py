@@ -45,7 +45,7 @@ def probe(root: Path, case: Path, stage: str, binaries: str = "", image: str = "
     parent = (
         "import os,signal,subprocess,sys,time; from pathlib import Path; "
         "signal.signal(signal.SIGINT,signal.SIG_IGN); "
-        f"sys.path.insert(0,{str(Path(__file__).resolve().parents[2] / 'crates/aw-service/tests/fixtures/sec_core')!r}); "
+        f"sys.path.insert(0,{str(Path(__file__).resolve().parents[2] / 'crates/aw-cli/tests/fixtures/sec_core')!r}); "
         "from runtime import Processes; "
         f"root=Path({str(root)!r}); case=Path({str(case)!r}); (case/'work').mkdir(); "
         "processes=Processes(case,root,dict(os.environ)); "

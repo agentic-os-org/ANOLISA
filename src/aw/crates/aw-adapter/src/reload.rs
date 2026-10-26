@@ -43,8 +43,9 @@ pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
         capabilities.version.as_str(),
         capabilities.entrypoint.as_str(),
     ) {
-        ("qoder", "1.1.73", "tui") | ("qwenpaw", "2.2.2b4", "app") => Ok(()),
-        _ => Err("runtime policy updates require Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 App".into()),
+        ("qoder", "1.1.73", "tui") | ("qwenpaw", "2.2.2b4", "app")
+        | ("qoder-sdk", "1.0.54", "sdk-worker") => Ok(()),
+        _ => Err("runtime policy updates require Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 App or Qoder SDK 1.0.54".into()),
     }
 }
 
@@ -86,6 +87,7 @@ pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str)
         .collect::<Vec<_>>();
     let sequential = match adapter {
         "qoder" => document["spec"]["agents"][target]["qoder"]["sequential"] == true,
+        "qoder-sdk" => true,
         "qwenpaw" => {
             if event == "tool.after" && !replacement {
                 ordered.reverse();
@@ -190,6 +192,10 @@ pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
     for output in outputs {
         result.stderr.extend(output.stderr);
         if matches!(output.exit, NativeExit::Code(2)) {
+            if adapter == "qoder-sdk" && !matches!(result.exit, NativeExit::Code(2)) {
+                // SDK denial reasons are JSON strings, not mergeable Hook objects.
+                result.stdout = output.stdout.clone();
+            }
             result.exit = NativeExit::Code(2);
         } else if !matches!(output.exit, NativeExit::Code(0))
             && matches!(result.exit, NativeExit::Code(0))
@@ -204,6 +210,9 @@ pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
         }
     }
     if matches!(result.exit, NativeExit::Code(2)) {
+        if adapter == "qoder-sdk" {
+            return Ok(result);
+        }
         value = json!({});
     }
     if adapter == "qoder" || value != json!({}) {
@@ -253,7 +262,10 @@ pub fn adopt_step(
         // Qoder logs nonblocking exits. QwenPaw applies each wrapper's failure
         // policy; a report-only failure must not hide another step's veto/result.
         output.exit = NativeExit::Code(
-            if adapter == "qwenpaw" && event == "tool.before" && on_error == "block" {
+            if matches!(adapter, "qwenpaw" | "qoder-sdk")
+                && event == "tool.before"
+                && on_error == "block"
+            {
                 2
             } else {
                 0

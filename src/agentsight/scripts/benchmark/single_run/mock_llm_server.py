@@ -215,6 +215,7 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         request_id = request_id_from(body, headers)
         run_id = header_value(headers, "X-Benchmark-Run-ID")
         preflight = header_value(headers, "X-Benchmark-Preflight") == "1"
+        truncate_sse = header_value(headers, "X-Benchmark-Fault") == "truncated-sse"
         settings = self.server.settings  # type: ignore[attr-defined]
         token_rate = getattr(settings, "tokens_per_second", None)
         if token_rate is not None and self.path != "/v1/chat/completions":
@@ -228,7 +229,7 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             if token_rate is not None
             else response_events(self.path, request_id, settings.chunks, settings.chunk_bytes)
         )
-        if settings.sse and not preflight:
+        if (settings.sse or truncate_sse) and not preflight:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -242,6 +243,11 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                     # Absolute deadlines avoid accumulating serialization/write latency.
                     time.sleep(max(0, started + (index + 1) / token_rate - time.monotonic()))
                 self.chunked_write(f"data: {json.dumps(event, separators=(',', ':'))}\n\n".encode())
+                if truncate_sse:
+                    # Make the response incomplete on the wire even when the
+                    # normal mock stream has no pacing delay.
+                    self.close_connection = True
+                    return
                 if token_rate is None and settings.chunk_delay:
                     time.sleep(settings.chunk_delay)
             self.chunked_write(b"data: [DONE]\n\n")
@@ -476,10 +482,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    if args.chunks < 1 or args.chunk_bytes < 1 or args.chunk_delay_ms < 0:
+    parser = build_parser()
+    args = parser.parse_args()
+    if (
+        args.chunks < 1
+        or args.chunk_bytes < 1
+        or not math.isfinite(args.chunk_delay_ms)
+        or args.chunk_delay_ms < 0
+    ):
         raise SystemExit(
-            "chunks, chunk-bytes, and chunk-delay-ms must be non-negative (chunks/bytes > 0)"
+            "chunks, chunk-bytes, and chunk-delay-ms must be non-negative "
+            "(chunks/bytes > 0); chunk-delay-ms must be finite"
         )
     if args.tokens_per_second is not None or args.output_tokens is not None:
         if (

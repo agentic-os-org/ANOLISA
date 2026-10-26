@@ -67,7 +67,7 @@ or authorize an unsafe-install bypass.
 
 Enable the Tokenless local plugin with `anolisa adapter enable tokenless opencode`.
 ANOLISA manages its plugin link; restart OpenCode after enabling or disabling it.
-See the [adapter reference](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md#adapter)
+See the [adapter reference](../../docs/user-guide/en/getting-started/anolisa-cli.md#adapter)
 for custom configuration directories and existing-installation ownership.
 
 Enable Tokenless in QwenWorkCN native Bash and macOS workspace Shell sessions with
@@ -100,7 +100,7 @@ installation even when the same component is already installed system-wide.
 | `-q, --quiet` | Suppress non-error output |
 | `--no-color` | Disable colored output |
 
-See the [full CLI guide](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md)
+See the [full CLI guide](../../docs/user-guide/en/getting-started/anolisa-cli.md)
 for command forms, scope behavior, and recovery workflows.
 
 RPM installs support Yum 3 and DNF 4. Use `sudo` with RPM `--dry-run`

@@ -21,9 +21,23 @@ pub(crate) struct Audit {
     directory: PathBuf,
     failed: AtomicBool,
     recent: Mutex<VecDeque<Value>>,
+    #[cfg(test)]
+    started_appends: std::sync::atomic::AtomicUsize,
 }
 
 impl Audit {
+    /// Hold durable mutation while testing admission across delayed writes.
+    #[cfg(test)]
+    pub(crate) fn hold_journal(&self) -> std::sync::MutexGuard<'_, FileJournal> {
+        self.journal.lock().unwrap()
+    }
+
+    /// Count start-record attempts before taking the durable-write lock.
+    #[cfg(test)]
+    pub(crate) fn started_appends(&self) -> usize {
+        self.started_appends.load(Ordering::Acquire)
+    }
+
     pub(crate) fn new(directory: &Path) -> Result<Self> {
         if let Ok(metadata) = fs::symlink_metadata(directory) {
             // SAFETY: geteuid has no pointer arguments or preconditions.
@@ -40,6 +54,8 @@ impl Audit {
             directory: directory.into(),
             failed: AtomicBool::new(false),
             recent: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            started_appends: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -71,6 +87,10 @@ impl Audit {
     }
 
     pub(crate) fn append(&self, key: &str, record: Value) -> Result<Value> {
+        #[cfg(test)]
+        if record["phase"] == "started" {
+            self.started_appends.fetch_add(1, Ordering::Release);
+        }
         self.mutate(|journal| {
             let written = journal.append(key, &record)?;
             if record["phase"] == "completed" {

@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf, time::Duration};
 
 const VERSION: &str = "0.84.2";
+use super::sdk_tools::invocation_uuid;
+
 pub(crate) struct Pi;
 struct Prepared {
     input: LaunchInput,
@@ -126,7 +128,8 @@ impl PreparedLaunch for Prepared {
             .trim()
             .to_owned();
         let ready = context.files.directory().join("pi-ready.json");
-        let config=context.files.write("pi-hooks.json",&serde_json::to_vec(&json!({"executable":context.executable,"binding":context.binding_path,"ready_path":ready,"ready_token":token,"replacement_step":events.get("tool.after").and_then(|route|route.replacement_step.as_ref()),"hooks":hooks}))?)?;
+        let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
+        let config=context.files.write("pi-hooks.json",&serde_json::to_vec(&json!({"executable":context.executable,"binding":context.binding_path,"ready_path":ready,"ready_token":token,"observation_enabled":observe,"replacement_step":events.get("tool.after").and_then(|route|route.replacement_step.as_ref()),"hooks":hooks}))?)?;
         let entrypoint = context.files.write(
             "pi-entrypoint.mjs",
             include_bytes!("../../native/pi/entrypoint.mjs"),
@@ -134,6 +137,26 @@ impl PreparedLaunch for Prepared {
         context
             .files
             .write("bridge.mjs", include_bytes!("../../native/pi/bridge.mjs"))?;
+        for (name, bytes) in [
+            (
+                "transport.mjs",
+                include_bytes!("../../native/pi/transport.mjs").as_slice(),
+            ),
+            (
+                "producer.mjs",
+                include_bytes!("../../native/pi/producer.mjs").as_slice(),
+            ),
+            (
+                "scope.mjs",
+                include_bytes!("../../native/pi/scope.mjs").as_slice(),
+            ),
+            (
+                "resident.mjs",
+                include_bytes!("../../native/pi/resident.mjs").as_slice(),
+            ),
+        ] {
+            context.files.write(name, bytes)?;
+        }
         let mut command = self.input.command.clone();
         command.args = std::iter::once(entrypoint.into_os_string())
             .chain(std::iter::once(self.application.clone().into_os_string()))
@@ -200,15 +223,6 @@ fn routes(
 
 // Model-issued tool IDs may recur in later turns; only this per-preparation UUID
 // binds AW before/after without changing the durable SDK session identity.
-fn invocation_uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, byte)| match i {
-            8 | 13 | 18 | 23 => byte == b'-',
-            14 => byte == b'4',
-            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
-            _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
-        })
-}
 
 #[cfg(test)]
 mod tests {

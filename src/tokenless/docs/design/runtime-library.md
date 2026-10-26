@@ -66,7 +66,7 @@ host result; the adapter catches them because the host treats thrown middleware 
 tool failures. Legacy middleware preprocessing can already have clipped text or metadata.
 Tokenless neither rejects such hosts above the API minimum nor reconstructs missing content.
 Only `applied` compression replaces text; tool-error diagnostics may still append context.
-See the [host compatibility boundary](../../../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#openclaw).
+See the [host compatibility boundary](../../../../docs/user-guide/en/tokenless/framework-integration.md#openclaw).
 
 After building the CLI and OpenClaw adapter, run the optional container regression from
 `src/tokenless` with a local host image:
@@ -171,7 +171,30 @@ Unwrapped Grep listings are recorded as `api_response` in statistics, rather tha
 they are filtered tool responses, not authoritative file copies. Historical origin-grouped queries
 therefore have a version boundary. Core treats the exact tool name `Grep` as a search-only tool:
 it cannot enter JSON, table, or log compressors, even when search path sharing is disabled. SDK
-callers should use that name only for this search contract. RTK-owned output still bypasses Core.
+callers should use that name only for this search contract.
+
+RTK ownership is provisional until execution completes. PreTool atomically stores the original and exact executed commands
+and assigns each rewritten RTK invocation a generation and ordinal in `rtk-outcomes.db` under
+the Runtime data directory, independently of statistics collection. Bundled RTK records whether
+it changed any output bytes; a tied or increased token estimate does not prove unchanged output.
+PostTool requires its `command` to match the registered command, including the generation, before
+consuming evidence once per agent/session/tool call. Missing or modified commands retain the bypass,
+so a failed retry registration cannot reuse older receipts. Complete unchanged receipts
+allow a successful result back into the normal pipeline using the saved original command, so
+file-read origin and other command-based guards still apply. A retry with an untrackable rewrite
+attempts to invalidate the previous generation; even if this fails, command matching prevents
+reuse by that retry. Late reports cannot recreate a deleted generation.
+Changed output, missing or expired receipts, old RTK binaries, or state failures retain the RTK
+bypass. Compound calls require receipts for every newly wrapped invocation; existing or
+untracked RTK wrappers and ambiguous shell substitutions conservatively disable fallback.
+PowerShell wrappers currently have no receipts and retain the RTK bypass.
+Receipt lookup failures warn in Core; RTK-side writes fail silently to preserve tool output.
+Abandoned receipts expire after one day and an indexed sweep removes them on a later rewrite.
+The pipeline retains the host's declared capabilities. Common Hooks, Hermes and OpenClaw declare
+`recovery: none` for RTK output before receipt lookup, so their fallback accepts only lossless
+candidates; this change does not enable Stash/retrieve recovery for those calls.
+Continuing PostTool does not guarantee compression: its candidate must still pass normal
+fidelity and savings checks.
 
 ## Statistics queries
 

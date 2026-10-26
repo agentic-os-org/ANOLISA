@@ -26,6 +26,7 @@ import campaign
 import campaign_manifest
 from campaign_config import safety_settings, validate_campaign
 from campaign_evidence import finite_float
+from campaign_manifest import write_json
 from collect_metrics import GIB, MIB, allocated_size, available_memory_bytes
 
 BTF_PATH = Path("/sys/kernel/btf/vmlinux")
@@ -74,16 +75,6 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object: {path}")
     return value
-
-
-def write_json(path: Path, value: dict[str, Any]) -> None:
-    """Atomically replace a JSON checkpoint."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
 
 
 def file_sha256(path: Path) -> str:

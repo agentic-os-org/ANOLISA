@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-23
+
+### Added
+
+- `skillfs mount --config mount.toml --managed` supports automatic recovery,
+  preserving startup configuration while reading current source contents.
+  Configuration changes take effect after a successful stop/start
+  ([#8883](https://github.com/agentic-os-org/ANOLISA/pull/8883)).
+
+### Fixed
+
+- Managed mounts start reliably on dot-prefixed mountpoints and slow hosts,
+  and report worker startup failures promptly
+  ([#8080](https://github.com/agentic-os-org/ANOLISA/pull/8080)).
+- Flat and Hermes installs keep staging directories hidden and maintain
+  consistent metadata reads and directory listings after publication
+  ([#7767](https://github.com/agentic-os-org/ANOLISA/pull/7767)).
+- Creates, renames and nested manifest edits keep skill-name ownership and
+  discovery consistent; installation and renames honor configured size limits
+  ([#7742](https://github.com/agentic-os-org/ANOLISA/pull/7742)).
+- Skill parsing and CLI output handle whitespace-only frontmatter,
+  character-based name-length diagnostics and control-character escaping.
+
 ## [0.5.2] - 2026-10-15
 
 ### Fixed

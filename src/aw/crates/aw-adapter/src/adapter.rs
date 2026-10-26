@@ -145,6 +145,13 @@ pub trait PreparedLaunch {
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()>;
     /// Materialize bridge registration in the caller-owned directory.
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan>;
+    /// Prepare registration for an already running native process; never spawn it.
+    fn attachment(
+        &mut self,
+        _context: &LaunchContext<'_>,
+    ) -> Result<crate::attachment::Registration> {
+        Err("this adapter cannot attach to a running process".into())
+    }
     /// Release integration-owned files outside the common launch directory.
     fn finish(&mut self) -> Result<()> {
         Ok(())
@@ -170,7 +177,7 @@ pub fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result
     }
     match adapter {
         "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
-        "claude-sdk" => reply.stdout = serde_json::to_vec(text)?,
+        "claude-sdk" | "qoder-sdk" => reply.stdout = serde_json::to_vec(text)?,
         "openclaw" | "hermes" | "pi" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
             value[if adapter == "openclaw" {
@@ -183,6 +190,11 @@ pub fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result
             reply.stdout = serde_json::to_vec(&value)?;
         }
         _ => return Err("unsupported block reason adapter".into()),
+    }
+    if reply.stdout.len() > aw_provider::MAX_MESSAGE_BYTES
+        || reply.stderr.len() > aw_provider::MAX_MESSAGE_BYTES
+    {
+        return Err("block reason output exceeds the message bound".into());
     }
     Ok(())
 }
@@ -343,5 +355,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn block_reason_rejects_output_above_the_message_bound() {
+        // block_reason checked only the input text length, not the final
+        // output length: a text at exactly MAX_MESSAGE_BYTES produced a
+        // serialized output above the bound (the qoder branch adds a
+        // newline, claude-sdk wraps in quotes, openclaw/hermes/pi embed
+        // it in a JSON structure).
+        let text = "x".repeat(aw_provider::MAX_MESSAGE_BYTES);
+        let mut reply = select("qoder").unwrap().reply(true);
+        assert!(block_reason("qoder", &mut reply, &text).is_err());
+
+        let mut reply = select("claude-sdk").unwrap().reply(true);
+        assert!(block_reason("claude-sdk", &mut reply, &text).is_err());
     }
 }

@@ -4,7 +4,7 @@ Design notes for the `SKILL.md` read-time transform pipeline: the ordering
 contract, the optional stage model, immutability guarantees, and the external
 rule-provider contract. This document describes component-internal design; the
 user-facing configuration reference lives in the SkillFS README and
-`docs/user-guide/{en,zh}/runtime/skillfs.md`.
+`docs/user-guide/{en,zh}/skillfs/index.md`.
 
 ## 1. Activation before transformation
 

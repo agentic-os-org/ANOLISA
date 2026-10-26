@@ -305,6 +305,10 @@ pub enum InterruptionAction {
     Resolve {
         /// The interruption_id to resolve (32-char hex)
         interruption_id: String,
+
+        /// Output as JSON
+        #[structopt(long)]
+        json: bool,
     },
 }
 
@@ -580,10 +584,22 @@ impl InterruptionCommand {
                 }
             }
 
-            InterruptionAction::Resolve { interruption_id } => {
+            InterruptionAction::Resolve {
+                interruption_id,
+                json,
+            } => {
                 match store.resolve(interruption_id) {
                     Ok(true) => {
-                        println!("Resolved: {interruption_id}");
+                        if *json {
+                            // The HTTP route's `status` field, plus the id the
+                            // route only carries in its path.
+                            print_json(&serde_json::json!({
+                                "status": "resolved",
+                                "interruption_id": interruption_id,
+                            }));
+                        } else {
+                            println!("Resolved: {interruption_id}");
+                        }
                     }
                     Ok(false) => {
                         eprintln!("No interruption found with id: {interruption_id}");
@@ -1403,6 +1419,42 @@ mod tests {
                     "{command} {flag} {bad} must be rejected, like list's"
                 );
             }
+        }
+    }
+
+    /// `resolve` is the one `interruption` subcommand that changed the database
+    /// without a machine-readable answer, while the CLI reference's Conventions
+    /// table promises `--json` on `interruption *`. The flag is additive: the
+    /// plain form keeps the line it always printed.
+    #[test]
+    fn resolve_accepts_json_and_keeps_the_plain_line() {
+        let plain = InterruptionCommand::from_iter_safe([
+            "interruption",
+            "resolve",
+            "0123456789abcdef0123456789abcdef",
+        ])
+        .expect("resolve must keep parsing without --json");
+        match plain.action {
+            InterruptionAction::Resolve {
+                interruption_id,
+                json,
+            } => {
+                assert_eq!(interruption_id, "0123456789abcdef0123456789abcdef");
+                assert!(!json, "the plain form must stay non-JSON");
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+
+        let machine = InterruptionCommand::from_iter_safe([
+            "interruption",
+            "resolve",
+            "0123456789abcdef0123456789abcdef",
+            "--json",
+        ])
+        .expect("--json must parse on resolve");
+        match machine.action {
+            InterruptionAction::Resolve { json, .. } => assert!(json),
+            other => panic!("expected Resolve, got {other:?}"),
         }
     }
 }

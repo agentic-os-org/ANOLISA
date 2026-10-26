@@ -78,11 +78,22 @@ DB/WAL/SHM，schema converger 遇到更新的版本会告警后返回，连接�
 
 ### 3.1 路径、安全与独占
 
-使用既有 daemon 数据根 `AGENT_SEC_DATA_DIR`，未设置时为 `/var/log/agent-sec`，数据库名
-`policy-state.db`；不引入 HOME 或临时目录 fallback。沿用 system daemon 身份和授权，
+显式非空 `AGENT_SEC_DATA_DIR` 是固定数据根，不参与默认路径发现或回退。未设置时，
+Policy 数据库候选 A 为 `/var/log/agent-sec/policy-state.db`，B 为
+`/var/lib/agent-sec/policy/policy-state.db`；安全事件和可观测存储仍沿用既有数据根。
+先只读检查 A/B 是否已有数据库，再逐级验证祖先，将 daemon 自己拥有的已有叶目录修复为 `0700`。
+优先选择 A；仅 A 的祖先不安全时检查 B，叶目录属主错误或权限修复失败均直接报错。
+两处都有数据库，或选址会绕过另一处已有数据库时拒绝启动，不静默换库；A 权限恢复后也不绕过 B。
+仅在没有冲突时打开所选库或初始化新库。检查不可读取不能当成不存在，仅有 WAL/SHM 残留也报错。
+目录检查与最终打开复用同一套逐级验证，预检查不创建文件、不修改祖先权限；数据库损坏、锁占用、
+schema 或 I/O 失败不会回退。不引入 HOME 或临时目录 fallback。沿用 system daemon 身份和授权，
 CLI 通过 PAP 访问，不能直接打开数据库。数据库及其辅助文件包含完整策略和 cleanup 数据，
 必须限制为服务身份可访问：数据库/锁文件 0600，数据库所在私有目录 0700。
-已有共享数据根如不满足私有目录要求，启动报错并明确指出配置问题，不擅自 chmod 共享目录。
+显式数据根或最终所选目录不满足私有目录要求时，启动报错并明确指出配置问题，不擅自 chmod 共享目录。
+
+诊断须包含实际选址/已有库路径，目录失败包含违规路径、UID/GID/mode 和预期权限；
+冲突须明确说明拒绝创建空库及恢复配置或显式离线迁移的处理方向。DPROC-023 的路径选择 fixture
+位于 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs`，不代表目标主机安装或 systemd 验收。
 
 安全打开按目录描述符逐级检查所有者与权限，拒绝 symlink、非普通文件、硬链接别名及不可信父目录。
 受控 sticky 临时根只用于隔离测试。整个运行期固定路径/文件身份，不支持运行中替换 DB。

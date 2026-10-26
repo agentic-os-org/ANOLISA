@@ -1,6 +1,6 @@
 {
   "name": "anolisa-tokenless",
-  "version": "0.8.8",
+  "version": "0.9.0",
   "private": true,
   "description": "Token-Less — LLM token optimization toolkit (schema/response compression, command rewriting, tool readiness)",
   "type": "module",
@@ -37,6 +37,7 @@
     "node": ">=16.7.0"
   },
   "os": [
+    "win32",
     "linux",
     "darwin"
   ],
@@ -45,9 +46,10 @@
     "arm64"
   ],
   "optionalDependencies": {
-    "@anolisa/tokenless-linux-x64": "0.8.8",
-    "@anolisa/tokenless-linux-arm64": "0.8.8",
-    "@anolisa/tokenless-darwin-x64": "0.8.8",
-    "@anolisa/tokenless-darwin-arm64": "0.8.8"
+    "@anolisa/tokenless-win32-x64": "0.9.0",
+    "@anolisa/tokenless-linux-x64": "0.9.0",
+    "@anolisa/tokenless-linux-arm64": "0.9.0",
+    "@anolisa/tokenless-darwin-x64": "0.9.0",
+    "@anolisa/tokenless-darwin-arm64": "0.9.0"
   }
 }

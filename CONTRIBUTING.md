@@ -42,7 +42,6 @@ scopes are used in commit subjects and PR titles.
 
 | Component | Path | Platform | Build name | Scope | Development entry and minimum local gate |
 | --- | --- | --- | --- | --- | --- |
-| copilot-shell | `deprecated/copilot-shell/` | All platforms | `cosh` | `cosh` | `cd deprecated/copilot-shell`; `make deps`, `make build`, `make lint`, `make test` |
 | cosh-ng | `src/cosh-ng/` | Linux full; macOS limited functionality | `cosh-ng` | `cosh-ng` | `cd src/cosh-ng`; `cargo build --workspace`, `cargo fmt --all -- --check`, then run the closest targeted test described in `src/cosh-ng/CONTRIBUTING.md` |
 | agent-sec-core | `src/agent-sec-core/` | Linux only | `sec-core` | `sec-core` | Python 3.11.6 and `uv`; `make build-all`, `make test` |
 | agentsight | `src/agentsight/` | Linux full eBPF; macOS `trace`/`serve` only | `sight` | `sight` | Linux uses `make build-all`; macOS uses `make build-mac`; Linux runs `make lint`, `make test` |
@@ -61,7 +60,8 @@ The Linux-only components must be built and tested on Linux. `cosh-ng` and
 
 ### Toolchain prerequisites
 
-- Node.js 20 or newer for `copilot-shell` and TypeScript adapters.
+- Node.js and npm for TypeScript plugins, adapters, and the website. Follow
+  each package's `package.json` and build instructions for version requirements.
 - The stable Rust toolchain for Rust components. Follow a component's
   `AGENTS.md` when it pins a toolchain or adds native libraries.
 - Python **3.11.6** and [uv](https://docs.astral.sh/uv/) for
@@ -114,26 +114,24 @@ boundaries, explain the contract and test impact in the PR.
 
 ### Unified build
 
-`build-all.sh` supports eight components only:
-
-- Default set: `cosh`, `skills`, `sec-core`, `tokenless`, `ws-ckpt`, `memory`.
-- Optional set: `cosh-ng` and `sight`. Add `--all` or name them with
-  `--component`.
+`scripts/build-all.sh` is a Linux convenience entry point. Select the maintained
+components you need with repeated `--component` options: `skills`, `sec-core`,
+`tokenless`, `ws-ckpt`, `memory`, `cosh-ng`, and `sight`.
 
 The script does not build `anolisa`, `skillfs`, or `ktuner`. Use their
 component gates in the matrix above.
 
-With no install-mode flag, component files install to the user profile under
-`$HOME/.local` without elevated installation privileges. Dependency bootstrap
+With no install-mode flag, each component's install rules select paths within
+the user's home directory without elevated installation privileges. Dependency bootstrap
 may still request `sudo` for system packages. System installation uses
 `--system` or `--usr` and may require `sudo`. For development, prefer a
 targeted build with installation disabled.
 
 ```bash
 ./scripts/build-all.sh --help
-./scripts/build-all.sh --no-install --component cosh
+./scripts/build-all.sh --no-install --component cosh-ng
 ./scripts/build-all.sh --no-install --component sec-core
-./scripts/build-all.sh --no-install --all
+./scripts/build-all.sh --no-install --component sec-core --component tokenless
 ```
 
 The main options are:
@@ -143,34 +141,29 @@ The main options are:
 | `--no-install` | Install dependencies and build, then skip installation. |
 | `--install-mode <mode>` | Select `user` or `system`; `user` is the default. |
 | `--usr`, `--system` | Select system installation mode. |
-| `--ignore-deps` | Skip dependency installation. |
+| `--ignore-deps` | Skip dependency setup and runtime verification; use only on a pre-provisioned host. |
 | `--deps-only` | Install dependencies without building. |
 | `--uninstall` | Remove installed files; combine with `--component` to target a component. |
 | `--dry-run` | Print actions without changing files or systemd state. |
 | `--interactive`, `--non-interactive` | Open the guided flow or explicitly select automation mode. |
-| `--all` | Include optional components `cosh-ng` and `sight`. |
 | `--component <name>` | Build or uninstall one supported component; repeat for multiple components. |
 
-Do not treat `build-all.sh --all` as a build of every `src/<component>/`
-directory. Its scope is limited to the eight names printed by
-`./scripts/build-all.sh --help`.
+Use explicit component selections for development. See
+`./scripts/build-all.sh --help` for the complete script interface.
 
 The `sight` selection uses the Linux eBPF build. On macOS, build AgentSight
 locally with `make build-mac` instead.
 
-See [`docs/BUILDING.md`](docs/BUILDING.md) and
-[`docs/BUILDING_zh.md`](docs/BUILDING_zh.md) for the longer dependency and
-packaging reference.
+See [Build from source](docs/user-guide/en/getting-started/building.md)
+([中文版](docs/user-guide/zh/getting-started/building.md)) for the longer
+dependency and packaging reference.
 
 ### Convenience test runner
 
-`tests/run-all-tests.sh` is a convenience aggregator for five components:
-`copilot-shell`, `agent-sec-core`, `agentsight`, `tokenless`, and
-`agent-memory`. It accepts these filters:
+`tests/run-all-tests.sh` provides partial convenience suites. Select the
+affected maintained component explicitly with one of these filters:
 
 ```bash
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
 ./tests/run-all-tests.sh --filter tokenless
@@ -215,40 +208,14 @@ when changing generated packages or framework adapters.
 
 ## Commit messages
 
-Use [Conventional Commits](https://www.conventionalcommits.org/) with an
-English, imperative subject in this form:
+Commit message rules are defined in
+[`specs/commit-message-standard.md`](specs/commit-message-standard.md) —
+subject format, body content, `Assisted-by` and `Signed-off-by` trailers, the
+scope list with its path inference, atomicity, fix attribution, and the
+version bump rule. Read that file before committing; this section keeps only
+the recovery workflow that humans need.
 
-```text
-type(scope): imperative description
-```
-
-The scope is mandatory. Commitlint rejects an empty scope. The following
-values are the repository's recommended scopes; an unlisted scope produces a
-warning and should be justified or replaced before review.
-
-| Scope | Path or purpose |
-| --- | --- |
-| `cosh` | `deprecated/copilot-shell/` |
-| `cosh-ng` | `src/cosh-ng/` |
-| `sec-core` | `src/agent-sec-core/` |
-| `skill` | `src/os-skills/` |
-| `sight` | `src/agentsight/` |
-| `tokenless` | `src/tokenless/` |
-| `ckpt` | `src/ws-ckpt/` |
-| `memory` | `src/agent-memory/` |
-| `anolisa` | `distribution/anolisa/` |
-| `skillfs` | `src/skillfs/` |
-| `ktuner` | `src/ktuner/` |
-| `deps` | Dependency changes, including lockfiles. |
-| `ci` | `.github/workflows/` and CI configuration. |
-| `docs` | Documentation-only changes. |
-| `chore` | Root scripts, tooling, and other maintenance. |
-
-Repository convention limits the full subject to 50 characters; commitlint
-currently enforces a hard ceiling of 120 characters. Start the description
-with lowercase, and omit a trailing period. Fold tests and formatting fixes
-into the logical commit when possible. Every commit must carry a
-`Signed-off-by` trailer using the contributor's own Git identity:
+Every commit must carry a `Signed-off-by` trailer using your own Git identity:
 
 ```bash
 git commit -s -m 'docs(docs): refresh contribution guide'
@@ -271,13 +238,6 @@ git push --force-with-lease
 
 Do not use plain `git push --force`. The lease prevents overwriting remote work
 that is not present in your local checkout.
-
-Use `git commit --fixup=<commit>` followed by an autosquash rebase when fixing
-a defect introduced earlier in the same PR. A fix for code already on `main`
-uses a standalone commit with a `Fixes:` reference to the introducing commit.
-An enhancement to a feature already on `main` uses `Supplements:`. Keep a
-component version bump as the final commit in its feature branch and update
-all version-bearing files atomically.
 
 ## Pull requests and CI
 
@@ -313,7 +273,7 @@ long usage and architecture material belongs in the canonical locations below.
 | --- | --- |
 | CLI command or flag | Component `README.md` and the relevant `docs/user-guide/` page. |
 | Configuration option | Component `README.md` and the relevant `docs/user-guide/` page. |
-| Installation method | `docs/QUICKSTART*.md` and the component README. |
+| Installation method | Shared installation/quickstart pages as applicable, the component manual, and its README. |
 | Architecture or protocol | `src/<component>/docs/design/`. |
 | New component | Root README and `NOTICE` when applicable. |
 

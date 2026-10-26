@@ -11,6 +11,7 @@ import os
 import shutil
 import signal
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 FIELDS = (
@@ -85,6 +86,25 @@ def stop(_: int, __: object) -> None:
     STOP = True
 
 
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """Identify one Linux process lifetime independently of PID recycling."""
+
+    pid: int
+    start_ticks: int
+
+
+def read_process_identity(pid: int) -> ProcessIdentity | None:
+    """Read starttime after the final comm delimiter, including unusual names."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = text[text.rindex(")") + 2 :].split()
+        start_ticks = int(fields[19])
+        return ProcessIdentity(pid, start_ticks) if start_ticks >= 0 else None
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def read_status(pid: int) -> dict[str, int]:
     """Read numeric process fields from procfs."""
     values: dict[str, int] = {}
@@ -107,14 +127,15 @@ def read_status(pid: int) -> dict[str, int]:
     return values
 
 
-def read_cpu_ticks(pid: int) -> int:
-    """Return user plus system CPU ticks for a process."""
+def read_cpu_ticks(pid: int) -> int | None:
+    """Return user plus system CPU ticks, or no measurement after a failed read."""
     try:
         text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         fields = text[text.rfind(")") + 2 :].split()
-        return int(fields[11]) + int(fields[12])
+        user, system = int(fields[11]), int(fields[12])
+        return user + system if user >= 0 and system >= 0 else None
     except (OSError, IndexError, ValueError):
-        return 0
+        return None
 
 
 def fd_count(pid: int) -> int:
@@ -150,9 +171,10 @@ def read_internal_metrics(path: Path | None) -> dict[str, str]:
         fields = line.split()
         if len(fields) == 2 and fields[0].split("{", 1)[0] == "agentsight_ffi_dropped_total":
             try:
-                result["ffi_dropped"] = str(
-                    float(result.get("ffi_dropped", "0")) + float(fields[1])
-                )
+                value = float(fields[1])
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError("FFI drop counters must be finite and non-negative")
+                result["ffi_dropped"] = str(float(result.get("ffi_dropped", "0")) + value)
             except ValueError:
                 result["ffi_dropped"] = "nan"
             continue
@@ -269,23 +291,22 @@ def write_json(path: Path, value: dict[str, object]) -> None:
 
 def sample(
     pid: int,
-    previous_ticks: int,
+    previous_ticks: int | None,
     previous_time: float,
     input_qps: float,
     metrics: Path | None,
-) -> tuple[dict[str, object], int, float]:
+    identity: ProcessIdentity | None = None,
+) -> tuple[dict[str, object], int | None, float]:
     """Collect one row and the state needed for the next CPU calculation."""
     now = time.monotonic()
-    status = read_status(pid)
+    matches = identity is None or read_process_identity(pid) == identity
+    status = read_status(pid) if matches else {}
     alive = bool(status)
-    ticks = read_cpu_ticks(pid) if alive else previous_ticks
+    ticks = read_cpu_ticks(pid) if alive else None
     elapsed = max(now - previous_time, 1e-9)
     cpu = (
-        max(
-            0.0,
-            (ticks - previous_ticks) / os.sysconf(os.sysconf_names["SC_CLK_TCK"]) / elapsed * 100,
-        )
-        if alive
+        (ticks - previous_ticks) / os.sysconf(os.sysconf_names["SC_CLK_TCK"]) / elapsed * 100
+        if ticks is not None and previous_ticks is not None and ticks >= previous_ticks
         else None
     )
     row: dict[str, object] = {
@@ -313,6 +334,12 @@ def sample(
         "completed": "",
     }
     row.update(read_internal_metrics(metrics))
+    if identity is not None and read_process_identity(pid) != identity:
+        # A process can exit and its PID can be reused between procfs reads.
+        row["process_alive"] = 0
+        for field in ("cpu_pct", "rss_mb", "threads", "file_descriptors", "active_connections"):
+            row[field] = ""
+        ticks = None
     return row, ticks, now
 
 
@@ -362,6 +389,9 @@ def main() -> int:
         raise SystemExit(f"results-root does not exist: {args.results_root}")
     if not Path(f"/proc/{args.pid}").exists():
         raise SystemExit(f"process {args.pid} does not exist")
+    identity = read_process_identity(args.pid)
+    if identity is None:
+        raise SystemExit(f"cannot identify process {args.pid}")
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     if args.start_file is not None:
@@ -390,6 +420,7 @@ def main() -> int:
                 previous_time,
                 args.input_qps,
                 args.metrics_file,
+                identity,
             )
             if first_sample:
                 # Establish a baseline without treating startup microseconds as a CPU interval.
@@ -432,7 +463,7 @@ def main() -> int:
         # Include counters published while validation drains the capture queue,
         # including updates after the collector's last periodic sample.
         row, _, _ = sample(
-            args.pid, previous_ticks, previous_time, args.input_qps, args.metrics_file
+            args.pid, previous_ticks, previous_time, args.input_qps, args.metrics_file, identity
         )
         writer.writerow(row)
         handle.flush()

@@ -14,11 +14,10 @@ and existing build and test entry points.
 
 | Component | Path | Tech | Platform |
 |-----------|------|------|----------|
-| **copilot-shell** (`cosh`) | `deprecated/copilot-shell/` | TypeScript / Node.js | All |
 | **cosh-ng** | `src/cosh-ng/` | Rust | Linux (full); macOS (limited functionality) |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux (full); macOS (trajectory/serve only) |
-| **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm) |
+| **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm); Windows x64 (native CLI + QwenWork adapter) |
 | **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
 | **anolisa** | `distribution/anolisa/` | Rust | Linux + macOS (arm64) |
@@ -32,24 +31,16 @@ and existing build and test entry points.
 ## 2. Development Commands
 
 ```bash
-# Unified build (recommended — handles deps, build, and user install)
-./scripts/build-all.sh                                        # integrated default components
-./scripts/build-all.sh --no-install                           # build only, skip install
-./scripts/build-all.sh --ignore-deps                          # skip dependency setup and runtime verification
-./scripts/build-all.sh --component cosh --component sec-core  # selected components
+# Unified build (Linux — select maintained components explicitly)
+./scripts/build-all.sh --component sec-core --component tokenless  # deps, build, and user install
+./scripts/build-all.sh --component sec-core --no-install           # install deps and build, skip component install
+./scripts/build-all.sh --component sec-core --ignore-deps          # pre-provisioned hosts: skip dependency setup and runtime verification
 
-# Partial convenience test runner (five components; may skip unavailable suites)
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell   # copilot-shell only
+# Partial convenience test suites (may skip unavailable suites)
 ./tests/run-all-tests.sh --filter sec     # agent-sec-core only
 ./tests/run-all-tests.sh --filter sight   # agentsight only
-
-# copilot-shell (per-component)
-cd deprecated/copilot-shell
-make deps      # npm install + husky hooks (use make deps-ci in CI)
-make build
-make lint
-make test
+./tests/run-all-tests.sh --filter tokenless
+./tests/run-all-tests.sh --filter memory
 
 # cosh-ng (Linux full; macOS limited functionality, per-component)
 cd src/cosh-ng
@@ -217,104 +208,23 @@ Summary:
 
 ## 5. TypeScript Conventions
 
-> Detailed config in `deprecated/copilot-shell/`.
-
-- **Linting**: ESLint
-- **Formatting**: Prettier
-- **Build**: `make build` (npm-based)
-- **Test**: `make test`
+Follow each active package's `package.json`, `tsconfig.json`, and local lint
+configuration. TypeScript is used by component plugins, adapters, and `website/`;
+their build and test entry points differ. Use the component's documented commands
+and its declared package scripts rather than assuming repository-wide npm targets.
 
 ## 6. Commit Message Rules
 
-> **scope is mandatory** — CI will error if scope is missing.
+> **MANDATORY**: All commit message rules — subject format, body requirements,
+> trailers, scope list and inference, atomicity — are defined in
+> [`specs/commit-message-standard.md`](specs/commit-message-standard.md).
+> You MUST read that file before composing a commit message. Non-compliance
+> will be rejected in review.
 
-### Subject line
-
-Format: `type(scope): imperative description`
-- **Repository maximum: 50 characters** (commitlint currently hard-fails above 120)
-- Language: **English only**
-- Imperative mood ("add", "fix", "remove" — not "added", "fixes", "removing")
-- Lowercase first letter, no trailing period
-- Breaking changes: append `!` before colon, e.g. `feat(cosh)!: remove legacy flag`
-
-### Body (when non-trivial)
-
-Separated from subject by a blank line. Cover three things:
-1. What architectural choice was made
-2. Why this approach over alternatives
-3. Known limitations or trade-offs
-
-Do **not** restate the diff line-by-line or paste design docs.
-
-### Trailers
-
-```
-Assisted-by: <tool>:<version>
-Signed-off-by: Name <email>
-```
-
-`Assisted-by` goes **above** `Signed-off-by`. Omit `Assisted-by` if no AI was involved.
-
-```bash
-git commit \
-  --trailer "Assisted-by: Qoder:1.7.0" \
-  --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" \
-  -m '...'
-```
-
-**Tool identifier detection:**
-
-| Detection method | Tool identifier |
-|---|---|
-| `$QODER_VERSION` env var | `Qoder:<ver>` |
-| `$CLAUDE_CODE_VERSION` env var | `Claude Code:<ver>` |
-| Parent process is Qoder.app / QoderWork.app | Read `CFBundleShortVersionString` from app bundle |
-| Parent process is Claude.app | `Claude:<ver>` |
-| Parent process is Cursor.app | `Cursor:<ver>` |
-
-When generating commits, detect the active tool and fill in the actual version. Do **not** hardcode a fixed string like `Qoder:latest`.
-
-### Atomicity
-
-- One commit = one logical change
-- Scope must match the actual files changed
-- Every commit in a PR must compile independently
-- Squash fixup commits before merge
-
-### Scope Inference (by changed file path)
-
-| Changed path | Scope |
-|---|---|
-| `deprecated/copilot-shell/` | `cosh` |
-| `src/cosh-ng/` | `cosh-ng` |
-| `src/agent-sec-core/` | `sec-core` |
-| `src/os-skills/` | `skill` |
-| `src/agentsight/` | `sight` |
-| `src/tokenless/` | `tokenless` |
-| `src/ws-ckpt/` | `ckpt` |
-| `src/agent-memory/` | `memory` |
-| `distribution/anolisa/` | `anolisa` |
-| `src/skillfs/` | `skillfs` |
-| `src/ktuner/` | `ktuner` |
-| `src/aw/` | `aw` |
-| `.github/workflows/` | `ci` |
-| `docs/` | `docs` |
-| `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
-| Other root-level config / scripts / tooling | `chore` |
-
-**Multi-component changes**: use the scope covering the most changed files.
-
-### Examples
-
-```
-feat(cosh): add --json flag to config command
-
-Scripts need machine-readable config output; chose flat JSON over
-nested to keep parsing trivial. Nested config support tracked in #55.
-
-Assisted-by: Qoder
-Signed-off-by: Zhang San <zhangsan@example.com>
-```
+Two invariants repeated here because they fail most often: **scope is
+mandatory** (CI errors when it is missing), and `Signed-off-by` MUST use the
+contributor's own Git identity. This section intentionally does not duplicate
+the spec.
 
 ## 7. Branch Naming
 
@@ -378,29 +288,15 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 
 ## 13. Commit Discipline
 
-### Fix attribution rule
+> **MANDATORY**: Rebase preparation, fix attribution (`Fixes:` / `Supplements:` /
+> `git commit --fixup`), the version bump rule, CHANGELOG timing, and the
+> pre-commit format check are defined in
+> [`specs/commit-message-standard.md`](specs/commit-message-standard.md) §6–§8.
 
-Every fix commit must be attributed correctly:
-
-| Situation | Action |
-|-----------|--------|
-| Bug introduced by a commit **in this PR** | `git commit --fixup=<hash>` then `rebase --autosquash`. No separate commit. |
-| Bug introduced by a commit **already on main** | Standalone commit with `Fixes: <hash> ("<subject>")` in body. |
-| Enhancement supplementing a feature **already on main** | Standalone commit with `Supplements: <hash> ("<subject>")` in body. |
-| Brand-new feature or unrelated change | Standalone commit, no Fixes/Supplements needed. |
-
-**Never** create a standalone "fix" commit for something introduced earlier in the same PR branch. Always amend or fixup into the originating commit.
-
-### Version bump rule
-
-- Use `chore(<scope>): bump version to X.Y.Z` (not `release(...)` — commitlint rejects non-standard types).
-- Version bump is always the **last commit** in a feature branch.
-- All version-bearing files for the component must be updated atomically. This includes whichever of the following exist: `Cargo.toml` or `package.json`, `.anolisa/component.toml`, `manifests/<name>.toml`, `dist/<name>.spec`, and `CHANGELOG.md`.
-- `CHANGELOG.md` (and its `_zh` counterpart) is edited **only** in the version bump commit. Feature, fix, docs and test commits must not touch it, even when the change is user-visible — the entry is written when the version is cut, together with the other version-bearing files. Do not add a changelog line to a feature PR and expect the bump to merge it.
-
-### Format check
-
-Run the component's applicable formatter before every commit (e.g. `cargo fmt --all` for Rust from the workspace root, `npm run format` for TypeScript, `make python-code-pretty` for Python). CI will reject formatting diffs. If a rebase introduces format changes, amend them into the commit that caused the change — do not create a standalone "style" commit.
+One rule repeated here because it is broken most often: **never** create a
+standalone "fix" commit for something introduced earlier in the same PR
+branch — amend or fixup it into the originating commit. This section
+intentionally does not duplicate the spec.
 
 ---
 

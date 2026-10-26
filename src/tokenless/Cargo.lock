@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "libc",
@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-cli"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "csv",
  "html5ever",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-python"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "pyo3",
  "serde",
@@ -1693,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-runtime"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "libc",
  "regex",
@@ -1708,11 +1708,12 @@ dependencies = [
  "tokenless-schema",
  "tokenless-stats",
  "toon-format",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "tokenless-schema"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "libc",
  "regex",
@@ -1723,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-stats"
-version = "0.8.8"
+version = "0.9.0"
 dependencies = [
  "actix-web",
  "blake3",
@@ -1783,9 +1784,9 @@ dependencies = [
 
 [[package]]
 name = "toon-format"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f89570c1a68d73941f728cca32a4345b2ffca36667ad921af336c60309a3e7e"
+checksum = "ee91127810858e0dbcecb2947a0074a7d18bd191d56bcb581f5962374aed9fb8"
 dependencies = [
  "indexmap",
  "serde",

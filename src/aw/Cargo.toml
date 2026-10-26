@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/aw-cli",
     "crates/aw-adapter",
     "crates/aw-contracts",
     "crates/aw-config",
@@ -13,6 +14,9 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+clap = { version = "4.6.1", features = ["derive", "string"] }
+clap_complete = "4.6.0"
+aw-package = { path = "crates/aw-package" }
 aw-adapter = { path = "crates/aw-adapter" }
 flate2 = "1"
 tar = "0.4"
@@ -34,3 +38,8 @@ serde_yaml_ng = "0.10"
 sha2 = "0.10"
 thiserror = "2"
 shlex = "1"
+
+# Package acceptance repeatedly hashes real executables; keep that bounded work
+# practical in debug builds while retaining development checks in AW code.
+[profile.dev.package.sha2]
+opt-level = 3

@@ -18,6 +18,41 @@ fn parse(value: &Value) -> Result<aw_config::Configuration, Error> {
 }
 
 #[test]
+fn agent_shutdown_grace_accepts_bounded_integer_values_without_inserting_defaults() {
+    let mut value = example();
+    let path = "/spec/agents/qoder/shutdown_grace_ms";
+    assert!(parse(&value).unwrap().as_value().pointer(path).is_none());
+    for literal in ["1", "2000", "120000", "3000.0", "3e3"] {
+        let grace: Value = serde_json::from_str(literal).unwrap();
+        value["spec"]["agents"]["qoder"]["shutdown_grace_ms"] = grace.clone();
+        let configuration = parse(&value).unwrap();
+        assert_eq!(configuration.as_value().pointer(path), Some(&grace));
+    }
+}
+
+#[test]
+fn agent_shutdown_grace_rejects_invalid_bounds_and_types() {
+    for grace in [
+        json!(0),
+        json!(-1),
+        json!(0.5),
+        json!(2000.5),
+        json!(120001),
+        json!("2000"),
+        json!(true),
+        json!(null),
+    ] {
+        let mut value = example();
+        value["spec"]["agents"]["qoder"]["shutdown_grace_ms"] = grace;
+        assert!(matches!(
+            parse(&value),
+            Err(Error::Shape { path, .. })
+                if path == "/spec/agents/qoder/shutdown_grace_ms"
+        ));
+    }
+}
+
+#[test]
 fn starter_example_needs_no_policy_program_and_requests_only_tool_events() {
     let configuration = VALIDATOR
         .parse(include_bytes!("../examples/aw.minimal.yaml"))
@@ -40,6 +75,7 @@ fn one_configuration_covers_declared_adapters_and_sixteen_event_names() {
     for adapter in [
         "qwenpaw",
         "qoder",
+        "qoder-sdk",
         "openclaw",
         "hermes",
         "pi",
@@ -615,4 +651,34 @@ fn yaml_scalar_context_preserves_strings_and_explicit_float_spellings() {
         value.as_value()["spec"]["providers"]["business"]["config"]["copy"],
         WIDE
     );
+}
+
+#[test]
+fn daemon_limits_accept_concurrent_budgets_and_reject_invalid_values() {
+    let mut value = example();
+    for field in [
+        "bindings",
+        "events",
+        "calls",
+        "connections",
+        "invocations_per_binding",
+    ] {
+        for limit in [1, 64, 4096] {
+            value["spec"]["daemon"]["limits"] = json!({field:limit});
+            parse(&value).unwrap();
+        }
+        for limit in [
+            json!(0),
+            json!(-1),
+            json!(4097),
+            json!(1.5),
+            json!("64"),
+            Value::Null,
+        ] {
+            value["spec"]["daemon"]["limits"] = json!({field:limit});
+            assert!(parse(&value).is_err());
+        }
+    }
+    value["spec"]["daemon"]["limits"] = json!({"history_calls":1024});
+    assert!(parse(&value).is_err());
 }

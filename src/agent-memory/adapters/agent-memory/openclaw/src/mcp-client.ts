@@ -170,27 +170,72 @@ export class McpStdioClient {
   private async doStart(): Promise<void> {
     this.spawnProcess();
 
-    // Send MCP initialize handshake.
-    const initResult = await this.sendRaw("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: {
-        name: "openclaw-agent-memory-plugin",
-        version: PLUGIN_VERSION,
-      },
-    });
+    try {
+      // Send MCP initialize handshake.
+      const initResult = await this.sendRaw("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: {
+          name: "openclaw-agent-memory-plugin",
+          version: PLUGIN_VERSION,
+        },
+      });
 
-    if (!initResult) {
-      throw new Error("agent-memory initialize handshake returned no result");
+      if (!initResult) {
+        throw new Error("agent-memory initialize handshake returned no result");
+      }
+
+      // Send initialized notification (no response expected).
+      this.sendNotification("notifications/initialized");
+
+      this.initialized = true;
+      // Successful init: reset the respawn counter so the next crash
+      // gets a full quota of retries again.
+      this.respawnAttempts = 0;
+    } catch (err) {
+      // A failed handshake says nothing about whether the worker we just
+      // spawned is alive — on a JSON-RPC error or an empty result it
+      // usually is. `initialized` stays false, so the next tool call
+      // would spawn a replacement and overwrite `this.proc`, orphaning
+      // this worker where `stop()` can never reach it and leaving its
+      // exit handler behind to skew the crash counter later. Release it
+      // first, then surface the original handshake error untouched.
+      await this.releaseWorker();
+      throw err;
     }
+  }
 
-    // Send initialized notification (no response expected).
-    this.sendNotification("notifications/initialized");
-
-    this.initialized = true;
-    // Successful init: reset the respawn counter so the next crash
-    // gets a full quota of retries again.
-    this.respawnAttempts = 0;
+  /**
+   * Tear down the current worker after a failed startup.
+   *
+   * Routes through `stop()` so the shutdown reuses the SIGTERM/SIGKILL
+   * escalation that already guarantees the child is gone on return, and
+   * marks the exit deliberate so it is not booked as a crash — a real
+   * crash still reaches `handleExit()` on its own path, with `this.proc`
+   * already cleared, and keeps its normal accounting.
+   *
+   * Never throws: a teardown failure must not mask the startup error the
+   * caller is about to receive. The handle is dropped either way so the
+   * next start cannot inherit a worker we no longer track.
+   */
+  private async releaseWorker(): Promise<void> {
+    if (!this.proc) {
+      return;
+    }
+    try {
+      await this.stop();
+    } catch (err) {
+      const orphan = this.proc;
+      this.proc = null;
+      this.initialized = false;
+      this.pending.clear();
+      orphan?.kill("SIGKILL");
+      console.error(
+        `[agent-memory] failed to release worker after initialization failure: ${
+          (err as Error).message
+        }`,
+      );
+    }
   }
 
   private spawnProcess(): void {
@@ -220,12 +265,22 @@ export class McpStdioClient {
       detached: false,
     });
 
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
-      this.handleData(chunk.toString("utf8"));
+    // Decode both child streams through the stream's own incremental UTF-8
+    // decoder. A pipe can split one JSON-RPC reply anywhere, including inside
+    // a multibyte character, and decoding each Buffer chunk on its own turns
+    // both halves of that character into U+FFFD before JSON.parse ever runs —
+    // silently corrupting Chinese text, accents and emoji in tool results.
+    // setEncoding("utf8") keeps a trailing partial code point buffered until
+    // its remaining bytes arrive; the newline framing in handleData is
+    // unchanged, and each spawn gets a fresh stream decoder.
+    this.proc.stdout?.setEncoding("utf8");
+    this.proc.stdout?.on("data", (chunk: string) => {
+      this.handleData(chunk);
     });
 
-    this.proc.stderr?.on("data", (chunk: Buffer) => {
-      this.appendStderr(chunk.toString("utf8"));
+    this.proc.stderr?.setEncoding("utf8");
+    this.proc.stderr?.on("data", (chunk: string) => {
+      this.appendStderr(chunk);
     });
 
     this.proc.on("exit", (code, signal) => {

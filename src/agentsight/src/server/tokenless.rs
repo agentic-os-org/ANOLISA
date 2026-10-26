@@ -442,12 +442,17 @@ async fn get_record(
 
 /// Refresh source statistics before exposing applied savings through existing views.
 ///
+/// Records are bounded to `[start_ns, end_ns]` so the savings numerator spans
+/// the same window as the denominator that consumes it.
+///
 /// # Errors
 /// Returns an HTTP error on refresh/storage failure instead of substituting stale totals.
 pub(super) async fn savings_rows(
     data: &AppState,
     client: Option<web::Data<QueryClient>>,
     ids: &[&str],
+    start_ns: i64,
+    end_ns: i64,
 ) -> Result<
     (
         bool,
@@ -467,7 +472,7 @@ pub(super) async fn savings_rows(
                 .save_tokenless_records(&client.endpoint, &records)
                 .map_err(|_| QueryError::Endpoint)?;
             store
-                .tokenless_applied_stats(&client.endpoint, &ids, 0, i64::MAX, Some(&records))
+                .tokenless_applied_stats(&client.endpoint, &ids, start_ns, end_ns, Some(&records))
                 .map_err(|_| QueryError::Endpoint)
         })
         .await;
@@ -486,7 +491,7 @@ pub(super) async fn savings_rows(
     Ok((
         store.is_some(),
         store
-            .map(|store| store.get_stats_by_tool_use_ids(ids))
+            .map(|store| store.get_stats_by_tool_use_ids_in_window(ids, start_ns, end_ns))
             .unwrap_or_default(),
     ))
 }

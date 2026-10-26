@@ -143,4 +143,4 @@ Stage 耗时还覆盖 pending 插入、完成、连接锁等待和 GenAI 维护�
 分片压缩 SSE、开启和关闭 raw 导出时的 provider 字段一致性及 FFI reservation 生命周期。
 RSS 与吞吐 bench 单独执行；字节预算并不直接保证进程 RSS 上限。
 
-详见[运行时配置参考](../../../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#运行时上限)。
+详见[运行时配置参考](../../../../docs/user-guide/zh/agentsight/configuration.md#运行时上限)。

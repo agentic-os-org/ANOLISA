@@ -160,15 +160,17 @@ fn per_step_failure_actions_preserve_other_vetoes_and_final_replacements() {
         stdout: b"ignored failure output".to_vec(),
         stderr: b"diagnostic".to_vec(),
     };
-    let report = adopt_step("qwenpaw", "tool.before", "report", failure()).unwrap();
-    assert!(matches!(report.exit, NativeExit::Code(0)));
-    assert!(report.stdout.is_empty());
-    assert!(matches!(
-        adopt_step("qwenpaw", "tool.before", "block", failure())
-            .unwrap()
-            .exit,
-        NativeExit::Code(2)
-    ));
+    for adapter in ["qwenpaw", "qoder-sdk"] {
+        let report = adopt_step(adapter, "tool.before", "report", failure()).unwrap();
+        assert!(matches!(report.exit, NativeExit::Code(0)));
+        assert!(report.stdout.is_empty());
+        assert!(matches!(
+            adopt_step(adapter, "tool.before", "block", failure())
+                .unwrap()
+                .exit,
+            NativeExit::Code(2)
+        ));
+    }
     let veto = HookOutput { exit: NativeExit::Code(0), stdout: br#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"native veto"}}"#.to_vec(), stderr: vec![] };
     let veto = adopt_step("qoder", "tool.before", "report", veto).unwrap();
     let report = adopt_step("qoder", "tool.before", "report", failure()).unwrap();
@@ -290,5 +292,39 @@ fn qoder_preserves_ordered_additional_context_and_final_replacement() {
     assert_eq!(
         value["hookSpecificOutput"]["updatedToolOutput"],
         "second-context"
+    );
+}
+
+#[test]
+fn qoder_sdk_reload_preserves_the_first_denial_reason() {
+    let mut veto = HookOutput {
+        exit: NativeExit::Code(2),
+        stdout: vec![],
+        stderr: vec![],
+    };
+    let reason = "Retry with arguments: {\"command\":\"rtk candidate\"}";
+    adapter::block_reason("qoder-sdk", &mut veto, reason).unwrap();
+    let veto = adopt_step("qoder-sdk", "tool.before", "block", veto).unwrap();
+    let output = combine(
+        "qoder-sdk",
+        vec![
+            veto,
+            HookOutput {
+                exit: NativeExit::Code(0),
+                stdout: br#"{"decision":"allow"}"#.to_vec(),
+                stderr: vec![],
+            },
+            HookOutput {
+                exit: NativeExit::Code(2),
+                stdout: br#""another denial""#.to_vec(),
+                stderr: vec![],
+            },
+        ],
+    )
+    .unwrap();
+    assert!(matches!(output.exit, NativeExit::Code(2)));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        reason
     );
 }

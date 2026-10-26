@@ -552,6 +552,57 @@ fn interruption_db_reads_the_given_database() {
     assert_eq!(rows[0]["interruption_id"], serde_json::json!(id));
 }
 
+/// `resolve` writes the database and, unlike every sibling subcommand, had no
+/// machine-readable answer: the CLI reference's Conventions table already
+/// promises `--json` on `interruption *`, so a script had to parse the human
+/// line. The flag is additive; the plain line stays.
+#[test]
+fn interruption_resolve_json_reports_the_resolution() {
+    let dir = fixture_dir("resolve_json");
+    let (db, id) = interruption_fixture(&dir);
+
+    let plain = agentsight()
+        .args(["interruption", "--db", db.to_str().unwrap(), "resolve", &id])
+        .output()
+        .expect("run agentsight");
+    assert!(
+        plain.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).contains("Resolved:"),
+        "the plain form must keep its line: {}",
+        String::from_utf8_lossy(&plain.stdout)
+    );
+
+    // A second fixture, so the earlier resolve cannot make this one a no-op.
+    let dir_json = fixture_dir("resolve_json_machine");
+    let (db_json, id_json) = interruption_fixture(&dir_json);
+    let out = agentsight()
+        .args([
+            "interruption",
+            "--db",
+            db_json.to_str().unwrap(),
+            "resolve",
+            &id_json,
+            "--json",
+        ])
+        .output()
+        .expect("run agentsight");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir_json);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("resolve --json must emit valid JSON");
+    assert_eq!(v["status"], serde_json::json!("resolved"));
+    assert_eq!(v["interruption_id"], serde_json::json!(id_json));
+}
+
 #[test]
 fn metrics_db_reads_the_given_database() {
     let dir = fixture_dir("metrics");

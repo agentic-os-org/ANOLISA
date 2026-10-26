@@ -728,7 +728,7 @@ fn flatten_result_content(payload: &serde_json::Value) -> String {
 /// `content` is the common spelling and stays first. The rest are what the
 /// twin readers of the same payload already scan — the interruption detector's
 /// `tool_response_failure_text` reads `error`, `message`, `content`,
-/// `response` and `details`; the grader's `tool_response_has_error_signal`
+/// `response` and `details`; the grader's `tool_response_has_error`
 /// reads `response`, `content`, `error` and `output` — so an MCP result that
 /// reports `{"error":"grep: …","is_error":true}` exports its reason as text
 /// for every consumer, not as the serialised object that defeats a classifier

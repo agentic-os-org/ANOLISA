@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-10-25
+
+### Added
+- Persisted session data is now bounded by a per-user budget (100 MiB / 7 days across configured roots): the oldest eligible sessions are cleaned up automatically, active sessions hold leases that keep them safe, and corrupted or incompatible data is never deleted (#7157)
+- New `/bug <description>` command builds a pre-filled ANOLISA GitHub issue from an allowlisted runtime snapshot (version, provider/model, session ID, OS, shell identity, install package), prints the URL for review, and best-effort opens it in a browser on graphical Linux or macOS; opening or clicking the link sends the pre-filled fields to GitHub when the form loads, and the issue is only created when the user submits the form (#7258)
+- Standalone SLS telemetry now reports the OS distribution (e.g. `alinux 23`, `ubuntu 24.04`) through a new `os.distro` field, so environment breakdowns match the anolisa unified uploader (#8565)
+
+### Fixed
+- A checked-out project can no longer weaken agent security: the agent core ignores project-level config hooks, `approval_mode`, and `allowed_tools`, while system/user settings and shell-side project hooks (with their own content consent) keep working (#7244)
+- Shell command trust is now bound to the exact approved command bytes: commands differing in whitespace, quoting, or newlines require their own approval instead of silently sharing one, and commands that failed, were interrupted, or timed out lose their trusted status, so a rerun asks again; a structured `{"cmd": ...}` request can no longer borrow the approval of a configured plain-command key (#6787, #6788)
+- Project shell-hook consent now binds to the exact reviewed file content: consent records carry a digest, so changed hook files require re-consent before their hooks run again, and records in the earlier unversioned format need a one-time re-consent; hook loading is bounded (64 entries / 4 MiB per project, oversized trees rejected as a whole), and provider-owned request fields can no longer be overridden (#7158)
+- `COSH_SHELL_AI=off` now stops every remaining path that could start an agent request: prompt insights are no longer rendered, auto-started, or accepted, and hook-consultation approvals and `/hint <id> analyze` no longer dispatch requests; local shell suggestions keep working (#6892, #7256)
+- Quoted secret fragments — including bare access keys and PEM private keys — are now redacted from persisted and resumed conversations and from shell provider evidence, extending the existing cookie/token rules (#7396)
+- Checkpoint commands no longer pre-reserve memory from an untrusted response-length prefix (a hostile daemon could previously force a 64 MiB reservation); memory now grows only as real data arrives (#7102)
+- Manually configured AK/SK + security-token credentials are never silently replaced by the ECS instance role when a token expires; only providers configured as ECS RAM Role refresh from instance metadata (#6591)
+- Re-authenticating an existing aliyun provider no longer loops on `invalid base_url` when the stored `base_url` is blank: the blank value is treated as absent and the template's builtin endpoint applies (#8505)
+- `[logging] level` now configures the log level for both the agent core and the shell (the shell previously read only `[ui] log_level`); the old key remains as a fallback and the user guide documents the full resolution order (#8529)
+- Diagnostic log files now respect the per-user budget (3 days / 20 MiB) even when the core and the shell write concurrently, and hard-linked or externally archived copies are never truncated (#7159)
+- Natural-language prompts typed in a login session are routed to the agent again on distributions whose system profile ships a `command_not_found_handle` (Ubuntu/Debian with command-not-found installed); they were previously executed as missing commands with a `command not found` error. Handlers defined in the user's own login files keep running and stay delegated (#6999)
+- After routing is turned off in an enhanced-native session, `/mode routing assisted` restores assisted routing locally whether it is typed directly, recalled from history, or edited at the prompt — it no longer falls through to Bash as a command (#7350)
+- Deferred timeout notices finish by restoring the editable shell line instead of leaving the cursor on a blank line, and restoring an idle native prompt no longer swallows the failed-command insight (#7489)
+- Approval cards no longer leak state between replacements: composer selections reset on each new card and captured command output stays synchronized, while approval prompts keep rendering inline in the shell (#7333, #8042)
+- The audit log keeps its exactly-once guarantee when the shell event buffer shrinks or is rebuilt upstream: already-recorded events are not duplicated, and a typed `audit.truncated` marker records the gap (#2408)
+- Checkpoint diff previews keep escaped and spaced filenames distinct and no longer reject valid diffs over non-UTF-8 bytes in ignored metadata; unsupported filename encodings now fail closed with a clear, non-retryable error instead of corrupting the diff digest (#3558)
+- Checkpoint creation and rollback are refused while the btrfs filesystem is above its safe usage threshold, with a clear retryable message; deletion stays available so space can still be reclaimed (#7888)
+- Legacy headless sessions now start on Linux kernels without `openat2` (e.g. 4.19-era servers): the workspace file tools are disabled with a warning, and the model is told to use shell commands such as `cat` under the existing approval policy instead of the backend exiting before the first reply (#8769)
+- The agent core no longer exits at startup in restricted environments where Ctrl-C (SIGINT) handler registration fails: it warns once and keeps running, and Ctrl-C still terminates the process through the kernel default (#2648)
+- Removing or replacing the RPM no longer leaves stray `/etc/shells` temporary files behind when the transaction is interrupted, and the rewrite refuses unsafe symlinked `/etc/shells` targets instead of following them (#6581)
+
 ## [0.27.0] — 2026-10-11
 
 ### Added

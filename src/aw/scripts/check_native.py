@@ -40,7 +40,7 @@ def load(root: Path) -> dict:
             validate_pin(row.get("qoder_reload_cli", {}))
             reload = [case for case in row.get("cases", []) if case["name"] == "runtime-reload"]
             expected = [
-                "{python}", "crates/aw-service/tests/fixtures/qoder/reload.py",
+                "{python}", "crates/aw-cli/tests/fixtures/qoder/reload.py",
                 "--bin", "{bin}", "--output", "{output}/runtime-reload",
             ]
             if (
@@ -66,7 +66,7 @@ def load(root: Path) -> dict:
                 raise ValueError(f"{agent}: pin the sec-core runtime container digest")
             expected_argv = [
                 "{python}",
-                "crates/aw-service/tests/fixtures/sec_core/native.py",
+                "crates/aw-cli/tests/fixtures/sec_core/native.py",
                 "--agent",
                 agent,
                 "--bin",
@@ -96,7 +96,7 @@ def load(root: Path) -> dict:
         if not cases or len({case["name"] for case in cases}) != len(cases):
             raise ValueError(f"{agent}: missing or duplicate native cases")
         for case in cases:
-            if not 0 < case["timeout_seconds"] <= 1200:
+            if not 0 < case["timeout_seconds"] <= 2400:
                 raise ValueError(f"{agent}: native cases need bounded deadlines")
             validate_case(case)
             scripts = [arg for arg in case["argv"] if arg.endswith((".py", ".mjs"))]

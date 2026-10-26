@@ -249,7 +249,7 @@ Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
 %setup -q
 
 %build
-make build-all
+make build-all-v1
 make download-deps
 make stage-cli
 

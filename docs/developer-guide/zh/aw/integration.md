@@ -7,7 +7,7 @@ Qoder、OpenClaw、QwenPaw 和 Hermes。简单规则优先使用布尔判断命�
 自有操作或结构化效果时，再实现完整 Provider。
 
 AW 当前为 Preview，尚未提供 `anolisa install aw` 或 RPM 分发。使用预编译二进制请
-参阅 [Preview 包指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。下述源码流程在
+参阅 [Preview 包指南](../../../user-guide/zh/aw/installation.md)。下述源码流程在
 选择 sec-core 或原生 Agent 步骤之前，无需安装 sec-core 或配置模型账号。
 
 ## 1. 从源码构建
@@ -21,32 +21,30 @@ AW 当前为 Preview，尚未提供 `anolisa install aw` 或 RPM 分发。使用
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
+cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
 export AW_SOURCE="$PWD"
 export AW_BIN="$AW_SOURCE/target/debug/aw"
-export AW_PACKAGE="$AW_SOURCE/target/debug/aw-package"
 export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 "$AW_BIN" --help
-"$AW_PACKAGE" --help
 ```
 
 debug 二进制位于 `src/aw/target/debug`，此步骤不安装系统服务。需要可分发的
-release 包时，按[打包构建说明](building.md)
+release 包时，按[打包构建说明](../../../../contribute/zh/aw/building.md)
 使用 `aw-build`。core 可独立于 sec-core 构建。不要混装来自不同源码提交或包版本
 的 core 与 Provider 包。
 
 ## 2. 准备四框架共用配置
 
-运行任何 `aw-package config add-*` 命令前，必须先有初始 `aw.yaml`。已安装 core、
-使用 Qoder/OpenClaw 时，通过 `aw-package configure` 创建；不传 `--provider` 就生成
-空策略配置。按[初始化与编辑流程](packages.md#编辑已有-provider-与-hook-配置)
-依次执行 `configure` → `add-provider` → `add-event` → `add-hook` → `validate`。
-`configure` 会校验已安装的包前缀，仅构建源码二进制还不能提供这个前缀。它只创建
+运行任何 `aw config add-*` 命令前，必须先有初始 `aw.yaml`。已安装 core、
+使用 Qoder/OpenClaw 时，通过 `aw config init` 创建；不传 `--provider` 就生成
+空策略配置。按[初始化与编辑流程](../../../user-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)
+依次执行 `aw config init` → `aw config add-provider` → `aw config add-event` → `aw config add-hook` → `aw config validate`。
+`aw config init` 会校验已安装的包前缀，仅构建源码二进制还不能提供这个前缀。它只创建
 新文件，拒绝覆盖已有文件。
 
 本源码教程及 QwenPaw/Hermes 使用下方完整四框架示例作为初始配置。生成器目前只
 支持 Qoder/OpenClaw，编辑器不能添加 Agent 条目。示例已声明两个工具事件；只有
-事件不存在时，才需要先 `add-event` 再 `add-hook`。
+事件不存在时，才需要先 `aw config add-event` 再 `aw config add-hook`。
 
 在同一终端保留这些变量。另开终端时，重新 export 打印出的绝对路径，避免再次
 创建一个新的演示目录。
@@ -80,15 +78,15 @@ printf 'AW_BIN=%s\nAW_CONFIG=%s\nAW_DEMO=%s\n' "$AW_BIN" "$AW_CONFIG" "$AW_DEMO"
 命名程序，`events` 将有序步骤挂到工具执行边界。四个目标共用一个布尔 Hook 命令，各步骤分别声明命中后的效果。示例在工具前输入包含 `AW_DENY_TEST` 时请求阻断，在工具完成后请求
 观察。它用于演示接线，不是生产安全规则。
 
-[配置参考](configuration.md)解释全部字段。当前 `aw-package configure` 只生成
+[配置参考](configuration.md)解释全部字段。当前 `aw config init` 只生成
 Qoder/OpenClaw 条目；四框架配置使用本 YAML 副本。
-[配置编辑器](packages.md#编辑已有-provider-与-hook-配置)
+[配置编辑器](../../../user-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)
 可以增删 Provider 和 Hook 步骤，不修改 Agent 条目。
 
 ```bash
 "$AW_BIN" validate --config "$AW_CONFIG"
-"$AW_PACKAGE" config show --config "$AW_CONFIG" --event tool.before
-"$AW_PACKAGE" config validate --config "$AW_CONFIG"
+"$AW_BIN" config show --config "$AW_CONFIG" --event tool.before
+"$AW_BIN" config validate --config "$AW_CONFIG"
 ```
 
 校验检查文档结构与引用，不执行策略、不检查凭据，也不证明框架采纳了阻断。
@@ -140,7 +138,7 @@ timeout 15s "$AW_HOST" "$AW_CONFIG" tool.after demo_shell '{"command":"printf AW
 
 完整 Provider 可参考第 1 步已构建的
 [Rust 示例](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-provider/examples/policy.rs)和
-[协议参考](../../../../src/aw/docs/design/provider-protocol_zh.md)。以下两次调用验证它的
+[协议参考](providers/protocol.md)。以下两次调用验证它的
 发现与私有配置合同：
 
 ```bash
@@ -155,7 +153,7 @@ printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config",
 Provider 无需修改 AW 或把组件 crate 引入 AW。可执行文件及其运行依赖须安装在
 Agent 运行的位置。AW 为每个方法启动新进程，长期运行的后端由组件自己管理。
 
-[sec-core 接入流程](../../../user-guide/zh/user-entrypoint/aw/security.md)展示了如何桥接已有
+[sec-core 接入流程](../../../user-guide/zh/aw/security.md)展示了如何桥接已有
 CLI/daemon。需要为每个框架映射**实际工具名称和输入 JSON Pointer**；标准化事件
 结构不代表所有工具参数相同。Preview 生成的 sec-core 映射覆盖 Qoder `Bash` 和
 OpenClaw `exec`。扩充并验证映射后，才能声明覆盖 QwenPaw 或 Hermes 扫描。
@@ -172,7 +170,7 @@ OpenClaw `exec`。扩充并验证映射后，才能声明覆盖 QwenPaw 或 Herm
 
 ```bash
 cd "$AW_SOURCE"
-cargo test --locked -p aw-host -p aw-service
+cargo test --locked -p aw-host -p aw-service -p aw-cli
 ```
 
 提交 AW 实现改动前，在仓库根目录运行完整 Linux 门禁：
@@ -188,7 +186,7 @@ cargo test --locked -p aw-host -p aw-service
 cd "$AW_SOURCE"
 rm -r -- "$AW_DEMO"
 test ! -e "$AW_DEMO"
-unset AW_CONFIG AW_DEMO AW_HOST AW_PACKAGE AW_BIN AW_SOURCE
+unset AW_CONFIG AW_DEMO AW_HOST AW_BIN AW_SOURCE
 ```
 
 该清理不影响框架安装与 profile；Hermes 插件安装的回退步骤另见使用指南。

@@ -36,7 +36,7 @@
 - 纯新增可选字段且旧配置完全兼容时，不需要 bump `schema_version`
 
 ### 用户文档
-用户指南位于 `docs/user-guide/{en,zh}/agent-observability/agentsight/`，中英双语必须同步改，只改一侧视为未完成。
+用户指南位于 `docs/user-guide/{en,zh}/agentsight/`，中英双语必须同步改，只改一侧视为未完成。
 
 改动落在下面这些面上时，必须在同一个 PR 里更新对应页面：
 

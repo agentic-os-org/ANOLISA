@@ -119,14 +119,19 @@ impl AgentSecClient {
             }
 
             chunks.extend_from_slice(&buffer[..n]);
+            if let Some(newline) = chunks.iter().position(|byte| *byte == b'\n') {
+                if newline > self.max_response_bytes {
+                    return Err(AgentSecClientError::ResponseTooLarge(
+                        self.max_response_bytes,
+                    ));
+                }
+                chunks.truncate(newline);
+                break;
+            }
             if chunks.len() > self.max_response_bytes {
                 return Err(AgentSecClientError::ResponseTooLarge(
                     self.max_response_bytes,
                 ));
-            }
-            if let Some(newline) = chunks.iter().position(|byte| *byte == b'\n') {
-                chunks.truncate(newline);
-                break;
             }
         }
 
@@ -378,6 +383,22 @@ ignored"#,
             .expect_err("oversized daemon response should fail");
 
         assert!(matches!(err, AgentSecClientError::ResponseTooLarge(4)));
+    }
+
+    #[test]
+    fn read_response_line_ignores_read_ahead_after_newline() {
+        let client = test_client(64);
+        let mut payload = br#"{"request_id":"req-1","ok":true}
+"#
+        .to_vec();
+        payload.extend(std::iter::repeat_n(b'x', 128));
+        let mut reader = Cursor::new(payload);
+
+        let line = client
+            .read_response_line(&mut reader)
+            .expect("a short response line must not be rejected by read-ahead bytes");
+
+        assert_eq!(line, br#"{"request_id":"req-1","ok":true}"#);
     }
 
     #[test]

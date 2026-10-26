@@ -91,16 +91,29 @@ if target.startswith("linux-"):
     struct.pack_into("<H", header, 18, machine)
     struct.pack_into("<I", header, 20, 1)
     content = bytes(header) + b"\nGLIBC_2.17\n"
-else:
+elif target.startswith("darwin-"):
     cpu = {"darwin-x64": 0x01000007, "darwin-arm64": 0x0100000C}[target]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
+else:
+    assert target == "win32-x64"
+    header = bytearray(90)
+    header[:2] = b"MZ"
+    struct.pack_into("<I", header, 60, 64)
+    struct.pack_into("<I", header, 64, 0x4550)
+    struct.pack_into("<H", header, 68, 0x8664)
+    struct.pack_into("<H", header, 88, 0x20B)
+    content = bytes(header)
 for name in ("tokenless", "rtk"):
+    if target == "win32-x64":
+        name += ".exe"
     (root / name).write_bytes(content + f"\n{name}-{target}\n".encode())
 PY
-    chmod 0755 "$destination/tokenless" "$destination/rtk"
+    local suffix=""
+    if [[ "$target" == "win32-x64" ]]; then suffix=".exe"; fi
+    chmod 0755 "$destination/tokenless$suffix" "$destination/rtk$suffix"
 }
 
-for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     make_binaries "$target"
 done
 
@@ -135,7 +148,7 @@ check_selector() {
     grep -Fq "Targets: $expected" "$TMP/selector.out"
 }
 
-check_selector x86_64 'linux-x64, darwin-x64'
+check_selector x86_64 'win32-x64, linux-x64, darwin-x64'
 check_selector arm64 'linux-arm64, darwin-arm64'
 check_selector linux 'linux-x64, linux-arm64'
 check_selector aarch64-apple-darwin 'darwin-arm64'
@@ -207,11 +220,12 @@ for package in packages:
             assert shared.read_bytes() == common.read_bytes(), shared
 PY
 
-for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"
     test -f "$package/package.json"
     test -f "$package"/*.tgz
     for binary in tokenless rtk; do
+        if [[ "$target" = win32-x64 ]]; then binary="$binary.exe"; fi
         cmp "$PREBUILT/$target/$binary" "$package/bin/$binary"
         test "$(stat -c '%a' "$package/bin/$binary")" = 755
     done
@@ -223,7 +237,7 @@ done
 # without a tokenless executable. The root package's postinstall links its
 # bins to these platform binaries instead (esbuild's platform packages use
 # the same model).
-for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     node - "$ROOT/npm/dist/tokenless-$target/package.json" <<'JS'
 const fs = require('node:fs');
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
@@ -240,6 +254,7 @@ node - "$ROOT/npm/dist/tokenless/package.json" <<'JS'
 const fs = require('node:fs');
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const expected = [
+  '@anolisa/tokenless-win32-x64',
   '@anolisa/tokenless-linux-x64',
   '@anolisa/tokenless-linux-arm64',
   '@anolisa/tokenless-darwin-x64',

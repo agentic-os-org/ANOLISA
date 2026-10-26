@@ -2,9 +2,6 @@
   "repository": "https://github.com/agentic-os-org/ANOLISA",
   "license": "Apache-2.0",
   "components": {
-    "copilot-shell": {
-      "install_name": "cosh"
-    },
     "agent-memory": {
       "install_name": "agent-memory"
     },

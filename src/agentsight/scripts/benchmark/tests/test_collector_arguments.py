@@ -27,6 +27,11 @@ def collector_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(collect_metrics, "STOP", False)
     monkeypatch.setattr(collect_metrics, "read_cpu_ticks", lambda pid: 0)
     monkeypatch.setattr(
+        collect_metrics,
+        "read_process_identity",
+        lambda pid: collect_metrics.ProcessIdentity(pid, 1),
+    )
+    monkeypatch.setattr(
         collect_metrics, "sample", lambda *args: ({"timestamp": 1, "process_alive": 1}, 0, 0)
     )
 

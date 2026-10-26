@@ -9,6 +9,36 @@
 
 ## [未发布]
 
+## [0.3.19] - 2026-10-25
+
+### 变更
+
+- 遥测和 `anolisa register status` 将容器部署识别为 `container`，避免继承宿主机的
+  云产品类型。读取 `product_type` 的程序需接受此新增值。`/etc/anolisa-release` 中
+  显式声明的 `PRODUCT_TYPE` 仍优先；构建容器镜像时需更新或移除过期声明
+  （[#8206](https://github.com/agentic-os-org/ANOLISA/pull/8206)）。
+- 组件目录更新至 Agent Memory `0.2.10`、AgentSight `0.14.3`、cosh-ng `0.28.0`、
+  Copilot Shell `2.8.0`、OS Skills `0.6.3`、SkillFS `0.5.3`、Tokenless `0.8.8`
+  和 ws-ckpt `0.6.0`。
+
+### 修复
+
+- 禁用 OpenClaw 和 Hermes skills 时保留用户新增或修改的文件；启用时拒绝写入
+  ANOLISA 不拥有的已有目录。祖先目录被重定向或成为悬空链接时停止清理并保留安装
+  记录，恢复原路径后可重试。没有逐文件归属信息的旧记录在通过相同路径检查后，
+  仍按整个目录清理
+  （[#6221](https://github.com/agentic-os-org/ANOLISA/pull/6221)）。
+- 移动包含平台依赖的完整 npm 安装目录后，启动器仍可运行。已有安装可通过重新
+  执行 postinstall 获得相对路径启动器
+  （[#8278](https://github.com/agentic-os-org/ANOLISA/pull/8278)）。
+- 遥测 enable、disable、link、unlink、upload 和 init 操作成功后遵循 `--json`，
+  同时支持 `--quiet --json`。标准响应包含对应操作的状态，警告仍写入 stderr
+  （[#8706](https://github.com/agentic-os-org/ANOLISA/pull/8706)）。
+- Raw 安装或更新遇到 CLI 无法执行的 hook 阶段时给出提示：非严格 hook 允许操作
+  继续，`strict = true` hook 则在下载或替换文件前拒绝操作。含不受支持 hook 声明
+  的旧安装仍可执行修复
+  （[#6447](https://github.com/agentic-os-org/ANOLISA/pull/6447)）。
+
 ## [0.3.18] - 2026-10-15
 
 ### 新增

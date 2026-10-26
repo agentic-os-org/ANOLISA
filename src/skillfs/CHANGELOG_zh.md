@@ -9,6 +9,25 @@
 
 ## [未发布]
 
+## [0.5.3] - 2026-10-23
+
+### 新增
+
+- `skillfs mount --config mount.toml --managed` 支持自动恢复，保留启动时的配置，
+  同时读取来源的当前内容。配置变更在成功停止并重新启动后生效
+  ([#8883](https://github.com/agentic-os-org/ANOLISA/pull/8883))。
+
+### 修复
+
+- Managed mount 在点号开头的挂载点和慢主机上稳定启动，worker 启动失败时及时报错
+  ([#8080](https://github.com/agentic-os-org/ANOLISA/pull/8080))。
+- Flat 和 Hermes 安装时隐藏暂存目录，发布后保持元数据读取和目录列表一致
+  ([#7767](https://github.com/agentic-os-org/ANOLISA/pull/7767))。
+- 创建、重命名和嵌套 manifest 修改后，同名 Skill 归属和 discovery 保持一致；
+  安装和重命名遵守配置的大小上限
+  ([#7742](https://github.com/agentic-os-org/ANOLISA/pull/7742))。
+- Skill 解析和 CLI 输出正确处理空白 frontmatter、按字符计算的名称长度诊断及控制字符转义。
+
 ## [0.5.2] - 2026-10-15
 
 ### 修复

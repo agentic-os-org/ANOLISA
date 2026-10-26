@@ -91,6 +91,9 @@ fn canonicalize_or_reconstruct(path: &std::path::Path) -> PathBuf {
 /// NOTE: `SlsWriter` stores the canonicalized path at construction time
 /// to narrow the TOCTOU window between validation and write.
 fn validate_sls_path(path: &std::path::Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
     if path
         .components()
         .any(|c| c == std::path::Component::ParentDir)
@@ -296,7 +299,7 @@ impl SlsWriter {
     /// creates, truncates, or deletes the file or its parent directory.
     pub fn write(&self, record: &StatsRecord) {
         // Skip silently when the SLS collector has not created the file yet.
-        if !self.path.exists() {
+        if !self.path.is_absolute() || !self.path.exists() {
             return;
         }
 
@@ -655,6 +658,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_resolve_sls_path_accepts_valid_path() {
         // Valid paths under /var/log/ or /tmp/ are accepted.
         assert_eq!(
@@ -668,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_sls_path_symlinked_prefix() {
         // When /var/log is symlinked to another filesystem, canonicalization
         // resolves it to the real target which no longer starts with

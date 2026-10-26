@@ -201,6 +201,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sun Oct 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.11-1
+- Correct category filtering and keep keyword and vector indexes current
+- Avoid duplicate consolidation facts and sanitized search-marker interests
+- Preserve OpenClaw UTF-8 replies and release workers after failed startup
+- Validate decay settings and reject retries after incomplete userns setup
+- Preserve frontmatter metadata without a trailing newline
+
 * Thu Oct 15 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.10-1
 - Guide deferred tool calls in the bundled OpenClaw adapter
 - Clean up MCP subprocesses on shutdown and plugin disposal

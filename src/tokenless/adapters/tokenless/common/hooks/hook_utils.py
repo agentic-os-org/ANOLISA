@@ -138,6 +138,8 @@ _FALLBACK_SKIP_TOOLS = [
     "notebookread",
 ]
 _FALLBACK_SHELL_TOOLS = [
+    "PowerShell",
+    "powershell",
     "Bash",
     "bash",
     "Shell",

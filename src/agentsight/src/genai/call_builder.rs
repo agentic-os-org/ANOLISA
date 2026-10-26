@@ -109,6 +109,7 @@ impl GenAIBuilder {
                 let (parts, finish) = Self::merge_sse_chunks(chunks);
                 let merged = if parts.is_empty() {
                     Self::extract_dashscope_native_parts(chunks)
+                        .or_else(|| finish.map(|reason| (parts, Some(reason))))
                 } else {
                     Some((parts, finish))
                 };
@@ -934,6 +935,15 @@ impl GenAIBuilder {
                     })
                     .unwrap_or_else(|| (vec![], None))
             }
+            Some(ParsedApiMessage::GeminiMessage { response, .. }) => response
+                .as_ref()
+                .and_then(|resp| serde_json::to_string(resp).ok())
+                .and_then(|body| Self::parse_sse_response_body(&body, None))
+                .map(|messages| {
+                    let finish_reason = messages.first().and_then(|msg| msg.finish_reason.clone());
+                    (messages, finish_reason)
+                })
+                .unwrap_or_else(|| (vec![], None)),
             _ => (vec![], None),
         };
 
@@ -1121,6 +1131,7 @@ mod tests {
         OpenAIResponse,
     };
     use crate::analyzer::{AnalysisResult, HttpRecord, ParsedApiMessage, TokenRecord};
+    use crate::interruption::{InterruptionDetector, InterruptionType};
     use crate::response_map::ResponseSessionMapper;
     use std::collections::HashMap;
 
@@ -1661,6 +1672,144 @@ mod tests {
         assert_eq!(
             call.response.messages[0].finish_reason.as_deref(),
             Some("STOP")
+        );
+    }
+
+    #[test]
+    fn blocked_gemini_completion_keeps_reason_and_classifies_safety() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(
+            path,
+            None,
+            Some(r#"{"candidates":[{"finishReason":"SAFETY","index":0}]}"#.to_string()),
+        );
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(call.response.messages.len(), 1);
+        assert!(call.response.messages[0].parts.is_empty());
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("SAFETY")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
+        );
+    }
+
+    #[test]
+    fn malformed_gemini_completion_keeps_reason_and_classifies_protocol_error() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(
+            path,
+            None,
+            Some(r#"{"candidates":[{"finishReason":"MALFORMED_RESPONSE","index":0}]}"#.to_string()),
+        );
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("MALFORMED_RESPONSE")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::StateMachineError)
+        );
+        assert!(
+            events[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("MALFORMED_RESPONSE")
+        );
+    }
+
+    #[test]
+    fn blocked_openai_sse_completion_keeps_terminal_reason() {
+        let mut http = make_http(
+            "/v1/chat/completions",
+            None,
+            Some(r#"[{"choices":[{"delta":{},"finish_reason":"content_filter"}]}]"#.to_string()),
+        );
+        http.is_sse = true;
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("content_filter")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated)
+        );
+    }
+
+    #[test]
+    fn partially_blocked_gemini_sse_keeps_content_and_safety_reason() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse";
+        let mut http = make_http(
+            path,
+            None,
+            Some(r#"[{"candidates":[{"content":{"parts":[{"text":"partial"}]},"index":0}]},{"candidates":[{"finishReason":"SAFETY","index":0}]}]"#.to_string()),
+        );
+        http.is_sse = true;
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert!(matches!(
+            &call.response.messages[0].parts[0],
+            MessagePart::Text { content } if content == "partial"
+        ));
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("SAFETY")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated)
+        );
+    }
+
+    #[test]
+    fn blocked_gemini_parsed_response_keeps_terminal_reason_without_raw_body() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let response = serde_json::json!({"candidates":[{"finishReason":"SAFETY","index":0}]});
+        let parsed = crate::analyzer::message::MessageParser::new()
+            .parse_by_path(path, None, Some(&response))
+            .expect("parsed Gemini response");
+        let http = make_http(path, None, None);
+        let call = build_call(
+            &GenAIBuilder::new(),
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .expect("call");
+
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("SAFETY")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
         );
     }
 

@@ -71,7 +71,7 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.88+. pkg/svc c
 - **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering (ratatui), tool approval control protocol.
 - **cosh-gateway-contracts**: Side-effect-free Gateway Task, Runtime, Capability, identity, and error contracts. It must not own storage, processes, transports, providers, or OS execution.
 - **cosh-gateway**: Gateway control-plane library: authenticated local Unix daemon/client, durable Task and governance storage, Runtime scheduling and supervision, restart reconciliation, private core transport, ACP v1 codec/bridge, and local once-only permission evidence.
-- **cosh-gateway-app**: Installed `cosh-gateway` binary and composition root. It owns CLI/serve wiring and concrete governed OS adapters so the Gateway library retains its contracts-only internal dependency boundary. See the [composition design note](docs/design/gateway-app-composition.md) for callers, API/test boundaries, alternatives, and revisit conditions.
+- **cosh-gateway-app**: Installed `cosh-gateway` binary and composition root. It owns CLI/serve wiring and concrete governed OS adapters so the Gateway library retains its contracts-only internal dependency boundary. See the [composition design note](docs/design/en/gateway-app-composition.md) for callers, API/test boundaries, alternatives, and revisit conditions.
 
 ### cosh-shell Code Organization
 

@@ -8,6 +8,7 @@
 
 VERSION ?= $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 NAME := agent-memory
+SMOKE_TIMEOUT ?= 30
 NPM_INSTALL ?= install
 PLUGIN_BUILD_ARGS ?=
 
@@ -388,25 +389,9 @@ clean: ## Clean build artifacts
 version: ## Show current version
 	@echo $(VERSION)
 
-# Quick smoke test: init the mount, then drive 5 MCP tools through stdin.
-# Validates: write → read → append → grep → list, plus path-sandbox enforcement.
+# Check the release server's MCP responses in an isolated userland namespace.
 smoke: build ## Run end-to-end smoke test against release binary
-	@echo "==> Smoke test..."
-	@TMPDIR=$$(mktemp -d) && \
-		MEMORY_BASE_DIR="$$TMPDIR" USER_ID=smoke target/release/$(NAME) init && \
-		MEMORY_BASE_DIR="$$TMPDIR" USER_ID=smoke target/release/$(NAME) info && \
-		MEMORY_BASE_DIR="$$TMPDIR" USER_ID=smoke \
-		printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-			'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1.0"}}}' \
-			'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-			'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-			'{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mem_write","arguments":{"path":"notes/smoke.md","content":"hello smoke world"}}}' \
-			'{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mem_read","arguments":{"path":"notes/smoke.md"}}}' \
-			'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mem_grep","arguments":{"pattern":"smoke"}}}' \
-			'{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"mem_list","arguments":{"recursive":true}}}' \
-		| target/release/$(NAME) | head -10 && \
-		rm -rf "$$TMPDIR" && \
-		echo "==> Smoke test PASSED"
+	python3 tests/smoke.py target/release/$(NAME) --timeout $(SMOKE_TIMEOUT)
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \

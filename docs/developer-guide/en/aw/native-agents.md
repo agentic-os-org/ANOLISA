@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/native-agents.md)
 
 This reference is for integration and maintenance. For installation and daily use,
-see the [user guide](../../../user-guide/en/user-entrypoint/aw/README.md).
+see the [user guide](../../../user-guide/en/aw/index.md).
 
 AW connects your tool policies and Hook commands to an Agent while preserving
 its normal interface. You describe the programs and events in `aw.yaml`; AW
@@ -17,14 +17,14 @@ and AgentScope SDK 2.0.6 through explicitly wired public factories in a foregrou
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
 
-Start with the [Preview package guide](../../../user-guide/en/user-entrypoint/aw/installation.md) for installation, or the
+Start with the [Preview package guide](../../../user-guide/en/aw/installation.md) for installation, or the
 [component integration walkthrough](integration.md)
 for source builds and a policy you can verify without a model. Then use the
 shared configuration below to verify native tool behavior. Field definitions
 live in the [configuration reference](configuration.md).
 
 
-For optional lifecycle observation, see [AgentSight through aw run](../../../user-guide/en/user-entrypoint/aw/observability.md).
+For optional lifecycle observation, see [AgentSight through aw run](../../../user-guide/en/aw/observability.md).
 
 ## Current support
 
@@ -45,7 +45,7 @@ For optional lifecycle observation, see [AgentSight through aw run](../../../use
 | Start AgentScope SDK through AW | ✅ [Explicit public factories](#start-agentscope-sdk) in one foreground Python worker |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, input rewriting or OS enforcement | ❌ Not admitted by the current structured Provider path |
-| Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](../../../user-guide/en/user-entrypoint/aw/installation.md); not a stable release |
+| Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](../../../user-guide/en/aw/installation.md); not a stable release |
 
 For Qoder, `tool.after` maps to successful `PostToolUse` callbacks. Qoder's
 `PostToolUseFailure` is a separate event and is not connected in this adapter.
@@ -55,7 +55,7 @@ support; interactive approval is not part of this delivery's acceptance.
 
 ## Install a Preview
 
-Use the [Preview packages](../../../user-guide/en/user-entrypoint/aw/installation.md) for a prebuilt AW + sec-core demo.
+Use the [Preview packages](../../../user-guide/en/aw/installation.md) for a prebuilt AW + sec-core demo.
 The source instructions below are for developers.
 
 ## Use one configuration for four frameworks
@@ -195,7 +195,7 @@ native-plugin uninstall command.
 Retain audit evidence before deleting the demo directory, following the
 [walkthrough's cleanup](integration.md#5-verify-native-adoption-and-clean-up).
 Framework profiles remain separate. Package removal is covered by the
-[Preview guide](packages.md#6-stop-upgrade-or-uninstall).
+[Preview guide](../../../user-guide/en/aw/packages.md#6-stop-upgrade-or-uninstall).
 
 ## Build and start Qoder
 
@@ -205,7 +205,7 @@ Qoder CLI separately and verify its version. From the repository root:
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 qodercli --version
 target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
@@ -289,7 +289,7 @@ For an existing application, use `AwBridge().create_agent(...)` in **every** pub
 factory, passing the existing middleware list unchanged. Existing trusted
 argument injection must precede the appended AW middleware. A readiness receipt
 covers the constructed Agent, not other factories or direct dispatch routes.
-The [factory contract](../../../../src/aw/docs/design/agentscope-adapter.md) details
+The [factory contract](../../../../src/aw/docs/design/en/adapters/agentscope-adapter.md) details
 ordering, budgets, invocation identity and coverage.
 
 Before waits and can block before a tool side effect. After awaits one final
@@ -314,7 +314,7 @@ steps. Observe-only chains keep native reverse unwind order.
 PreTool denies the original call and returns full retry arguments to the model;
 each new attempt passes native permissions and sec-core again. An attributed RTK
 retry avoids double compression even with a new call ID. Install RTK separately
-for PreTool; PostTool works without it. See [Tokenless behavior](../../../user-guide/en/user-entrypoint/aw/tokenless.md)
+for PreTool; PostTool works without it. See [Tokenless behavior](../../../user-guide/en/aw/tokenless.md)
 for text-slot eligibility, failure handling and telemetry configuration. Invalid
 final-response replacement directives report failure and retain the original result.
 
@@ -386,7 +386,7 @@ The native Hook output dialect and event coverage remain framework-specific.
 
 ## Upgrade the service
 
-This build uses local protocol `aw-service/v1alpha4`. A daemon from an older
+This build uses local protocol `aw-service/v1alpha7`. A daemon from an older
 build is rejected with `protocol_version` before Agent binding or callbacks.
 Before replacing the executable, exit its Agent sessions and use the **old**
 `aw stop --config FILE` (or `--socket ABSOLUTE_PATH`) to stop each old daemon.
@@ -427,12 +427,12 @@ event = json.load(sys.stdin)
 print(json.dumps(contains(event["tool"]["input"])))
 ```
 
-Using the Preview prefix and paths from the [installation guide](../../../user-guide/en/user-entrypoint/aw/installation.md),
+Using the Preview prefix and paths from the [installation guide](../../../user-guide/en/aw/installation.md),
 generate the full YAML instead of assembling Provider and step objects by hand.
 Supply only the Agent entrypoints you need; this example declares both:
 
 ```bash
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw-command.yaml" --state-dir "$AW_DEMO/command-state" \
   --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW" \
   --provider command --check /usr/bin/python3 --effect block \
@@ -493,7 +493,7 @@ matched effects and optional reason code on the step. Stop the old service and
 Agent sessions before switching configurations. Older AW binaries do not accept
 the new default form; retain the earlier configuration for rollback.
 
-`configure` creates a new private file and never overwrites an existing one.
+`aw config init` creates a new private file and never overwrites an existing one.
 To remove a policy, generate a new base document without `--provider` (or with
 `--provider none`), then exit the old Agents, stop their service and explicitly
 switch to the new configuration. Provider definitions and associated steps are
@@ -524,7 +524,7 @@ interpreter to enter the same native CLI process, preserving its arguments and
 working directory. Native profile loading determines the effective
 `HERMES_SAFE_MODE`, including profile `.env` overrides; safe mode is rejected,
 and plugin registration is required before chat can dispatch tools.
-Initialize its profile and model account through Hermes first. `aw install` is an
+Initialize its profile and model account through Hermes first. `aw agent connect` is an
 explicit one-time installation of the native AW plugin in the selected profile.
 It saves the original configuration before enabling that plugin, retains unknown
 configuration fields, and refuses a conflicting non-AW plugin. The native YAML
@@ -563,7 +563,7 @@ query values such as `--query=--help` remain supported.
 An AW upgrade can change the bundled plugin bytes. If launch or installation
 reports a mismatched or incomplete plugin, stop Hermes sessions and plugin writers, review
 `<profile>/plugins/aw-native-hooks`, and move that directory to a backup outside
-`<profile>/plugins`. Rerun the same `aw install` command to install matching files;
+`<profile>/plugins`. Rerun the same `aw agent connect` command to install matching files;
 the saved directory remains available for inspection or rollback.
 
 An empty `providers` and `events` configuration launches with zero AW callbacks.
@@ -589,7 +589,7 @@ profile/worktree/resume switches and option abbreviations are unsupported. Event
 budgets are limited to 55,000 ms and must fit the native callback timeout.
 
 ```bash
-target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+target/debug/aw agent connect --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
 target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -684,7 +684,7 @@ directory under `XDG_RUNTIME_DIR`, or under `/tmp/aw-UID` when that variable is
 unset. Explicit paths must be absolute and agree on the `aw.sock` location.
 
 The service retains its bootstrap configuration snapshot. Editing `aw.yaml` does not
-reload it. Opt-in instances can use [explicit idle policy updates](../../../user-guide/en/user-entrypoint/aw/configuration.md#update-a-prewarmed-instance);
+reload it. Opt-in instances can use [explicit idle policy updates](../../../user-guide/en/aw/configuration.md#update-a-prewarmed-instance);
 these change the instance Host without changing service identity. Stop a service using its original file or socket before retiring that
 configuration; auto paths for changed configuration may select a different
 service. Exiting an Agent does not stop other sessions or the shared daemon.
@@ -694,7 +694,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 | --- | --- |
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and AgentScope SDK reject this command |
+| `aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and AgentScope SDK reject this command |
 | `aw update --config CURRENT --agent TARGET --policy NEXT` | Update an opted-in idle instance; busy rejects without queuing |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
@@ -704,17 +704,20 @@ The local endpoint is a same-user boundary, not a sandbox.
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
 the implementation. This build implements Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
 QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
-Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw install`
+Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw agent connect`
 validates the configuration and dispatches to that adapter. Hermes supports
 persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and
 AgentScope SDK reject it.
 This command does not install AW packages or Agent software, start an Agent,
-or configure model credentials. `aw run` does not implicitly call `install`.
+or configure model credentials. `aw run` does not implicitly call `agent connect`.
+The legacy `aw install --config FILE --agent TARGET [--native-profile PROFILE]`
+syntax keeps the same native-registration behavior. Software installation uses
+`aw install --prefix ABS_DIR --bundle ABS_DIR`; the two option sets cannot be mixed.
 
 | Adapter-specific option | Command | Current support |
 | --- | --- | --- |
 | `--native-settings JSON_FILE` | `run` | Qoder: optional extra JSON settings merged with generated Hooks; the original file remains unchanged. OpenClaw: required existing native JSON configuration |
-| `--native-profile PROFILE` | `run`, `install` | Hermes: required existing absolute profile for `run` and `install`. Qoder and OpenClaw reject it |
+| `--native-profile PROFILE` | `run`, `agent connect` | Hermes: required existing absolute profile for `run` and `agent connect`. Qoder and OpenClaw reject it |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw: required absolute native state directory. Qoder rejects it; this is not the AW service's `--state-dir` |
 
 The shared command parser recognizes these adapter-specific options, but that
@@ -722,7 +725,7 @@ alone does not enable them for a framework. Pi, Claude SDK and AgentScope SDK
 reject all these native override options. QwenPaw also rejects them and uses
 `QWENPAW_WORKING_DIR`. Pass
 supported AW options before `--`; arguments
-after it are forwarded literally to the Agent. `install` accepts no Agent
+after it are forwarded literally to the Agent. `agent connect` accepts no Agent
 arguments. Use `aw --help` to see the command syntax and current support.
 
 In a source checkout, use `target/debug/aw` for `aw`. `aw hook` is an internal
@@ -749,7 +752,7 @@ hide files installed there during the image build; see Docker's
 | `<state_dir>/journal/` | Persist when execution history must survive container replacement; audit is enabled and metadata-only in this version |
 | Socket, locks, `launch-*` and session bindings | Runtime artifacts, not recoverable sessions; each service/Agent launch creates fresh runtime state |
 | Native profiles, credentials, conversations and workspaces | Persist according to the selected framework's requirements; these are not AW audit data |
-| sec-core backend data | Managed by sec-core independently of AW; see the [Preview backend setup](packages.md#2-optionally-install-and-start-sec-core) |
+| sec-core backend data | Managed by sec-core independently of AW; see the [Preview backend setup](../../../user-guide/en/aw/packages.md#2-optionally-install-and-start-sec-core) |
 
 AW always needs writable local state even when no history is retained across
 container replacement. For durable history, set an absolute `daemon.state_dir`
@@ -839,12 +842,12 @@ creates a new service identity; historical records remain queryable without
 resuming or replaying old events.
 
 The [configuration reference](configuration.md)
-covers every field and event name. The [local service contract](../../../../src/aw/docs/design/local-service.md)
+covers every field and event name. The [local service contract](../../../../src/aw/docs/design/en/runtime/local-service.md)
 describes operation JSON, deadlines and lifecycle for Adapter developers.
 
-Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guide](../../../user-guide/en/user-entrypoint/aw/security.md).
+Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guide](../../../user-guide/en/aw/security.md).
 
-Model-visible PostTool compression uses the optional [Tokenless Provider](../../../user-guide/en/user-entrypoint/aw/tokenless.md).
+Model-visible PostTool compression uses the optional [Tokenless Provider](../../../user-guide/en/aw/tokenless.md).
 
 ## Start a Pi SDK worker
 
@@ -900,7 +903,7 @@ preserving SDK metadata; report failures retain the original result. Raw native
 Hooks cannot supply replacements. AW uses a fresh invocation UUID for pairing,
 retains the original tool ID in `native`, and closes events on early denial.
 
-See the [adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/pi-adapter.md)
+See the [adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/pi-adapter.md)
 for exact callback semantics, identity, cancellation, capacity and reproducible
 SDK acceptance. Exit Agents and stop the original service before changing policy;
 retain/remove the audit state using the same local-service cleanup procedure.
@@ -965,7 +968,7 @@ need their own task lifecycle integration.
 CLI 2.1.161 emits `PostToolUse` for SDK MCP `isError: true` responses and omits that
 flag from callback data. After observation therefore does not classify every
 business failure. Native Bash execution failure does use `PostToolUseFailure`.
-See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/claude-sdk-adapter.md)
+See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-sdk-adapter.md)
 for identity, cancellation and validation limits.
 
 For model-free native adoption checks, build AW and use the real SDK/bundled CLI
@@ -987,10 +990,10 @@ CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
 `strict_mcp_config` option is also preserved. Model/authentication options are
 unchanged. Applications which discover project skills through settings sources
 need an explicit integration design before using this restricted first bridge.
-Only one client can be created in each foreground worker.
+The direct task-worker mode permits one client per worker. Use the resident entrypoint below for multiple task clients.
 
 The `claude-sdk` adapter supports this restricted foreground worker factory;
-`aw install` does not provide persistent installation for it, and all `--native-*`
+`aw agent connect` does not provide persistent installation for it, and all `--native-*`
 overrides are unsupported.
 
 ### Enable Bash PreTool and PostTool optimization
@@ -999,7 +1002,7 @@ Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLI
 select its `claude` target, and replace the absolute executable, worker and state
 paths. The source `claude-worker.py` example explicitly exposes and allows native
 Bash in addition to its echo tool. Keep your application's own permission policy
-when composing its factory. See the [Tokenless guide](../../../user-guide/en/user-entrypoint/aw/tokenless.md) for Provider
+when composing its factory. See the [Tokenless guide](../../../user-guide/en/aw/tokenless.md) for Provider
 installation, RTK requirements and statistics settings.
 
 PreTool blocks the original Bash attempt and returns retry arguments to the model;
@@ -1007,7 +1010,7 @@ the new call passes all policies and native permissions again. PostTool replaces
 only completed, non-image, non-interrupted Bash stdout. Put completion observers
 and custom steps before the single final `replace_result` step. They see the
 original result; stderr and other native fields are retained. Failure/report keeps
-the original result. MCP tools remain observable but are not compressed because
+the original result. MCP tools on this native callback path remain observable but are not compressed because
 the native callback does not expose reliable business-error status.
 
 After building AW, its Tokenless Provider and the current Tokenless Protocol v2
@@ -1020,3 +1023,206 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless ../tokenless/target/debug/tokenless \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
+
+## Start a Qoder SDK worker
+
+Use `adapter: qoder-sdk` with `@qoder-ai/qoder-agent-sdk@1.0.54`, its bundled
+Worker 1.1.74 (global), and Node.js 22 or newer. Install the SDK in the worker's
+application directory. Configure the target in your existing AW configuration:
+
+```yaml
+agents:
+  sdk:
+    adapter: qoder-sdk
+    argv: [node, /absolute/application/worker.mjs]
+```
+
+The worker selects AW's daemon and Query factories when launched through AW. The same
+worker can run directly with Node and the native SDK factory:
+
+```javascript
+import { startDaemon, query, accessTokenFromEnv } from "@qoder-ai/qoder-agent-sdk";
+import { pathToFileURL } from "node:url";
+
+const prompt = process.argv[2];
+if (!prompt) throw new Error("A prompt is required");
+const bridge = process.env.AW_QODER_SDK_BRIDGE
+  ? await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE)) : undefined;
+const makeQuery = bridge ? bridge.createQuery : async (request) => query(request);
+const makeDaemon = bridge ? bridge.startDaemon : startDaemon;
+const daemon = await makeDaemon({ auth: accessTokenFromEnv() });
+let current;
+try {
+  current = await makeQuery({ prompt, options: {
+    daemon, cwd: process.cwd(), settingSources: [],
+  } });
+  for await (const message of current) console.log(JSON.stringify(message));
+} finally {
+  await current?.return();
+  await daemon.stop();
+}
+```
+
+Run `aw run --config aw.yaml --agent sdk -- "your prompt"`, or run
+`node /absolute/application/worker.mjs "your prompt"` for native startup without AW.
+Use your normal SDK authentication; keep credentials out of configuration files.
+The caller starts and stops the daemon and closes each Query. Under AW, use
+both bridge factories: `startDaemon()` validates runtime selectors and the
+Hook-disable environment before starting the pinned daemon; `createQuery()`
+rejects daemons created directly through the SDK because their launch context
+cannot be verified. Daemon startup alone does not publish Query readiness.
+AW keeps the foreground-worker lifecycle and releases its binding on worker exit.
+
+AW registers per-Query callbacks before initialization, then reports readiness
+after the SDK handshake. `tool.before` supports observation and denial;
+`tool.after` observes successful and failed native tool calls. Native permission
+denials retain precedence. Result replacement is rejected during admission.
+Existing SDK hooks are retained; argument rewrites and permission-hook overrides
+are rejected so a tool cannot execute different arguments from those checked.
+
+Use `settingSources: []` and no `settings`, plugins, extra CLI flags or runtime
+transport overrides. Hook-disable flags are parsed with the bundled Worker's
+whitespace normalization and rejected in both process and launch environments.
+All managed Queries must use the bound working directory.
+Each Query gets its own callbacks; an ordinary SDK Query on the same daemon is
+unmodified and is **not protected by AW**. Managed Queries within one AW instance
+share its configured policy, not independently selectable per-session policies.
+Changing Hook routing through `applyFlagSettings` after registration is outside
+the supported contract; AW does not guarantee policy enforcement or complete
+auditing after such changes.
+To update existing Queries without restarting the daemon, opt in with
+`aw run --config aw.yaml --agent sdk --reloadable`. Keep using the same
+`createQuery` factory and caller-owned `startDaemon()`; an asynchronous input
+iterator keeps a Query available between requests. Use `aw update --config
+aw.yaml --agent sdk --policy desired.yaml` to explicitly activate a complete
+candidate policy. No SDK-specific command or service RPC is introduced.
+
+All managed Queries in the instance must be idle. Submitted/queued messages,
+model waits, native callbacks and Query close cleanup keep the instance busy.
+A result message alone is not an idle acknowledgement: inspect `aw service
+status --config aw.yaml` and retry an explicit update after the request count
+returns to zero. Failed updates preserve the active policy. Stable callbacks
+are registered even for an empty initial policy; additions and removals affect
+the next request on existing Queries. Native permissions remain authoritative.
+
+Reloadable Queries require an explicit daemon and `msg_lifecycle_v1` support.
+The bridge retains request admission until the native command queue has drained,
+and awaits native `close()` plus in-flight callbacks on early return or error.
+Ordinary Bash commands can automatically move to the background on timeout.
+Their request remains busy until the child exits and the native completion
+notification turn finishes cleanup. Closing the Query first stops those tasks
+through the native `stopTask()` API before releasing admission.
+Use prompt input or `streamInput` to submit work. Goal options, `setGoal`,
+`resumeGoal`, host-action scheduling, `backgroundTasks`, `CreateGoal`,
+`ScheduleWakeup`, `CronCreate` and
+`run_in_background` tools are rejected because they can schedule work outside
+that admission boundary. Timer-created turns bypass the input iterator, so
+creating a scheduled wakeup or cron job is unsupported; `CronList` and `CronDelete`
+remain available. Worker 1.1.74's `UpdateGoal` only completes or blocks an
+existing goal; it does not activate one and remains available. Query creation also
+rejects custom `agents`
+definitions with `background: true` or `isolation: "worktree"`. The `Agent` tool's
+`isolation: "worktree"` input is denied before execution because worktree
+execution is outside the supported binding boundary. Foreground definitions and default-isolation
+Agent calls remain allowed. Ordinary `aw run` keeps the original SDK path.
+External PID attach/detach, independently selected per-session AW policies and
+steer are not provided by this integration.
+
+In ordinary mode, Worker 1.1.74 sends worktree child callbacks with the parent
+Query's `cwd` and a child `agent_id`, although tools execute in the worktree.
+AW observes those callbacks; it does not reconstruct the actual execution
+working directory. Worktree execution is not supported for policies that depend
+on that directory, and ordinary mode does not reject it at Query creation.
+Reloadable mode rejects it before execution as described above.
+
+The reloadable bridge keeps reading native output to observe cleanup even when
+application reads pause. Its output buffer is not bounded: continuously consume
+Query output while submitting work, including across result messages. If the
+application stops consuming, stop submitting and await `close()` or `return()`;
+these discard buffered output and await native cleanup. This mode does not
+provide backpressure for an indefinitely paused consumer.
+
+The Qoder SDK path described above retains 1024
+Hook correlation entries per instance, and 64 active claims per request/tool
+claim set. Completed request claims are released; Hook correlation entries are
+retained until instance release. These are not a count of supported lifetime
+turns. Bound instance lifetime and concurrent submissions; policy updates do not
+reset correlation history.
+
+## Resident Pi and Claude SDK hosts
+
+Install matching AW, Providers and pinned SDK packages in the image. Use the
+[shared configuration example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.resident-sdk.yaml),
+replace its paths and select the target:
+
+```bash
+aw run --config /etc/aw/aw.yaml --agent claude
+aw run --config /etc/aw/aw.yaml --agent pi
+```
+
+For Claude, set the target argv to the application's Python interpreter followed
+by `-m aw_claude -- -m application`. A foreground Gunicorn host can use
+`-m aw_claude -- -m gunicorn -c conf/gunicorn.py main:app`; create task clients
+inside workers after fork. In the common client factory:
+
+```python
+from aw_claude import create_client
+
+client = create_client(options)
+try:
+    await client.connect()
+    await client.query(prompt)
+    async for message in client.receive_response():
+        yield message
+finally:
+    await client.disconnect()
+```
+
+Sequential queries reuse a client after its response and callbacks drain; each
+client retains its conversation. Resume/session-store options remain available.
+Concurrent work uses independent clients with separate cwd/env.
+Each query accepts a string or a finite one-message AsyncIterable; multi-message
+input is rejected before dispatch. Submit successive turns with sequential queries.
+Both `receive_response()` and `receive_messages()` drain callbacks before
+delivering `ResultMessage`. EOF without that message raises an error; keep
+`disconnect()` in `finally` so unfinished queries still receive an interrupt.
+
+For in-process MCP tools, also import `create_sdk_mcp_server` from `aw_claude` and
+create a fresh server for each client. Keep SDK `tool` definitions and business closures.
+The [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md) covers single successful text replacement, reliable errors and explicit correlation.
+
+Resident Pi and Claude hosts reject enabled AgentSight evidence before publishing
+readiness. Set evidence `mode: off` for resident hosts; legacy task mode continues
+to support evidence.
+
+For Pi, export the existing SDK session factory and a resident host entrypoint:
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd /* application model/tools/options */ });
+}
+export async function runWorker({ withSession }) {
+  await serveRequests(async (request) => {
+    return withSession({ cwd: request.workspace, environment: request.environment },
+      async (session) => session.prompt(request.prompt));
+  });
+}
+```
+
+`serveRequests` is the application's server. Install business callbacks before
+returning from the factory. Close sessions at task completion; concurrent prompts
+on one session are rejected. Avoid creating unmanaged SDK clients elsewhere.
+
+The example composes custom Hooks, sec-core Bash scanning and Tokenless PreTool/
+PostTool. Start the sec-core daemon separately and supply a real custom Hook.
+Opaque MCP tools need explicit security semantics. Resident mode stops tasks on
+callback errors even for `on_error: report`; policy denial remains a normal native
+denial. A failed Claude interrupt terminates AW's owned foreground process group,
+so configure supervisor restart. Drain requests before sending termination and
+set the target's `shutdown_grace_ms` to allow time for the application's remaining
+cleanup. The outer launcher defaults to a two-second grace from its first signal
+forwarding until forced cleanup starts. See
+[shutdown grace](../../../user-guide/en/aw/configuration.md#set-the-agent-shutdown-grace-period)
+for scope and limits. Schema/BeforeModel and
+Retrieve require the request/effect admission and authorization work listed in the
+[resident contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/resident-sdk.md).

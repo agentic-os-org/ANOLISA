@@ -32,6 +32,7 @@ struct OwnedPlugin {
     path: PathBuf,
     identity: (u64, u64),
     created_parent: bool,
+    cleanup_on_drop: bool,
 }
 
 impl OwnedPlugin {
@@ -56,6 +57,7 @@ impl OwnedPlugin {
             path,
             identity: (metadata.dev(), metadata.ino()),
             created_parent,
+            cleanup_on_drop: true,
         };
         for (name, bytes) in [
             (
@@ -102,7 +104,9 @@ impl OwnedPlugin {
 
 impl Drop for OwnedPlugin {
     fn drop(&mut self) {
-        let _ = self.cleanup();
+        if self.cleanup_on_drop {
+            let _ = self.cleanup();
+        }
     }
 }
 
@@ -199,6 +203,70 @@ impl PreparedLaunch for Prepared {
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
+        self.configure_in(context, &self.working.clone())
+    }
+
+    fn attachment(
+        &mut self,
+        context: &LaunchContext<'_>,
+    ) -> Result<crate::attachment::Registration> {
+        let plan = self.configure_in(context, context.files.directory())?;
+        let descriptor: Value = serde_json::from_slice(&read_file(
+            context.files.directory().join("qwenpaw-hooks.json"),
+            1024 * 1024,
+        )?)?;
+        let source = context.files.directory().join("plugins/aw-native");
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(source.join("aw-attachment.json"))?;
+        output.write_all(&serde_json::to_vec(&descriptor)?)?;
+        output.sync_all()?;
+        let args = &plan.command.args;
+        let mut port = 8088;
+        for (index, arg) in args.iter().enumerate() {
+            if arg == "--port" {
+                port = args
+                    .get(index + 1)
+                    .and_then(|arg| arg.to_str())
+                    .ok_or("missing App port")?
+                    .parse::<u16>()
+                    .map_err(|_| "invalid App port")?;
+            }
+            if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--port=")) {
+                port = value.parse::<u16>().map_err(|_| "invalid App port")?;
+            }
+        }
+        // The attachment directory now owns staging, including failed-cleanup
+        // retries. Ordinary aw run retains Prepared's drop cleanup.
+        self.plugin
+            .as_mut()
+            .ok_or("missing staged plugin")?
+            .cleanup_on_drop = false;
+        Ok(crate::attachment::Registration::Qwenpaw {
+            profile: self.working.clone(),
+            port,
+            source,
+            descriptor,
+        })
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if let Some(plugin) = self.plugin.as_ref() {
+            plugin.cleanup()?;
+        }
+        self.plugin = None;
+        Ok(())
+    }
+}
+
+impl Prepared {
+    fn configure_in(
+        &mut self,
+        context: &LaunchContext<'_>,
+        plugin_root: &std::path::Path,
+    ) -> Result<LaunchPlan> {
         let (events, hooks) = if self.input.options.reloadable {
             (crate::reload::routes(), Vec::new())
         } else {
@@ -220,7 +288,7 @@ impl PreparedLaunch for Prepared {
                 "reloadable":self.input.options.reloadable,
             }))?,
         )?;
-        self.plugin = Some(OwnedPlugin::create(&self.working)?);
+        self.plugin = Some(OwnedPlugin::create(plugin_root)?);
         let mut command = self.input.command.clone();
         command.environment.insert(
             "QWENPAW_WORKING_DIR".into(),
@@ -242,14 +310,6 @@ impl PreparedLaunch for Prepared {
                 timeout: Duration::from_secs(30),
             }),
         })
-    }
-
-    fn finish(&mut self) -> Result<()> {
-        if let Some(plugin) = self.plugin.as_ref() {
-            plugin.cleanup()?;
-        }
-        self.plugin = None;
-        Ok(())
     }
 }
 

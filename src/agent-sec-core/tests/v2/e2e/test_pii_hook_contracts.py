@@ -1,7 +1,7 @@
 """Direct Hook contracts with real Rust PII subprocesses, without Agent hosts.
 
 Only observability record storage is isolated. Installed-layout acceptance must
-load RPM plugin assets and fails if any asset is absent; there is no source fallback.
+load installed plugin assets and fails if any asset is absent.
 """
 
 import json
@@ -52,9 +52,15 @@ def _asset(host):
             "hermes": "hermes-plugin",
             "openclaw": "openclaw-plugin/dist",
         }[host]
-        path = (Path("/opt/agent-sec") if layout == "installed" else ROOT) / relative
+        root = Path(os.environ.get("PII_HOOK_ASSET_ROOT", "/opt/agent-sec"))
+        path = (root if layout == "installed" else ROOT) / relative
         if layout == "installed" and host == "cosh":
-            path = Path("/usr/share/anolisa/extensions/agent-sec-core/hooks")
+            path = Path(
+                os.environ.get(
+                    "PII_COSH_HOOK_DIR",
+                    "/usr/share/anolisa/extensions/agent-sec-core/hooks",
+                )
+            )
     assert path.is_dir(), f"required {host} plugin assets missing: {path}"
     return path
 
