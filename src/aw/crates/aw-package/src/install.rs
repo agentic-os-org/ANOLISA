@@ -55,6 +55,9 @@ pub(crate) fn selected_receipts(
                     && !components.contains_key(&value.component),
                 "invalid package receipt",
             )?;
+            for name in value.files.keys() {
+                paths::relative(name)?;
+            }
             components.insert(value.component.clone(), value);
         }
     }
