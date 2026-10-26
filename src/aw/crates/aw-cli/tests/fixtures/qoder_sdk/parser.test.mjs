@@ -62,6 +62,31 @@ test("unknown native callbacks deny before the application handler", { timeout: 
   assert.equal(f.scope.invocations.size, 0);
 });
 
+test("late model frames preserve the first native identity rejection", { timeout: 5000 }, async t => {
+  let calls = 0;
+  const f = await fixture(t, async () => { calls++; return {}; });
+  const pending = f.query.next();
+  const rejected = assert.rejects(pending, /unknown native tool identity/);
+  f.hook("unknown-child", "forged-child");
+  assert.equal((await f.response("forged-child")).response.hookSpecificOutput.permissionDecision, "deny");
+  f.model("late-frame");
+  await rejected;
+  assert.equal(calls, 0);
+  assert.equal(f.scope.closed, true);
+});
+
+test("model registration failure retains its cause and fences the Query", { timeout: 5000 }, async t => {
+  const f = await fixture(t);
+  const failure = new Error("registration fixture rejected");
+  f.scope.register = async () => { throw failure; };
+  f.model("registration-failed");
+  for (let attempt = 0; !f.resident.failure && attempt < 100; attempt++) await pause();
+  assert.equal(f.resident.failure, failure);
+  await assert.rejects(f.query.next(), error => error === failure);
+  assert.equal(f.scope.closed, true);
+  assert.equal(f.scope.invocations.size, 0);
+});
+
 test("long native sequences retire active resources and reject late callbacks", { timeout: 15000 }, async t => {
   const f = await fixture(t);
   for (let sequence = 0; sequence < 1280; sequence++) {

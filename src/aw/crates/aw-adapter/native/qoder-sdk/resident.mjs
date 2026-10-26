@@ -35,7 +35,7 @@ export class Resident {
     this.config = config;
     this.id = randomUUID();
     this.scope = new Scope(config, "qoder-sdk");
-    this.identities = new Identities(this.scope);
+    this.identities = new Identities(this.scope, error => this.fail(error));
     this.callbacks = new Set();
     this.work = new Set();
     this.closing = false;
@@ -175,7 +175,11 @@ export class Resident {
       throw new Error("Pinned Qoder Query lacks native control response transport");
     const record = query.recordInboundSessionMessage.bind(query);
     query.recordInboundSessionMessage = message => {
-      this.identities.produce(message);
+      try { this.identities.produce(message); }
+      catch (error) {
+        this.fail(error);
+        throw this.failure;
+      }
       if (message.type === "system" && message.subtype === "background_tasks_changed")
         this.background = new Set(message.tasks.map(task => task.task_id));
       if (message.type === "user") {
@@ -200,18 +204,18 @@ export class Resident {
       let ticket;
       try { ticket = this.identities.ticket(frame); }
       catch (error) {
-        const request = frame.request;
-        const kind = request.subtype ?? request.type;
+        this.fail(error);
+        const request = frame?.request;
+        const kind = request?.subtype ?? request?.type;
         if (this.strictPost && kind === "hook_callback" &&
             ["PostToolUse", "PostToolUseFailure"].includes(request.input?.hook_event_name))
           return this.track(() => this.withhold(error)).catch(() => {});
         const response = kind === "hook_callback" ?
           (request.input?.hook_event_name === "PreToolUse" ? deny("AW native identity rejected") : stopped()) :
           kind === "can_use_tool" ? { behavior: "deny", message: "AW native identity rejected" } : undefined;
-        const result = response ? { subtype: "success", request_id: frame.request_id, response } :
-          { subtype: "error", request_id: frame.request_id, error: "AW native identity rejected" };
+        const result = response ? { subtype: "success", request_id: frame?.request_id, response } :
+          { subtype: "error", request_id: frame?.request_id, error: "AW native identity rejected" };
         query.transport.write(JSON.stringify({ type: "control_response", response: result }) + "\n");
-        this.fail(error);
         return Promise.resolve();
       }
       return this.identities.dispatch.run(ticket, () => this.track(() => dispatch(frame), ticket.entry))
@@ -239,9 +243,12 @@ export class Resident {
         if (item.done) await this.close();
         return item;
       } catch (error) {
+        // A late frame can hit the closed scope after the original identity or
+        // callback failure. Keep that first rejection actionable to the caller.
+        const primary = this.failure ?? error;
         try { await this.close(); }
-        catch (cleanup) { throw new AggregateError([error, cleanup], "AW native read and cleanup failed"); }
-        throw error;
+        catch (cleanup) { throw new AggregateError([primary, cleanup], "AW native read and cleanup failed"); }
+        throw primary;
       }
     };
     const streamInput = query.streamInput.bind(query);
@@ -371,9 +378,10 @@ export class Resident {
       this.releaseInput();
       return this.facade();
     } catch (error) {
-      this.failure = error;
-      await this.close();
-      throw error;
+      const primary = this.failure ??= error;
+      try { await this.close(); }
+      catch (cleanup) { throw new AggregateError([primary, cleanup], "AW native initialization and cleanup failed"); }
+      throw primary;
     }
   }
 

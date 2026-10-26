@@ -151,7 +151,7 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 41"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 47"));
 }
 
 #[test]

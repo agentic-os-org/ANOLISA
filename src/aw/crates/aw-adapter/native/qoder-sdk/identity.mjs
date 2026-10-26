@@ -4,8 +4,9 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 export class Identities {
-  constructor(scope) {
+  constructor(scope, onFailure) {
     this.scope = scope;
+    this.onFailure = onFailure;
     this.active = new Map();
     this.dispatch = new AsyncLocalStorage();
     this.pending = new Set();
@@ -30,7 +31,7 @@ export class Identities {
         callbacks: new Set(), phase: "issued", pending: new Set() };
       this.active.set(block.id, entry);
       entry.admitted = this.scope.register(entry.id, entry.name, entry.input);
-      entry.admitted.catch(() => { this.scope.failed = true; });
+      entry.admitted.catch(error => this.onFailure(error));
     }
   }
 

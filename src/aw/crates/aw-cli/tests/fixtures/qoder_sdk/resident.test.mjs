@@ -140,6 +140,104 @@ test("read-loop failure during initialization prevents readiness and execution",
   assert.deepEqual(f.state.events, ["native-closed", "scope-closed"]);
 });
 
+for (const earlierFailure of [false, true]) {
+  for (const cleanupFails of [false, true]) {
+    test(`initialization retains ${earlierFailure ? "earlier read-loop" : "initialization"} failure with ${cleanupFails ? "failed" : "successful"} cleanup`,
+      { timeout: 5000 }, async t => {
+        const f = fixture(t, true);
+        const readLoop = deferred();
+        if (earlierFailure) f.state.query.readLoopPromise = readLoop.promise;
+        f.state.importGate.resolve();
+        const pending = f.create();
+        await f.state.initializationEntered.promise;
+        const first = new Error("first read-loop failure");
+        const initialization = new Error("initialization waiter rejected");
+        const cleanup = new Error("native close rejected");
+        const primary = earlierFailure ? first : initialization;
+        if (earlierFailure) {
+          readLoop.reject(first);
+          await f.state.closeEntered.promise;
+        }
+        f.state.initializationGate.reject(initialization);
+        await f.state.closeEntered.promise;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(f.resident.failure, primary);
+        assert.equal(f.state.settled, false, "creation must join native cleanup before rejecting");
+        assert.equal(f.state.ready, 0);
+        assert.equal(f.state.scopeCloses, 0);
+        if (cleanupFails) f.state.closeGate.reject(cleanup);
+        else f.state.closeGate.resolve();
+        const result = await pending;
+        await f.state.dispatch;
+        assert.equal(f.resident.failure, primary);
+        assert.equal(result.value, undefined);
+        assert.equal(f.state.executions, 0);
+        assert.equal(f.state.nativeCloses, 1);
+        assert.equal(f.scope.failed, true);
+        if (cleanupFails) {
+          assert(result.error instanceof AggregateError);
+          assert.equal(result.error.errors[0], primary);
+          const cleanupFailure = await f.resident.close().catch(error => error);
+          assert.equal(result.error.errors[1], cleanupFailure);
+          assert.equal(cleanupFailure.errors[0].errors[0], cleanup);
+          assert.equal(f.state.scopeCloses, 0);
+          assert(f.scope.handle, "unconfirmed native cleanup must retain ownership");
+        } else {
+          assert.equal(result.error, primary);
+          assert.equal(f.state.scopeCloses, 1);
+          assert.equal(f.scope.handle, null);
+        }
+      });
+  }
+}
+
+test("malformed native control frames retain their original rejection and fence the Query", { timeout: 5000 }, async t => {
+  for (const frame of [undefined, null, { request_id: "missing-request" },
+    { request_id: "null-request", request: null }]) {
+    const f = fixture(t);
+    const responses = [];
+    f.state.query.transport.write = line => responses.push(JSON.parse(line));
+    f.state.importGate.resolve();
+    const result = await f.create();
+    assert.ifError(result.error);
+    let primary;
+    const ticket = f.resident.identities.ticket.bind(f.resident.identities);
+    f.resident.identities.ticket = value => {
+      try { return ticket(value); }
+      catch (error) { primary = error; throw error; }
+    };
+    await f.state.query.handleControlRequest(frame);
+    assert(primary instanceof Error);
+    assert.equal(f.resident.failure, primary);
+    assert.equal(f.scope.failed, true);
+    assert.deepEqual(responses, [{ type: "control_response", response: {
+      subtype: "error", ...(frame?.request_id ? { request_id: frame.request_id } : {}),
+      error: "AW native identity rejected" } }]);
+    f.state.closeGate.resolve();
+    await assert.rejects(result.value.next(), error => error === primary);
+    assert.equal(f.state.nativeCloses, 1);
+    assert.equal(f.state.scopeCloses, 1);
+  }
+});
+
+test("failed native rejection writes preserve the identity failure and fence the Query", { timeout: 5000 }, async t => {
+  const f = fixture(t);
+  const writeFailure = new Error("native rejection write failed");
+  f.state.query.transport.write = () => { throw writeFailure; };
+  f.state.importGate.resolve();
+  const result = await f.create();
+  assert.ifError(result.error);
+  assert.throws(() => f.state.query.handleControlRequest({ request_id: "unknown", request: {
+    subtype: "can_use_tool", tool_use_id: "unregistered" } }), error => error === writeFailure);
+  const primary = f.resident.failure;
+  assert.match(primary?.message ?? "", /unknown native tool identity/);
+  assert.equal(f.scope.failed, true);
+  f.state.closeGate.resolve();
+  await assert.rejects(result.value.next(), error => error === primary);
+  assert.equal(f.state.nativeCloses, 1);
+  assert.equal(f.state.scopeCloses, 1);
+});
+
 test("daemon stop waits for an initialized Query to release its scope", { timeout: 5000 }, async t => {
   const f = fixture(t);
   const owner = await daemon(f);
