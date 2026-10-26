@@ -294,7 +294,9 @@ AW 只添加自身临时插件，保留已有插件和原生配置，App 退出�
 后台 HTTP 输出和下一轮提示在全部必要原生回调成功后才发布；拒绝结果保留策略说明及
 Tokenless 重试参数。脱敏函数必须幂等，以支持多个交付及 Hook 边界重复检查。
 After Hook 接收脱敏后的终结 `ToolResponse`，包括 AW 拒绝结果。应用凭据扩展提供
-任务私有环境与清理；授权所依据的工具参数保持原样。`on_error: report` 保持配置的
+每次 Agent reply 一个私有执行租约，由该 reply 的工具共享，并负责清理；见
+[私有执行租约](../../../../src/aw/docs/design/zh/adapters/private-execution.md)。
+授权所依据的工具参数保持原样。`on_error: report` 保持配置的
 回调故障报告策略，工具前 `block` 拒绝执行。结构化 Provider 和布尔 Hook 的工具后
 `withhold_result` 阻止未核验结果交付及后续派发，仅普通 resident 启动准入该动作。
 严格 After 路径暂扣匹配工具的流式 chunk；任务私有执行也会暂扣中间 chunk，直到终态脱敏。
@@ -885,6 +887,32 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
 
+## 为常驻 SDK 复用一份安全策略
+
+[统一 SDK 安全示例](../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+通过 `--agent` 选择 Qoder SDK 或 QwenPaw。替换全部绝对路径，按对应章节初始化
+原生运行时，并在启动前按配置的 socket 启动 sec-core：
+
+```bash
+aw validate --config /absolute/path/aw.sdk-security.yaml
+aw run --config /absolute/path/aw.sdk-security.yaml --agent qoder-sdk -- "your prompt"
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home aw run \
+  --config /absolute/path/aw.sdk-security.yaml --agent qwenpaw
+```
+
+sec-core 步骤只匹配 `native:qoder-sdk:Bash` 和
+`native:qwenpaw:execute_shell_command`。AW 在能力准入和 Provider 准备前投影所选
+目标的步骤。其他工具仍执行自定义前后检查，不会隐式增加 sec-core 扫描。扩展扫描
+范围时，显式增加 selector 及对应的 Provider 工具映射。
+
+自定义脚本使用布尔 Hook 合同：从 stdin 读取一个规范化事件，输出 JSON 布尔值并以
+零退出。本例 Before 的 `true` 请求 `block`，After 的 `true` 记录 `observe`；
+After 的 `false` 不产生效果，检查仍视为成功。结果检查失败须非零退出，随后
+`on_error: withhold_result` 阻止交付及后续派发。保留原生权限和调用方负责的
+daemon/App 生命周期。使用普通 `aw run`，通过滚动重启更新。私有凭据需在应用代码
+接入[显式执行工厂](../../../../src/aw/docs/design/zh/adapters/private-execution.md)，
+此 YAML 安装安全策略。
+
 ## 启动 Qoder SDK Worker
 
 使用 `adapter: qoder-sdk`、`@qoder-ai/qoder-agent-sdk@1.0.56`、随包提供的
@@ -932,10 +960,13 @@ daemon，因为无法核验它的启动配置。仅启动 daemon 不会报告 Qu
 AW 沿用前台 Worker 生命周期，在 Worker 退出时释放自己的绑定。
 
 AW 在 Query 初始化前注册回调，SDK 握手成功后报告就绪。
-`tool.before` 支持观察和拒绝；`tool.after` 使用 `on_error: report` 观察原生工具成功和失败的结果。
-准入仅允许 `tool.before` 使用 `on_error: block`。原生权限拒绝保留优先级，
-结果替换和扣留在准入时拒绝。现有 SDK Hook 保留；参数改写和权限
-Hook 覆盖不受支持，防止实际执行参数与检查参数不同。
+`tool.before` 支持观察和拒绝；`tool.after` 观察原生工具成功和失败的结果。
+普通 resident Query 准入 `on_error: withhold_result`：Post 失败或超时会在回复回调前
+关闭原生 Query，扣留未核验结果并停止后续派发。Post 之前已发生的工具副作用继续生效。
+`on_error: report` 报告故障并允许正常结果处理。
+准入仅允许 `tool.before` 使用 `on_error: block`。原生权限拒绝保留优先级，结果替换仍
+不支持。现有 SDK Hook 保留；参数改写和权限 Hook 覆盖不受支持，防止实际执行参数
+与检查参数不同。
 
 使用 `settingSources: []`，不要传入 `settings`、插件、额外 CLI 参数或运行时 transport
 覆盖。进程环境和启动环境中的 Hook 禁用标志按 bundled Worker 的去除首尾空白
@@ -957,20 +988,29 @@ Bridge 返回冻结的公共 Query 接口，隐藏原生解析器、transport、
 提前 return、取消和 transport 故障均等待原生 close，以及原始 Hook、权限、凭据、
 模型和 MCP 回调完成后释放 scope。记忆生成/消费、技能演进的 gate/result 回调，
 以及执行中的 `sendHostAction()`（包括原生 fallback 清理）也纳入等待。
-关闭开始后拒绝新 Host action。清理失败时保留所有权，直到 Worker 退出。
-支持原生认证回调；逐工具凭据租约注入和 Hook 可见凭据脱敏仍待后续集成。
+关闭开始后拒绝新 Host action。派发故障在原生工作排空、凭据撤销确认后可退休 scope；
+原生清理失败会保留所有权；租约清理失败或超时还会在进程范围内封锁新工作，直到 Worker 重启。
+原生认证回调保留自己的生命周期。普通 Query 可通过 `options.awExecutionFactory`
+为每次受管 MCP handler 调用获取版本化私有租约。Bridge 在调用 SDK 前移除此选项，
+并导出 `PRIVATE_EXECUTION_VERSION`、`executionEnvironment()` 与
+`hookEnvironment()`。handler 显式消费私有环境，结果在 Post 与交付前脱敏。
+固定版本 SDK 的内建 Bash 没有对应环境注入接点。公共工厂合同与清理顺序见
+[私有执行租约](../../../../src/aw/docs/design/zh/adapters/private-execution.md)。
 
 进程内 MCP 使用 `await bridge.createSdkMcpServer(options)`，每个 Query 提供新的受管
 server。保留原生 schema、annotations、权限设置和结构化结果 envelope。
 若 schema 通过默认值、transform 或移除未知字段改变已批准参数，则在应用 handler
 执行前拒绝。严格 Pre 拒绝阻止 handler 进入。
-Post 回调失败时，直接注入严格 Post 路由会触发 Bridge 的拒绝结果交付防御；对应测试绕过配置准入。
-AW 配置当前只准入 `on_error: report` 的 Post 观察，严格 Post 的准入与原生验收仍由 #9069 跟进。
+普通 resident MCP 调用与原生工具共用已准入的 Post `withhold_result` 屏障。
 MCP 子调用绑定原生 control request、精确的 server/tool/arguments 和所属 Query。
-固定版本 Worker 的 MCP 请求未提供来源模型工具 ID，父工具调用关联仍依赖上游接点。
-结果替换继续保持不支持，等待原生采用验证。
+`parentIdentity: "query"` 为默认值：固定版本 Worker 的 MCP 请求未提供来源模型
+工具 ID；`parentIdentity: "required"` 在创建原生 server 前拒绝。元数据与完整结果
+封装处理见[结构化 MCP 派发](../../../../src/aw/docs/design/zh/adapters/structured-mcp.md)。
+结果替换仍不支持。
 
-需要在不重启 daemon 的情况下更新已有 Query 时，使用
+严格 Post 和私有执行租约要求普通 resident 模式，通过滚动重启更新；`--reloadable`
+拒绝这些合同。兼容空闲更新路径的策略，需要在不重启 daemon 的情况下更新已有
+Query 时，使用
 `aw run --config aw.yaml --agent sdk --reloadable` 显式启用。沿用同一个
 `createQuery` 工厂和调用方管理的 `startDaemon()`；异步输入迭代器可让 Query
 在请求之间保持可用。使用 `aw update --config aw.yaml --agent sdk --policy desired.yaml`

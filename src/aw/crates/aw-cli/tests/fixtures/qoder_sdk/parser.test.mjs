@@ -1,114 +1,10 @@
 /** Exercise the pinned SDK's real control parser without credentials or a model connection. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
 import { Resident } from "../../../../aw-adapter/native/qoder-sdk/resident.mjs";
 import { managedMcpServer, admitMcp } from "../../../../aw-adapter/native/qoder-sdk/mcp.mjs";
-import { invoke } from "../../../../aw-adapter/native/qoder-sdk/callback.mjs";
-const sdk = await import(pathToFileURL(process.argv[2]).href);
-const { z } = createRequire(pathToFileURL(process.argv[2]))("zod");
-const pause = () => new Promise(resolve => setImmediate(resolve));
-const deferred = () => {
-  let resolve;
-  const promise = new Promise(done => { resolve = done; });
-  return { promise, resolve };
-};
-
-class Transport {
-  messages = [];
-  responses = new Map();
-  changed = deferred();
-  closed = false;
-  hooks = [];
-  async initialize() {}
-  isReady() { return !this.closed; }
-  emit(message) { this.messages.push(message); this.changed.resolve(); }
-  write(line) {
-    const message = JSON.parse(line);
-    if (message.type === "control_request") {
-      if (message.request.type === "initialize") {
-        this.initialization = message.request;
-        this.hooks = message.request.hooks;
-      }
-      if (message.request.type === "get_context_usage" && this.holdBarrier) {
-        this.barrier = message;
-        return;
-      }
-      this.emit({ type: "control_response", response: { subtype: "success",
-        request_id: message.request_id, response: { capabilities: ["msg_lifecycle_v1", "host_action"] } } });
-    } else if (message.type === "control_response") {
-      this.responses.set(message.response.request_id, message.response);
-    }
-  }
-  async *readMessages() {
-    while (!this.closed) {
-      if (!this.messages.length) { await this.changed.promise; this.changed = deferred(); }
-      if (this.failure) throw this.failure;
-      while (this.messages.length) yield this.messages.shift();
-    }
-  }
-  endInput() {}
-  close() { this.closed = true; this.changed.resolve(); }
-}
-
-async function fixture(t, callback = async () => ({}), extra = {}, policyHooks) {
-  const transport = new Transport();
-  const resident = new Resident({ hooks: policyHooks ?? [], sdk: process.argv[2] });
-  const scope = resident.scope;
-  scope.open = async () => { scope.handle = {}; };
-  scope.invocationLimit = 4;
-  scope.register = async (id, name, input) => { scope.invocations.set(id, { name, input }); };
-  scope.finish = async id => { assert(scope.invocations.delete(id)); };
-  scope.close = async () => { scope.closed = true; };
-  const input = deferred();
-  async function* prompt() { await input.promise; }
-  const options = { transport: { create: () => transport },
-    auth: { type: "accessToken", accessToken: "fixture-local-only" }, ...extra,
-    hooks: { PreToolUse: [{ hooks: [callback] }], PostToolUse: [{ hooks: [callback] }] } };
-  if (policyHooks) {
-    await resident.create(prompt(), options, (config, native) => {
-      const hooks = Object.fromEntries(Object.entries(native.hooks).map(([event, groups]) => [event, [...groups]]));
-      for (const hook of config.hooks) {
-        const event = hook.event === "tool.before" ? "PreToolUse" : "PostToolUse";
-        hooks[event].push({ hooks: [async (input, id, { signal }) => {
-          assert.equal(id, input.tool_use_id);
-          return await invoke(config, hook, input, signal);
-        }] });
-      }
-      return { ...native, hooks };
-    }, () => {});
-  } else {
-    resident.mcp = admitMcp(extra);
-    resident.cwd = process.cwd();
-    await scope.open();
-    scope.begin();
-    const query = sdk.query({ prompt: prompt(), options: resident.decorate(options) });
-    resident.install(query);
-    await query.initializationResult();
-  }
-  t.after(async () => { input.resolve(); await resident.close(); });
-  const model = (id, input = { command: "fixture" }, name = "Bash") => transport.emit({ type: "assistant",
-    session_id: "session", uuid: `message-${id}`, parent_tool_use_id: null,
-    message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
-  const hook = (id, request, event = "PreToolUse", input = { command: "fixture" },
-    { name = "Bash", mcpContext, group = 0 } = {}) => {
-    const callbackId = transport.hooks[event][group].hookCallbackIds[0];
-    transport.emit({ type: "control_request", request_id: request,
-      request: { subtype: "hook_callback", callback_id: callbackId, tool_use_id: id,
-        input: { hook_event_name: event, tool_use_id: id, tool_name: name, tool_input: input,
-          ...(mcpContext ? { mcp_context: mcpContext } : {}),
-          cwd: process.cwd(), session_id: "session", tool_response: "result" } } });
-  };
-  const response = async request => {
-    for (let attempt = 0; attempt < 1000; attempt++) {
-      if (transport.responses.has(request)) return transport.responses.get(request);
-      await pause();
-    }
-    throw new Error(`Native response timeout: ${request}`);
-  };
-  return { resident, scope, query: resident.facade(), transport, model, hook, response };
-}
+import { sdk, z, pause, deferred, fixture } from "./parser-support.mjs";
+import "./parser-mcp.test.mjs";
 
 test("actual SDK parser binds model identity before native callback dispatch", { timeout: 5000 }, async t => {
   let calls = 0;
@@ -219,27 +115,20 @@ test("managed MCP retains schemas, annotations and structured error results", { 
   }
 });
 
-test("managed MCP deny prevents handlers and injected strict Post defends the bridge", { timeout: 5000 }, async t => {
-  for (const event of ["tool.before", "tool.after"]) {
-    let calls = 0;
-    const server = managedMcpServer(sdk, { name: "fixture", tools: [{ name: "read", description: "Read fixture", inputSchema: {},
-      handler: async () => { calls++; return { content: [{ type: "text", text: "private result" }] }; } }] });
-    const f = await fixture(t, undefined, { mcpServers: { fixture: server } });
-    // Strict Post is injected below admission: qoder-sdk admits only observe/report
-    // after a tool. Strict Post policy admission remains unsupported.
-    f.resident.config.hooks = [{ event, step: "required", on_error: "block", budget_ms: 100 }];
-    f.scope.invoke = async () => event === "tool.before" ?
-      { code: 2, stdout: Buffer.from('"policy denied"') } : { code: 1, stdout: Buffer.from("") };
-    f.transport.emit({ type: "control_request", request_id: event, request: {
-      subtype: "mcp_message", server_name: "fixture", message: { jsonrpc: "2.0", id: 1,
-        method: "tools/call", params: { name: "read", arguments: {} } } } });
-    const response = await f.response(event);
-    assert.equal(response.subtype, "error");
-    assert(!JSON.stringify(response).includes("private result"));
-    assert.equal(calls, event === "tool.before" ? 0 : 1);
-    assert.equal(f.scope.invocations.size, 0);
-    if (event === "tool.after") assert(f.resident.failure);
-  }
+test("managed MCP Pre denial prevents actual handler execution", { timeout: 5000 }, async t => {
+  let calls = 0;
+  const server = managedMcpServer(sdk, { name: "fixture", tools: [{ name: "read",
+    description: "Read fixture", inputSchema: {},
+    handler: async () => { calls++; return { content: [] }; } }] });
+  const f = await fixture(t, undefined, { mcpServers: { fixture: server } },
+    [{ event: "tool.before", step: "required", on_error: "block", budget_ms: 100 }]);
+  f.scope.invoke = async () => ({ code: 2, stdout: Buffer.from('"policy denied"') });
+  f.transport.emit({ type: "control_request", request_id: "denied", request: {
+    subtype: "mcp_message", server_name: "fixture", message: { jsonrpc: "2.0", id: 1,
+      method: "tools/call", params: { name: "read", arguments: {} } } } });
+  assert.equal((await f.response("denied")).subtype, "error");
+  assert.equal(calls, 0);
+  assert.equal(f.scope.invocations.size, 0);
 });
 
 test("native transport loss closes the scope and public output hides private partials", { timeout: 5000 }, async t => {
@@ -283,7 +172,7 @@ test("credential and model callback finalizers survive native abortable waits", 
 });
 
 const policyHooks = ["tool.before", "tool.after"].map(event =>
-  ({ event, step: "required", on_error: "block", budget_ms: 100 }));
+  ({ event, step: "required", on_error: event === "tool.before" ? "block" : "report", budget_ms: 100 }));
 
 test("managed native MCP Hooks delegate each policy phase once through Resident.create", { timeout: 5000 }, async t => {
   const users = [], policies = [];
@@ -512,4 +401,82 @@ test("callback decoration preserves native invalid-option rejection and untouche
       { name: "TypeError", message });
   }
   assert.equal(creates, 0);
+});
+
+test("managed MCP rejects required model parent before native server creation", () => {
+  let creations = 0;
+  const native = { createSdkMcpServer(options) { creations++; return sdk.createSdkMcpServer(options); } };
+  assert.throws(() => managedMcpServer(native, { name: "fixture", tools: [],
+    parentIdentity: "required" }), /lacks a trusted model parent/);
+  assert.equal(creations, 0);
+});
+
+test("managed MCP snapshots handler and exposes only proven query identity", { timeout: 5000 }, async t => {
+  const policies = [];
+  let original = 0, replaced = 0;
+  const definition = { name: "read", description: "Read fixture", inputSchema: {},
+    handler: async () => { original++; return { content: [], structuredContent: { original: true } }; } };
+  const server = managedMcpServer(sdk, { name: "fixture", tools: [definition] });
+  definition.handler = async () => { replaced++; return { content: [] }; };
+  const f = await fixture(t, undefined, { mcpServers: { fixture: server } });
+  f.resident.config.hooks = policyHooks;
+  f.scope.invoke = async (hook, payload) => {
+    policies.push(structuredClone(payload));
+    if (hook.event === "tool.after") payload.tool_response.result.structuredContent.original = false;
+    return { code: 0, stdout: Buffer.from("{}") };
+  };
+  f.transport.emit({ type: "control_request", request_id: "snapshot", request: {
+    subtype: "mcp_message", server_name: "fixture", message: { jsonrpc: "2.0", id: 1,
+      method: "tools/call", params: { name: "read", arguments: {} } } } });
+  assert.deepEqual((await f.response("snapshot")).response.mcp_response.result.structuredContent, { original: true });
+  assert.equal(original, 1);
+  assert.equal(replaced, 0);
+  assert.equal(policies.length, 2);
+  assert.deepEqual(policies[0].aw_mcp_context, { server: "fixture", tool: "read",
+    subject: "mcp__fixture__read", parent_tool_call_id: null, parent_query_id: f.resident.id,
+    generation: f.scope.execution, identity_scope: "query" });
+  assert.deepEqual(policies[1].aw_mcp_context, policies[0].aw_mcp_context);
+});
+
+test("managed MCP cancellation during Pre prevents actual handler entry", { timeout: 5000 }, async t => {
+  const entered = deferred(), release = deferred();
+  let calls = 0;
+  const server = managedMcpServer(sdk, { name: "fixture", tools: [{ name: "read",
+    description: "Read fixture", inputSchema: {}, handler: async () => { calls++; return { content: [] }; } }] });
+  const f = await fixture(t, undefined, { mcpServers: { fixture: server } });
+  f.resident.config.hooks = [policyHooks[0]];
+  f.scope.invoke = async () => {
+    entered.resolve();
+    await release.promise;
+    return { code: 0, stdout: Buffer.from("{}") };
+  };
+  f.transport.emit({ type: "control_request", request_id: "cancel-pre", request: {
+    subtype: "mcp_message", server_name: "fixture", message: { jsonrpc: "2.0", id: 1,
+      method: "tools/call", params: { name: "read", arguments: {} } } } });
+  await entered.promise;
+  f.transport.emit({ type: "control_cancel_request", request_id: "cancel-pre" });
+  await pause();
+  release.resolve();
+  await f.resident.close();
+  assert.equal(f.transport.responses.has("cancel-pre"), false);
+  assert.equal(calls, 0);
+  assert.equal(f.scope.invocations.size, 0);
+});
+
+test("managed MCP generation changes during Pre prevent native execution", { timeout: 5000 }, async t => {
+  let calls = 0;
+  const server = managedMcpServer(sdk, { name: "fixture", tools: [{ name: "read",
+    description: "Read fixture", inputSchema: {}, handler: async () => { calls++; return { content: [] }; } }] });
+  const f = await fixture(t, undefined, { mcpServers: { fixture: server } });
+  f.resident.config.hooks = [policyHooks[0]];
+  f.scope.invoke = async () => {
+    f.scope.execution++;
+    return { code: 0, stdout: Buffer.from("{}") };
+  };
+  f.transport.emit({ type: "control_request", request_id: "stale", request: {
+    subtype: "mcp_message", server_name: "fixture", message: { jsonrpc: "2.0", id: 1,
+      method: "tools/call", params: { name: "read", arguments: {} } } } });
+  assert.equal((await f.response("stale")).subtype, "error");
+  assert.equal(calls, 0);
+  assert.equal(f.scope.invocations.size, 0);
 });

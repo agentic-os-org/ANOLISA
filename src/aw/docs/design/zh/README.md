@@ -69,3 +69,7 @@ flowchart LR
 
 常驻 SDK 模型响应在原生调度前进入 Adapter 的身份生产接点，服务负责递增登记和活动状态回收。
 [长期会话归属与限制](adapters/resident-sdk.md) 同时说明回调排空、MCP 调度和固定 Claude 传输。
+
+[结构化 MCP 派发](adapters/structured-mcp.md) 说明 QwenPaw 实际协议调用、父模型证据、完整结果 envelope 和 Qoder Query 身份边界。
+
+[私有执行租约](adapters/private-execution.md) 说明 Qoder 受管 MCP 调用租约、QwenPaw reply 租约、显式环境消费、脱敏和 scope 退休前的清理确认。

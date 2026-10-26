@@ -6,85 +6,9 @@ import path from "node:path";
 import { Resident, bounded } from "../../../../aw-adapter/native/qoder-sdk/resident.mjs";
 import { managedDaemon } from "../../../../aw-adapter/native/qoder-sdk/daemon.mjs";
 import { managedMcpServer } from "../../../../aw-adapter/native/qoder-sdk/mcp.mjs";
+import { PRIVATE_EXECUTION_VERSION } from "../../../../aw-adapter/native/qoder-sdk/private.mjs";
 
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
-  return { promise, resolve, reject };
-};
-
-function fixture(t, holdInitialization = false) {
-  const root = fs.mkdtempSync(path.join(process.cwd(), "sdk-resident-"));
-  const sdk = path.join(root, "sdk.mjs");
-  const state = { imported: deferred(), importGate: deferred(), closeEntered: deferred(),
-    closeGate: deferred(), created: 0, ready: 0, nativeCloses: 0, scopeCloses: 0,
-    initializationEntered: deferred(), initializationGate: deferred(), executions: 0,
-    settled: false, events: [] };
-  if (!holdInitialization) state.initializationGate.resolve();
-  globalThis[root] = state;
-  fs.writeFileSync(sdk, `const state = globalThis[${JSON.stringify(root)}];
-state.imported.resolve();
-await state.importGate.promise;
-export function query({ prompt }) {
-  state.created++;
-  state.dispatch = prompt.next().then(item => { if (!item.done) state.executions++; });
-  return state.query;
-}
-`);
-  state.query = {
-    recordInboundSessionMessage() {},
-    async handleControlRequest() {},
-    async processControlRequest() {},
-    transport: { write() {} },
-    async interrupt() {},
-    async getContextUsage() {},
-    async next() { return { done: true }; },
-    async streamInput() {},
-    async initializationResult() {
-      state.initializationEntered.resolve();
-      await state.initializationGate.promise;
-      return { capabilities: ["msg_lifecycle_v1"] };
-    },
-    async close() {
-      state.nativeCloses++;
-      state.closeEntered.resolve();
-      await state.closeGate.promise;
-      state.events.push("native-closed");
-    },
-  };
-  const config = { sdk, binding: path.join(root, "binding"), hooks: [] };
-  const resident = new Resident(config);
-  const scope = resident.scope;
-  scope.open = async () => { scope.handle = {}; };
-  scope.close = async () => {
-    state.scopeCloses++;
-    state.events.push("scope-closed");
-    scope.handle = null;
-    scope.closed = true;
-  };
-  const create = (extra = {}) => {
-    state.pending = resident.create("fixture", { cwd: process.cwd(), ...extra },
-      (_config, options) => ({ ...options, hooks: {} }), () => { state.ready++; })
-      .then(value => ({ value }), error => ({ error }))
-      .finally(() => { state.settled = true; });
-    return state.pending;
-  };
-  t.after(async () => {
-    state.importGate.resolve();
-    state.initializationGate.resolve();
-    state.closeGate.resolve();
-    try {
-      await state.pending;
-      await state.dispatch;
-      await resident.close().catch(() => {});
-      await state.daemon?.stop();
-    } finally {
-      delete globalThis[root];
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
-  return { state, config, resident, scope, create };
-}
+import { fixture, deferred } from "./resident-support.mjs";
 
 const missingSeams = [
   ["recordInboundSessionMessage", query => { delete query.recordInboundSessionMessage; },
@@ -240,3 +164,43 @@ test("daemon stop waits for an initialized Query to release its scope", { timeou
   assert.equal(f.scope.handle, null);
   assert.deepEqual(f.state.events, ["native-closed", "scope-closed", "daemon-stopped"]);
 });
+
+for (const mode of ["tool-failure", "cancel"]) {
+  test(`private ${mode} drains credentials and retires the Query scope`, { timeout: 3000 }, async t => {
+    const f = fixture(t);
+    const entered = deferred(), finalizing = deferred(), finish = deferred();
+    let released = false;
+    f.state.importGate.resolve();
+    const result = await f.create({ awExecutionFactory: async () => ({
+      version: PRIVATE_EXECUTION_VERSION, environment: {}, hookEnvironment: {}, secrets: {},
+      redact: value => value,
+      release: async () => { released = true; f.state.events.push("lease-released"); },
+    }) });
+    assert.ifError(result.error);
+    assert.equal(Object.hasOwn(f.state.options, "awExecutionFactory"), false);
+    const operation = assert.rejects(f.resident.executionOwner.run({ invocationId: "private",
+      toolName: "fixture", input: {} }, async (_context, { signal }) => {
+      try {
+        entered.resolve();
+        if (mode === "tool-failure") throw new Error("private business failure");
+        await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+      } finally {
+        finalizing.resolve();
+        await finish.promise;
+        assert.equal(released, false);
+        f.state.events.push("handler-finally");
+      }
+    }), /withheld/);
+    await entered.promise;
+    const closing = result.value.close();
+    await f.state.closeEntered.promise;
+    f.state.closeGate.resolve();
+    await finalizing.promise;
+    assert.equal(f.state.scopeCloses, 0);
+    finish.resolve();
+    await Promise.all([operation, closing]);
+    assert.equal(f.state.scopeCloses, 1);
+    assert.equal(f.scope.handle, null);
+    assert.deepEqual(f.state.events, ["native-closed", "handler-finally", "lease-released", "scope-closed"]);
+  });
+}

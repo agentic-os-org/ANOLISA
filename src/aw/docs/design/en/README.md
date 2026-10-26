@@ -74,3 +74,7 @@ Resident SDK model responses now enter an Adapter-owned identity producer before
 dispatch; the service owns sequence admission and active-state retirement.
 [Long-session ownership and limits](adapters/resident-sdk.md) also cover callback drain,
 MCP dispatch and the pinned Claude transport.
+
+[Structured MCP dispatch](adapters/structured-mcp.md) covers actual QwenPaw protocol calls, native-parent evidence, complete result envelopes and Qoder query-scoped identity limits.
+
+[Private execution leases](adapters/private-execution.md) defines Qoder managed-MCP invocation leases, QwenPaw reply leases, explicit environment consumers, redaction and confirmed cleanup before scope retirement.

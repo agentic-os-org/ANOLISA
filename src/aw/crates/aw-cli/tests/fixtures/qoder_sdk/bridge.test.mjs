@@ -7,6 +7,8 @@ import { pathToFileURL } from "node:url";
 import * as bridge from "../../../../aw-adapter/native/qoder-sdk/bridge.mjs";
 import "./resident.test.mjs";
 import "./daemon.test.mjs";
+import "./private.test.mjs";
+import "./cleanup-fence.test.mjs";
 const { createQuery } = bridge;
 
 function fixture(t, mode = "allow") {

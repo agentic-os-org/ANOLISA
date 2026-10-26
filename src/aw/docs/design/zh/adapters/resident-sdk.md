@@ -129,9 +129,13 @@ daemon stop 关闭所属 Query 并等待活动凭据回调，包括运行期 `da
 request，使每个阶段只执行一次。子调用绑定精确的 server/tool/arguments 和 Query；
 固定协议没有为该 control request 提供父模型工具 ID。
 
-Qoder 准入 `tool.before` observe/block，以及 `on_error: report` 的 `tool.after` observe。
-只有 `tool.before` 准入 `on_error: block`。严格 Post 拒绝是通过绕过准入注入路由验证的
-Bridge 防御；严格 Post 的准入与原生验收仍由 #9069 跟进。结果替换和扣留仍不受支持。
+Qoder 准入 `tool.before` observe/block 和 `tool.after` observe。普通 resident Query
+支持 after `on_error: withhold_result`：必要检查失败时封锁 Query，在回调响应前关闭
+原生 transport，阻止未核验结果交付和后续派发；已完成的工具副作用保留。`report`
+保持原生结果，结果替换仍不支持。显式受管 handler 可通过 `awExecutionFactory`
+获取逐工具凭据，见[私有执行租约](private-execution.md)。原生 close、租约排空与
+原始回调清理共用 60 秒期限。工具失败且凭据已确认撤销时仍释放 scope；凭据清理未确认时
+保留所有权并封锁 worker。
 普通 Query 要求 evidence `mode: off`；子 scope 无法继承观测根 binding，启动准入明确
 拒绝启用的 AgentSight evidence。常驻 scope 拒绝策略 reload。
 独立的[可更新 Qoder SDK 路径](../runtime/policy-reload.md#qoder-sdk-请求准入)保留
@@ -198,17 +202,19 @@ MCP，并核对下一次模型请求确实收到压缩文本。报告包含 RSS�
 复用，以及永不结束的清理导致自有进程组退出。夹具验证回归行为，实际 SYSOM 流量、镜像依赖
 与 endpoint 决定生产负载验收目标。
 
-Qoder 固定版本解析器的 17 项测试覆盖身份和回调排空、1,280 次完成调用、transport 丢失、
-受管 MCP schema/envelope 和 Hook 委托、非受管 MCP 上下文、memory/evolution gate/result
-回调、`sendHostAction` fallback 清理和原生非法选项拒绝。严格 Post 用例绕过准入注入路由。
-[原生清单](../../../../tests/native-matrix.json)分别记录解析器检查、daemon 和 hosted Worker 验收。
+Qoder 固定版本解析器覆盖身份和回调排空、1,280 次完成调用、transport 丢失、受管 MCP
+schema/envelope 和 Hook 委托、非受管 MCP 上下文、memory/evolution gate/result 回调、
+`sendHostAction` fallback 清理和原生非法选项拒绝。普通 resident Query 准入严格 Post 策略；
+hosted Worker 验收核对失败、超时、结果扣留及后续派发停止。私有租约夹具验证隔离、脱敏、
+迟到获取清理和 worker 封锁。[原生清单](../../../../tests/native-matrix.json)分别记录解析器检查、
+daemon 和 hosted Worker 验收。
 
 | 交付 | 边界及后续工作 |
 | --- | --- |
 | 受管 scope 与常驻工厂（#8953/#8954） | 客户端上下文、owner 死亡、有界释放、统一启动 |
 | 受管 MCP（#8955） | 明确 handler 来源、原生权限、成功单文本结果采纳 |
 | 长期会话（#8956） | 生产端调用身份、回调排空、状态回收、并发预算 |
-| Qoder 常驻接入（#9069） | 严格 Post 准入和原生验收、MCP 父工具关联、逐工具凭据租约及 Hook 可见脱敏仍待交付；普通 Query 要求 evidence `mode: off`。 |
+| Qoder 常驻接入（#9069） | 普通 Query 支持严格 Post、逐 handler 私有租约和 Hook 可见脱敏。MCP 父工具关联、Post 替换及 resident 热更新仍待交付；普通 Query 要求 evidence `mode: off`。 |
 | Schema / BeforeModel（#8952） | 准入请求事件/效果；分类 resume/compaction 后实际 tools/context；保留路由和缓存/签名语义；验收模型实际采纳。转发层提供请求位置，这些合同仍需实现。 |
 | Retrieve（#8952） | 有损输出前注册恢复工具；marker 鉴权；租户/任务存储、TTL/配额、逐字恢复、禁止重复压缩。 |
 

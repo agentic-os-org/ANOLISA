@@ -529,6 +529,7 @@ class NativeResidentTests(NativeFixture):
 from native_resident_review import ReviewResidentTests
 from native_resident_delivery import DeliveryResidentTests
 from native_resident_cleanup import CleanupResidentTests
+from native_private import PrivateResidentTests
 
 
 if __name__ == "__main__":

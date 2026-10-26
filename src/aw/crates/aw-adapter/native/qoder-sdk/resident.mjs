@@ -1,16 +1,25 @@
 /** Per-Query ownership fences dispatch and joins original callbacks before scope retirement. */
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { Scope } from "./scope.mjs";
+import { Scope as SharedScope } from "./scope.mjs";
 import { Identities } from "./identity.mjs";
 import { daemonOwner, credentialOptions } from "./daemon.mjs";
 import { admitMcp, delegatesMcp, dispatchMcp } from "./mcp.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { ExecutionOwner, checkExecutionCleanup } from "./private.mjs";
+import { postTools } from "./post.mjs";
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
 const stopped = () => ({ continue: false, stopReason: "AW required Hook failed" });
+
+class Scope extends SharedScope {
+  checkExecution(execution = this.execution) {
+    checkExecutionCleanup();
+    super.checkExecution(execution);
+  }
+}
 
 export async function bounded(promise, milliseconds = 12000) {
   let timer;
@@ -32,6 +41,8 @@ export class Resident {
     this.closing = false;
     this.failure = null;
     this.background = new Set();
+    this.strictPost = config.hooks.some(hook => hook.event === "tool.after" &&
+      hook.on_error === "withhold_result");
   }
 
   track(callback, entry) {
@@ -56,6 +67,40 @@ export class Resident {
     }
   }
 
+  async withhold(error) {
+    this.fail(error);
+    // Closing only the native transport avoids joining this callback from itself.
+    // The full resident close subsequently joins original callbacks and finalizers.
+    try { await this.stopNative(); }
+    catch (cleanup) { throw new AggregateError([error, cleanup], "AW Post withholding cleanup failed"); }
+    throw error;
+  }
+
+  stopNative() {
+    if (!this.nativeStopped) {
+      this.cleanupDeadline ??= Date.now() + 60000;
+      this.nativeStopped = (async () => {
+        const failures = [];
+        if (this.query && !this.nativeClose)
+          throw new Error("Pinned Qoder Query lacks native close; shutdown cannot be confirmed");
+        if (this.nativeClose) {
+          try { await bounded(Promise.all([...this.background].map(id => this.query.stopTask(id))),
+            Math.min(12000, this.cleanupBudget())); }
+          catch (error) { failures.push(error); }
+          try { await bounded(this.nativeClose(), Math.min(12000, this.cleanupBudget())); }
+          catch (error) { failures.push(error); }
+        }
+        if (failures.length) throw new AggregateError(failures, "AW native shutdown incomplete");
+      })();
+      this.nativeStopped.catch(() => {});
+    }
+    return this.nativeStopped;
+  }
+
+  cleanupBudget() {
+    return Math.max(1, this.cleanupDeadline - Date.now());
+  }
+
   decorate(options) {
     if (options.experimentalCloudAgent)
       throw new Error("AW resident Queries require the pinned local Worker transport");
@@ -68,12 +113,15 @@ export class Resident {
             const tool = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event);
             const entry = tool ? await this.identities.claim(input, id, key) : undefined;
             const result = await callback(input, id, context);
+            checkExecutionCleanup();
             if (entry && event === "PreToolUse") {
               if (result?.hookSpecificOutput?.permissionDecision === "deny") entry.phase = "denied";
               else if (entry.phase !== "denied") entry.phase = "allowed";
             }
             return result;
           }, this.identities.dispatch.getStore()?.entry).catch(error => {
+            if (this.strictPost && ["PostToolUse", "PostToolUseFailure"].includes(event))
+              return this.withhold(error);
             this.fail(error);
             return event === "PreToolUse" ? deny("AW native identity or callback failed") : stopped();
           });
@@ -85,7 +133,9 @@ export class Resident {
           args[0] !== ticket.entry.name || !isDeepStrictEqual(args[1], ticket.entry.input) ||
           args[2].toolUseID !== ticket.entry.native)
         return { behavior: "deny", message: "AW rejected native permission identity" };
-      return await options.canUseTool(...args);
+      const result = await options.canUseTool(...args);
+      checkExecutionCleanup();
+      return result;
     }, this.identities.dispatch.getStore()?.entry));
     const decorated = { ...options, hooks, ...(canUseTool ? { canUseTool } : {}) };
     for (const path of ["resolveModel", "onAuthExpired", "resolveSessionArtifacts", "onElicitation",
@@ -152,6 +202,9 @@ export class Resident {
       catch (error) {
         const request = frame.request;
         const kind = request.subtype ?? request.type;
+        if (this.strictPost && kind === "hook_callback" &&
+            ["PostToolUse", "PostToolUseFailure"].includes(request.input?.hook_event_name))
+          return this.track(() => this.withhold(error)).catch(() => {});
         const response = kind === "hook_callback" ?
           (request.input?.hook_event_name === "PreToolUse" ? deny("AW native identity rejected") : stopped()) :
           kind === "can_use_tool" ? { behavior: "deny", message: "AW native identity rejected" } : undefined;
@@ -176,10 +229,12 @@ export class Resident {
     const next = query.next.bind(query);
     query.next = async () => {
       try {
+        checkExecutionCleanup();
         if (this.failure) throw this.failure;
         let item = await next();
         while (!item.done && item.value.type === "stream_event" && !this.partialMessages)
           item = await next();
+        checkExecutionCleanup();
         if (this.failure) throw this.failure;
         if (item.done) await this.close();
         return item;
@@ -240,6 +295,15 @@ export class Resident {
   }
 
   async create(prompt, options, compose, ready) {
+    checkExecutionCleanup();
+    const { awExecutionFactory, ...nativeOptions } = options;
+    options = nativeOptions;
+    if (awExecutionFactory !== undefined) {
+      this.executionOwner = new ExecutionOwner(awExecutionFactory, {
+        onFailure: error => this.fail(error),
+      });
+      this.executionOwner.check();
+    }
     this.partialMessages = options.includePartialMessages === true;
     this.owner = daemonOwner(options.daemon, this.config);
     if (this.owner && (options.env !== undefined || options.auth !== undefined))
@@ -267,6 +331,10 @@ export class Resident {
           const entry = this.identities.dispatch.getStore()?.entry;
           if (!entry) throw new Error("AW policy callback lacks native dispatch identity");
           if (delegatesMcp(this, this.identities.dispatch.getStore().request.input)) return {};
+          if (event !== "PreToolUse") {
+            await postTools(this, this.identities.payload(entry, input), context.signal);
+            return {};
+          }
           const result = await callback(this.identities.payload(entry, input), entry.id, context);
           return result;
         });
@@ -278,6 +346,7 @@ export class Resident {
       const sdk = await import(pathToFileURL(this.config.sdk).href);
       await this.scope.open(cwd, environment);
       // No await may separate this fence from native creation and owner registration.
+      checkExecutionCleanup();
       if (this.owner?.closing) throw new Error("AW daemon stopped during Query admission");
       this.scope.begin();
       const initialized = new Promise(resolve => { this.releaseInput = resolve; });
@@ -292,6 +361,7 @@ export class Resident {
       this.install(query);
       this.owner?.queries.add(this.ownerClose);
       const initialization = await query.initializationResult();
+      checkExecutionCleanup();
       if (this.failure) throw this.failure;
       if (this.closing || this.owner?.closing)
         throw new Error("AW resident Query closed during initialization");
@@ -321,15 +391,12 @@ export class Resident {
   async finish() {
     // Native close aborts its waiters. Original Hook finalizers still own the scope.
     const failures = [];
-    if (this.query && !this.nativeClose)
-      failures.push(new Error("Pinned Qoder Query lacks native close; shutdown cannot be confirmed"));
-    if (this.nativeClose) {
-      try { await bounded(Promise.all([...this.background].map(id => this.query.stopTask(id)))); }
-      catch (error) { failures.push(error); }
-      try { await bounded(this.nativeClose()); }
-      catch (error) { failures.push(error); }
-    }
-    try { await bounded(Promise.allSettled([...this.callbacks, ...this.work])); }
+    try { await this.stopNative(); }
+    catch (error) { failures.push(error); }
+    try { await this.executionOwner?.close(this.cleanupBudget()); }
+    catch (error) { failures.push(error); }
+    try { await bounded(Promise.allSettled([...this.callbacks, ...this.work]),
+      Math.min(12000, this.cleanupBudget())); }
     catch (error) { failures.push(error); }
     if (failures.length)
       throw new AggregateError(failures, "AW native cleanup incomplete; scope retained until worker exit");

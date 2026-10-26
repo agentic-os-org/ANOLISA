@@ -74,7 +74,8 @@ class Ledger:
     async def close(self):
         assert not self.active
         self.closed = True
-        self.environment.clear()
+        if self.environment is not None:
+            self.environment.clear()
 
     async def invoke_native(self, hook, payload):
         code, output = await self.invoke(hook, payload)

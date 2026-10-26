@@ -336,8 +336,10 @@ Completed invocations retire their state, allowing long sessions to continue
 within the bounded active-call limit.
 
 After Hooks receive redacted terminal `ToolResponse` objects, including AW-denied
-results. The application credential extension supplies task-private environments
-and cleanup. Redactors must be idempotent across repeated delivery/Hook checks.
+results. The application credential extension supplies one private execution
+lease per Agent reply, shared by that reply's tools, and owns its cleanup; see
+[Private execution leases](../../../../src/aw/docs/design/en/adapters/private-execution.md).
+Redactors must be idempotent across repeated delivery/Hook checks.
 Authorization-bearing arguments remain unchanged. `on_error: report`
 preserves callback error reporting; before `block` denies execution. For structured
 Providers and boolean Hooks, after `withhold_result` prevents unverified result
@@ -373,8 +375,8 @@ runs commands before and after tools; it installs no security policy. Use the
 same `aw-provider/v1alpha1` policy configuration across supported adapters.
 The native Hook output dialect and event coverage remain framework-specific.
 
-A configuration with no Providers or event steps also starts the App; AW verifies
-plugin readiness without registering any tool middleware.
+An ordinary configuration with no Providers or event steps still installs
+resident admission and cleanup middleware.
 
 ## Start OpenClaw
 
@@ -1044,6 +1046,36 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
 
+## Use one security policy for resident SDKs
+
+The [shared SDK security example](../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+selects Qoder SDK or QwenPaw through `--agent`. Replace every absolute path,
+initialize the native runtime as described in its section, and start sec-core
+with the configured socket before launching:
+
+```bash
+aw validate --config /absolute/path/aw.sdk-security.yaml
+aw run --config /absolute/path/aw.sdk-security.yaml --agent qoder-sdk -- "your prompt"
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home aw run \
+  --config /absolute/path/aw.sdk-security.yaml --agent qwenpaw
+```
+
+The sec-core step matches only `native:qoder-sdk:Bash` and
+`native:qwenpaw:execute_shell_command`. AW projects the selected target's steps
+before capability admission and Provider preparation. Other tools still use the
+custom before/after checks without acquiring an implicit sec-core scan. Add
+explicit selectors and matching Provider tool mappings when extending coverage.
+
+The custom scripts use the boolean Hook contract: read one normalized event from
+stdin and print a JSON boolean with exit status zero. In this example, before
+`true` requests `block`; after `true` records `observe`. After `false` produces no
+effect and is still a successful check. A failed result check must exit nonzero;
+`on_error: withhold_result` then prevents delivery and subsequent dispatch.
+Native permissions and the caller's daemon/App lifecycle remain in force.
+Use ordinary `aw run` and a rolling restart for changes. Private credentials need
+the [explicit execution factory](../../../../src/aw/docs/design/en/adapters/private-execution.md)
+in application code; this YAML installs the security policy.
+
 ## Start a Qoder SDK worker
 
 Use `adapter: qoder-sdk` with `@qoder-ai/qoder-agent-sdk@1.0.56`, its bundled
@@ -1095,10 +1127,13 @@ AW keeps the foreground-worker lifecycle and releases its binding on worker exit
 
 AW registers per-Query callbacks before initialization, then reports readiness
 after the SDK handshake. `tool.before` supports observation and denial;
-`tool.after` observes successful and failed native tool calls with `on_error: report`.
+`tool.after` observes successful and failed native tool calls. Ordinary resident
+Queries admit `on_error: withhold_result`: a Post failure or timeout closes the
+native Query before replying to the callback, withholds the unverified result and
+stops subsequent dispatch. Tool side effects that occurred before Post remain in
+effect. `on_error: report` reports the failure and allows normal result handling.
 Admission allows `on_error: block` only for `tool.before`. Native permission
-denials retain precedence. Result replacement and withholding are rejected
-during admission.
+denials retain precedence. Result replacement remains unsupported.
 Existing SDK hooks are retained; argument rewrites and permission-hook overrides
 are rejected so a tool cannot execute different arguments from those checked.
 
@@ -1131,24 +1166,36 @@ Hook, permission, credential, model and MCP callbacks before retiring the scope.
 Memory generation/consumption and skill-evolution gate/result callbacks are also
 joined, along with in-flight `sendHostAction()` work, including its native
 fallback cleanup. Closing rejects new Host actions.
-Cleanup failures retain ownership until worker exit. Native authentication
-callbacks are supported; per-tool credential lease injection and Hook-visible
-credential redaction remain pending integration work.
+A dispatch failure can retire its scope after native drain and confirmed credential
+revocation. Native cleanup failure retains ownership; lease cleanup failure or
+timeout also fences new work process-wide until worker restart. Native authentication
+callbacks keep their own lifecycle. Ordinary Queries may pass `options.awExecutionFactory` to acquire a
+versioned private lease for each managed MCP handler. The bridge consumes this
+option before calling the SDK and exports `PRIVATE_EXECUTION_VERSION`,
+`executionEnvironment()` and `hookEnvironment()`. Handlers explicitly consume the
+private environment; results are redacted before Post and delivery. The pinned
+SDK has no such environment injection seam for built-in Bash. See
+[Private execution leases](../../../../src/aw/docs/design/en/adapters/private-execution.md)
+for the public factory contract and cleanup ordering.
 
 For in-process MCP, use `await bridge.createSdkMcpServer(options)` and provide a
 fresh managed server per Query. Native schemas, annotations, permission settings
 and structured result envelopes are retained. A schema that changes approved
 arguments through defaults, transforms or unknown-key stripping is rejected
 before the application handler. Strict Pre rejection prevents handler entry.
-On Post callback failure, the bridge rejects result delivery when directly supplied
-a strict Post route; this defensive branch is tested below configuration admission. AW configurations
-currently admit only Post observation with `on_error: report`; strict Post admission
-and native acceptance remain work under #9069. MCP child invocations bind
-the native control request, exact server/tool/arguments and owning Query. The
-pinned Worker does not expose the originating model tool ID in that MCP request;
-parent tool-invocation correlation remains an upstream dependency. Result
-replacement remains unsupported pending native adoption validation.
-To update existing Queries without restarting the daemon, opt in with
+Ordinary resident MCP calls use the same admitted Post `withhold_result` barrier
+as native tools. MCP child invocations bind the native control request, exact
+server/tool/arguments and owning Query. `parentIdentity: "query"` is the default:
+the pinned Worker does not expose the originating model tool ID in that MCP
+request. `parentIdentity: "required"` rejects before native server creation.
+See [Structured MCP dispatch](../../../../src/aw/docs/design/en/adapters/structured-mcp.md)
+for metadata and complete result-envelope handling. Result replacement remains
+unsupported.
+
+Strict Post and private execution leases require ordinary resident mode; update
+them with a rolling restart. `--reloadable` rejects these contracts. For policies
+compatible with the idle-update path, update existing Queries without restarting
+the daemon by opting in with
 `aw run --config aw.yaml --agent sdk --reloadable`. Keep using the same
 `createQuery` factory and caller-owned `startDaemon()`; an asynchronous input
 iterator keeps a Query available between requests. Use `aw update --config

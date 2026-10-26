@@ -746,6 +746,18 @@
     "qwenpaw-withhold-reload-rejection": {
       "target": "aw-cli/test/qwenpaw",
       "test": "resident::reloadable_entry_rejects_withhold_before_service_or_plugin_creation"
+    },
+    "qoder-sdk-strict-post": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "post::strict_post_failures_close_the_query_and_report_continues"
+    },
+    "qoder-sdk-post-drain": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "post::strict_post_joins_original_callbacks_and_preserves_native_results"
+    },
+    "qoder-sdk-private-fence": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "installed_bridge_fences_queries_after_private_cleanup_failure"
     }
   },
   "agents": {
@@ -1100,7 +1112,8 @@
         },
         "tool.after": {
           "observe": [
-            "qoder-sdk-lifecycle"
+            "qoder-sdk-lifecycle",
+            "qoder-sdk-strict-post"
           ]
         }
       },
@@ -1113,12 +1126,16 @@
         "scope-qoder-sdk-close",
         "sdk-scope-transport",
         "sdk-scope-expired-close",
-        "sdk-scope-process-cli"
+        "sdk-scope-process-cli",
+        "qoder-sdk-post-drain",
+        "qoder-sdk-private-fence"
       ],
       "security": [
         "security-retry",
         "scope-native-skips",
-        "scope-qoder-sdk-order"
+        "scope-qoder-sdk-order",
+        "qoder-sdk-strict-post",
+        "qoder-sdk-private-fence"
       ],
       "tokenless": [
         "security-retry",

@@ -77,6 +77,10 @@ impl OwnedPlugin {
                 include_bytes!("../../native/qwenpaw/aw_resident.py").as_slice(),
             ),
             (
+                "aw_mcp.py",
+                include_bytes!("../../native/qwenpaw/aw_mcp.py").as_slice(),
+            ),
+            (
                 "aw_native.py",
                 include_bytes!("../../native/qwenpaw/aw_native.py").as_slice(),
             ),

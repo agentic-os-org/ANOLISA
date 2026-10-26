@@ -149,9 +149,19 @@ It lists capabilities declared by the runtime and covered by CI contract tests.
 See the [native Agent integration reference](../../docs/developer-guide/en/aw/native-agents.md)
 for supported versions, tool types, and text replacement boundaries.
 
-Each ordinary managed Qoder SDK Query owns a child scope; daemon shutdown drains its Queries and original callbacks.
+Each ordinary managed Qoder SDK Query owns a child scope; daemon shutdown drains
+its Queries and original callbacks. An explicit application factory provides a
+private lease per managed MCP handler. Ordinary QwenPaw App launches use a task
+scope and one private execution lease per managed Agent reply. Tools explicitly
+consume these environments; see [Private execution leases](docs/design/en/adapters/private-execution.md).
 
-Ordinary QwenPaw App launches use a task scope for each managed Agent reply. Private tool environments require the explicit native execution helper. Strict after steps use `on_error: withhold_result` to retain unverified output. Resident policy changes use a rolling restart; `--reloadable` keeps the separate idle-update path.
+Both ordinary resident paths admit strict after steps with
+`on_error: withhold_result`, preventing unverified result delivery and subsequent
+dispatch. Tool side effects that occurred before Post remain in effect. Use the
+[shared security example](crates/aw-service/examples/aw.sdk-security.yaml) with
+`--agent qoder-sdk` or `--agent qwenpaw`. Resident policy changes use a rolling
+restart; `--reloadable` keeps a separate idle-update path without strict Post
+or private execution leases.
 
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
@@ -170,8 +180,8 @@ Qoder SDK 1.0.56 / Worker 1.1.78 requires the bridge daemon and Query factories
 to admit the native runtime and register per-Query callbacks through
 `aw run`; `--reloadable` enables explicit policy updates for idle existing Queries,
 returning busy during requests and native cleanup. See the [SDK worker guide](../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker).
-It supports before observation/denial and after observation; external attach
-and result replacement remain unsupported.
+It supports before observation/denial, after observation and ordinary resident
+Post withholding; external attach and result replacement remain unsupported.
 
 
 A Tokenless retry suggestion blocks the original call. The Agent must make a new

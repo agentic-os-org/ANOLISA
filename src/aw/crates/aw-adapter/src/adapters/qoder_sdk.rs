@@ -79,7 +79,13 @@ impl Adapter for QoderSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> AdapterCapabilities {
-        adapter::catalog::QODER_SDK.capabilities("1.0.56", "sdk-worker")
+        let mut capabilities = adapter::catalog::QODER_SDK.capabilities("1.0.56", "sdk-worker");
+        if !self.input.options.reloadable {
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+        }
+        capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         if self.input.options.reloadable {
@@ -127,12 +133,20 @@ impl PreparedLaunch for Prepared {
         )?;
         for (name, bytes) in [
             (
+                "post.mjs",
+                include_bytes!("../../native/qoder-sdk/post.mjs").as_slice(),
+            ),
+            (
                 "mcp.mjs",
                 include_bytes!("../../native/qoder-sdk/mcp.mjs").as_slice(),
             ),
             (
                 "daemon.mjs",
                 include_bytes!("../../native/qoder-sdk/daemon.mjs").as_slice(),
+            ),
+            (
+                "private.mjs",
+                include_bytes!("../../native/qoder-sdk/private.mjs").as_slice(),
             ),
             (
                 "resident.mjs",

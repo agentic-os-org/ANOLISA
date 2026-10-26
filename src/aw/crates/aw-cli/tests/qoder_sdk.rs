@@ -10,6 +10,9 @@ use support::{Fixture, Service};
 #[path = "qoder_sdk/tool_scope.rs"]
 mod tool_scope;
 
+#[path = "qoder_sdk/post.rs"]
+mod post;
+
 fn setup(f: &Fixture) -> Value {
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|p| p.join("node"))
@@ -148,7 +151,7 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 26"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 41"));
 }
 
 #[test]
@@ -209,4 +212,17 @@ fn reload_queries(single_configuration: bool) {
         );
         service.released(&f);
     }
+}
+
+#[test]
+fn installed_bridge_fences_queries_after_private_cleanup_failure() {
+    let fixture = Fixture::new();
+    let document = setup(&fixture);
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk/private-packaged.mjs");
+    fs::copy(source, fixture.root.join("app.mjs")).unwrap();
+    let service = Service::start(&fixture, &document);
+    assert_eq!(fixture.successful(launch(&fixture))["fenced"], true);
+    assert!(!fixture.root.join("executed").exists());
+    service.released(&fixture);
 }

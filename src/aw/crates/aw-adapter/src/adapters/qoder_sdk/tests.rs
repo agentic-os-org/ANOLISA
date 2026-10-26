@@ -108,3 +108,23 @@ fn reloadable_observation_retains_its_existing_admission() {
     assert_eq!(config["resident"], false);
     assert_eq!(config["reloadable"], true);
 }
+
+#[test]
+fn only_resident_queries_admit_post_withholding() {
+    for reloadable in [false, true] {
+        let fixture = Fixture::new();
+        let prepared = QoderSdk
+            .prepare(fixture.input(None, reloadable), &AtomicBool::new(false))
+            .unwrap();
+        let capabilities = prepared.capabilities();
+        assert_eq!(
+            capabilities.failure_actions.get("tool.after").cloned(),
+            if reloadable {
+                None
+            } else {
+                Some(vec!["withhold_result".into()])
+            }
+        );
+        assert!(!capabilities.events["tool.after"].contains(&"replace_result".into()));
+    }
+}

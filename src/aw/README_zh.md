@@ -127,8 +127,15 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 [原生 Agent 接入参考](../../docs/developer-guide/zh/aw/native-agents.md)。
 
 普通受管 Qoder SDK Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。
+显式应用工厂为每次受管 MCP handler 调用提供私有租约。普通 QwenPaw App 启动为每个
+受管 Agent reply 分配任务 scope 和一个私有执行租约。工具显式消费这些环境，见
+[私有执行租约](docs/design/zh/adapters/private-execution.md)。
 
-普通 QwenPaw App 启动为每个受管 Agent reply 分配任务 scope。工具私有环境需要显式接入原生执行 helper。严格 After 步骤使用 `on_error: withhold_result` 暂扣未核验输出。resident 策略变更采用滚动重启，`--reloadable` 保留独立的空闲更新路径。
+两种普通 resident 路径均准入严格 After 的 `on_error: withhold_result`，阻止未核验
+结果交付和后续派发。Post 之前已经发生的工具副作用继续生效。
+[统一安全示例](crates/aw-service/examples/aw.sdk-security.yaml) 通过
+`--agent qoder-sdk` 或 `--agent qwenpaw` 选择目标。resident 策略变更采用滚动重启；
+`--reloadable` 保留独立的空闲更新路径，不提供严格 Post 和私有执行租约。
 
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
@@ -147,7 +154,8 @@ Qoder SDK 1.0.56 / Worker 1.1.78 使用 Bridge 的 daemon 和 Query 工厂校验
 原生运行时，通过 `aw run` 显式注册每个 Query 的回调，
 可通过 `--reloadable` 显式启用已有 Query 的空闲策略更新；忙碌或清理未完成时返回 busy。
 参见 [SDK Worker 指南](../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)。
-支持调用前观察/拒绝和调用后观察，不包含外部 attach 或结果替换。
+支持调用前观察/拒绝、调用后观察和普通 resident Post 结果扣留，外部 attach 与结果
+替换仍不支持。
 
 
 Tokenless 重试建议会阻止原调用，Agent 需发起新调用并重新经过安全和原生权限检查。

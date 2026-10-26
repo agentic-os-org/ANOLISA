@@ -8,6 +8,7 @@ import { Reload } from "./reload.mjs";
 import { Resident, bounded } from "./resident.mjs";
 import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
 import { managedMcpServer } from "./mcp.mjs";
+export { PRIVATE_EXECUTION_VERSION, executionEnvironment, hookEnvironment } from "./private.mjs";
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
@@ -21,7 +22,9 @@ function configuration() {
   for (const hook of config.hooks)
     if (!["tool.before", "tool.after"].includes(hook.event) ||
         typeof hook.step !== "string" || !hook.step ||
-        !["block", "report"].includes(hook.on_error) || hook.replace_result !== false ||
+        !(["block", "report"].includes(hook.on_error) ||
+          (config.resident && hook.event === "tool.after" && hook.on_error === "withhold_result")) ||
+        hook.replace_result !== false ||
         !Number.isInteger(hook.budget_ms) || hook.budget_ms < 1 || hook.budget_ms > 55000)
       throw new Error("Invalid AW Qoder SDK hook route");
   return config;
@@ -131,6 +134,8 @@ export async function createQuery({ prompt, options }) {
     const resident = new Resident(config);
     return await resident.create(prompt, options, compose, ready);
   }
+  if (options.awExecutionFactory !== undefined)
+    throw new Error("Private execution requires an AW resident Query");
   const reload = config.reloadable ? new Reload(config) : undefined;
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);

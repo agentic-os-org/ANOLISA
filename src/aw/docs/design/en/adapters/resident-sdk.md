@@ -172,11 +172,16 @@ request, so each phase runs once. The child invocation binds the exact
 server/tool/arguments and Query; the pinned protocol supplies no parent model
 tool ID for that control request.
 
-Qoder admits `tool.before` observe/block and `tool.after` observe with
-`on_error: report`. Only `tool.before` admits `on_error: block`. Strict Post
-rejection is a bridge defense tested with an injected route below admission;
-strict Post admission and native acceptance remain under #9069. Result replacement
-and withholding remain unsupported. Ordinary Queries require evidence
+Qoder admits `tool.before` observe/block and `tool.after` observation. Ordinary
+resident Queries support after `on_error: withhold_result`: a required failure
+fences the Query and closes native transport before the callback responds. This
+prevents unverified result delivery and later dispatch; completed tool side
+effects remain. `report` preserves the original native result. Result replacement
+remains unsupported. Explicit managed handlers can acquire per-tool credentials
+through `awExecutionFactory`; see [private execution leases](private-execution.md).
+Native close, lease drain and original callback cleanup share a 60-second deadline.
+A failed tool with confirmed credential revocation still releases its scope;
+uncertain lease cleanup retains ownership and fences the worker. Ordinary Queries require evidence
 `mode: off`; launch admission rejects enabled AgentSight evidence because child
 scopes cannot inherit observation roots. Resident scopes reject policy reload.
 The separate [reloadable Qoder SDK path](../runtime/policy-reload.md#qoder-sdk-request-admission)
@@ -268,19 +273,22 @@ subsequent reuse, and process-group termination when cleanup never completes.
 These fixtures measure regression behavior; production load targets need actual
 SYSOM traffic, image dependencies and endpoints.
 
-Qoder's 17-case pinned parser suite covers identity and callback drain, 1,280
-completed calls, transport loss, managed MCP schemas/envelopes and Hook delegation,
-unmanaged MCP contexts, memory/evolution gate/result callbacks, `sendHostAction`
-fallback cleanup and native invalid-option rejection. Strict Post coverage injects
-a route below admission. The [native inventory](../../../../tests/native-matrix.json)
-records daemon and hosted-Worker acceptance separately from parser checks.
+Qoder's pinned parser suite covers identity and callback drain, 1,280 completed
+calls, transport loss, managed MCP schemas/envelopes and Hook delegation, unmanaged
+MCP contexts, memory/evolution gate/result callbacks, `sendHostAction` fallback
+cleanup and native invalid-option rejection. Ordinary resident Queries admit strict
+Post policies; hosted-Worker acceptance verifies failure, timeout, withheld output
+and stopped subsequent dispatch. Private-lease fixtures verify isolation, redaction,
+late acquisition cleanup and worker fencing. The
+[native inventory](../../../../tests/native-matrix.json) records daemon and
+hosted-Worker acceptance separately from parser checks.
 
 | Delivery | Boundary / remaining work |
 | --- | --- |
 | Owned scopes and resident factories (#8953/#8954) | Per-client context, owner death, bounded release, common startup |
 | Managed MCP (#8955) | Explicit handler source, native permissions, successful single-text adoption |
 | Long sessions (#8956) | Producer identity, callback drain, state reclamation, concurrent budgets |
-| Qoder resident adoption (#9069) | Strict Post admission and native acceptance, MCP parent tool correlation, per-tool credential leases and Hook-visible redaction remain pending; ordinary Queries require evidence `mode: off`. |
+| Qoder resident adoption (#9069) | Ordinary Queries support strict Post and per-handler private leases with Hook-visible redaction. MCP parent tool correlation, Post replacement and resident hot reload remain pending; ordinary Queries require evidence `mode: off`. |
 | Schema / BeforeModel (#8952) | Admit a request event/effect; classify actual tools/context after resume/compaction; preserve routing and cache/signature semantics; prove model-visible adoption. The relay supplies a request location, not these contracts. |
 | Retrieve (#8952) | Register recovery before lossy output; authenticate markers; tenant/task storage, TTL/quota, byte-exact retrieval, no recompression. |
 

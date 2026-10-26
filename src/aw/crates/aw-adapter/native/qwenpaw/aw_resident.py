@@ -14,7 +14,7 @@ from agentscope.middleware import MiddlewareBase
 from agentscope._utils._common import _json_loads_with_repair
 from agentscope.tool import ToolResponse, _toolkit
 
-from .aw_private import current_execution, public_execution
+from .aw_private import clear_execution, current_execution, public_execution, validate_execution
 from .aw_scope import Scope
 
 
@@ -163,6 +163,8 @@ class Invocation:
             "aw_invocation_id": self.identity,
             "tool_call": self.call.model_dump(mode="json"),
         }
+        if getattr(self, "mcp_dispatch", None) is not None:
+            result["aw_mcp_context"] = self.mcp_dispatch.payload()
         if response is not None:
             result["tool_response"] = response.model_dump(mode="json")
         # Redaction is mandatory before crossing any external Hook boundary.
@@ -193,6 +195,7 @@ class ResidentMiddleware(MiddlewareBase):
         self.lease = None
         self.private = False
         self.lease_context = None
+        self.lease_entered = False
         self.session = None
         self.agent = None
         self.reply_stream = None
@@ -229,10 +232,10 @@ class ResidentMiddleware(MiddlewareBase):
         if factory is not public_execution and getattr(self.context, "aw_environment_version", None) != 1:
             raise ResidentFailure("AW task credentials require the native environment extension")
         self.private = factory is not public_execution
-        self.lease_context = factory()
-        self.lease = await self.lease_context.__aenter__()
         stream = None
         try:
+            self.lease_context = factory()
+            await settle(self.acquire_lease())
             cwd = str(getattr(self.context, "workspace_dir", os.getcwd()))
             await self.scope.open(cwd, self.lease.hook_environment)
             self.check()
@@ -262,6 +265,21 @@ class ResidentMiddleware(MiddlewareBase):
                     raise
                 finally:
                     await settle(self.close_if_drained())
+
+    async def acquire_lease(self):
+        # Keep the original acquisition owned when a cancelled caller stops
+        # waiting. A late lease is retired without entering native execution.
+        try:
+            self.lease = await self.lease_context.__aenter__()
+            self.lease_entered = True
+            validate_execution(self.lease)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ResidentFailure("AW private execution acquisition failed") from None
+        finally:
+            if self.request_done:
+                await self.close_if_drained()
 
     async def drain_foreground(self):
         # Closing an outer AgentScope generator does not close its nested
@@ -310,7 +328,7 @@ class ResidentMiddleware(MiddlewareBase):
 
     async def close_if_drained(self):
         async with self.closing:
-            if not self.request_done or self.lease is None:
+            if not self.request_done or (self.lease is None and not self.lease_entered):
                 return
             if self.active and not (self.failed and all(call.drained() for call in self.active.values())):
                 return
@@ -323,15 +341,18 @@ class ResidentMiddleware(MiddlewareBase):
             finally:
                 try:
                     await self.lease_context.__aexit__(None, None, None)
-                except BaseException:
+                except asyncio.CancelledError:
                     self.failed = True
                     fence_cleanup()
                     raise
+                except Exception:
+                    self.failed = True
+                    fence_cleanup()
+                    raise ResidentFailure("AW private cleanup failed; worker restart required") from None
                 finally:
-                    self.lease.environment.clear()
-                    self.lease.hook_environment.clear()
-                    self.lease.secrets.clear()
+                    clear_execution(self.lease)
                     self.lease = None
+                    self.lease_entered = False
 
     def selected(self, hook, call):
         def matches(selectors):
@@ -403,6 +424,9 @@ class ResidentMiddleware(MiddlewareBase):
                 raise ResidentFailure("AW active invocation capacity exceeded")
             self.sequence += 1
             invocation = Invocation(self, call.model_copy(deep=True), self.sequence, frozen(arguments))
+            if getattr(tool, "is_mcp", False):
+                from .aw_mcp import bind_mcp_invocation
+                bind_mcp_invocation(tool, invocation)
             invocation.payload("tool.before")
             self.active[invocation.identity] = invocation
             try:

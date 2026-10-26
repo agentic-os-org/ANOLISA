@@ -89,6 +89,9 @@ correcting the cause. Other native Hook failures fence their owning Agent.
 
 ## Task-private execution extension
 
+The versioned lease fields and explicit consumer requirements are defined in
+[Private execution leases](private-execution.md).
+
 An application may supply `ctx.aw_execution_factory`, an async context manager
 that yields `PrivateExecution`, and declares `ctx.aw_environment_version = 1`.
 Its native tool subprocess boundary consumes `execution_environment()` explicitly

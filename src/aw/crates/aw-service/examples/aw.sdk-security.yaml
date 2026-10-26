@@ -1,0 +1,83 @@
+# Replace all absolute paths before use. Run the sec-core daemon separately.
+# Qoder: SDK 1.0.56 / Worker 1.1.78, Node.js >=22, AW bridge factories.
+# QwenPaw: 2.2.2.post1 / AgentScope 2.0.10, initialized QWENPAW_WORKING_DIR.
+# Use ordinary aw run; strict Post and private execution require resident mode.
+# Custom scripts read one normalized event and print a JSON boolean with exit 0.
+# The before script returns true to block; the after script returns true to observe.
+# A failed after check must exit nonzero so withhold_result stops delivery.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: resident-sdk-security
+spec:
+  daemon: {startup: on_demand, endpoint: auto, state_dir: auto}
+  execution: {guarantee: native_hook, default_event_budget_ms: 5000}
+  audit: {enabled: true, payload: metadata_only}
+  agents:
+    qoder-sdk:
+      adapter: qoder-sdk
+      argv: [/absolute/path/to/node, /absolute/application/worker.mjs]
+    qwenpaw:
+      adapter: qwenpaw
+      argv: [/absolute/path/to/qwenpaw, app]
+  providers:
+    security:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv:
+          - /absolute/path/to/aw-provider-sec-core
+          - --cli
+          - /absolute/path/to/agent-sec-cli
+          - --socket
+          - /absolute/path/to/sec-core.sock
+      timeout_ms: 2500
+      max_output_bytes: 4096
+      config:
+        version: 1
+        mode: block
+        unmapped_tool: error
+        tools:
+          bash: {language: bash, input_pointer: /command}
+          execute_shell_command: {language: bash, input_pointer: /command}
+    before-check:
+      transport:
+        type: stdio
+        location: agent
+        argv: [/absolute/path/to/python3, /absolute/application/pre-check.py]
+      timeout_ms: 1000
+      max_output_bytes: 32
+    after-check:
+      transport:
+        type: stdio
+        location: agent
+        argv: [/absolute/path/to/python3, /absolute/application/post-check.py]
+      timeout_ms: 1000
+      max_output_bytes: 32
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: scan-shell
+          provider: security
+          operation: scan_code
+          match:
+            tools: ["native:qoder-sdk:Bash", "native:qwenpaw:execute_shell_command"]
+          effects: [observe, block]
+          on_error: block
+        - id: custom-before
+          provider: before-check
+          effects: [block]
+          reason_code: application_policy
+          on_error: block
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: custom-after
+          provider: after-check
+          effects: [observe]
+          reason_code: application_result_checked
+          on_error: withhold_result
