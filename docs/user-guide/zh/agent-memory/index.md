@@ -250,9 +250,11 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_snapshot_list` | — | — | 按 `created_at` 升序数组 |
 | `mem_snapshot_restore` | `id` | — | `restored <id>` |
 | `mem_log` | — | `limit`（默认 20）、`path` | `{hash, summary, author, time}` 数组（需启用 git） |
-| `mem_revert` | `path` | — | `reverted <path> (commit <hash>)`（需启用 git） |
+| `mem_revert` | `path` | — | `reverted <path> (from commit <hash>)`（需启用 git） |
 | `mem_consolidate` | — | — | `consolidation complete: N facts written` |
 | `mem_compact` | — | — | `compacted N files to cold storage` |
+
+`mem_revert` 仅从 HEAD 恢复指定文件的工作区内容，保持 Git 历史和暂存区不变（包括该文件已暂存的修改），返回恢复来源的 HEAD 哈希。因此，之后若不重新暂存就手动提交，仍可能提交恢复前的暂存区内容；若希望提交恢复后的文件，请显式重新暂存该文件。其他文件仍可单独撤销。此行为不受 `memory.git.auto_commit` 开关影响；普通写入工具保留原有的自动提交行为。
 
 ### 主权与导入导出（13 个）
 

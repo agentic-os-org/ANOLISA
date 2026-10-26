@@ -372,12 +372,12 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Revert a single file to its content at HEAD, then commit the revert. Useful for undoing the most recent uncommitted edit. Errors when git versioning isn't enabled."
+        description = "Restore a single file's working-tree content from HEAD without changing the Git index or committing other files. Returns the source commit hash. Useful for undoing an uncommitted edit. Errors when git versioning isn't enabled."
     )]
     async fn mem_revert(&self, #[tool(param)] path: String) -> ToolResult {
         self.svc
             .mem_revert(&path)
-            .map(|hash| format!("reverted {path} (commit {hash})"))
+            .map(|hash| format!("reverted {path} (from commit {hash})"))
             .map_err(|e| fmt_err("mem_revert failed", e))
     }
 

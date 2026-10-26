@@ -262,9 +262,11 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `mem_snapshot_list` | — | — | array sorted by `created_at` |
 | `mem_snapshot_restore` | `id` | — | `restored <id>` |
 | `mem_log` | — | `limit` (default 20), `path` | `{hash, summary, author, time}` array (requires git) |
-| `mem_revert` | `path` | — | `reverted <path> (commit <hash>)` (requires git) |
+| `mem_revert` | `path` | — | `reverted <path> (from commit <hash>)` (requires git) |
 | `mem_consolidate` | — | — | `consolidation complete: N facts written` |
 | `mem_compact` | — | — | `compacted N files to cold storage` |
+
+`mem_revert` restores only the requested file's working-tree content from HEAD. It leaves Git history and the index unchanged, including any staged changes to that file, and returns the source HEAD hash. A later manual commit without restaging can therefore commit the pre-restore index contents; stage the restored file explicitly if that is what you intend to commit. Other files remain available for separate undo operations. This applies with either value of `memory.git.auto_commit`; ordinary write tools retain their existing auto-commit behavior.
 
 ### Sovereignty & import/export (13)
 
