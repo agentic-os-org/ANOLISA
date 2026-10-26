@@ -439,16 +439,6 @@ class OpenClawExternalAgent(BaseAgent):
                 _LOG_PREFIX, iteration, returncode, parsed_label,
             )
 
-            # Extract session_id from first call for context continuity.
-            if not oc_session_id and isinstance(parsed, dict):
-                agent_meta = (parsed.get("meta") or {}).get("agentMeta") or {}
-                oc_session_id = agent_meta.get("sessionId")
-                if oc_session_id:
-                    self.logger.info(
-                        "%s: session established (%s...)",
-                        _LOG_PREFIX, oc_session_id[:12],
-                    )
-
             if not parsed:
                 self.logger.debug(
                     "%s: stdout(first %d): %s",
@@ -479,10 +469,27 @@ class OpenClawExternalAgent(BaseAgent):
 
                 if returncode != 0:
                     final_result = self._build_result(
-                        returncode, stdout_text, stderr_text,
-                        parsed, container_id, iteration, all_executions,
+                        returncode,
+                        stdout_text,
+                        stderr_text,
+                        parsed,
+                        container_id,
+                        iteration,
+                        all_executions,
                     )
                     break
+
+            # A successful retry response also establishes the session that the
+        # following rounds need.
+            if not oc_session_id and isinstance(parsed, dict):
+                agent_meta = (parsed.get("meta") or {}).get("agentMeta") or {}
+                oc_session_id = agent_meta.get("sessionId")
+                if oc_session_id:
+                    self.logger.info(
+                        "%s: session established (%s...)",
+                        _LOG_PREFIX,
+                        oc_session_id[:12],
+                    )
 
             # Extract commands from parsed response.
             commands = self._extract_commands(parsed)
@@ -929,10 +936,18 @@ class OpenClawExternalAgent(BaseAgent):
                     >= no_output_timeout_sec
                 ):
                     proc.kill()
+                    # The caller decides whether to retry from the returned stderr, so a log
+            # line cannot substitute for the failure reason.
+                    stderr_chunks.append(
+                        f"\n{_LOG_PREFIX}: no stdout for {no_output_timeout_sec}s "
+                        "(likely API hang)\n".encode("utf-8")
+                    )
                     _log.warning(
                         "%s: no stdout for %ds after %ds elapsed, "
                         "killing process (likely API hang)",
-                        _LOG_PREFIX, no_output_timeout_sec, int(elapsed),
+                        _LOG_PREFIX,
+                        no_output_timeout_sec,
+                        int(elapsed),
                     )
                     break
 
