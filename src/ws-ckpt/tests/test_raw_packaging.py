@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 COMPONENT = Path(__file__).resolve().parents[1]
-CONTRACT = COMPONENT / ".anolisa/component.toml"
+CONTRACT = COMPONENT / "packaging/anolisa/raw/component.toml"
 PACKER = COMPONENT / "packaging/raw/package.sh"
 
 
@@ -27,7 +27,7 @@ class WsCkptPackagingTests(unittest.TestCase):
         self.contract = CONTRACT
         self.manifest = tomllib.loads(CONTRACT.read_text())
         self.version = self.manifest["component"]["version"]
-        for relative in ("scripts", "src/skills", "src/systemd", "src/plugins/hermes"):
+        for relative in ("scripts", "src/skills", "packaging/systemd", "src/plugins/hermes"):
             shutil.copytree(COMPONENT / relative, self.source / relative)
         binary = self.source / "src/target/release/ws-ckpt"
         binary.parent.mkdir(parents=True)
@@ -48,9 +48,15 @@ class WsCkptPackagingTests(unittest.TestCase):
         cache.mkdir(exist_ok=True)
         (cache / "fixture.pyc").write_bytes(b"cache")
         shutil.copyfile(COMPONENT / "src/Cargo.toml", self.source / "src/Cargo.toml")
-        shutil.copyfile(COMPONENT / "component.toml", self.source / "component.toml")
         shutil.copyfile(COMPONENT / "LICENSE", self.source / "LICENSE")
         shutil.copyfile(COMPONENT / "README.md", self.source / "README.md")
+        shutil.copyfile(COMPONENT / "Makefile", self.source / "Makefile")
+        shutil.copytree(
+            COMPONENT / "packaging",
+            self.source / "packaging",
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
         self.metadata = binary.parent / "ws-ckpt-build.toml"
         self.metadata.write_text(
             f'version = "{self.version}"\ntarget_os = "linux"\ntarget_arch = "x86_64"\n'
@@ -59,17 +65,22 @@ class WsCkptPackagingTests(unittest.TestCase):
         self.arch = "x86_64"
 
     def pack(
-        self, registry: str = "registry", check: bool = True
+        self,
+        registry: str = "registry",
+        check: bool = True,
+        command: str = "package",
+        default_contract: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(PACKER), "package"],
+            [str(PACKER), command],
             env={
                 **os.environ,
                 "WS_CKPT_SOURCE_DIR": str(self.source),
-                "RAW_CONTRACT": str(self.contract),
+                "RAW_CONTRACT": "" if default_contract else str(self.contract),
                 "TARGET_OS": "linux",
                 "TARGET_ARCH": self.arch,
                 "OUTPUT_DIR": str(self.root / registry),
+                "DESTDIR": str(self.root / "legacy-stage"),
                 "SOURCE_DATE_EPOCH": "1700000000",
                 "WS_CKPT_BUILD_METADATA": str(self.metadata),
             },
@@ -124,10 +135,38 @@ class WsCkptPackagingTests(unittest.TestCase):
             ["bash", "-c", 'source "$1/lib-openclaw.sh"', "bash", str(adapter)], check=True
         )
         hermes = payload / "share/anolisa/runtime/ws-ckpt/plugins/hermes"
+        self.assertEqual(
+            (hermes / "cron.py").read_bytes(),
+            (COMPONENT / "src/plugins/hermes/cron.py").read_bytes(),
+        )
         self.assertFalse((hermes / "tests").exists())
         self.assertFalse(list(hermes.rglob("*.pyc")))
         self.assertFalse(list(hermes.rglob("__pycache__")))
         self.assertFalse((payload / "scripts").exists())
+
+    def test_legacy_stage_reuses_inventory_without_live_config(self) -> None:
+        self.pack(command="stage", default_contract=True)
+        payload = self.root / "legacy-stage"
+        for entry in self.manifest["component"]["layout"]["files"]:
+            self.assertTrue((payload / entry["source"]).exists(), entry["source"])
+        unit = payload / "share/anolisa/ws-ckpt/ws-ckpt.service"
+        template = (COMPONENT / "packaging/systemd/ws-ckpt.service.in").read_text()
+        self.assertEqual(unit.read_text(), template)
+        self.assertIn("ExecStart={bindir}/ws-ckpt daemon", unit.read_text())
+        self.assertIn("ExecReload={bindir}/ws-ckpt reload", unit.read_text())
+        unit_mapping = next(
+            item
+            for item in self.manifest["component"]["layout"]["files"]
+            if item["source"] == "share/anolisa/ws-ckpt/ws-ckpt.service"
+        )
+        self.assertEqual(unit_mapping["render"], "anolisa-paths-v1")
+        self.assertGreaterEqual(
+            tuple(
+                map(int, self.manifest["component"]["contract"]["min_anolisa_version"].split("."))
+            ),
+            (0, 2, 17),
+        )
+        self.assertFalse((payload / "share/anolisa/ws-ckpt/config.toml").exists())
 
     def test_archive_is_reproducible_and_metadata_matches(self) -> None:
         self.pack()

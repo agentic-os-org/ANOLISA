@@ -1,0 +1,26 @@
+# ws-ckpt workspace snapshot daemon
+#
+# Render {bindir} from SERVICE_BINDIR for a custom or legacy installation.
+# The default system unit is kept in ws-ckpt.service.
+
+[Unit]
+Description=ws-ckpt workspace snapshot daemon
+After=local-fs.target
+# Count the initial start plus three retries within five minutes.
+StartLimitIntervalSec=300
+StartLimitBurst=4
+
+[Service]
+Type=simple
+ExecStart={bindir}/ws-ckpt daemon
+ExecReload={bindir}/ws-ckpt reload
+Restart=on-failure
+RestartSec=10
+Environment=RUST_LOG=info
+StateDirectory=ws-ckpt
+StateDirectoryMode=0755
+RuntimeDirectory=ws-ckpt
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

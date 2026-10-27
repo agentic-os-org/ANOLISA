@@ -39,8 +39,17 @@ sudo yum install ws-ckpt
 
 ### Option 3: Source build (developers)
 
+From the repository root on Linux:
+
 ```bash
-cd src/ws-ckpt && make build
+make -C src/ws-ckpt build
+```
+
+The executable is `src/ws-ckpt/src/target/release/ws-ckpt`. To install it
+system-wide after building:
+
+```bash
+sudo make -C src/ws-ckpt install
 ```
 
 ---

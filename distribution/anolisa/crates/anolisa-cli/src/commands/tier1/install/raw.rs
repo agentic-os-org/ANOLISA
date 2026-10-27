@@ -1229,7 +1229,7 @@ mod tests {
 
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         for contract in [
-            "../../../../src/ws-ckpt/.anolisa/component.toml",
+            "../../../../src/ws-ckpt/packaging/anolisa/raw/component.toml",
             "../../manifests/components/ws-ckpt/component.toml",
         ] {
             let manifest = ComponentManifest::from_file(&manifest_dir.join(contract))

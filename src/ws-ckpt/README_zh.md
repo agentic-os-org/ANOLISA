@@ -33,11 +33,10 @@ ws-ckpt/
 │   │   ├── common/            # 共享类型、IPC 协议编解码
 │   │   ├── daemon/            # 守护进程核心逻辑
 │   │   └── cli/               # 命令行客户端
-│   ├── systemd/               # systemd service 文件
 │   └── skills/                # OS Skills
 ├── docs/                      # 项目文档
-├── ws-ckpt.spec.in            # RPM 规格模板
-├── build-rpm.sh               # RPM 打包脚本
+├── packaging/                 # RPM/raw 规格、服务资源及交付规则
+├── build-rpm.sh               # packaging/rpm/build.sh 的兼容入口
 └── .gitignore
 ```
 
@@ -56,8 +55,7 @@ ws-ckpt/
 ### 编译
 
 ```bash
-cd src
-cargo build --release
+make build
 ```
 
 [维护者说明：Raw 打包与 GitHub 构建](../../contribute/zh/ws-ckpt/packaging.md)

@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.2.17"
 
 [backends.rpm]
 package = "ws-ckpt"
@@ -65,6 +65,7 @@ target = "{datadir}/skills/ws-ckpt"
 source = "share/anolisa/ws-ckpt/ws-ckpt.service"
 target = "{unitdir}/ws-ckpt.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.layout.files]]
 source = "share/anolisa/ws-ckpt/config.toml.sample"

@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="${WS_CKPT_SOURCE_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BIN_DIR="${BIN_DIR:-$SOURCE_ROOT/src/target/release}"
-CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/.anolisa/component.toml}"
+CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/packaging/anolisa/raw/component.toml}"
 TARGET_OS="${TARGET_OS:-linux}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 BUILD_METADATA="${WS_CKPT_BUILD_METADATA:-$BIN_DIR/ws-ckpt-build.toml}"
@@ -17,6 +17,10 @@ die() {
 }
 
 case "$COMMAND" in stage | package) ;; *) die "usage: $0 {stage|package}" ;; esac
+# Raw manifests describe the legacy archive tree, not arbitrary install layouts.
+if [ "${AWPRJ+x}" = x ] && [ "$AWPRJ" != anolisa ]; then
+    die "raw payload requires AWPRJ=anolisa; use make install DESTDIR=<temporary-root> for independent layouts"
+fi
 case "$TARGET_OS/$TARGET_ARCH" in
     linux/x86_64 | linux/aarch64) ;;
     *) die "unsupported ws-ckpt target: $TARGET_OS/$TARGET_ARCH" ;;
@@ -43,33 +47,17 @@ stage_payload() {
         die "staging directory must be empty: $stage"
     fi
     local runtime="$stage/share/anolisa/runtime"
-    install -d -m 0755 "$stage/.anolisa" "$stage/bin" \
-        "$runtime/skills" "$runtime/ws-ckpt/plugins/openclaw" \
-        "$stage/share/anolisa/skills" "$stage/share/anolisa/ws-ckpt" \
-        "$stage/share/anolisa/hooks/ws-ckpt" "$stage/share/doc/ws-ckpt"
+    install -d -m 0755 "$stage/.anolisa" "$stage/share/anolisa/hooks/ws-ckpt" "$stage/share/doc/ws-ckpt"
     install -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
-    install -m 0755 "$BIN_DIR/ws-ckpt" "$stage/bin/"
-    cp -pr "$SOURCE_ROOT/src/skills/ws-ckpt" "$runtime/skills/ws-ckpt"
-    cp -pr "$SOURCE_ROOT/src/skills/ws-ckpt" "$stage/share/anolisa/skills/ws-ckpt"
-    install -m 0644 "$SOURCE_ROOT/src/systemd/ws-ckpt.service" \
-        "$SOURCE_ROOT/src/config.toml.sample" "$stage/share/anolisa/ws-ckpt/"
+    make -s -C "$SOURCE_ROOT" install-core-files install-plugin-files install-skills-files \
+        DESTDIR="$stage" BINARY="$BIN_DIR/ws-ckpt" BINDIR=/bin \
+        SYSTEMD_SYSTEM_DIR=/share/anolisa/ws-ckpt CONFIG_DIR=/share/anolisa/ws-ckpt \
+        SERVICE_BINDIR='{bindir}' INSTALL_LIVE_CONFIG=0 \
+        RUNTIME_SKILLS_DIR=/share/anolisa/runtime/skills/ws-ckpt \
+        COSH_SKILLS_DIR=/share/anolisa/skills/ws-ckpt \
+        ADAPTER_DIR=/share/anolisa/adapters/ws-ckpt PLUGINS_DIR=/share/anolisa/runtime/ws-ckpt/plugins
     install -m 0755 "$SCRIPT_DIR/assets/hooks/pre-uninstall.sh" \
         "$stage/share/anolisa/hooks/ws-ckpt/"
-    for framework in openclaw hermes; do
-        local adapter="$stage/share/anolisa/adapters/ws-ckpt/$framework"
-        install -d -m 0755 "$adapter"
-        install -m 0644 "$SOURCE_ROOT/scripts/$framework/lib-discover.sh" "$adapter/"
-        for action in detect install uninstall; do
-            install -m 0755 "$SOURCE_ROOT/scripts/$framework/$action-$framework.sh" "$adapter/"
-        done
-    done
-    install -m 0644 "$SOURCE_ROOT/scripts/openclaw/lib-openclaw.sh" \
-        "$stage/share/anolisa/adapters/ws-ckpt/openclaw/"
-    install -m 0644 "$SOURCE_ROOT/src/plugins/openclaw/package.json" \
-        "$SOURCE_ROOT/src/plugins/openclaw/openclaw.plugin.json" \
-        "$runtime/ws-ckpt/plugins/openclaw/"
-    cp -pr "$SOURCE_ROOT/src/plugins/openclaw/dist" "$runtime/ws-ckpt/plugins/openclaw/"
-    cp -pr "$SOURCE_ROOT/src/plugins/hermes" "$runtime/ws-ckpt/plugins/hermes"
     find "$runtime/ws-ckpt/plugins" \
         \( -type d \( -name __pycache__ -o -name __tests__ -o -name tests \) \
         -o -type f \( -name '*.pyc' -o -name '.coverage' \) \) -exec rm -rf {} +

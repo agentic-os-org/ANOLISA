@@ -58,7 +58,7 @@ install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes
 
 install -p -m 0755 src/target/release/ws-ckpt %{buildroot}%{_localbindir}/ws-ckpt
-install -p -m 0644 src/systemd/ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
+install -p -m 0644 packaging/systemd/ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
 install -p -m 0644 src/config.toml.sample %{buildroot}/etc/ws-ckpt/config.toml.sample
 # Ship the live config too; %config(noreplace) preserves admin edits on
 # upgrade and saves them as .rpmsave on erase (issue #3070).
@@ -72,7 +72,7 @@ find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
     \( -type d -name __pycache__ -o -type d -name tests \
        -o -type f -name '*.pyc' -o -type f -name '.coverage' \) \
     -exec rm -rf {} +
-install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/ws-ckpt/component.toml
+install -p -m 0644 packaging/anolisa/rpm/component.toml %{buildroot}%{_datadir}/anolisa/components/ws-ckpt/component.toml
 install -p -m 0644 scripts/openclaw/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
 install -p -m 0644 scripts/openclaw/lib-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
 install -p -m 0755 scripts/openclaw/detect-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/

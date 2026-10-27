@@ -35,11 +35,10 @@ ws-ckpt/
 │   │   ├── common/            # Shared types, IPC protocol codec
 │   │   ├── daemon/            # Daemon core logic
 │   │   └── cli/               # CLI client
-│   ├── systemd/               # systemd service files
 │   └── skills/                # OS Skills
 ├── docs/                      # Documentation
-├── ws-ckpt.spec.in            # RPM spec template
-├── build-rpm.sh               # RPM build script
+├── packaging/                 # RPM/raw specs, service resources and delivery rules
+├── build-rpm.sh               # Compatibility wrapper for packaging/rpm/build.sh
 └── .gitignore
 ```
 
@@ -60,8 +59,7 @@ the first `checkpoint`.
 ### Build
 
 ```bash
-cd src
-cargo build --release
+make build
 ```
 
 [Maintainer guide: Raw packaging and GitHub builds](../../contribute/en/ws-ckpt/packaging.md)

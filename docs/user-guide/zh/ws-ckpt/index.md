@@ -39,8 +39,16 @@ sudo yum install ws-ckpt
 
 ### 方式三：源码编译（开发者）
 
+在 Linux 的仓库根目录执行：
+
 ```bash
-cd src/ws-ckpt && make build
+make -C src/ws-ckpt build
+```
+
+可执行文件位于 `src/ws-ckpt/src/target/release/ws-ckpt`。构建完成后，如需安装到系统：
+
+```bash
+sudo make -C src/ws-ckpt install
 ```
 
 ---

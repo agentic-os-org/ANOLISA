@@ -65,7 +65,7 @@ def config_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ConfigHar
                 }
             }
         },
-        lines=[cron._build_cron_line(old_workspace, "0 * * * *")],
+        lines=[cron._build_cron_line(old_workspace, "0 * * * *", "/usr/bin/ws-ckpt")],
         writes=[],
         commands=[],
     )
@@ -79,6 +79,7 @@ def config_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ConfigHar
     monkeypatch.setattr(cron, "_LOCK_PATH", str(tmp_path / "cron.lock"))
     monkeypatch.setattr(cron, "_read_crontab", lambda: list(harness.lines))
     monkeypatch.setattr(cron, "_write_crontab", harness.write_cron)
+    monkeypatch.setattr(cron.shutil, "which", lambda _command: "/usr/bin/ws-ckpt")
     monkeypatch.setattr(tools, "_run_ws_ckpt_cmd", harness.run_command)
     return harness
 
