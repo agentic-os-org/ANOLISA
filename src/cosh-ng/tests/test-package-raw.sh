@@ -7,16 +7,16 @@ TMP="$(mktemp -d /tmp/cosh-ng-raw-package-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 SOURCE="$TMP/cosh-ng"
-LINUX_CONTRACT="$SOURCE/.anolisa/component.toml"
-MACOS_CONTRACT="$SOURCE/.anolisa/component.macos.toml"
+LINUX_CONTRACT="$SOURCE/packaging/anolisa/raw/component.toml"
+MACOS_CONTRACT="$SOURCE/packaging/anolisa/raw/component.macos.toml"
 VERSION="$(awk -F'"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
 
 install -d -m 0755 \
-    "$SOURCE/.anolisa" \
+    "$SOURCE/packaging/anolisa/raw" \
     "$SOURCE/packaging/systemd" \
     "$SOURCE/skills/manage-task-checkpoints"
-install -p -m 0644 "$ROOT/.anolisa/component.toml" "$LINUX_CONTRACT"
-install -p -m 0644 "$ROOT/.anolisa/component.macos.toml" "$MACOS_CONTRACT"
+install -p -m 0644 "$ROOT/packaging/anolisa/raw/component.toml" "$LINUX_CONTRACT"
+install -p -m 0644 "$ROOT/packaging/anolisa/raw/component.macos.toml" "$MACOS_CONTRACT"
 install -p -m 0644 "$ROOT/Cargo.toml" "$SOURCE/Cargo.toml"
 install -p -m 0644 "$ROOT/LICENSE" "$SOURCE/LICENSE"
 install -p -m 0644 "$ROOT/README.md" "$SOURCE/README.md"
@@ -36,7 +36,7 @@ test_rpm_systemd_unit_render() {
                 print
                 exit
             }
-        ' "$ROOT/cosh-ng.spec.in"
+        ' "$ROOT/packaging/rpm/cosh-ng.spec.in"
     )"
     rpm_libexec_cosh="$(
         printf '%s\n' "$rpm_libexec_cosh_macro" |
@@ -50,7 +50,7 @@ test_rpm_systemd_unit_render() {
         exit 1
     fi
     grep -Fq "s|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g" \
-        "$ROOT/cosh-ng.spec.in" || {
+        "$ROOT/packaging/rpm/cosh-ng.spec.in" || {
         echo "ERROR: RPM unit render does not use the cosh libexec macro" >&2
         exit 1
     }
@@ -259,14 +259,14 @@ test_native_without_metadata() {
     native_bins="$TMP/native-bins"
     native_stage="$TMP/native-stage"
     install -d -m 0755 \
-        "$native_source/.anolisa" \
+        "$native_source/packaging/anolisa/raw" \
         "$native_source/packaging/systemd" \
         "$native_source/skills/manage-task-checkpoints" \
         "$native_bins"
     sed "0,/version = \"$VERSION\"/s//version = \"$native_version\"/" \
         "$ROOT/Cargo.toml" > "$native_source/Cargo.toml"
     sed "0,/version = \"$VERSION\"/s//version = \"$native_version\"/" \
-        "$ROOT/.anolisa/component.toml" > "$native_source/.anolisa/component.toml"
+        "$ROOT/packaging/anolisa/raw/component.toml" > "$native_source/packaging/anolisa/raw/component.toml"
     install -p -m 0644 "$ROOT/LICENSE" "$native_source/LICENSE"
     install -p -m 0644 "$ROOT/README.md" "$native_source/README.md"
     install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
@@ -387,9 +387,9 @@ if grep -Fq -- '--security-audit=' \
     exit 1
 fi
 if grep -Fq 'packaging/systemd/cosh-gateway-acp@.service.in' \
-    "$ROOT/cosh-ng.spec.in" || \
+    "$ROOT/packaging/rpm/cosh-ng.spec.in" || \
     grep -Fxq '%{_unitdir}/cosh-gateway-acp@.service' \
-        "$ROOT/cosh-ng.spec.in"; then
+        "$ROOT/packaging/rpm/cosh-ng.spec.in"; then
     echo "ERROR: RPM spec still ships the retired split ACP Gateway unit" >&2
     exit 1
 fi
@@ -541,9 +541,9 @@ for binary in cosh-core cosh-gateway cosh-shell; do
 done
 test ! -e "$MACOS_X64_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/skills/manage-task-checkpoints"
-test -z "$(grep -F 'libssl' "$ROOT/.anolisa/component.toml" || true)"
-grep -Fq 'source = "bin/cosh"' "$ROOT/.anolisa/component.toml"
+test -z "$(grep -F 'libssl' "$ROOT/packaging/anolisa/raw/component.toml" || true)"
+grep -Fq 'source = "bin/cosh"' "$ROOT/packaging/anolisa/raw/component.toml"
 grep -Fq 'source = "libexec/anolisa/cosh-ng/cosh-shell"' \
-    "$ROOT/.anolisa/component.toml"
+    "$ROOT/packaging/anolisa/raw/component.toml"
 
 echo "cosh-ng component-owned raw package tests passed"

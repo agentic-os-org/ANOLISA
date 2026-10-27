@@ -113,6 +113,7 @@ run_raw_packaging() {
     return 1
   fi
   shellcheck \
+    packaging/payload.sh \
     packaging/raw/package.sh \
     packaging/raw/assets/bin/cosh \
     packaging/raw/assets/bin/cosh-switch \

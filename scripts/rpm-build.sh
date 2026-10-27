@@ -982,7 +982,7 @@ build_cosh_ng() {
     log "Building RPM: cosh-ng"
     log "=========================================="
 
-    local spec_in="${COSH_DIR}/cosh-ng.spec.in"
+    local spec_in="${COSH_DIR}/packaging/rpm/cosh-ng.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -1014,7 +1014,7 @@ build_cosh_ng() {
             print value
             exit
         }
-    ' "${COSH_DIR}/component.toml")
+    ' "${COSH_DIR}/packaging/anolisa/rpm/component.toml")
     if [ "$component_name" != "$pkg_name" ]; then
         err "cosh-ng identity mismatch: RPM name '${pkg_name}', component name '${component_name}'"
         return 1
@@ -1024,7 +1024,7 @@ build_cosh_ng() {
         return 1
     fi
     local manifest_path="%{_datadir}/anolisa/components/${component_name}/component.toml"
-    if ! grep -Fq "install -m 0644 component.toml %{buildroot}${manifest_path}" "$spec_in" \
+    if ! grep -Fq "install -m 0644 packaging/anolisa/rpm/component.toml %{buildroot}${manifest_path}" "$spec_in" \
         || ! grep -Fqx "$manifest_path" "$spec_in"; then
         err "cosh-ng spec must install and own ${manifest_path}"
         return 1
@@ -1054,8 +1054,7 @@ build_cosh_ng() {
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"
 
-    # cosh-ng ships component.toml at repo root — must be in the tarball because
-    # spec %install does `install -m 0644 component.toml ...`.
+    # Include the component-owned packaging metadata consumed by the RPM spec.
     tar -cf - -C "$COSH_DIR" \
         --exclude='target' \
         --exclude='.git' \

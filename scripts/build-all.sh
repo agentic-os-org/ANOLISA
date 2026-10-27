@@ -2102,7 +2102,7 @@ runtime_manifest_path() {
         cosh)      echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/cosh/component.toml" ;;
         skills)    echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/os-skills/component.toml" ;;
         sec-core)  echo "$PROJECT_ROOT/src/agent-sec-core/.anolisa/component.toml" ;;
-        cosh-ng)   echo "$PROJECT_ROOT/src/cosh-ng/.anolisa/component.toml" ;;
+        cosh-ng)   echo "$PROJECT_ROOT/src/cosh-ng/packaging/anolisa/raw/component.toml" ;;
         tokenless) echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/tokenless/component.toml" ;;
         ws-ckpt)   echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/ws-ckpt/component.toml" ;;
         memory)    echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/agent-memory/component.toml" ;;
