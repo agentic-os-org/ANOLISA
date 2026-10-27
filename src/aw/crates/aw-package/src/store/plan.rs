@@ -2,12 +2,11 @@
 
 mod capacity;
 mod install;
-mod runtime;
 mod snapshot;
 mod uninstall;
 
-use crate::{
-    database::{DatabasePaths, Scope},
+use crate::store::{
+    database::{DatabasePaths, PackageManager, Scope},
     transaction::ChangeSet,
     Error, MutationFailure, MutationReport, MutationResult, Result,
 };
@@ -41,7 +40,7 @@ pub struct PackageSummary {
 pub struct FileChange {
     /// Add or remove operation for this relative file.
     pub action: Action,
-    /// Path relative to the selected prefix.
+    /// Relative payload path below the installation prefix.
     pub path: String,
     /// Expected content digest.
     pub sha256: String,
@@ -91,8 +90,6 @@ pub struct PackagePlan {
     pub expected_generation: Option<u64>,
     /// Existing stable ID; new installation IDs are assigned only during execution.
     pub installation_id: Option<String>,
-    /// Whether execution will archive and replace old component records.
-    pub register_legacy: bool,
     /// Packages to be added.
     pub added: Vec<PackageSummary>,
     /// Packages to be removed.
@@ -107,6 +104,8 @@ pub struct PackagePlan {
     pub(crate) changes: Option<ChangeSet>,
     #[serde(skip)]
     pub(crate) database_root: PathBuf,
+    #[serde(skip)]
+    pub(crate) database_manager: PackageManager,
 }
 
 impl PackagePlan {
@@ -136,7 +135,21 @@ impl PackagePlan {
 /// # Errors
 /// Rejects malformed input, unsafe paths and inconsistent database records.
 pub fn install(paths: &DatabasePaths, bundle: &Path, prefix: &Path) -> Result<PackagePlan> {
-    install::plan(paths, bundle, prefix)
+    install_checked(paths, bundle, prefix, |_| Ok(()))
+}
+
+/// Check application admission against the same verified bundle used to derive the plan.
+/// The callback runs before reading installation state and cannot replace the inspected input.
+///
+/// # Errors
+/// Returns admission failures as well as invalid bundle, layout and installation errors.
+pub fn install_checked(
+    paths: &DatabasePaths,
+    bundle: &Path,
+    prefix: &Path,
+    validate: impl FnOnce(&crate::store::open_bundle::Bundle) -> Result<()>,
+) -> Result<PackagePlan> {
+    install::plan(paths, bundle, prefix, validate)
 }
 
 /// Derive a selective removal plan; an empty ID list selects the whole prefix.
@@ -158,11 +171,14 @@ pub fn execute(paths: &DatabasePaths, plan: &PackagePlan, cancel: &AtomicBool) -
             report: MutationReport::default(),
         });
     };
-    if paths.scope() != plan.scope || paths.root != plan.database_root {
+    if paths.scope() != plan.scope
+        || paths.root != plan.database_root
+        || paths.manager() != plan.database_manager
+    {
         return Err(MutationFailure {
             error: Error::Invalid("package plan scope changed".into()),
             report: MutationReport::default(),
         });
     }
-    crate::transaction::apply(paths, changes, cancel)
+    crate::store::transaction::apply(paths, changes, cancel)
 }

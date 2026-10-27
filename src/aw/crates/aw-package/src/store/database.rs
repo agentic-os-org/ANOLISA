@@ -3,17 +3,18 @@
 use aw_exec::PackageLock;
 mod doctor;
 mod json;
-mod legacy;
 mod paths;
 mod read;
 mod registration;
 mod validation;
 
 pub use doctor::{DoctorIssue, DoctorIssueCode, DoctorReport};
-pub use paths::{DatabasePaths, SYSTEM_DATABASE_ROOT};
+pub use paths::{
+    DatabasePaths, PackageManager, ANOLISA_SYSTEM_DATABASE_ROOT, SYSTEM_DATABASE_ROOT,
+};
 pub use registration::RegistrationPointer;
 
-use crate::{description::ProviderDeclaration, Payload, Result};
+use crate::store::{description::ProviderDeclaration, Payload, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,16 +28,14 @@ pub const MAX_INSTALLATIONS: usize = 1024;
 /// Maximum number of packages accepted in a single installation.
 pub const MAX_PACKAGES: usize = 1024;
 
-/// Storage authority used for this query; legacy records are not silently registered.
+/// Storage authority used for this query.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InventorySource {
-    /// No package database or selected legacy records exist.
+    /// No package database exists.
     Absent,
     /// Records came from the central installed-package database.
     Database,
-    /// Records came from the explicitly selected prefix's old `.aw-packages` files.
-    Legacy,
 }
 
 /// Privilege boundary of an installation; separate user databases are never combined.
@@ -47,8 +46,6 @@ pub enum Scope {
     User,
     /// Administrator-managed packages.
     System,
-    /// Legacy records did not preserve their original privilege scope.
-    Unknown,
 }
 
 /// Manager responsible for changing this installation's files.
@@ -70,8 +67,6 @@ pub enum Registration {
     /// Persistent installation ID from the central database.
     #[default]
     Registered,
-    /// Read-only compatibility view; its stable display ID grants no write authority.
-    LegacyUnregistered,
 }
 
 /// Evidence copied from the input; absent facts must not be fabricated during queries.
@@ -81,7 +76,7 @@ pub struct SourceEvidence {
     /// SHA-256 of the supplied bundle description, whose file digests bind its payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_sha256: Option<String>,
-    /// Producer-supplied source evidence; old build labels remain byte-for-byte facts.
+    /// Producer-supplied source commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
 }
@@ -98,7 +93,7 @@ pub struct InstalledDependency {
     pub version: String,
 }
 
-/// One installed package, independent of AW's bundled Preview component set.
+/// One independently versioned installed package.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct InstalledPackage {
@@ -125,11 +120,11 @@ pub struct InstalledPackage {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Installation {
-    /// Stable database ID; legacy views use `legacy:<absolute-prefix>` for display.
+    /// Stable database ID.
     pub installation_id: String,
     /// Absolute payload root, independent of the central database location.
     pub prefix: PathBuf,
-    /// Recorded owner; legacy views report only the current prefix directory's owner.
+    /// Recorded owner of the installation prefix.
     pub owner_uid: u32,
     /// User or system privilege boundary.
     pub scope: Scope,
@@ -159,11 +154,11 @@ pub struct InstalledDatabase {
 pub struct Inventory {
     /// Selected database's `installed.json`, even when it does not yet exist.
     pub database_path: PathBuf,
-    /// Committed generation, absent for legacy or uninitialized databases.
+    /// Committed generation, absent for uninitialized databases.
     pub generation: Option<u64>,
     /// Record authority used for this query.
     pub source: InventorySource,
-    /// Registered installations or one explicitly requested legacy prefix.
+    /// Registered installations selected by the query.
     pub installations: Vec<Installation>,
     #[serde(skip)]
     _locks: Vec<PackageLock>,
@@ -171,18 +166,19 @@ pub struct Inventory {
     _database_generation: Option<u64>,
     #[serde(skip)]
     _dependency_targets: BTreeSet<(String, String, String)>,
+    #[serde(skip)]
+    _manager: PackageManager,
 }
 
+#[cfg(test)]
 pub(crate) fn read_description(path: &Path, limit: u64) -> Result<Vec<u8>> {
     paths::bytes(path, limit)
 }
 
 pub(crate) use json::decode;
-pub(crate) use legacy::validate as validate_legacy_component;
 pub(crate) use paths::{
     absolute as absolute_path, bytes as safe_bytes, directory as safe_directory,
-    entries as safe_entries, lock as shared_file_lock, missing as is_missing, regular as safe_file,
-    same as same_file,
+    lock as shared_file_lock, missing as is_missing, regular as safe_file, same as same_file,
 };
 pub(crate) use registration::check_registered;
 pub(crate) use validation::database as validate_database;
@@ -190,8 +186,7 @@ pub(crate) use validation::database as validate_database;
 impl Inventory {
     /// Read a database, optionally restricting the view to one absolute prefix.
     ///
-    /// Only explicit prefixes permit legacy discovery. This call never creates
-    /// directories or locks, migrates records, repairs transactions or runs programs.
+    /// This call never creates directories or locks, repairs transactions or runs programs.
     ///
     /// # Errors
     /// Rejects unsafe paths, malformed records, unavailable locks and unfinished transactions.

@@ -155,7 +155,8 @@ fn exists(path: &Path) -> Result<bool> {
 
 fn discover(path: &Path, prefixes: &mut BTreeSet<PathBuf>) -> Result<()> {
     for prefix in path.ancestors() {
-        if exists(&prefix.join(".aw-packages"))? || exists(&prefix.join(".aw-install.lock"))? {
+        if exists(&prefix.join(".local-packages"))? || exists(&prefix.join(".local-install.lock"))?
+        {
             prefixes.insert(fs::canonicalize(prefix).map_err(|error| io(prefix, error))?);
         }
     }
@@ -212,13 +213,13 @@ fn same(left: &Metadata, right: &Metadata) -> bool {
 
 fn acquire(prefix: &Path) -> Result<PackageLock> {
     let root = directory(prefix)?;
-    let records_path = prefix.join(".aw-packages");
-    let records = open_at(&root, OsStr::new(".aw-packages"), true, &records_path)?;
+    let records_path = prefix.join(".local-packages");
+    let records = open_at(&root, OsStr::new(".local-packages"), true, &records_path)?;
     if !safe(&metadata(&records, &records_path)?, false) {
         return Err(LeaseError::Unsafe(prefix.to_owned()));
     }
-    let lock_path = prefix.join(".aw-install.lock");
-    let lock = open_at(&root, OsStr::new(".aw-install.lock"), false, &lock_path)?;
+    let lock_path = prefix.join(".local-install.lock");
+    let lock = open_at(&root, OsStr::new(".local-install.lock"), false, &lock_path)?;
     let before = metadata(&lock, &lock_path)?;
     let root_metadata = metadata(&root, prefix)?;
     if !before.is_file()
@@ -241,11 +242,16 @@ fn acquire(prefix: &Path) -> Result<PackageLock> {
     let fresh_root = directory(prefix)?;
     let fresh_lock = open_at(
         &fresh_root,
-        OsStr::new(".aw-install.lock"),
+        OsStr::new(".local-install.lock"),
         false,
         &lock_path,
     )?;
-    let fresh_records = open_at(&fresh_root, OsStr::new(".aw-packages"), true, &records_path)?;
+    let fresh_records = open_at(
+        &fresh_root,
+        OsStr::new(".local-packages"),
+        true,
+        &records_path,
+    )?;
     if !same(&root_metadata, &metadata(&fresh_root, prefix)?)
         || !same(&before, &metadata(&fresh_lock, &lock_path)?)
         || !same(

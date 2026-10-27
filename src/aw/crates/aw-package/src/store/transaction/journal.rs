@@ -6,8 +6,8 @@ use super::{
     capacity,
     fs::{self, Identity},
 };
-use crate::{
-    database::{self, DatabasePaths, MAX_DATABASE_BYTES},
+use crate::store::{
+    database::{self, DatabasePaths, PackageManager, MAX_DATABASE_BYTES},
     require, Error, Result,
 };
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,7 @@ pub(super) struct Journal {
     pub schema_version: u32,
     pub transaction_id: String,
     pub database_root: PathBuf,
+    pub package_manager: PackageManager,
     pub prefix: PathBuf,
     pub installation_id: String,
     #[serde(with = "snapshots::optional")]
@@ -69,7 +70,8 @@ impl Journal {
             .join(&self.transaction_id)
     }
     pub fn workspace(&self) -> PathBuf {
-        self.prefix.join(format!(".aw-txn-{}", self.transaction_id))
+        self.prefix
+            .join(format!(".local-txn-{}", self.transaction_id))
     }
     pub fn path(&self) -> PathBuf {
         self.directory().join("journal.json")
@@ -91,11 +93,12 @@ impl Journal {
         require(
             self.schema_version == 1
                 && self.database_root == paths.root
+                && self.package_manager == paths.manager()
                 && self.directory() == directory,
             "unsupported or misplaced transaction journal",
         )?;
-        crate::description::identifier(&self.transaction_id)?;
-        crate::description::identifier(&self.installation_id)?;
+        crate::store::description::identifier(&self.transaction_id)?;
+        crate::store::description::identifier(&self.installation_id)?;
         fs::absolute(&self.prefix)?;
         require(
             !self.prefix.starts_with(&paths.root) && !paths.root.starts_with(&self.prefix),
@@ -129,20 +132,15 @@ impl Journal {
         for action in &self.actions {
             fs::relative(Path::new(&action.path))?;
             require(
-                paths_seen.insert(&action.path) || action.path == ".aw-packages/aw-core.json",
+                paths_seen.insert(&action.path),
                 "duplicate transaction action path",
             )?;
-            if !action.path.starts_with(".aw-packages/") {
-                crate::filesystem::relative(&action.path)?;
+            if !action.path.starts_with(".local-packages/") {
+                crate::store::filesystem::relative(&action.path)?;
             } else {
                 require(
-                    matches!(
-                        action.path.as_str(),
-                        ".aw-packages/aw-core.json"
-                            | ".aw-packages/aw-provider-sec-core.json"
-                            | ".aw-packages/aw-provider-tokenless.json"
-                    ),
-                    "unsupported historical record action",
+                    action.path == ".local-packages/installation.json",
+                    "unsupported installation metadata action",
                 )?;
             }
             for name in [&action.stage, &action.backup] {
@@ -152,7 +150,7 @@ impl Journal {
                 )?;
             }
             for identity in action.before.iter().chain(action.after.iter()) {
-                crate::description::sha256(&identity.sha256)?;
+                crate::store::description::sha256(&identity.sha256)?;
                 require(
                     identity.ino != 0 && matches!(identity.mode, 0o600 | 0o644 | 0o755),
                     "invalid transaction file identity",

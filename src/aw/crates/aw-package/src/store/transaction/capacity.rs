@@ -3,9 +3,9 @@
 use super::{
     fs::Identity,
     journal::{Action, Journal, MAX_JOURNAL_BYTES},
-    prepare, ChangeSet,
+    ChangeSet,
 };
-use crate::{database, require, Result};
+use crate::store::{database, require, Result};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Write},
@@ -23,24 +23,13 @@ pub(crate) const MAX_DIRECTORIES: usize = 32768;
 /// Shared encoded-byte ceiling for planning and locked preparation.
 pub(crate) const MAX_BYTES: u64 = MAX_JOURNAL_BYTES;
 
-/// Count payload changes and every locator/legacy action used by preparation.
-pub(crate) fn actions(paths: &database::DatabasePaths, changes: &ChangeSet) -> Result<usize> {
-    let gate = prepare::gate_bytes(paths, changes)?;
-    let gate_write = usize::from(gate.is_some() && gate != changes.marker_before);
-    let legacy_removals = changes
-        .legacy
-        .keys()
-        .filter(|name| name.as_str() != "aw-core.json")
-        .count();
+/// Count payload changes and every locator action used by preparation.
+pub(crate) fn actions(_paths: &database::DatabasePaths, changes: &ChangeSet) -> Result<usize> {
+    let locator = changes.marker_after.clone();
+    let locator_write = usize::from(locator.is_some() && locator != changes.marker_before);
     let marker_removal =
         usize::from(changes.marker_after.is_none() && changes.marker_before.is_some());
-    Ok(
-        gate_write
-            + legacy_removals
-            + changes.removes.len()
-            + changes.writes.len()
-            + marker_removal,
-    )
+    Ok(locator_write + changes.removes.len() + changes.writes.len() + marker_removal)
 }
 
 /// Count unique absent parents that payload/locator publication would create.
@@ -49,15 +38,20 @@ pub(crate) fn directories(paths: &database::DatabasePaths, changes: &ChangeSet) 
 }
 
 fn parent_paths(
-    paths: &database::DatabasePaths,
+    _paths: &database::DatabasePaths,
     changes: &ChangeSet,
     only_missing: bool,
 ) -> Result<BTreeSet<String>> {
-    let gate = prepare::gate_bytes(paths, changes)?;
-    let gate_path =
-        (gate.is_some() && gate != changes.marker_before).then_some(".aw-packages/aw-core.json");
+    let locator = changes.marker_after.clone();
+    let locator_path = (locator.is_some() && locator != changes.marker_before)
+        .then_some(".local-packages/installation.json");
     let mut parents = BTreeSet::new();
-    for name in changes.writes.keys().map(String::as_str).chain(gate_path) {
+    for name in changes
+        .writes
+        .keys()
+        .map(String::as_str)
+        .chain(locator_path)
+    {
         for parent in Path::new(name)
             .ancestors()
             .skip(1)
@@ -111,7 +105,7 @@ pub(crate) fn encoded_bytes(
             .chain(std::iter::once(&entry.after_database))
         {
             let text = std::str::from_utf8(bytes).map_err(|error| {
-                crate::Error::Invalid(format!("database snapshot is not UTF-8: {error}"))
+                crate::store::Error::Invalid(format!("database snapshot is not UTF-8: {error}"))
             })?;
             serde_json::to_writer(&mut snapshots, text)?;
         }
@@ -142,8 +136,8 @@ fn bounded_journal(
     changes: &ChangeSet,
     removal: bool,
 ) -> Result<Journal> {
-    let gate = prepare::gate_bytes(paths, changes)?;
-    let gate_write = removal || (gate.is_some() && gate != changes.marker_before);
+    let locator = changes.marker_after.clone();
+    let locator_write = removal || (locator.is_some() && locator != changes.marker_before);
     let mut actions = Vec::new();
     let mut push = |path: String, before: bool, after: bool| {
         let index = actions.len();
@@ -156,19 +150,12 @@ fn bounded_journal(
             active: false,
         });
     };
-    if gate_write {
+    if locator_write {
         push(
-            ".aw-packages/aw-core.json".into(),
+            ".local-packages/installation.json".into(),
             removal || changes.marker_before.is_some(),
             true,
         );
-    }
-    for name in changes
-        .legacy
-        .keys()
-        .filter(|name| name.as_str() != "aw-core.json")
-    {
-        push(format!(".aw-packages/{name}"), true, false);
     }
     for name in changes.removes.keys() {
         push(name.clone(), true, false);
@@ -177,11 +164,11 @@ fn bounded_journal(
         push(name.clone(), changes.verify.contains_key(name), true);
     }
     if changes.marker_after.is_none() && changes.marker_before.is_some() {
-        // A preceding gate rewrite fills this before identity while execution proceeds.
-        push(".aw-packages/aw-core.json".into(), true, false);
+        // Removal preserves the existing locator identity until its journal action runs.
+        push(".local-packages/installation.json".into(), true, false);
     }
     let directories = if removal {
-        BTreeMap::from([(".aw-packages".into(), identity(true))])
+        BTreeMap::from([(".local-packages".into(), identity(true))])
     } else {
         parent_paths(paths, changes, false)?
             .into_iter()
@@ -200,6 +187,7 @@ fn bounded_journal(
         schema_version: 1,
         transaction_id: format!("txn-{:x}-{:x}-{:x}", u128::MAX, u32::MAX, u64::MAX),
         database_root: paths.root.clone(),
+        package_manager: paths.manager(),
         prefix: changes.prefix.clone(),
         installation_id: changes.installation_id.clone(),
         before_database: Some(before_database),

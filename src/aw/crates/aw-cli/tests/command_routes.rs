@@ -62,11 +62,12 @@ fn help_separates_software_installation_from_native_agent_connection() {
         "install",
         "agent",
         "config",
-        "manifest.json or package.json",
+        "package.json",
         "Compatibility: aw install --config",
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
+    assert!(!text.contains("manifest.json"));
     for (path, options) in [
         (vec!["install", "--help"], vec!["--prefix", "--bundle"]),
         (

@@ -5,7 +5,7 @@ use super::{
     journal::{self, Action, Journal},
     ChangeSet,
 };
-use crate::{
+use crate::store::{
     database::{self, DatabasePaths, Scope},
     require, Error, Result,
 };
@@ -55,11 +55,14 @@ pub(super) fn begin(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Prepar
         }
         Err(error) => return Err(error),
     };
-    let lock_created = !fs::exists(&changes.prefix.join(".aw-install.lock"))?;
+    let lock_created = !fs::exists(&changes.prefix.join(".local-install.lock"))?;
     let prefix_lock = if lock_created {
         None
     } else {
-        Some(fs::lock(&changes.prefix.join(".aw-install.lock"), false)?)
+        Some(fs::lock(
+            &changes.prefix.join(".local-install.lock"),
+            false,
+        )?)
     };
     if paths.scope() == Scope::System {
         if let Some(lock) = &prefix_lock {
@@ -76,10 +79,7 @@ pub(super) fn begin(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Prepar
         }
     }
     require(
-        prefix_lock.is_some()
-            || (changes.verify.is_empty()
-                && changes.legacy.is_empty()
-                && changes.marker_before.is_none()),
+        prefix_lock.is_some() || (changes.verify.is_empty() && changes.marker_before.is_none()),
         "existing installation is missing its prefix lock",
     )?;
     recheck(changes)?;
@@ -89,6 +89,7 @@ pub(super) fn begin(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Prepar
         schema_version: 1,
         transaction_id: id,
         database_root: paths.root.clone(),
+        package_manager: paths.manager(),
         prefix: changes.prefix.clone(),
         installation_id: changes.installation_id.clone(),
         before_database,
@@ -104,35 +105,22 @@ pub(super) fn begin(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Prepar
         lock_identity: if lock_created {
             None
         } else {
-            Some(fs::identity(&changes.prefix.join(".aw-install.lock"))?)
+            Some(fs::identity(&changes.prefix.join(".local-install.lock"))?)
         },
         directories: BTreeMap::new(),
         actions: Vec::new(),
         database_stage: None,
     };
-    let gate = gate_bytes(paths, changes)?;
-    if gate.is_some() && gate != changes.marker_before {
+    let locator = changes.marker_after.clone();
+    if locator.is_some() && locator != changes.marker_before {
         push(
             &mut entry,
-            ".aw-packages/aw-core.json",
+            ".local-packages/installation.json",
             changes
                 .marker_before
                 .as_ref()
-                .map(|_| fs::identity(&changes.prefix.join(".aw-packages/aw-core.json")))
+                .map(|_| fs::identity(&changes.prefix.join(".local-packages/installation.json")))
                 .transpose()?,
-        )?;
-    }
-    for name in changes
-        .legacy
-        .keys()
-        .filter(|name| name.as_str() != "aw-core.json")
-    {
-        push(
-            &mut entry,
-            &format!(".aw-packages/{name}"),
-            Some(fs::identity(
-                &changes.prefix.join(".aw-packages").join(name),
-            )?),
         )?;
     }
     for name in changes.removes.keys() {
@@ -159,14 +147,10 @@ pub(super) fn begin(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Prepar
         push(&mut entry, name, before)?;
     }
     if changes.marker_after.is_none() && changes.marker_before.is_some() {
-        let before = if gate != changes.marker_before {
-            None
-        } else {
-            Some(fs::identity(
-                &changes.prefix.join(".aw-packages/aw-core.json"),
-            )?)
-        };
-        push(&mut entry, ".aw-packages/aw-core.json", before)?;
+        let before = Some(fs::identity(
+            &changes.prefix.join(".local-packages/installation.json"),
+        )?);
+        push(&mut entry, ".local-packages/installation.json", before)?;
     }
     entry.validate(paths, &entry.directory())?;
     drop(entry.bytes()?);
@@ -212,7 +196,7 @@ pub(super) fn initialize(paths: &DatabasePaths, changes: &ChangeSet) -> Result<b
         .ok_or_else(|| Error::Invalid("database has no parent".into()))?;
     fs::ensure_tree(parent, mode)?;
     // Publish a complete empty database atomically. A crash cannot expose root+lock without data.
-    let stage = parent.join(format!(".aw-database-init-{}", journal::new_id()?));
+    let stage = parent.join(format!(".local-database-init-{}", journal::new_id()?));
     fs::mkdir(&stage, mode)?;
     let _lock = fs::lock(&stage.join("lock"), true)?;
     fs::mkdir(&stage.join("transactions"), transactions_mode(paths))?;
@@ -259,7 +243,7 @@ fn validate(paths: &DatabasePaths, changes: &ChangeSet) -> Result<()> {
             "system package writes require root and explicit system scope",
         )?;
     }
-    crate::description::identifier(&changes.installation_id)?;
+    crate::store::description::identifier(&changes.installation_id)?;
     database::validate_database(&changes.database_after, paths.scope())?;
     let generation = match &changes.database_before {
         Some(bytes) => {
@@ -274,11 +258,11 @@ fn validate(paths: &DatabasePaths, changes: &ChangeSet) -> Result<()> {
         "planned database generation does not advance exactly once",
     )?;
     for (name, payload) in changes.verify.iter().chain(changes.removes.iter()) {
-        crate::filesystem::relative(name)?;
-        crate::description::sha256(&payload.sha256)?;
+        crate::store::filesystem::relative(name)?;
+        crate::store::description::sha256(&payload.sha256)?;
     }
     for name in changes.writes.keys() {
-        crate::filesystem::relative(name)?;
+        crate::store::filesystem::relative(name)?;
     }
     Ok(())
 }
@@ -286,7 +270,7 @@ fn validate(paths: &DatabasePaths, changes: &ChangeSet) -> Result<()> {
 pub(super) fn recheck(changes: &ChangeSet) -> Result<()> {
     for (source, expected) in &changes.source_records {
         require(
-            fs::read(source, crate::description::MAX_DESCRIPTION_BYTES)? == *expected,
+            fs::read(source, crate::store::description::MAX_DESCRIPTION_BYTES)? == *expected,
             format!(
                 "bundle description changed after planning: {}",
                 source.display()
@@ -299,55 +283,26 @@ pub(super) fn recheck(changes: &ChangeSet) -> Result<()> {
     for (name, payload) in changes.verify.iter().chain(changes.removes.iter()) {
         fs::verify(&changes.prefix.join(name), payload)?;
     }
-    let directory = changes.prefix.join(".aw-packages");
+    let directory = changes.prefix.join(".local-packages");
     let entries = match fs::entries(&directory) {
         Ok(entries) => entries,
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
-    let expected_count = if changes.legacy.is_empty() {
-        usize::from(changes.marker_before.is_some())
-    } else {
-        changes.legacy.len()
-    };
+    let expected_count = usize::from(changes.marker_before.is_some());
     require(
         entries.len() == expected_count,
         "installation records changed after planning",
     )?;
     require(
         fs::read_optional(
-            &directory.join("aw-core.json"),
-            crate::description::MAX_DESCRIPTION_BYTES,
+            &directory.join("installation.json"),
+            crate::store::description::MAX_DESCRIPTION_BYTES,
         )? == changes.marker_before,
         "prefix registration changed after planning",
     )?;
-    for (name, bytes) in &changes.legacy {
-        require(
-            matches!(
-                name.as_str(),
-                "aw-core.json" | "aw-provider-sec-core.json" | "aw-provider-tokenless.json"
-            ),
-            "unsupported historical record filename",
-        )?;
-        require(
-            fs::read(
-                &directory.join(name),
-                crate::description::MAX_DESCRIPTION_BYTES,
-            )? == *bytes,
-            format!("older installation record changed: {name}"),
-        )?;
-    }
-    Ok(())
-}
 
-pub(super) fn gate_bytes(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Option<Vec<u8>>> {
-    if !changes.legacy.is_empty() {
-        Ok(Some(serde_json::to_vec(
-            &database::RegistrationPointer::new(paths, changes.installation_id.clone())?,
-        )?))
-    } else {
-        Ok(changes.marker_after.clone())
-    }
+    Ok(())
 }
 
 pub(super) fn parents(entry: &mut Journal, relative: &Path) -> Result<()> {
@@ -383,10 +338,6 @@ pub(super) fn parents(entry: &mut Journal, relative: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn verify_bytes(path: &Path, bytes: &[u8]) -> Result<fs::Identity> {
-    fs::verify(path, &fs::bytes_payload(bytes, 0o644))
-}
-
 pub(super) fn stage_source(
     entry: &mut Journal,
     index: usize,
@@ -394,7 +345,8 @@ pub(super) fn stage_source(
 ) -> Result<()> {
     let mut held = fs::regular(&source.source)?;
     let before = fs::verify(&source.source, &source.metadata)?;
-    let (file, identity) = fs::anonymous(&entry.workspace(), source.metadata.mode, |file| {
+    let workspace = entry.workspace();
+    let (file, identity) = fs::anonymous(&workspace, source.metadata.mode, |file| {
         let count = std::io::copy(
             &mut std::io::Read::take(&mut held, fs::MAX_FILE_BYTES + 1),
             file,
@@ -410,12 +362,13 @@ pub(super) fn stage_source(
     )?;
     entry.actions[index].after = Some(identity);
     entry.write()?;
-    fs::publish(&file, &entry.workspace().join(&entry.actions[index].stage))
+    fs::publish(&file, &workspace.join(&entry.actions[index].stage))
 }
 
 pub(super) fn stage_bytes(entry: &mut Journal, index: usize, bytes: &[u8]) -> Result<()> {
-    let (file, identity) = fs::write_bytes(&entry.workspace(), bytes, 0o644)?;
+    let workspace = entry.workspace();
+    let (file, identity) = fs::write_bytes(&workspace, bytes, 0o644)?;
     entry.actions[index].after = Some(identity);
     entry.write()?;
-    fs::publish(&file, &entry.workspace().join(&entry.actions[index].stage))
+    fs::publish(&file, &workspace.join(&entry.actions[index].stage))
 }

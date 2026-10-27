@@ -18,7 +18,6 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                 let scope = match plan.scope {
                     Scope::User => "user",
                     Scope::System => "system",
-                    Scope::Unknown => "not recorded",
                 };
                 let title = format!(
                     "{action} plan for {} ({scope})",
@@ -55,9 +54,6 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                         terminal::escape(&dependency.required_package_id),
                         terminal::escape(&dependency.version)
                     )?;
-                }
-                if plan.register_legacy {
-                    writeln!(stdout, "Older installation records will be archived and registered when this plan is executed.")?;
                 }
                 writeln!(stdout, "Plan only; no files were created or changed.")?;
             }

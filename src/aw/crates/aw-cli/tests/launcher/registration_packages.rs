@@ -201,19 +201,19 @@ fn seed(
             fs::set_permissions(destination, fs::Permissions::from_mode(payload.mode)).unwrap();
         }
     }
-    fs::create_dir_all(prefix.join(".aw-packages")).unwrap();
+    fs::create_dir_all(prefix.join(".local-packages")).unwrap();
     for directory in [
         prefix.to_owned(),
         prefix.join("bin"),
-        prefix.join(".aw-packages"),
+        prefix.join(".local-packages"),
     ] {
         fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let lock = prefix.join(".aw-install.lock");
+    let lock = prefix.join(".local-install.lock");
     fs::write(&lock, []).unwrap();
     fs::set_permissions(lock, fs::Permissions::from_mode(0o644)).unwrap();
     let pointer = RegistrationPointer::new(paths, installation_id.into()).unwrap();
-    let marker = prefix.join(".aw-packages/aw-core.json");
+    let marker = prefix.join(".local-packages/installation.json");
     // Exact removal-plan encoding keeps the retained locator unchanged during uninstall.
     fs::write(&marker, serde_json::to_vec_pretty(&pointer).unwrap()).unwrap();
     fs::set_permissions(marker, fs::Permissions::from_mode(0o644)).unwrap();
@@ -253,7 +253,7 @@ fn exclusive(prefix: &Path) -> File {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(prefix.join(".aw-install.lock"))
+        .open(prefix.join(".local-install.lock"))
         .unwrap();
     // SAFETY: the returned owned descriptor retains this nonblocking lock for the test.
     assert_eq!(

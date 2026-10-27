@@ -1,7 +1,7 @@
 //! Small byte-limit seams exercise current operations and future complete removal.
 
 use super::*;
-use crate::{database::*, plan::Action, transaction::SourceFile, Payload};
+use crate::store::{database::*, plan::Action, transaction::SourceFile, Payload};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
 
 fn fixture(root: &std::path::Path) -> (DatabasePaths, ChangeSet, PackagePlan) {
@@ -10,7 +10,7 @@ fn fixture(root: &std::path::Path) -> (DatabasePaths, ChangeSet, PackagePlan) {
     let prefix = root.join("prefix");
     fs::create_dir(&prefix).unwrap();
     fs::set_permissions(&prefix, fs::Permissions::from_mode(0o755)).unwrap();
-    for name in ["bin", ".aw-packages"] {
+    for name in ["bin", ".local-packages"] {
         let directory = prefix.join(name);
         fs::create_dir(&directory).unwrap();
         fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
@@ -65,7 +65,6 @@ fn fixture(root: &std::path::Path) -> (DatabasePaths, ChangeSet, PackagePlan) {
             },
         )]),
         removes: BTreeMap::new(),
-        legacy: BTreeMap::new(),
         marker_before: None,
         marker_after: Some(marker),
         source_records: BTreeMap::new(),
@@ -74,10 +73,10 @@ fn fixture(root: &std::path::Path) -> (DatabasePaths, ChangeSet, PackagePlan) {
         format: 1,
         action: Action::Install,
         prefix,
+
         scope: Scope::User,
         expected_generation: None,
         installation_id: None,
-        register_legacy: false,
         added: Vec::new(),
         removed: Vec::new(),
         files: Vec::new(),
@@ -85,6 +84,7 @@ fn fixture(root: &std::path::Path) -> (DatabasePaths, ChangeSet, PackagePlan) {
         problems: Vec::new(),
         changes: Some(changes.clone()),
         database_root: paths.root.clone(),
+        database_manager: paths.manager(),
     };
     (paths, changes, plan)
 }
@@ -99,11 +99,11 @@ fn encoded_byte_overflow_blocks_execution_before_any_database_or_payload_write()
         .problems
         .iter()
         .any(|problem| problem.code == "transaction_limit"));
-    assert!(crate::plan::execute(&paths, &plan, &AtomicBool::new(false)).is_err());
+    assert!(crate::store::plan::execute(&paths, &plan, &AtomicBool::new(false)).is_err());
     assert!(!paths.root.exists());
     assert!(!changes.prefix.join("bin/tool").exists());
     assert_eq!(
-        fs::read_dir(changes.prefix.join(".aw-packages"))
+        fs::read_dir(changes.prefix.join(".local-packages"))
             .unwrap()
             .count(),
         0
@@ -124,7 +124,7 @@ fn installation_admission_reserves_the_future_whole_removal_encoded_budget() {
         .problems
         .iter()
         .any(|problem| problem.code == "installation_limit"));
-    assert!(crate::plan::execute(&paths, &admission, &AtomicBool::new(false)).is_err());
+    assert!(crate::store::plan::execute(&paths, &admission, &AtomicBool::new(false)).is_err());
     assert!(!paths.root.exists());
     assert!(!changes.prefix.join("bin/tool").exists());
 }

@@ -5,7 +5,7 @@ use super::{
     snapshot::{self, Snapshot},
     Action, PackagePlan,
 };
-use crate::{
+use crate::store::{
     database::{self, DatabasePaths, RegistrationPointer},
     description, require,
     transaction::ChangeSet,
@@ -111,7 +111,6 @@ pub(super) fn plan_with_limits(
             }
         }
     }
-    super::runtime::check(&mut plan, &installation);
     let mut removes = BTreeMap::new();
     for package in &removed {
         plan.removed.push(snapshot::summary(package));
@@ -124,8 +123,7 @@ pub(super) fn plan_with_limits(
             .any(|removed| removed.package_id == package.package_id)
     });
     let installation_id = installation.installation_id.clone();
-    // Keep the locator after the last removal: historical installers must never regain
-    // write authority, and a later install can reuse the same registered prefix.
+    // Retain the installation identity so later additions reuse its registered roots.
     let marker_after = Some(serde_json::to_vec_pretty(&RegistrationPointer::new(
         paths,
         installation_id.clone(),
@@ -141,7 +139,6 @@ pub(super) fn plan_with_limits(
             verify,
             writes: BTreeMap::new(),
             removes,
-            legacy: snapshot.legacy.clone(),
             marker_before: snapshot.marker.clone(),
             marker_after,
             source_records: BTreeMap::new(),

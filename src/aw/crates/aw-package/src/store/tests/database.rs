@@ -1,12 +1,12 @@
-//! Read-only package inventory, legacy compatibility and bounded file verification.
+//! Read-only current package inventory and bounded file verification.
 
 #[path = "database/doctor_metadata.rs"]
 mod doctor_metadata;
 
-use aw_package::{
+use crate::store::{
     database::{
-        DatabasePaths, DoctorIssueCode, Inventory, InventorySource, Registration,
-        RegistrationPointer, MAX_DATABASE_BYTES,
+        DatabasePaths, DoctorIssueCode, Inventory, InventorySource, RegistrationPointer,
+        MAX_DATABASE_BYTES,
     },
     description::PackageDescription,
     digest, Error,
@@ -89,27 +89,16 @@ impl Fixture {
     }
 
     fn registration(&self, prefix: &Path, id: &str) {
-        self.record(&prefix.join(".aw-install.lock"), b"", 0o600);
+        self.record(&prefix.join(".local-install.lock"), b"", 0o600);
         let pointer = RegistrationPointer::new(&self.paths, id.into()).unwrap();
         self.record(
-            &prefix.join(".aw-packages/aw-core.json"),
+            &prefix.join(".local-packages/installation.json"),
             serde_json::to_vec(&pointer).unwrap(),
             0o644,
         );
     }
 
-    fn legacy(&self, version: &str) {
-        let files = json!({"bin/aw":self.file("bin/aw", b"aw"),"bin/aw-package":self.file("bin/aw-package", b"package")});
-        self.record(&self.prefix.join(".aw-install.lock"), b"", 0o600);
-        let record = json!({"format":1,"component":"aw-core","version":version,"source_commit":"producer-supplied-build", "os":"linux","arch":std::env::consts::ARCH,"provider_protocol":"aw-provider/v1alpha1","requires":{},"files":files});
-        self.record(
-            &self.prefix.join(".aw-packages/aw-core.json"),
-            serde_json::to_vec(&record).unwrap(),
-            0o644,
-        );
-    }
-
-    fn read(&self) -> aw_package::Result<Inventory> {
+    fn read(&self) -> crate::store::Result<Inventory> {
         Inventory::read(&self.paths, None)
     }
 }
@@ -166,9 +155,8 @@ fn database_paths_follow_xdg_and_reject_relative_values_without_creating_state()
 }
 
 #[test]
-fn absent_database_is_empty_and_never_discovers_legacy_prefixes_implicitly() {
+fn absent_database_is_empty_without_creating_state() {
     let fixture = Fixture::new();
-    fixture.legacy("1.2.3");
     let before = snapshot(fixture.directory.path());
     let inventory = fixture.read().unwrap();
     assert_eq!(inventory.source, InventorySource::Absent);
@@ -206,72 +194,6 @@ fn registered_inventory_and_doctor_are_read_only_and_keep_packages_at_distinct_p
     let selected = Inventory::read(&fixture.paths, Some(&fixture.prefix)).unwrap();
     assert_eq!(selected.installations.len(), 1);
     assert_eq!(before, snapshot(fixture.directory.path()));
-}
-
-#[test]
-fn explicit_legacy_prefix_reads_stable_versions_and_records_without_registering_them() {
-    let fixture = Fixture::new();
-    fixture.legacy("1.2.3");
-    let before = snapshot(fixture.directory.path());
-    for _ in 0..2 {
-        let inventory = Inventory::read(&fixture.paths, Some(&fixture.prefix)).unwrap();
-        assert_eq!(inventory.source, InventorySource::Legacy);
-        let installation = &inventory.installations[0];
-        assert_eq!(
-            installation.installation_id,
-            format!("legacy:{}", fixture.prefix.display())
-        );
-        assert_eq!(installation.registration, Registration::LegacyUnregistered);
-        assert_eq!(installation.packages[0].version, "1.2.3");
-        assert_eq!(installation.packages[0].source.bundle_sha256, None);
-        assert_eq!(installation.packages[0].provider, None);
-        assert!(inventory.doctor().unwrap().healthy());
-    }
-    assert!(!fixture.paths.root.exists());
-    assert_eq!(before, snapshot(fixture.directory.path()));
-}
-
-#[test]
-fn existing_record_layout_accepts_new_core_files_without_the_removed_cli() {
-    let fixture = Fixture::new();
-    fixture.legacy("1.2.3");
-    let record = fixture.prefix.join(".aw-packages/aw-core.json");
-    let mut value: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
-    value["files"]
-        .as_object_mut()
-        .unwrap()
-        .remove("bin/aw-package");
-    fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
-    fs::remove_file(fixture.prefix.join("bin/aw-package")).unwrap();
-    let inventory = Inventory::read(&fixture.paths, Some(&fixture.prefix)).unwrap();
-    assert_eq!(inventory.installations[0].packages[0].files.len(), 1);
-    assert!(inventory.doctor().unwrap().healthy());
-}
-
-#[test]
-fn registered_prefix_rejects_live_legacy_records_instead_of_merging_or_hiding_them() {
-    let fixture = Fixture::new();
-    fixture.legacy("1.2.3");
-    fixture.database(vec![fixture.installation()]);
-    let before = snapshot(fixture.directory.path());
-    let error = Inventory::read(&fixture.paths, Some(&fixture.prefix)).unwrap_err();
-    assert!(error.to_string().contains("older package records conflict"));
-    assert_eq!(before, snapshot(fixture.directory.path()));
-}
-
-#[test]
-fn an_oversized_legacy_directory_cannot_hide_mixed_database_state() {
-    let fixture = Fixture::new();
-    fixture.database(vec![fixture.installation()]);
-    let legacy = fixture.prefix.join(".aw-packages");
-    fixture.directory(&legacy);
-    for number in 0..4097 {
-        fs::write(legacy.join(format!("extra-{number}.json")), b"{}").unwrap();
-    }
-    let error = fixture.read().unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("too many package directory entries"));
 }
 
 #[test]
@@ -534,14 +456,14 @@ fn package_description_rejects_unknown_fields_inside_payload_metadata() {
 }
 
 #[test]
-fn new_package_description_needs_only_the_unified_aw_binary() {
+fn a_package_description_owns_only_its_declared_binary() {
     let fixture = Fixture::new();
     let path = fixture.directory.path().join("package.json");
-    let value = json!({"schema_version":1,"package_id":"aw-core","version":"1.2.3","os":"linux","arch":std::env::consts::ARCH,"files":{"bin/aw":fixture.file("bin/aw", b"unified CLI")},"dependencies":[]});
+    let value = json!({"schema_version":1,"package_id":"example.cli","version":"1.2.3","os":"linux","arch":std::env::consts::ARCH,"files":{"bin/cli":fixture.file("bin/cli", b"independent CLI")},"dependencies":[]});
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     let description = PackageDescription::read(&path).unwrap();
     assert_eq!(description.files.len(), 1);
-    assert!(description.files.contains_key("bin/aw"));
+    assert!(description.files.contains_key("bin/cli"));
     assert!(description.provider.is_none());
 }
 
@@ -561,10 +483,10 @@ fn native_manager_records_are_listed_but_never_claim_raw_verification() {
 fn registered_prefix_locator_selects_its_database_and_rejects_conflicting_authority() {
     let fixture = Fixture::new();
     fixture.database(vec![fixture.installation()]);
-    let records = fixture.prefix.join(".aw-packages");
+    let records = fixture.prefix.join(".local-packages");
     fixture.directory(&records);
-    fixture.record(&fixture.prefix.join(".aw-install.lock"), b"", 0o600);
-    let marker = records.join("aw-core.json");
+    fixture.record(&fixture.prefix.join(".local-install.lock"), b"", 0o600);
+    let marker = records.join("installation.json");
     let pointer = RegistrationPointer::new(&fixture.paths, "install-1".into()).unwrap();
     fixture.record(&marker, serde_json::to_vec(&pointer).unwrap(), 0o644);
     let other = DatabasePaths::user(
@@ -588,24 +510,81 @@ fn registered_prefix_locator_selects_its_database_and_rejects_conflicting_author
         .to_string()
         .contains("does not match"));
     fs::write(&marker, serde_json::to_vec(&pointer).unwrap()).unwrap();
-    fs::write(records.join("aw-provider-tokenless.json"), b"{}").unwrap();
+    fs::write(records.join("extra.json"), b"{}").unwrap();
     assert!(RegistrationPointer::read(&fixture.prefix)
         .unwrap_err()
         .to_string()
-        .contains("conflicts"));
+        .contains("unexpected"));
 }
 
 #[test]
 fn system_locator_cannot_redirect_ordinary_readers_to_an_arbitrary_database() {
     let fixture = Fixture::new();
     let mut pointer = RegistrationPointer::new(&fixture.paths, "install-1".into()).unwrap();
-    pointer.scope = aw_package::database::Scope::System;
+    pointer.scope = crate::store::database::Scope::System;
     assert!(pointer.database_paths().is_err());
     pointer.database_root = DatabasePaths::system().root;
     assert_eq!(
         pointer.database_paths().unwrap().scope(),
-        aw_package::database::Scope::System
+        crate::store::database::Scope::System
     );
-    pointer.scope = aw_package::database::Scope::Unknown;
-    assert!(pointer.database_paths().is_err());
+    let mut unknown = serde_json::to_value(pointer).unwrap();
+    unknown["scope"] = json!("unknown");
+    assert!(serde_json::from_value::<RegistrationPointer>(unknown).is_err());
+}
+
+#[test]
+fn a_current_locator_requires_an_explicit_manager() {
+    let fixture = Fixture::new();
+    let pointer = RegistrationPointer::new(&fixture.paths, "install-1".into()).unwrap();
+    let mut value = serde_json::to_value(pointer).unwrap();
+    assert_eq!(value["package_manager"], json!("aw"));
+    value.as_object_mut().unwrap().remove("package_manager");
+    fixture.record(
+        &fixture.prefix.join(".local-packages/installation.json"),
+        serde_json::to_vec(&value).unwrap(),
+        0o644,
+    );
+    let before = snapshot(fixture.directory.path());
+    assert!(RegistrationPointer::read(&fixture.prefix).is_err());
+    assert_eq!(snapshot(fixture.directory.path()), before);
+}
+
+#[test]
+fn previous_metadata_directories_are_rejected_without_decoding_their_contents() {
+    let fixture = Fixture::new();
+    fixture.record(
+        &fixture.prefix.join(".aw-packages/invalid.json"),
+        b"not JSON; do not import",
+        0o600,
+    );
+    let before = snapshot(fixture.directory.path());
+    for result in [
+        RegistrationPointer::read(&fixture.prefix).map(|_| ()),
+        Inventory::read(&fixture.paths, Some(&fixture.prefix)).map(|_| ()),
+    ] {
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported package metadata directory"));
+    }
+    assert!(!fixture.paths.root.exists());
+    assert_eq!(snapshot(fixture.directory.path()), before);
+}
+
+#[test]
+fn stored_versions_and_source_commits_use_the_current_description_contract() {
+    for source in [false, true] {
+        let fixture = Fixture::new();
+        let mut installation = fixture.installation();
+        if source {
+            installation["packages"][0]["source"]["source_commit"] = json!("vendor-build-label");
+        } else {
+            installation["packages"][0]["version"] = json!("vendor/dev-build");
+        }
+        fixture.database(vec![installation]);
+        let before = snapshot(fixture.directory.path());
+        assert!(fixture.read().is_err());
+        assert_eq!(snapshot(fixture.directory.path()), before);
+    }
 }

@@ -52,7 +52,7 @@ pub(super) mod optional {
 #[cfg(test)]
 mod tests {
     use super::super::{Journal, MAX_JOURNAL_BYTES};
-    use crate::database::{DatabasePaths, InstalledDatabase, MAX_DATABASE_BYTES};
+    use crate::store::database::{DatabasePaths, InstalledDatabase, MAX_DATABASE_BYTES};
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, path::Path};
 
@@ -73,6 +73,7 @@ mod tests {
             schema_version: 1,
             transaction_id: "txn-1-2-3".into(),
             database_root: paths.root.clone(),
+            package_manager: paths.manager(),
             prefix: "/tmp/aw-payload".into(),
             installation_id: "example".into(),
             before_database: Some(snapshot(0)),

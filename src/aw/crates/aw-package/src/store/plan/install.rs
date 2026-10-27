@@ -5,7 +5,7 @@ use super::{
     snapshot::{self, Snapshot},
     Action, DependencySummary, PackagePlan,
 };
-use crate::{
+use crate::store::{
     database::{self, DatabasePaths, RegistrationPointer},
     open_bundle,
     transaction::{ChangeSet, SourceFile},
@@ -20,10 +20,23 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-pub(super) fn plan(paths: &DatabasePaths, bundle: &Path, prefix: &Path) -> Result<PackagePlan> {
-    plan_with_limit(paths, bundle, prefix, open_bundle::MAX_PAYLOAD_BYTES)
+pub(super) fn plan(
+    paths: &DatabasePaths,
+    bundle: &Path,
+    prefix: &Path,
+    validate: impl FnOnce(&open_bundle::Bundle) -> Result<()>,
+) -> Result<PackagePlan> {
+    plan_with_limits_checked(
+        paths,
+        bundle,
+        prefix,
+        open_bundle::MAX_PAYLOAD_BYTES,
+        Limits::default(),
+        validate,
+    )
 }
 
+#[cfg(test)]
 fn plan_with_limit(
     paths: &DatabasePaths,
     bundle: &Path,
@@ -33,6 +46,7 @@ fn plan_with_limit(
     plan_with_limits(paths, bundle, prefix, prefix_byte_limit, Limits::default())
 }
 
+#[cfg(test)]
 fn plan_with_limits(
     paths: &DatabasePaths,
     bundle: &Path,
@@ -40,14 +54,23 @@ fn plan_with_limits(
     prefix_byte_limit: u64,
     limits: Limits,
 ) -> Result<PackagePlan> {
+    plan_with_limits_checked(paths, bundle, prefix, prefix_byte_limit, limits, |_| Ok(()))
+}
+
+fn plan_with_limits_checked(
+    paths: &DatabasePaths,
+    bundle: &Path,
+    prefix: &Path,
+    prefix_byte_limit: u64,
+    limits: Limits,
+    validate: impl FnOnce(&open_bundle::Bundle) -> Result<()>,
+) -> Result<PackagePlan> {
     let bundle = open_bundle::inspect(bundle)?;
+    validate(&bundle)?;
     let snapshot = Snapshot::read(paths, prefix)?;
     let mut plan = snapshot.plan(paths, prefix, Action::Install);
     let mut installation = snapshot.installation(paths, prefix);
     let (verify, installed_bytes) = snapshot::verify(&mut plan, &installation);
-    if !snapshot.legacy.is_empty() {
-        super::runtime::check(&mut plan, &installation);
-    }
     if installed_bytes
         .checked_add(bundle.payload_bytes)
         .is_none_or(|bytes| bytes > prefix_byte_limit)
@@ -77,26 +100,12 @@ fn plan_with_limits(
     for package in &mut incoming {
         for dependency in &mut package.dependencies {
             let selected = available.get(&dependency.package_id);
-            let same_build = selected.is_some_and(|required| {
-                !bundle.legacy_preview
-                    || (required.source.source_commit == package.source.source_commit
-                        && required.arch == package.arch
-                        && required.os == package.os)
-            });
-            if selected.is_none_or(|required| required.version != dependency.version) || !same_build
-            {
+            if selected.is_none_or(|required| required.version != dependency.version) {
                 plan.problem(
                     "dependency",
                     format!(
-                        "{} requires {}@{} in this prefix{}",
-                        package.package_id,
-                        dependency.package_id,
-                        dependency.version,
-                        if bundle.legacy_preview {
-                            " from the same Preview build"
-                        } else {
-                            ""
-                        }
+                        "{} requires {}@{} in this prefix",
+                        package.package_id, dependency.package_id, dependency.version,
                     ),
                     Some(&package.package_id),
                     Some(prefix.into()),
@@ -111,7 +120,7 @@ fn plan_with_limits(
             });
         }
         for (name, metadata) in &package.files {
-            let target = prefix.join(name);
+            let target = installation.prefix.join(name);
             ownership(
                 &mut plan,
                 &snapshot,
@@ -149,7 +158,6 @@ fn plan_with_limits(
             verify,
             writes,
             removes: BTreeMap::new(),
-            legacy: snapshot.legacy.clone(),
             marker_before: snapshot.marker.clone(),
             marker_after: Some(marker),
             source_records: bundle.records,
@@ -169,12 +177,7 @@ fn ownership(
     target: &Path,
     package: &str,
 ) {
-    let installations = snapshot.database.installations.iter().chain(
-        snapshot
-            .selected
-            .iter()
-            .filter(|_| !snapshot.legacy.is_empty()),
-    );
+    let installations = snapshot.database.installations.iter();
     for installation in installations {
         for installed in &installation.packages {
             for path in installed.files.keys() {
@@ -196,10 +199,10 @@ fn ownership(
         }
     }
     // The selected installation may be fresh; its reserved metadata is never package payload.
-    if target.starts_with(selected.prefix.join(".aw-packages")) {
+    if target.starts_with(selected.prefix.join(".local-packages")) {
         plan.problem(
             "reserved_path",
-            "payload overlaps AW package records",
+            "payload overlaps local package records",
             Some(package),
             Some(target.into()),
         );

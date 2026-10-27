@@ -5,12 +5,12 @@ mod durability;
 mod locks;
 
 use super::{fs, journal, prepare, ChangeSet, SourceFile};
-use crate::{
+use crate::store::{
     database::{
         DatabasePaths, Installation, InstalledDatabase, InstalledPackage, Inventory, Manager,
         Registration, RegistrationPointer, Scope, SourceEvidence,
     },
-    Component, Error,
+    Error,
 };
 use std::{
     collections::BTreeMap,
@@ -80,7 +80,7 @@ impl Fixture {
         }
     }
 
-    fn changes(&self, legacy: bool) -> ChangeSet {
+    fn changes(&self, existing: bool) -> ChangeSet {
         let source = self.source("tool", b"new tool\n");
         let files = BTreeMap::from([("bin/tool".into(), source.metadata.clone())]);
         let package = InstalledPackage {
@@ -117,7 +117,6 @@ impl Fixture {
             verify: BTreeMap::new(),
             writes: BTreeMap::from([("bin/tool".into(), source)]),
             removes: BTreeMap::new(),
-            legacy: BTreeMap::new(),
             marker_before: None,
             marker_after: Some(
                 serde_json::to_vec(
@@ -127,50 +126,40 @@ impl Fixture {
             ),
             source_records: BTreeMap::new(),
         };
-        if legacy {
-            let old = self.prefix.join("bin/aw");
-            self.record(&old, b"old core\n", 0o755);
-            self.record(&self.prefix.join(".aw-install.lock"), b"", 0o600);
-            let component = Component {
-                format: 1,
-                component: "aw-core".into(),
-                version: "old-build".into(),
-                source_commit: "historical-source".into(),
-                os: "linux".into(),
-                arch: std::env::consts::ARCH.into(),
-                provider_protocol: "aw-provider/v1alpha1".into(),
-                requires: BTreeMap::new(),
-                files: BTreeMap::from([("bin/aw".into(), fs::bytes_payload(b"old core\n", 0o755))]),
+        if existing {
+            let old_file = "bin/existing-tool";
+            let metadata = fs::bytes_payload(b"existing tool\n", 0o755);
+            self.record(&self.prefix.join(old_file), b"existing tool\n", 0o755);
+            self.record(&self.prefix.join(".local-install.lock"), b"", 0o600);
+            let mut old = changes.database_after.installations[0].clone();
+            old.packages[0].package_id = "example.existing".into();
+            old.packages[0].files = BTreeMap::from([(old_file.into(), metadata)]);
+            let before = InstalledDatabase {
+                schema_version: 1,
+                generation: 1,
+                installations: vec![old.clone()],
             };
-            let bytes = serde_json::to_vec_pretty(&component).unwrap();
+            let bytes = serde_json::to_vec(&before).unwrap();
+            self.record(&self.paths.installed(), &bytes, 0o644);
+            self.record(&self.paths.root.join("lock"), b"", 0o644);
+            self.directory(&self.paths.root.join("transactions"));
             self.record(
-                &self.prefix.join(".aw-packages/aw-core.json"),
-                &bytes,
+                &self.prefix.join(".local-packages/installation.json"),
+                changes.marker_after.as_ref().unwrap(),
                 0o644,
             );
-            changes.verify = component.files.clone();
-            changes.marker_before = Some(bytes.clone());
-            changes.legacy.insert("aw-core.json".into(), bytes);
+            changes.database_before = Some(bytes);
+            changes.database_after.generation = 2;
+            changes.verify = old.packages[0].files.clone();
             changes.database_after.installations[0]
                 .packages
-                .push(InstalledPackage {
-                    package_id: "aw-core".into(),
-                    version: component.version,
-                    os: component.os,
-                    arch: component.arch,
-                    files: component.files,
-                    dependencies: Vec::new(),
-                    source: SourceEvidence {
-                        bundle_sha256: None,
-                        source_commit: Some(component.source_commit),
-                    },
-                    provider: None,
-                });
+                .push(old.packages.remove(0));
+            changes.marker_before = changes.marker_after.clone();
         }
         changes
     }
 
-    fn kill(&self, phase: &str, legacy: bool) {
+    fn kill(&self, phase: &str, existing: bool) {
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -179,8 +168,8 @@ impl Fixture {
             ])
             .env("AW_PACKAGE_TRANSACTION_CHILD", &self.root)
             .env(
-                "AW_PACKAGE_TRANSACTION_LEGACY",
-                if legacy { "yes" } else { "no" },
+                "LOCAL_PACKAGE_TRANSACTION_EXISTING",
+                if existing { "yes" } else { "no" },
             )
             .env("AW_PACKAGE_TEST_KILL_AT", phase)
             .env(
@@ -240,8 +229,8 @@ fn crash_child() {
         system_cleanup(&fixture);
         panic!("requested system-cleanup checkpoint was not reached");
     }
-    let legacy = std::env::var("AW_PACKAGE_TRANSACTION_LEGACY").unwrap() == "yes";
-    let changes = fixture.changes(legacy);
+    let existing = std::env::var("LOCAL_PACKAGE_TRANSACTION_EXISTING").unwrap() == "yes";
+    let changes = fixture.changes(existing);
     super::apply(&fixture.paths, &changes, &AtomicBool::new(false)).unwrap();
     panic!("requested crash checkpoint was not reached");
 }
@@ -290,25 +279,7 @@ fn sigkill_after_commit_and_before_cleanup_finishes_without_undoing_payload() {
 }
 
 #[test]
-fn legacy_gate_is_present_after_sigkill_and_restored_only_after_rollback() {
-    let fixture = Fixture::new();
-    fixture.kill("gated", true);
-    let path = fixture.prefix.join(".aw-packages/aw-core.json");
-    let gate = disk::read(&path).unwrap();
-    assert!(serde_json::from_slice::<Component>(&gate).is_err());
-    assert!(serde_json::from_slice::<RegistrationPointer>(&gate).is_ok());
-    let attempt = fs::entries(&fixture.paths.root.join("legacy/install-one"))
-        .unwrap()
-        .remove(0);
-    let archived = disk::read(attempt.join("aw-core.json")).unwrap();
-    assert_eq!(fixture.recover().rolled_back, 1);
-    assert_eq!(disk::read(path).unwrap(), archived);
-    assert_eq!(fixture.recover().rolled_back, 0);
-    assert!(!fixture.prefix.join("bin/tool").exists());
-}
-
-#[test]
-fn recovery_keeps_user_replacements_and_keeps_the_old_writer_closed() {
+fn recovery_keeps_user_replacements_and_retains_management_metadata() {
     let fixture = Fixture::new();
     fixture.kill("precommit", true);
     let tool = fixture.prefix.join("bin/tool");
@@ -317,7 +288,7 @@ fn recovery_keeps_user_replacements_and_keeps_the_old_writer_closed() {
     let report = fixture.recover();
     assert!(report.conflicts.contains(&tool));
     assert_eq!(disk::read(&tool).unwrap(), b"user replacement\n");
-    let marker = disk::read(fixture.prefix.join(".aw-packages/aw-core.json")).unwrap();
+    let marker = disk::read(fixture.prefix.join(".local-packages/installation.json")).unwrap();
     assert!(serde_json::from_slice::<RegistrationPointer>(&marker).is_ok());
     assert!(!fixture.recover().conflicts.is_empty());
     assert!(matches!(
@@ -361,7 +332,7 @@ fn execution_rechecks_source_and_database_before_mutating_prefix() {
 fn prefix_lock_contention_is_reported_as_in_use() {
     let fixture = Fixture::new();
     let changes = fixture.changes(true);
-    let _lock = fs::lock(&fixture.prefix.join(".aw-install.lock"), false).unwrap();
+    let _lock = fs::lock(&fixture.prefix.join(".local-install.lock"), false).unwrap();
     let failure = super::apply(&fixture.paths, &changes, &AtomicBool::new(false)).unwrap_err();
     assert!(matches!(failure.error, Error::InUse(_)));
     assert!(!fixture.prefix.join("bin/tool").exists());
@@ -445,7 +416,7 @@ fn system_database_permissions_allow_readers_without_exposing_journals() {
 
 fn system_cleanup(fixture: &Fixture) {
     let _database = fs::lock(&fixture.paths.root.join("lock"), false).unwrap();
-    let _prefix = fs::lock(&fixture.prefix.join(".aw-install.lock"), false).unwrap();
+    let _prefix = fs::lock(&fixture.prefix.join(".local-install.lock"), false).unwrap();
     let directory = fs::entries(&fixture.paths.root.join("transactions"))
         .unwrap()
         .remove(0);
@@ -461,10 +432,10 @@ fn system_cleanup(fixture: &Fixture) {
 }
 
 #[test]
-fn legacy_lock_permissions_remain_private_when_precommit_changes_roll_back() {
+fn existing_lock_permissions_remain_private_when_precommit_changes_roll_back() {
     let fixture = Fixture::new();
     fixture.kill("precommit", true);
-    let lock = fixture.prefix.join(".aw-install.lock");
+    let lock = fixture.prefix.join(".local-install.lock");
     assert_eq!(disk::metadata(&lock).unwrap().mode() & 0o777, 0o600);
     assert_eq!(fixture.recover().rolled_back, 1);
     assert_eq!(disk::metadata(lock).unwrap().mode() & 0o777, 0o600);
@@ -474,7 +445,7 @@ fn legacy_lock_permissions_remain_private_when_precommit_changes_roll_back() {
 fn committed_system_lock_permissions_survive_interrupted_cleanup_and_retry() {
     let fixture = Fixture::new();
     fixture.kill("postcommit", true);
-    let lock = fixture.prefix.join(".aw-install.lock");
+    let lock = fixture.prefix.join(".local-install.lock");
     assert_eq!(disk::metadata(&lock).unwrap().mode() & 0o777, 0o600);
     let before = fs::identity(&lock).unwrap();
     fixture.kill("lock-readable", true);
@@ -493,7 +464,7 @@ fn committed_system_lock_permissions_survive_interrupted_cleanup_and_retry() {
 fn private_nonempty_or_replaced_locks_are_never_made_public() {
     let fixture = Fixture::new();
     fixture.directory(&fixture.prefix);
-    let lock = fixture.prefix.join(".aw-install.lock");
+    let lock = fixture.prefix.join(".local-install.lock");
     disk::write(&lock, b"private unknown bytes").unwrap();
     disk::set_permissions(&lock, disk::Permissions::from_mode(0o600)).unwrap();
     let before = fs::identity(&lock).unwrap();
@@ -585,66 +556,4 @@ fn journal_less_unknown_files_names_and_symlinks_are_preserved_as_conflicts() {
     assert!(unrelated.is_dir());
     assert!(alias.is_symlink());
     assert!(target.is_dir());
-}
-
-#[test]
-fn a_rolled_back_migration_does_not_reserve_future_legacy_record_bytes() {
-    let fixture = Fixture::new();
-    fixture.kill("gated", true);
-    assert_eq!(fixture.recover().rolled_back, 1);
-    let archive = fixture.paths.root.join("legacy/install-one");
-    let original_attempt = fs::entries(&archive).unwrap().remove(0);
-    let original_bytes = disk::read(original_attempt.join("aw-core.json")).unwrap();
-
-    let mut changes = fixture.changes(true);
-    let mut record: Component =
-        serde_json::from_slice(changes.marker_before.as_ref().unwrap()).unwrap();
-    record.version = "old-build-r2".into();
-    crate::database::validate_legacy_component(&record).unwrap();
-    let changed_bytes = serde_json::to_vec(&record).unwrap();
-    assert_ne!(changed_bytes, original_bytes);
-    disk::write(
-        fixture.prefix.join(".aw-packages/aw-core.json"),
-        &changed_bytes,
-    )
-    .unwrap();
-    changes.marker_before = Some(changed_bytes.clone());
-    changes
-        .legacy
-        .insert("aw-core.json".into(), changed_bytes.clone());
-    changes.database_after.installations[0]
-        .packages
-        .iter_mut()
-        .find(|package| package.package_id == "aw-core")
-        .unwrap()
-        .version = record.version;
-    changes.database_before = Some(disk::read(fixture.paths.installed()).unwrap());
-    assert_eq!(changes.installation_id, "install-one");
-    super::apply(&fixture.paths, &changes, &AtomicBool::new(false)).unwrap();
-
-    let attempts = fs::entries(&archive).unwrap();
-    assert_eq!(attempts.len(), 2);
-    assert_eq!(
-        disk::read(original_attempt.join("aw-core.json")).unwrap(),
-        original_bytes
-    );
-    let latest = attempts
-        .into_iter()
-        .find(|path| path != &original_attempt)
-        .unwrap();
-    assert_eq!(
-        disk::read(latest.join("aw-core.json")).unwrap(),
-        changed_bytes
-    );
-    let inventory = Inventory::read(&fixture.paths, None).unwrap();
-    assert_eq!(inventory.installations[0].installation_id, "install-one");
-    assert_eq!(
-        inventory.installations[0]
-            .packages
-            .iter()
-            .find(|package| package.package_id == "aw-core")
-            .unwrap()
-            .version,
-        "old-build-r2"
-    );
 }

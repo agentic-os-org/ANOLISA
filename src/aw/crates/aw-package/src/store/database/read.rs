@@ -1,10 +1,10 @@
-//! Central snapshots and explicit-prefix compatibility discovery.
+//! Central snapshots selected by an explicit database and optional prefix.
 
 use super::{
-    legacy, paths, validation, DatabasePaths, InstalledDatabase, Inventory, InventorySource, Scope,
+    paths, validation, DatabasePaths, InstalledDatabase, Inventory, InventorySource, Scope,
     MAX_DATABASE_BYTES,
 };
-use crate::{require, Error, Result};
+use crate::store::{require, Error, Result};
 use std::{collections::BTreeSet, os::unix::fs::MetadataExt, path::Path};
 
 pub(super) fn inventory(paths: &DatabasePaths, prefix: Option<&Path>) -> Result<Inventory> {
@@ -20,6 +20,7 @@ pub(super) fn inventory(paths: &DatabasePaths, prefix: Option<&Path>) -> Result<
         _locks: Vec::new(),
         _database_generation: None,
         _dependency_targets: BTreeSet::new(),
+        _manager: paths.manager(),
     };
     match paths::directory(&paths.root) {
         Err(error) if paths::missing(&error) => {}
@@ -83,25 +84,12 @@ pub(super) fn inventory(paths: &DatabasePaths, prefix: Option<&Path>) -> Result<
             super::RegistrationPointer::read(prefix)?.is_none(),
             "prefix registration has no matching installation in the selected database",
         )?;
-        if let Some((installation, lock)) = legacy::installation(prefix)? {
-            for package in &installation.packages {
-                inventory._dependency_targets.insert((
-                    installation.installation_id.clone(),
-                    package.package_id.clone(),
-                    package.version.clone(),
-                ));
-            }
-            inventory.installations.push(installation);
-            inventory._locks.push(lock);
-            inventory.source = InventorySource::Legacy;
-            inventory.generation = None;
-        } else {
-            return Err(Error::Invalid(format!(
-                "no installed package records for prefix: {}",
-                prefix.display()
-            )));
-        }
+        return Err(Error::Invalid(format!(
+            "no installed package records for prefix: {}",
+            prefix.display()
+        )));
     }
+
     if inventory.source == InventorySource::Database {
         for installation in &inventory.installations {
             // Listing records must survive a missing or inaccessible payload root.
@@ -148,16 +136,6 @@ pub(super) fn recheck(inventory: &Inventory) -> Result<()> {
         )?;
         if let Some(lock) = inventory._locks.first() {
             paths::same(&root.join("lock"), &lock.metadata()?)?;
-        }
-    }
-    for installation in &inventory.installations {
-        if installation.registration == super::Registration::LegacyUnregistered {
-            if let Some(lock) = inventory._locks.last() {
-                paths::same(
-                    &installation.prefix.join(".aw-install.lock"),
-                    &lock.metadata()?,
-                )?;
-            }
         }
     }
     Ok(())

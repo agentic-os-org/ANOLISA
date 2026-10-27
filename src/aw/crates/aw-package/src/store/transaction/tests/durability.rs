@@ -1,7 +1,7 @@
 //! A visible database rename must not retire recovery bytes before directory sync succeeds.
 
 use super::*;
-use crate::{NoticeCode, RecoveryState};
+use crate::store::{NoticeCode, RecoveryState};
 
 fn pending(fixture: &Fixture) -> journal::Journal {
     let mut entries = fs::entries(&fixture.paths.root.join("transactions")).unwrap();
@@ -14,12 +14,12 @@ fn failed_database_directory_sync_retains_backups_until_recovery_confirms_commit
     let fixture = Fixture::new();
     let changes = fixture.changes(false);
     super::super::apply(&fixture.paths, &changes, &AtomicBool::new(false)).unwrap();
-    let removal = crate::plan::uninstall(&fixture.paths, &fixture.prefix, &[]).unwrap();
+    let removal = crate::store::plan::uninstall(&fixture.paths, &fixture.prefix, &[]).unwrap();
     assert!(removal.ready(), "{:?}", removal.problems);
 
     let fault = fs::fail_database_sync(&fixture.paths.installed());
     let failure =
-        crate::plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).unwrap_err();
+        crate::store::plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).unwrap_err();
     assert!(matches!(&failure.error, Error::Io(error) if error.raw_os_error() == Some(libc::EIO)));
     assert!(!failure.report.committed);
     assert_eq!(failure.report.recovery, RecoveryState::Incomplete);
@@ -80,7 +80,7 @@ fn failed_commit_sync_keeps_rollback_material_if_the_old_database_returns() {
     );
     assert!(fixture.prefix.join("bin/tool").is_file());
     assert!(serde_json::from_slice::<RegistrationPointer>(
-        &disk::read(fixture.prefix.join(".aw-packages/aw-core.json")).unwrap()
+        &disk::read(fixture.prefix.join(".local-packages/installation.json")).unwrap()
     )
     .is_ok());
     drop(fault);
@@ -96,17 +96,21 @@ fn failed_commit_sync_keeps_rollback_material_if_the_old_database_returns() {
     assert!(recovered.conflicts.is_empty());
     assert!(!fixture.prefix.join("bin/tool").exists());
     assert_eq!(
-        disk::read(fixture.prefix.join("bin/aw")).unwrap(),
-        b"old core\n"
+        disk::read(fixture.prefix.join("bin/existing-tool")).unwrap(),
+        b"existing tool\n"
     );
     assert_eq!(
-        disk::read(fixture.prefix.join(".aw-packages/aw-core.json")).unwrap(),
+        disk::read(fixture.prefix.join(".local-packages/installation.json")).unwrap(),
         original_record
     );
     assert!(!entry.directory().exists());
-    assert!(Inventory::read(&fixture.paths, None)
-        .unwrap()
-        .installations
-        .is_empty());
+    let inventory = Inventory::read(&fixture.paths, None).unwrap();
+    assert_eq!(inventory.installations.len(), 1);
+    assert_eq!(inventory.installations[0].packages.len(), 1);
+    assert_eq!(
+        inventory.installations[0].packages[0].package_id,
+        "example.existing"
+    );
+    drop(inventory);
     assert_eq!(fixture.recover().rolled_back, 0);
 }

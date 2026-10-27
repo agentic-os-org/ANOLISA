@@ -50,7 +50,7 @@ fn tty_refusal_default_and_eof_preserve_every_installed_byte() {
     for mode in ["decline", "default", "eof"] {
         let f = Fixture::new();
         success(f.install().output().unwrap());
-        let receipt = f.prefix.join(".aw-packages/aw-core.json");
+        let receipt = f.prefix.join(".local-packages/installation.json");
         let before = fs::read(&receipt).unwrap();
         let inode = fs::metadata(&receipt).unwrap().ino();
         let output = captured(&f, mode, &[]);
@@ -76,7 +76,7 @@ fn prompt_interrupts_retain_signal_exit_codes_without_starting_removal() {
         assert_eq!(output["code"], code);
         assert!(text(&output, "terminal").contains("confirmation interrupted"));
         assert!(text(&output, "stdout").is_empty());
-        assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
+        assert!(f.prefix.join(".local-packages/installation.json").is_file());
     }
 }
 
@@ -93,7 +93,7 @@ fn mixed_terminal_channels_and_json_never_open_a_confirmation_prompt() {
         let output = captured(&f, mode, &options);
         assert_eq!(output["code"], 1);
         assert!(!text(&output, "terminal").contains("[y/N]"));
-        assert!(f.prefix.join(".aw-packages/aw-core.json").exists());
+        assert!(f.prefix.join(".local-packages/installation.json").exists());
     }
 }
 

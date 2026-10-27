@@ -1,6 +1,6 @@
 //! Bounded payload hashing shares the inventory's descriptor traversal rules.
 
-use crate::{database, require, Payload, Result};
+use crate::store::{database, require, Payload, Result};
 use sha2::{Digest, Sha256};
 use std::{io::Read, os::unix::fs::MetadataExt, path::Path};
 

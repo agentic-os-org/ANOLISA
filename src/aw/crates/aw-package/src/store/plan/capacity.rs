@@ -1,7 +1,7 @@
 //! Keep admitted prefixes removable within the unchanged recovery journal bounds.
 
 use super::PackagePlan;
-use crate::{
+use crate::store::{
     database::{DatabasePaths, RegistrationPointer},
     transaction::{self, ChangeSet},
     Result,
@@ -112,13 +112,15 @@ fn check_byte_limit(
             .database_after
             .generation
             .checked_add(1)
-            .ok_or_else(|| crate::Error::Invalid("package database generation exhausted".into()))?;
+            .ok_or_else(|| {
+                crate::store::Error::Invalid("package database generation exhausted".into())
+            })?;
         let installation = removal
             .database_after
             .installations
             .iter_mut()
             .find(|installation| installation.prefix == changes.prefix)
-            .ok_or_else(|| crate::Error::Invalid("planned installation is absent".into()))?;
+            .ok_or_else(|| crate::store::Error::Invalid("planned installation is absent".into()))?;
         removal.removes = installation
             .packages
             .iter()
@@ -127,7 +129,6 @@ fn check_byte_limit(
         removal.verify = removal.removes.clone();
         installation.packages.clear();
         removal.writes.clear();
-        removal.legacy.clear();
         removal.source_records.clear();
         let pointer = RegistrationPointer::new(paths, changes.installation_id.clone())?;
         // Reserve a future locator rewrite even when the installed encoding currently matches.

@@ -3,21 +3,21 @@
 use super::*;
 
 fn metadata(fixture: &Fixture) {
-    let records = fixture.prefix.join(".aw-packages");
+    let records = fixture.prefix.join(".local-packages");
     fs::create_dir_all(&records).unwrap();
     fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
-    let marker = records.join("aw-core.json");
+    let marker = records.join("installation.json");
     let pointer = RegistrationPointer::new(&fixture.paths, "install-1".into()).unwrap();
     fs::write(&marker, serde_json::to_vec(&pointer).unwrap()).unwrap();
     fs::set_permissions(marker, fs::Permissions::from_mode(0o644)).unwrap();
-    let lock = fixture.prefix.join(".aw-install.lock");
+    let lock = fixture.prefix.join(".local-install.lock");
     fs::write(&lock, []).unwrap();
     fs::set_permissions(lock, fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 #[test]
 fn registered_raw_metadata_loss_is_reported_while_central_listing_remains_available() {
-    for name in [".aw-install.lock", ".aw-packages/aw-core.json"] {
+    for name in [".local-install.lock", ".local-packages/installation.json"] {
         let fixture = Fixture::new();
         fixture.database(vec![fixture.installation()]);
         metadata(&fixture);
@@ -46,8 +46,8 @@ fn empty_registered_raw_installations_still_require_their_locator_and_lock() {
     fixture.database(vec![installation]);
     metadata(&fixture);
     assert!(fixture.read().unwrap().doctor().unwrap().healthy());
-    let lock = fixture.prefix.join(".aw-install.lock");
-    let marker = fixture.prefix.join(".aw-packages/aw-core.json");
+    let lock = fixture.prefix.join(".local-install.lock");
+    let marker = fixture.prefix.join(".local-packages/installation.json");
     fs::remove_file(&lock).unwrap();
     fs::remove_file(&marker).unwrap();
     let inventory = fixture.read().unwrap();
@@ -65,7 +65,7 @@ fn empty_registered_raw_installations_still_require_their_locator_and_lock() {
 }
 
 #[test]
-fn native_records_do_not_require_raw_management_metadata_and_legacy_records_keep_their_format() {
+fn native_records_do_not_require_raw_management_metadata() {
     let fixture = Fixture::new();
     let mut installation = fixture.installation();
     installation["manager"] = json!("rpm");
@@ -74,16 +74,8 @@ fn native_records_do_not_require_raw_management_metadata_and_legacy_records_keep
     assert_eq!(report.issues.len(), 1);
     assert_eq!(report.issues[0].code, DoctorIssueCode::NativeManager);
     assert_eq!(report.files_checked, 0);
-    assert!(!fixture.prefix.join(".aw-install.lock").exists());
-    assert!(!fixture.prefix.join(".aw-packages").exists());
-
-    let legacy = Fixture::new();
-    legacy.legacy("1.2.3");
-    let before = snapshot(legacy.directory.path());
-    let inventory = Inventory::read(&legacy.paths, Some(&legacy.prefix)).unwrap();
-    assert_eq!(inventory.source, InventorySource::Legacy);
-    assert!(inventory.doctor().unwrap().healthy());
-    assert_eq!(snapshot(legacy.directory.path()), before);
+    assert!(!fixture.prefix.join(".local-install.lock").exists());
+    assert!(!fixture.prefix.join(".local-packages").exists());
 }
 
 #[test]
@@ -91,7 +83,7 @@ fn a_symlinked_registered_lock_is_reported_without_following_or_replacing_it() {
     let fixture = Fixture::new();
     fixture.database(vec![fixture.installation()]);
     metadata(&fixture);
-    let lock = fixture.prefix.join(".aw-install.lock");
+    let lock = fixture.prefix.join(".local-install.lock");
     let target = fixture.directory.path().join("unrelated.txt");
     fs::write(&target, b"unrelated private data").unwrap();
     fs::remove_file(&lock).unwrap();

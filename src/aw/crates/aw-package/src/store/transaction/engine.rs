@@ -5,7 +5,7 @@ use super::{
     journal::{self, Journal},
     prepare, replay, ChangeSet,
 };
-use crate::{
+use crate::store::{
     database::DatabasePaths, require, Error, MutationFailure, MutationNotice, MutationReport,
     MutationResult, NoticeCode, RecoveryState, Result,
 };
@@ -123,8 +123,8 @@ fn execute(
         entry.write()?;
     }
     if prefix_lock.is_none() {
-        *prefix_lock = Some(fs::new_lock(&entry.prefix.join(".aw-install.lock"))?);
-        entry.lock_identity = Some(fs::identity(&entry.prefix.join(".aw-install.lock"))?);
+        *prefix_lock = Some(fs::new_lock(&entry.prefix.join(".local-install.lock"))?);
+        entry.lock_identity = Some(fs::identity(&entry.prefix.join(".local-install.lock"))?);
         entry.write()?;
     }
     require(
@@ -135,28 +135,21 @@ fn execute(
     fs::mkdir(&entry.workspace(), 0o700)?;
     entry.workspace_identity = Some(fs::directory_identity(&entry.workspace())?);
     entry.write()?;
-    archive(paths, changes, &entry.transaction_id)?;
-    let gate = prepare::gate_bytes(paths, changes)?;
-    let first_is_gate = gate.is_some() && gate != changes.marker_before;
+    let locator = changes.marker_after.clone();
+    let first_is_locator = locator.is_some() && locator != changes.marker_before;
     for index in 0..entry.actions.len() {
         journal::check_cancel(cancel)?;
         let name = entry.actions[index].path.clone();
-        if name == ".aw-packages/aw-core.json" && index == 0 && first_is_gate {
+        if name == ".local-packages/installation.json" && index == 0 && first_is_locator {
             prepare::stage_bytes(
                 entry,
                 index,
-                gate.as_deref()
-                    .ok_or_else(|| Error::Invalid("missing registration gate".into()))?,
+                locator
+                    .as_deref()
+                    .ok_or_else(|| Error::Invalid("missing registration locator".into()))?,
             )?;
         } else if let Some(source) = changes.writes.get(&name) {
             prepare::stage_source(entry, index, source)?;
-        } else if name == ".aw-packages/aw-core.json" && first_is_gate {
-            entry.actions[index].before = Some(prepare::verify_bytes(
-                &entry.prefix.join(&name),
-                gate.as_deref()
-                    .ok_or_else(|| Error::Invalid("missing registration gate".into()))?,
-            )?);
-            entry.write()?;
         }
         if entry.actions[index].after.is_some() {
             prepare::parents(entry, Path::new(&name))?;
@@ -182,11 +175,12 @@ fn execute(
         // This durable intent precedes either namespace change; replay checks inode plus contents.
         entry.actions[index].active = true;
         entry.write()?;
-        let backup = entry.workspace().join(&action.backup);
-        let stage = entry.workspace().join(&action.stage);
+        let workspace = entry.workspace();
+        let backup = workspace.join(&action.backup);
+        let stage = workspace.join(&action.stage);
         match (&action.before, &action.after) {
             (Some(before), Some(after)) => {
-                // The old-writer gate must never disappear, including across SIGKILL.
+                // Keep replacement metadata continuously present, including across SIGKILL.
                 fs::link_owned(&destination, &backup, before)?;
                 require(fs::same(&stage, after)?, "staged package file changed")?;
                 fs::exchange(&stage, &destination)?;
@@ -222,8 +216,8 @@ fn execute(
             }
             (None, None) => {}
         }
-        if index == 0 && first_is_gate {
-            journal::checkpoint("gated");
+        if index == 0 && first_is_locator {
+            journal::checkpoint("locator-published");
         }
     }
     journal::check_cancel(cancel)?;
@@ -267,36 +261,6 @@ fn verify_after(entry: &Journal) -> Result<()> {
                 !fs::exists(&path)?,
                 format!("removed file reappeared before commit: {}", path.display()),
             )?,
-        }
-    }
-    Ok(())
-}
-
-fn archive(paths: &DatabasePaths, changes: &ChangeSet, transaction_id: &str) -> Result<()> {
-    if changes.legacy.is_empty() {
-        return Ok(());
-    }
-    let root = paths.root.join("legacy");
-    fs::ensure_tree(&root, 0o700)?;
-    let installation = root.join(&changes.installation_id);
-    fs::ensure_tree(&installation, 0o700)?;
-    // A rolled-back attempt cannot reserve the stable installation ID's future raw bytes.
-    let directory = installation.join(transaction_id);
-    fs::ensure_tree(&directory, 0o700)?;
-    for (name, bytes) in &changes.legacy {
-        let destination = directory.join(name);
-        match fs::read_optional(&destination, crate::description::MAX_DESCRIPTION_BYTES)? {
-            Some(existing) => require(
-                existing == *bytes,
-                format!(
-                    "legacy archive differs from original bytes: {}",
-                    destination.display()
-                ),
-            )?,
-            None => {
-                let (file, _) = fs::write_bytes(&directory, bytes, 0o600)?;
-                fs::publish(&file, &destination)?;
-            }
         }
     }
     Ok(())

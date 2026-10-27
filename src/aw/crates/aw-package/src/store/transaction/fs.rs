@@ -6,7 +6,7 @@ mod faults;
 #[cfg(test)]
 pub(super) use faults::fail_database_sync;
 
-use crate::{require, Error, Payload, Result};
+use crate::store::{require, Error, Payload, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{

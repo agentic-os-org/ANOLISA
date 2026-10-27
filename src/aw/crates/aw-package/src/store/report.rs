@@ -1,6 +1,6 @@
-//! Observed outcomes of one existing Preview mutation, without terminal output.
+//! Observed outcomes of one file transaction, without terminal output.
 
-use crate::Error;
+use crate::store::Error;
 use std::{io::ErrorKind, path::PathBuf};
 
 /// Whether recovery ran for resources tracked by this invocation.
@@ -67,25 +67,3 @@ pub struct MutationFailure {
 
 /// A committed operation may still return notices about incomplete backup cleanup.
 pub type MutationResult = std::result::Result<MutationReport, MutationFailure>;
-
-impl MutationReport {
-    /// Record a known branch without copying a potentially private error string.
-    pub(super) fn notice(&mut self, code: NoticeCode, path: PathBuf, io_kind: Option<ErrorKind>) {
-        self.notices.push(MutationNotice {
-            code,
-            path,
-            io_kind,
-        });
-    }
-
-    /// Preserve primary failure independently from resource-recovery observations.
-    pub(super) fn finish(self, result: crate::Result<()>) -> MutationResult {
-        match result {
-            Ok(()) => Ok(self),
-            Err(error) => Err(MutationFailure {
-                error,
-                report: self,
-            }),
-        }
-    }
-}

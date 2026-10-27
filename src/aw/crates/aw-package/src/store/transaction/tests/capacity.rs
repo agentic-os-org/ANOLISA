@@ -1,74 +1,16 @@
-//! Compare admission counts with real preparation, including historical metadata changes.
+//! Compare admission counts with real preparation, including current registration metadata.
 
 use super::*;
 
-fn add_legacy_provider(fixture: &Fixture, changes: &mut ChangeSet) {
-    let mut files = BTreeMap::new();
-    for name in ["aw-provider-tokenless", "tokenless", "rtk"] {
-        let relative = format!("libexec/aw/providers/tokenless/{name}");
-        let path = fixture.prefix.join(&relative);
-        fixture.record(&path, b"old tool\n", 0o755);
-        files.insert(relative, fs::bytes_payload(b"old tool\n", 0o755));
-    }
-    let component = Component {
-        format: 1,
-        component: "aw-provider-tokenless".into(),
-        version: "old-build".into(),
-        source_commit: "historical-source".into(),
-        os: "linux".into(),
-        arch: std::env::consts::ARCH.into(),
-        provider_protocol: "aw-provider/v1alpha1".into(),
-        requires: BTreeMap::from([("aw-core".into(), "old-build".into())]),
-        files,
-    };
-    crate::database::validate_legacy_component(&component).unwrap();
-    let bytes = serde_json::to_vec_pretty(&component).unwrap();
-    fixture.record(
-        &fixture
-            .prefix
-            .join(".aw-packages/aw-provider-tokenless.json"),
-        &bytes,
-        0o644,
-    );
-    changes
-        .legacy
-        .insert("aw-provider-tokenless.json".into(), bytes);
-    changes.verify.extend(component.files.clone());
-    changes.database_after.installations[0]
-        .packages
-        .push(InstalledPackage {
-            package_id: component.component,
-            version: component.version,
-            os: component.os,
-            arch: component.arch,
-            files: component.files,
-            dependencies: vec![crate::database::InstalledDependency {
-                installation_id: changes.installation_id.clone(),
-                package_id: "aw-core".into(),
-                version: "old-build".into(),
-            }],
-            source: SourceEvidence {
-                bundle_sha256: None,
-                source_commit: Some(component.source_commit),
-            },
-            provider: Some(crate::description::ProviderDeclaration {
-                protocol: component.provider_protocol,
-            }),
-        });
-}
-
 #[test]
-fn action_capacity_matches_preparation_for_locator_and_legacy_record_changes() {
-    for legacy in [false, true] {
+fn action_capacity_matches_preparation_for_current_locator_changes() {
+    for existing in [false, true] {
         for remove_locator in [false, true] {
-            if remove_locator && !legacy {
+            if remove_locator && !existing {
                 continue;
             }
             let fixture = Fixture::new();
-            let mut changes = fixture.changes(legacy);
-            if legacy {
-                add_legacy_provider(&fixture, &mut changes);
-            }
+            let mut changes = fixture.changes(existing);
             if remove_locator {
                 changes.writes.clear();
                 changes.removes = changes.verify.clone();
@@ -77,9 +19,9 @@ fn action_capacity_matches_preparation_for_locator_and_legacy_record_changes() {
             }
             let count = super::super::capacity::actions(&fixture.paths, &changes).unwrap();
             let expected = if remove_locator {
-                7
-            } else if legacy {
-                3
+                2
+            } else if existing {
+                1
             } else {
                 2
             };

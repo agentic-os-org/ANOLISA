@@ -5,26 +5,33 @@ use super::{
     journal::{self, Journal},
     RecoveryReport,
 };
-use crate::{database::DatabasePaths, require, Error, Result};
+use crate::store::{
+    database::{DatabasePaths, InstalledDatabase},
+    require, Error, Result,
+};
 use std::{path::Path, sync::atomic::AtomicBool};
 
-pub(super) fn recover(paths: &DatabasePaths, cancel: &AtomicBool) -> Result<RecoveryReport> {
+pub(super) fn recover(
+    paths: &DatabasePaths,
+    cancel: &AtomicBool,
+    mut validate: impl FnMut(&InstalledDatabase) -> Result<()>,
+) -> Result<RecoveryReport> {
     journal::check_cancel(cancel)?;
     match fs::directory(&paths.root) {
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RecoveryReport::default())
+            return Ok(RecoveryReport::default());
         }
         Err(error) => return Err(error),
         Ok(_) => fs::owned(&paths.root)?,
     }
     let _database_lock = fs::lock(&paths.root.join("lock"), false)?;
-    require(
-        journal::current_database(paths)?.is_some(),
-        format!(
+    let current = journal::current_database(paths)?.ok_or_else(|| {
+        Error::Invalid(format!(
             "incomplete database bootstrap; preserve {}",
             paths.root.display()
-        ),
-    )?;
+        ))
+    })?;
+    validate(&serde_json::from_slice(&current)?)?;
     let transactions = paths.root.join("transactions");
     let entries = match fs::entries(&transactions) {
         Ok(entries) => entries,
@@ -43,6 +50,10 @@ pub(super) fn recover(paths: &DatabasePaths, cancel: &AtomicBool) -> Result<Reco
             PendingDirectory::Journal => {}
         }
         let entry = journal::read(paths, &directory)?;
+        if let Some(before) = &entry.before_database {
+            validate(&serde_json::from_slice(before)?)?;
+        }
+        validate(&serde_json::from_slice(&entry.after_database)?)?;
         let committed = decide(paths, &entry)?;
         let prefix_exists = match fs::directory(&entry.prefix) {
             Ok(_) => true,
@@ -60,7 +71,7 @@ pub(super) fn recover(paths: &DatabasePaths, cancel: &AtomicBool) -> Result<Reco
                 report.conflicts.push(entry.prefix.clone());
                 continue;
             }
-            let lock = entry.prefix.join(".aw-install.lock");
+            let lock = entry.prefix.join(".local-install.lock");
             if let Some(expected) = &entry.lock_identity {
                 let readable = committed
                     && journal::readable_lock(paths, &entry)
@@ -191,25 +202,18 @@ pub(super) fn finish(
         if let (Some(before), Some(after)) =
             (&entry.lock_identity, journal::readable_lock(paths, entry))
         {
-            let lock = entry.prefix.join(".aw-install.lock");
+            let lock = entry.prefix.join(".local-install.lock");
             if !fs::make_readable(&lock, before, &after)? {
                 return Ok(vec![lock]);
             }
             journal::checkpoint("lock-readable");
         }
     }
-    for (index, action) in entry.actions.iter().enumerate().rev() {
-        // Closing the historical writer is undone only after every other rollback is safe.
-        if !committed
-            && index == 0
-            && action.path == ".aw-packages/aw-core.json"
-            && !conflicts.is_empty()
-        {
-            continue;
-        }
+    for action in entry.actions.iter().rev() {
         let destination = entry.prefix.join(&action.path);
-        let backup = entry.workspace().join(&action.backup);
-        let stage = entry.workspace().join(&action.stage);
+        let workspace = entry.workspace();
+        let backup = workspace.join(&action.backup);
+        let stage = workspace.join(&action.stage);
         if !action.active {
             remove_if_owned(&stage, action.after.as_ref(), &mut conflicts)?;
             continue;
@@ -268,7 +272,7 @@ pub(super) fn finish(
         }
         if entry.lock_created {
             remove_if_owned(
-                &entry.prefix.join(".aw-install.lock"),
+                &entry.prefix.join(".local-install.lock"),
                 entry.lock_identity.as_ref(),
                 &mut conflicts,
             )?;

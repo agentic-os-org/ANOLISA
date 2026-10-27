@@ -1,7 +1,7 @@
 //! Validate record shape and file ownership without touching installed payloads.
 
 use super::{paths, InstalledDatabase, Registration, Scope, MAX_INSTALLATIONS, MAX_PACKAGES};
-use crate::{
+use crate::store::{
     description::{self, identifier},
     require, Result,
 };
@@ -52,21 +52,17 @@ pub(crate) fn database(database: &InstalledDatabase, scope: Scope) -> Result<()>
             )?;
             description::package_fields(
                 &package.package_id,
-                "0.0.0",
+                &package.version,
                 &package.os,
                 &package.arch,
                 &package.files,
                 package.provider.as_ref(),
             )?;
-            require(
-                !package.version.is_empty() && package.version.len() <= 128,
-                "invalid stored package version",
-            )?;
             if let Some(value) = &package.source.bundle_sha256 {
                 description::sha256(value)?;
             }
             if let Some(value) = &package.source.source_commit {
-                require(value.len() <= 1024, "stored source evidence exceeds limit")?;
+                description::commit_sha(value)?;
             }
             let mut dependencies = BTreeSet::new();
             require(
@@ -76,10 +72,7 @@ pub(crate) fn database(database: &InstalledDatabase, scope: Scope) -> Result<()>
             for dependency in &package.dependencies {
                 identifier(&dependency.installation_id)?;
                 identifier(&dependency.package_id)?;
-                require(
-                    !dependency.version.is_empty() && dependency.version.len() <= 128,
-                    "invalid stored dependency version",
-                )?;
+                description::version(&dependency.version)?;
                 require(
                     dependencies.insert((&dependency.installation_id, &dependency.package_id)),
                     "duplicate installed dependency",

@@ -100,18 +100,22 @@ fn inventory_locks_release_while_an_unrelated_child_is_before_exec() {
     let fixture = Fixture::new();
     let path = fixture.root.join("lock");
     fixture.record(&path, b"", 0o644);
-    released_before_child_exec(&path, || crate::database::shared_file_lock(&path).unwrap());
+    released_before_child_exec(&path, || {
+        crate::store::database::shared_file_lock(&path).unwrap()
+    });
 }
 
 #[test]
 fn installation_locks_release_while_an_unrelated_child_is_before_exec() {
     let fixture = Fixture::new();
     fixture.directory(&fixture.prefix);
-    let path = fixture.prefix.join(".aw-install.lock");
+    let path = fixture.prefix.join(".local-install.lock");
     fixture.record(&path, b"", 0o644);
-    released_before_child_exec(&path, || crate::filesystem::lock(&fixture.prefix).unwrap());
     released_before_child_exec(&path, || {
-        crate::filesystem::shared_lock(&fixture.prefix).unwrap()
+        crate::store::filesystem::lock(&fixture.prefix).unwrap()
+    });
+    released_before_child_exec(&path, || {
+        crate::store::filesystem::shared_lock(&fixture.prefix).unwrap()
     });
 }
 
@@ -121,8 +125,8 @@ fn runtime_leases_release_while_an_unrelated_child_is_before_exec() {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     disk::set_permissions(root.path(), disk::Permissions::from_mode(0o700)).unwrap();
     let fixture = Fixture::at(root.path());
-    fixture.directory(&fixture.prefix.join(".aw-packages"));
-    let path = fixture.prefix.join(".aw-install.lock");
+    fixture.directory(&fixture.prefix.join(".local-packages"));
+    let path = fixture.prefix.join(".local-install.lock");
     fixture.record(&path, b"", 0o644);
     released_before_child_exec(&path, || {
         aw_exec::PackageLeases::for_paths([fixture.prefix.clone()]).unwrap()

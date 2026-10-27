@@ -66,12 +66,12 @@
       "test": "list_keeps_recorded_packages_while_doctor_reports_missing_files"
     },
     "package-database-contract": {
-      "target": "aw-package/test/database",
-      "test": "malformed_records_reject_unknown_schema_fields_duplicates_and_escaping_paths"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::malformed_records_reject_unknown_schema_fields_duplicates_and_escaping_paths"
     },
     "package-description": {
-      "target": "aw-package/test/database",
-      "test": "generic_package_descriptions_allow_external_names_stable_versions_and_no_provider"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::generic_package_descriptions_allow_external_names_stable_versions_and_no_provider"
     },
     "package-pty-consent": {
       "target": "aw-cli/test/packages_pty",
@@ -242,16 +242,16 @@
       "test": "management::a_service_running_from_the_prefix_blocks_removal_until_shutdown"
     },
     "package-generic-plan": {
-      "target": "aw-package/test/management",
-      "test": "generic_install_plan_is_read_only_and_does_not_require_aw_core"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::management::generic_install_plan_is_read_only_and_does_not_require_aw_core"
     },
     "package-legacy-migration": {
       "target": "aw-cli/test/legacy_migration",
       "test": "real_historical_installer_refuses_all_writes_after_package_record_migration"
     },
     "package-cross-prefix-reverse-dependency": {
-      "target": "aw-package/test/management",
-      "test": "registered_reverse_dependencies_in_other_prefixes_prevent_removal"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::management::registered_reverse_dependencies_in_other_prefixes_prevent_removal"
     },
     "package-interrupted-rollback": {
       "target": "aw-package/lib/aw_package",
@@ -263,7 +263,7 @@
     },
     "package-recovery-conflict": {
       "target": "aw-package/lib/aw_package",
-      "test": "store::transaction::tests::recovery_keeps_user_replacements_and_keeps_the_old_writer_closed"
+      "test": "store::transaction::tests::recovery_keeps_user_replacements_and_retains_management_metadata"
     },
     "package-runtime-lease": {
       "target": "aw-exec/test/packages",
@@ -282,8 +282,8 @@
       "test": "store::transaction::tests::committed_system_lock_permissions_survive_interrupted_cleanup_and_retry"
     },
     "package-manager-authority": {
-      "target": "aw-package/test/management",
-      "test": "externally_managed_installations_reject_raw_install_and_uninstall"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::management::externally_managed_installations_reject_raw_install_and_uninstall"
     },
     "package-capacity-admission": {
       "target": "aw-package/lib/aw_package",
@@ -306,20 +306,20 @@
       "test": "store::transaction::journal::snapshots::tests::maximum_database_snapshots_fit_the_journal_and_preserve_exact_bytes"
     },
     "package-doctor-registration-metadata": {
-      "target": "aw-package/test/database",
-      "test": "doctor_metadata::registered_raw_metadata_loss_is_reported_while_central_listing_remains_available"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::registered_raw_metadata_loss_is_reported_while_central_listing_remains_available"
     },
     "package-doctor-empty-registration": {
-      "target": "aw-package/test/database",
-      "test": "doctor_metadata::empty_registered_raw_installations_still_require_their_locator_and_lock"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::empty_registered_raw_installations_still_require_their_locator_and_lock"
     },
     "package-doctor-native-metadata": {
-      "target": "aw-package/test/database",
-      "test": "doctor_metadata::native_records_do_not_require_raw_management_metadata_and_legacy_records_keep_their_format"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::native_records_do_not_require_raw_management_metadata"
     },
     "package-doctor-lock-symlink": {
-      "target": "aw-package/test/database",
-      "test": "doctor_metadata::a_symlinked_registered_lock_is_reported_without_following_or_replacing_it"
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::a_symlinked_registered_lock_is_reported_without_following_or_replacing_it"
     },
     "package-cli-doctor-metadata": {
       "target": "aw-cli/test/packages",
@@ -347,7 +347,7 @@
     },
     "package-journal-capacity-matches-planning": {
       "target": "aw-package/lib/aw_package",
-      "test": "store::transaction::tests::capacity::action_capacity_matches_preparation_for_locator_and_legacy_record_changes"
+      "test": "store::transaction::tests::capacity::action_capacity_matches_preparation_for_current_locator_changes"
     },
     "package-journal-capacity-overflow": {
       "target": "aw-package/lib/aw_package",
@@ -383,7 +383,7 @@
     },
     "package-journal-deep-path-bytes": {
       "target": "aw-package/lib/aw_package",
-      "test": "store::transaction::capacity::tests::deep_parent_paths_and_legacy_locator_actions_enter_the_encoded_budget"
+      "test": "store::transaction::capacity::tests::deep_parent_paths_and_locator_actions_enter_the_encoded_budget"
     },
     "package-journal-existing-parent-bytes": {
       "target": "aw-package/lib/aw_package",
@@ -391,7 +391,7 @@
     },
     "package-journal-final-marker-bytes": {
       "target": "aw-package/lib/aw_package",
-      "test": "store::transaction::capacity::tests::legacy_final_locator_removal_reserves_its_post_gate_before_identity"
+      "test": "store::transaction::capacity::tests::locator_removal_reserves_its_existing_identity"
     },
     "package-journal-future-database-growth": {
       "target": "aw-package/lib/aw_package",

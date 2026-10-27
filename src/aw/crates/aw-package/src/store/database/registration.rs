@@ -1,12 +1,11 @@
-//! Explicit prefix locators close the historical writer and identify the database authority.
+//! Explicit prefix locators identify the current database authority.
 
-use super::{paths, DatabasePaths, Scope, SYSTEM_DATABASE_ROOT};
-use crate::{description, require, Error, Result};
+use super::{paths, DatabasePaths, PackageManager, Scope};
+use crate::store::{description, require, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Prefix-local locator; package facts remain solely in the central database.
-/// Historical component decoders reject this shape before changing any files.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RegistrationPointer {
@@ -18,6 +17,8 @@ pub struct RegistrationPointer {
     pub scope: Scope,
     /// Absolute database root, preserving the XDG location used for installation.
     pub database_root: PathBuf,
+    /// Application that owns the selected package database.
+    pub package_manager: PackageManager,
 }
 
 impl RegistrationPointer {
@@ -31,40 +32,44 @@ impl RegistrationPointer {
             installation_id,
             scope: paths.scope(),
             database_root: paths.root.clone(),
+            package_manager: paths.manager(),
         };
         value.database_paths()?;
         Ok(value)
     }
 
-    /// Read a sole locator, distinguishing historical component records by their format.
+    /// Read the current locator without importing any previous metadata format.
     ///
     /// # Errors
-    /// Rejects mixed locator/legacy records, unsupported fields and unsafe traversal.
+    /// Rejects previous layouts, unexpected files, unsupported fields and unsafe traversal.
     pub fn read(prefix: &Path) -> Result<Option<Self>> {
         paths::absolute(prefix)?;
-        let directory = prefix.join(".aw-packages");
+        match std::fs::symlink_metadata(prefix.join(".aw-packages")) {
+            Ok(_) => {
+                return Err(Error::Invalid(
+                    "unsupported package metadata directory: .aw-packages".into(),
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let directory = prefix.join(".local-packages");
         let entries = match paths::entries(&directory) {
             Ok(entries) => entries,
             Err(error) if paths::missing(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let marker = directory.join("aw-core.json");
-        if !entries.iter().any(|path| path == &marker) {
+        if entries.is_empty() {
             return Ok(None);
         }
-        let bytes = paths::bytes(&marker, description::MAX_DESCRIPTION_BYTES)?;
-        let value: serde_json::Value = super::decode(&bytes)?;
-        if value.get("format").and_then(serde_json::Value::as_u64) == Some(1)
-            && value.get("schema_version").is_none()
-        {
-            return Ok(None);
-        }
-        let pointer: Self = super::decode(&bytes)?;
-        pointer.database_paths()?;
+        let marker = directory.join("installation.json");
         require(
-            entries.len() == 1,
-            "registration pointer conflicts with older package records",
+            entries.len() == 1 && entries[0] == marker,
+            "unexpected package registration metadata",
         )?;
+        let pointer: Self =
+            super::decode(&paths::bytes(&marker, description::MAX_DESCRIPTION_BYTES)?)?;
+        pointer.database_paths()?;
         require(
             !pointer.database_root.starts_with(prefix),
             "package database must be outside its payload prefix",
@@ -84,16 +89,14 @@ impl RegistrationPointer {
         description::identifier(&self.installation_id)?;
         paths::absolute(&self.database_root)?;
         require(
-            matches!(self.scope, Scope::User | Scope::System),
-            "registration requires an explicit user or system scope",
-        )?;
-        require(
-            self.scope != Scope::System || self.database_root == Path::new(SYSTEM_DATABASE_ROOT),
+            self.scope != Scope::System
+                || self.database_root == Path::new(self.package_manager.system_root()),
             "system registration uses an unexpected database root",
         )?;
         Ok(DatabasePaths {
             root: self.database_root.clone(),
             scope: self.scope,
+            manager: self.package_manager,
         })
     }
 }
@@ -107,13 +110,14 @@ pub(crate) fn check_registered(
         Ok(Some(pointer)) => require(
             pointer.installation_id == installation_id
                 && pointer.database_root == paths.root
-                && pointer.scope == paths.scope(),
+                && pointer.scope == paths.scope()
+                && pointer.package_manager == paths.manager(),
             "prefix registration does not match the central package database",
         ),
-        Ok(None) => match paths::entries(&prefix.join(".aw-packages")) {
+        Ok(None) => match paths::entries(&prefix.join(".local-packages")) {
             Ok(entries) => require(
                 entries.is_empty(),
-                "older package records conflict with the central package database",
+                "unexpected package records conflict with the central package database",
             ),
             Err(error) if paths::missing(&error) => Ok(()),
             Err(Error::Io(error))
@@ -148,7 +152,8 @@ pub(super) fn require_registered(
     require(
         pointer.installation_id == installation_id
             && pointer.database_root == paths.root
-            && pointer.scope == paths.scope(),
+            && pointer.scope == paths.scope()
+            && pointer.package_manager == paths.manager(),
         "prefix registration does not match the central package database",
     )
 }

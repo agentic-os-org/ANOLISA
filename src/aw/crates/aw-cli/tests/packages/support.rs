@@ -1,6 +1,7 @@
 //! Shared package fixtures and bounded process execution; no terminal driver.
 
-use aw_package::{Component, Manifest, Payload};
+use aw_package::Payload;
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs,
@@ -22,17 +23,29 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) fn new() -> Self {
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+        let target =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/package-fixtures");
         fs::create_dir_all(&target).unwrap();
         let directory = tempfile::tempdir_in(target).unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = directory.path().canonicalize().unwrap();
         let bundle = root.join("bundle");
-        let mut files = BTreeMap::new();
+        let mut files: BTreeMap<String, Payload> = BTreeMap::new();
         let name = "bin/aw";
         let path = bundle.join("payload").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::copy(env!("CARGO_BIN_EXE_aw"), &path).unwrap();
+        let copied = invoke(
+            Command::new("/bin/cp")
+                .arg("--")
+                .arg(env!("CARGO_BIN_EXE_aw"))
+                .arg(&path)
+                .current_dir(path.parent().unwrap()),
+        );
+        assert!(
+            copied.status.success(),
+            "{}",
+            String::from_utf8_lossy(&copied.stderr)
+        );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         files.insert(
             name.into(),
@@ -42,21 +55,16 @@ impl Fixture {
             },
         );
         fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec(&Manifest {
-                format: 1,
-                components: vec![Component {
-                    format: 1,
-                    component: "aw-core".into(),
-                    version: "0.1.0-preview.1".into(),
-                    source_commit: "a".repeat(40),
-                    os: "linux".into(),
-                    arch: std::env::consts::ARCH.into(),
-                    provider_protocol: "aw-provider/v1alpha1".into(),
-                    requires: BTreeMap::new(),
-                    files,
-                }],
-            })
+            bundle.join("package.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "package_id": "aw-core",
+                "version": "1.0.0",
+                "os": "linux",
+                "arch": std::env::consts::ARCH,
+                "files": files,
+                "dependencies": []
+            }))
             .unwrap(),
         )
         .unwrap();

@@ -8,7 +8,7 @@ fn quiet_keeps_work_and_errors_while_verbose_separates_scope_details() {
     let output = invoke(f.install().arg("--quiet"));
     assert!(output.status.success());
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
+    assert!(f.prefix.join(".local-packages/installation.json").is_file());
     let output = invoke(f.install().arg("--quiet"));
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());

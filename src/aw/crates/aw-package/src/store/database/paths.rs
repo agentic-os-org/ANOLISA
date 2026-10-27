@@ -1,8 +1,9 @@
 //! Read-only descriptor traversal: every path component refuses symbolic links.
 
 use super::Scope;
-use crate::{require, Error, Result};
+use crate::store::{require, Error, Result};
 use aw_exec::PackageLock;
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::CString,
     fs::{self, File, Metadata},
@@ -14,8 +15,37 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-/// Reserved system database root; system installation is introduced separately.
+/// AW extension database owned by the administrator.
 pub const SYSTEM_DATABASE_ROOT: &str = "/var/lib/aw/packages";
+
+/// Product-owned system package database, separate from AW extension ownership.
+pub const ANOLISA_SYSTEM_DATABASE_ROOT: &str = "/var/lib/anolisa/packages";
+
+/// Application responsible for one raw package database and its registered prefixes.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageManager {
+    /// AW extension installations.
+    Aw,
+    /// ANOLISA product software installations.
+    Anolisa,
+}
+
+impl PackageManager {
+    fn state_suffix(self) -> &'static str {
+        match self {
+            Self::Aw => "aw/packages",
+            Self::Anolisa => "anolisa/packages",
+        }
+    }
+
+    pub(super) fn system_root(self) -> &'static str {
+        match self {
+            Self::Aw => SYSTEM_DATABASE_ROOT,
+            Self::Anolisa => ANOLISA_SYSTEM_DATABASE_ROOT,
+        }
+    }
+}
 
 /// Central database location, resolved without touching the filesystem.
 #[derive(Clone, Debug)]
@@ -23,6 +53,7 @@ pub struct DatabasePaths {
     /// Root containing `installed.json`, `lock` and transaction recovery data.
     pub root: PathBuf,
     pub(super) scope: Scope,
+    pub(super) manager: PackageManager,
 }
 
 impl DatabasePaths {
@@ -31,30 +62,49 @@ impl DatabasePaths {
     /// # Errors
     /// Rejects a nonempty relative XDG path, missing HOME fallback or an unsafe path.
     pub fn user(state_home: Option<&Path>, home: Option<&Path>) -> Result<Self> {
+        Self::user_for(PackageManager::Aw, state_home, home)
+    }
+
+    /// Resolve a manager's user database without granting another manager's write authority.
+    ///
+    /// # Errors
+    /// Rejects relative XDG paths and a missing absolute HOME fallback.
+    pub fn user_for(
+        manager: PackageManager,
+        state_home: Option<&Path>,
+        home: Option<&Path>,
+    ) -> Result<Self> {
         let root = match state_home.filter(|path| !path.as_os_str().is_empty()) {
             Some(state) => {
                 absolute(state)?;
-                state.join("aw/packages")
+                state.join(manager.state_suffix())
             }
             None => {
                 let home = home.ok_or_else(|| {
                     Error::Invalid("HOME is required when XDG_STATE_HOME is unset".into())
                 })?;
                 absolute(home)?;
-                home.join(".local/state/aw/packages")
+                home.join(".local/state").join(manager.state_suffix())
             }
         };
         Ok(Self {
             root,
             scope: Scope::User,
+            manager,
         })
     }
 
     /// Describe the reserved administrator-owned database without reading or creating it.
     pub fn system() -> Self {
+        Self::system_for(PackageManager::Aw)
+    }
+
+    /// Describe the selected manager's administrator-owned database without filesystem writes.
+    pub fn system_for(manager: PackageManager) -> Self {
         Self {
-            root: SYSTEM_DATABASE_ROOT.into(),
+            root: manager.system_root().into(),
             scope: Scope::System,
+            manager,
         }
     }
 
@@ -68,13 +118,27 @@ impl DatabasePaths {
         self.scope
     }
 
+    /// Application authorized to mutate the selected database's installed files.
+    pub fn manager(&self) -> PackageManager {
+        self.manager
+    }
+
     /// Resolve an existing prefix's explicit registration without searching other databases.
+    /// Read-only discovery may follow its recorded scope; callers must separately enforce
+    /// an explicit scope option before querying or planning a mutation.
     ///
     /// # Errors
     /// Rejects malformed, conflicting or unsafe registration pointers.
     pub fn for_prefix(&self, prefix: &Path) -> Result<Self> {
         match super::RegistrationPointer::read(prefix)? {
-            Some(pointer) => pointer.database_paths(),
+            Some(pointer) => {
+                let recorded = pointer.database_paths()?;
+                require(
+                    recorded.manager == self.manager,
+                    "prefix registration belongs to another package manager",
+                )?;
+                Ok(recorded)
+            }
             None => Ok(self.clone()),
         }
     }

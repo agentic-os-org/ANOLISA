@@ -1,6 +1,6 @@
 //! Unified CLI generates configurations without a Provider package.
 
-use aw_package::{Component, Manifest, Payload};
+use aw_package::Payload;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command,
@@ -13,7 +13,8 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+        let target =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/package-fixtures");
         fs::create_dir_all(&target).unwrap();
         let directory = tempfile::Builder::new()
             .prefix("standalone-cli-")
@@ -35,26 +36,25 @@ impl Fixture {
             },
         );
         fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec(&Manifest {
-                format: 1,
-                components: vec![Component {
-                    format: 1,
-                    component: "aw-core".into(),
-                    version: "0.1.0-preview.1".into(),
-                    source_commit: "a".repeat(40),
-                    os: "linux".into(),
-                    arch: std::env::consts::ARCH.into(),
-                    provider_protocol: "aw-provider/v1alpha1".into(),
-                    requires: BTreeMap::new(),
-                    files,
-                }],
-            })
+            bundle.join("package.json"),
+            serde_json::to_vec(&json!({
+                "schema_version":1,"package_id":"aw-core","version":"1.0.0",
+                "os":"linux","arch":std::env::consts::ARCH,
+                "files":files,"dependencies":[]
+            }))
             .unwrap(),
         )
         .unwrap();
         let prefix = root.join("prefix");
-        aw_package::install(&bundle, &prefix).unwrap();
+        let state_home = root.join("package-state");
+        let paths = aw_package::database::DatabasePaths::user(Some(&state_home), None).unwrap();
+        let addition = aw_package::plan::install(&paths, &bundle, &prefix).unwrap();
+        aw_package::plan::execute(
+            &paths,
+            &addition,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
         Self { directory, prefix }
     }
     fn command(&self) -> Command {

@@ -1,6 +1,6 @@
 //! Owned-path validation and nonblocking installation locks.
 
-use crate::{require, Result};
+use crate::store::{require, Result};
 use aw_exec::PackageLock;
 use std::{
     fs::{self, File, OpenOptions},
@@ -12,7 +12,8 @@ use std::{
     path::{Component, Path},
 };
 
-pub(crate) fn absolute(path: &Path) -> Result<()> {
+/// Validate an absolute path without symbolic ancestors.
+pub fn absolute(path: &Path) -> Result<()> {
     require(
         path.is_absolute() && !path.components().any(|p| matches!(p, Component::ParentDir)),
         format!("expected absolute path without '..': {}", path.display()),
@@ -37,7 +38,8 @@ pub(crate) fn relative(path: &str) -> Result<()> {
     )
 }
 
-pub(crate) fn owned_directory(path: &Path) -> Result<()> {
+/// Validate the current user owns a directory without group/world write access.
+pub fn owned_directory(path: &Path) -> Result<()> {
     absolute(path)?;
     let metadata = path.metadata()?;
     // SAFETY: geteuid reads the current effective identity without side effects.
@@ -52,24 +54,17 @@ pub(crate) fn owned_directory(path: &Path) -> Result<()> {
     )
 }
 
-pub(crate) fn parent(path: &Path) -> Result<()> {
+/// Validate the owned parent of a prospective file.
+pub fn parent(path: &Path) -> Result<()> {
     absolute(path)?;
     owned_directory(
         path.parent()
-            .ok_or_else(|| crate::Error::Invalid("path has no parent".into()))?,
+            .ok_or_else(|| crate::store::Error::Invalid("path has no parent".into()))?,
     )
 }
 
-pub(crate) fn create(path: &Path, mode: u32) -> Result<File> {
-    Ok(OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(mode)
-        .open(path)?)
-}
-
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Publish a private file without replacing an existing destination.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     write_private_using(path, |file| file.write_all(bytes))
 }
 
@@ -79,22 +74,25 @@ fn write_private_using(
 ) -> Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| crate::Error::Invalid("path has no parent".into()))?;
+        .ok_or_else(|| crate::store::Error::Invalid("path has no parent".into()))?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     write(file.as_file_mut())?;
     file.persist_noclobber(path).map_err(|error| error.error)?;
     Ok(())
 }
 
-pub(crate) fn lock(prefix: &Path) -> Result<PackageLock> {
+/// Acquire a nonblocking exclusive installation lock.
+#[cfg(test)]
+pub fn lock(prefix: &Path) -> Result<PackageLock> {
     lock_using(prefix, |file, path| lock_file(file, path, libc::LOCK_EX))
 }
 
+#[cfg(test)]
 fn lock_using(
     prefix: &Path,
     acquire: impl FnOnce(File, &Path) -> Result<PackageLock>,
 ) -> Result<PackageLock> {
-    let path = prefix.join(".aw-install.lock");
+    let path = prefix.join(".local-install.lock");
     match OpenOptions::new()
         .read(true)
         .write(true)
@@ -113,9 +111,10 @@ fn lock_using(
     }
 }
 
-pub(crate) fn shared_lock(prefix: &Path) -> Result<PackageLock> {
+/// Acquire an existing shared installation lock without creating it.
+pub fn shared_lock(prefix: &Path) -> Result<PackageLock> {
     absolute(prefix)?;
-    let path = prefix.join(".aw-install.lock");
+    let path = prefix.join(".local-install.lock");
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -138,13 +137,28 @@ fn lock_file(file: File, path: &Path, operation: i32) -> Result<PackageLock> {
     Ok(file)
 }
 
+/// Open a regular metadata file without following symbolic links.
+#[cfg(test)]
+pub fn safe_file(path: &Path) -> Result<File> {
+    crate::store::database::safe_file(path)
+}
+
+/// Verify an owned payload against its recorded digest, mode and remaining byte budget.
+pub fn verify_payload_file(
+    path: &Path,
+    expected: &crate::store::Payload,
+    budget: &mut u64,
+) -> Result<()> {
+    crate::store::open_bundle::verify(path, expected, budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn failed_lock_acquisition_or_validation_leaves_no_published_lock() {
-        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/package-fixtures");
         fs::create_dir_all(&target).unwrap();
         for after_acquire in [false, true] {
             let directory = tempfile::tempdir_in(&target).unwrap();
@@ -158,7 +172,7 @@ mod tests {
                 }
             });
             assert!(
-                matches!(result, Err(crate::Error::Io(error)) if error.raw_os_error() == Some(if after_acquire { libc::EIO } else { libc::EINVAL }))
+                matches!(result, Err(crate::store::Error::Io(error)) if error.raw_os_error() == Some(if after_acquire { libc::EIO } else { libc::EINVAL }))
             );
             assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
             let held = lock(directory.path()).unwrap();
@@ -166,7 +180,7 @@ mod tests {
                 held.metadata().unwrap().ino(),
                 directory
                     .path()
-                    .join(".aw-install.lock")
+                    .join(".local-install.lock")
                     .metadata()
                     .unwrap()
                     .ino()
@@ -176,7 +190,7 @@ mod tests {
 
     #[test]
     fn failed_private_write_leaves_no_config_and_allows_retry() {
-        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/package-fixtures");
         fs::create_dir_all(&target).unwrap();
         let directory = tempfile::tempdir_in(target).unwrap();
         let path = directory.path().join("aw.yaml");
@@ -185,7 +199,7 @@ mod tests {
             Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
         });
         assert!(
-            matches!(result, Err(crate::Error::Io(error)) if error.raw_os_error() == Some(libc::ENOSPC))
+            matches!(result, Err(crate::store::Error::Io(error)) if error.raw_os_error() == Some(libc::ENOSPC))
         );
         assert!(!path.exists());
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);

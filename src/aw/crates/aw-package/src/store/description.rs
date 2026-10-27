@@ -1,11 +1,9 @@
 //! Independent local package descriptions; reading them never installs or executes payloads.
 
-use crate::{database, require, Payload, Result};
+use crate::store::{database, require, Payload, Result};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// Largest accepted package description, independent of payload size.
 pub const MAX_DESCRIPTION_BYTES: u64 = 1024 * 1024;
@@ -36,7 +34,7 @@ pub struct PackageDescription {
     pub schema_version: u32,
     /// Independent package name, unrestricted to AW's bundled component names.
     pub package_id: String,
-    /// Independent SemVer version; no Preview suffix or shared build is required.
+    /// Producer-selected SemVer version, independent of AW releases.
     pub version: String,
     /// Required operating system.
     pub os: String,
@@ -59,6 +57,7 @@ impl PackageDescription {
     ///
     /// # Errors
     /// Rejects symbolic links, nonregular files, unknown fields and invalid package metadata.
+    #[cfg(test)]
     pub fn read(path: &Path) -> Result<Self> {
         let value: Self =
             database::decode(&database::read_description(path, MAX_DESCRIPTION_BYTES)?)?;
@@ -184,7 +183,7 @@ pub(crate) fn package_fields(
     )?;
     let mut paths = BTreeSet::new();
     for (name, payload) in files {
-        crate::filesystem::relative(name)?;
+        crate::store::filesystem::relative(name)?;
         require(
             !name.contains('\\') && !name.contains('\0'),
             format!("invalid package file path: {name}"),

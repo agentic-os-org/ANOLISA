@@ -1,6 +1,6 @@
 //! Reject repeated JSON object keys before decoding records into maps.
 
-use crate::Result;
+use crate::store::Result;
 use serde::{
     de::{DeserializeOwned, Error, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,

@@ -9,7 +9,7 @@ mod replay;
 #[cfg(test)]
 mod tests;
 
-use crate::{
+use crate::store::{
     database::{DatabasePaths, InstalledDatabase},
     MutationResult, Payload, Result,
 };
@@ -33,7 +33,6 @@ pub(crate) struct ChangeSet {
     pub verify: BTreeMap<String, Payload>,
     pub writes: BTreeMap<String, SourceFile>,
     pub removes: BTreeMap<String, Payload>,
-    pub legacy: BTreeMap<String, Vec<u8>>,
     pub marker_before: Option<Vec<u8>>,
     pub marker_after: Option<Vec<u8>>,
     pub source_records: BTreeMap<PathBuf, Vec<u8>>,
@@ -56,7 +55,19 @@ pub struct RecoveryReport {
 /// Rejects unknown journals, unsafe paths, unavailable exclusive locks, changed databases,
 /// and cancellation. Ownership conflicts are returned in the report; bytes and journals remain.
 pub fn recover(paths: &DatabasePaths, cancel: &AtomicBool) -> Result<RecoveryReport> {
-    replay::recover(paths, cancel)
+    recover_checked(paths, cancel, |_| Ok(()))
+}
+
+/// Admit database snapshots before replaying an application's interrupted transactions.
+///
+/// # Errors
+/// Returns admission failures without replaying the rejected snapshot's payload changes.
+pub fn recover_checked(
+    paths: &DatabasePaths,
+    cancel: &AtomicBool,
+    validate: impl FnMut(&InstalledDatabase) -> Result<()>,
+) -> Result<RecoveryReport> {
+    replay::recover(paths, cancel, validate)
 }
 
 pub(crate) fn apply(

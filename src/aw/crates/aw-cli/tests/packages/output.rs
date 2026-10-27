@@ -37,7 +37,7 @@ fn install_init_and_uninstall_report_local_outcomes_without_starting_a_runtime()
         installed["result"],
         json!({"kind":"installed", "prefix":f.prefix})
     );
-    assert!(f.prefix.join(".aw-packages/aw-core.json").exists());
+    assert!(f.prefix.join(".local-packages/installation.json").exists());
     let configured = report(f.init().arg("--json"), 0, "config init");
     assert_eq!(
         configured["result"],
@@ -159,13 +159,13 @@ fn operation_failures_use_nonzero_json_without_private_error_details() {
     assert_eq!(error["error"]["code"], "io");
     assert_eq!(fs::read(&f.config).unwrap(), before);
     fs::write(
-        f.bundle.join("manifest.json"),
+        f.bundle.join("package.json"),
         "private-api-key-invalid-json",
     )
     .unwrap();
     let error = report(f.install().arg("--json"), 1, "install");
     assert_eq!(error["error"]["code"], "invalid_json");
-    assert!(f.prefix.join(".aw-packages/aw-core.json").exists());
+    assert!(f.prefix.join(".local-packages/installation.json").exists());
 }
 
 #[test]

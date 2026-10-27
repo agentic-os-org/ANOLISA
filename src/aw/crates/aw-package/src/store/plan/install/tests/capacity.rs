@@ -12,8 +12,8 @@ fn bundle_files(root: &Path, name: &str, names: &[&str]) -> PathBuf {
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
         files.insert(
             name.to_string(),
-            crate::Payload {
-                sha256: crate::digest(&file).unwrap(),
+            crate::store::Payload {
+                sha256: crate::store::digest(&file).unwrap(),
                 mode: 0o644,
             },
         );
@@ -66,9 +66,9 @@ fn aggregate_journal_admission_keeps_whole_prefix_removal_possible() {
             .collect::<Vec<_>>();
         let files = names.iter().map(String::as_str).collect::<Vec<_>>();
         let bundle = bundle_files(root, name, &files);
-        let plan = crate::plan::install(&paths, &bundle, &prefix).unwrap();
+        let plan = crate::store::plan::install(&paths, &bundle, &prefix).unwrap();
         assert!(plan.ready(), "{:?}", plan.problems);
-        crate::plan::execute(&paths, &plan, &AtomicBool::new(false)).unwrap();
+        crate::store::plan::execute(&paths, &plan, &AtomicBool::new(false)).unwrap();
     }
     // This valid existing database models a prefix admitted before the aggregate bound.
     let limits = Limits {
@@ -82,18 +82,19 @@ fn aggregate_journal_admission_keeps_whole_prefix_removal_possible() {
         .problems
         .iter()
         .any(|problem| problem.code == "installation_limit"));
-    let whole = crate::plan::uninstall::plan_with_limits(&paths, &prefix, &[], limits).unwrap();
+    let whole =
+        crate::store::plan::uninstall::plan_with_limits(&paths, &prefix, &[], limits).unwrap();
     assert!(whole
         .problems
         .iter()
         .any(|problem| problem.code == "transaction_limit"));
     for blocked in [&addition, &whole] {
         assert!(!blocked.ready());
-        assert!(crate::plan::execute(&paths, blocked, &AtomicBool::new(false)).is_err());
+        assert!(crate::store::plan::execute(&paths, blocked, &AtomicBool::new(false)).is_err());
     }
     assert_eq!(before, snapshot(root));
 
-    let shrink = crate::plan::uninstall::plan_with_limits(
+    let shrink = crate::store::plan::uninstall::plan_with_limits(
         &paths,
         &prefix,
         &["example.other".into()],
@@ -101,7 +102,7 @@ fn aggregate_journal_admission_keeps_whole_prefix_removal_possible() {
     )
     .unwrap();
     assert!(shrink.ready(), "{:?}", shrink.problems);
-    crate::plan::execute(&paths, &shrink, &AtomicBool::new(false)).unwrap();
+    crate::store::plan::execute(&paths, &shrink, &AtomicBool::new(false)).unwrap();
     let two = bundle_files(root, "two", &["share/two/a", "share/two/b"]);
     let before = snapshot(root);
     let blocked = install_limit(&paths, &two, &prefix, limits);
@@ -113,15 +114,18 @@ fn aggregate_journal_admission_keeps_whole_prefix_removal_possible() {
     let exact = install_limit(&paths, &extra, &prefix, limits);
     assert!(exact.ready(), "{:?}", exact.problems);
     assert_eq!(before, snapshot(root));
-    crate::plan::execute(&paths, &exact, &AtomicBool::new(false)).unwrap();
-    let removal = crate::plan::uninstall::plan_with_limits(&paths, &prefix, &[], limits).unwrap();
+    crate::store::plan::execute(&paths, &exact, &AtomicBool::new(false)).unwrap();
+    let removal =
+        crate::store::plan::uninstall::plan_with_limits(&paths, &prefix, &[], limits).unwrap();
     assert!(removal.ready(), "{:?}", removal.problems);
-    crate::plan::execute(&paths, &removal, &AtomicBool::new(false)).unwrap();
-    assert!(crate::database::Inventory::read(&paths, Some(&prefix))
-        .unwrap()
-        .installations[0]
-        .packages
-        .is_empty());
+    crate::store::plan::execute(&paths, &removal, &AtomicBool::new(false)).unwrap();
+    assert!(
+        crate::store::database::Inventory::read(&paths, Some(&prefix))
+            .unwrap()
+            .installations[0]
+            .packages
+            .is_empty()
+    );
 }
 
 #[test]
@@ -173,6 +177,6 @@ fn locator_and_new_parent_directories_count_toward_transaction_capacity() {
     );
     assert!(exact.ready(), "{:?}", exact.problems);
     assert_eq!(before, snapshot(root));
-    crate::plan::execute(&paths, &exact, &AtomicBool::new(false)).unwrap();
+    crate::store::plan::execute(&paths, &exact, &AtomicBool::new(false)).unwrap();
     assert!(prefix.join("share/one/two/three/tool").is_file());
 }

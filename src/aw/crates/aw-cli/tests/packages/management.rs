@@ -139,7 +139,7 @@ fn generic_packages_support_selective_removal_exact_dependencies_and_reinstall()
             .unwrap()
             .is_empty()
     );
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
+    assert!(f.prefix.join(".local-packages/installation.json").is_file());
     install(&base);
     assert_eq!(fs::read(f.prefix.join("user.txt")).unwrap(), b"keep");
 }
@@ -242,7 +242,7 @@ fn a_service_running_from_the_prefix_blocks_removal_until_shutdown() {
         assert!(Instant::now() < deadline, "service did not bind its socket");
         std::thread::sleep(Duration::from_millis(10));
     }
-    let pointer = fs::read(f.prefix.join(".aw-packages/aw-core.json")).unwrap();
+    let pointer = fs::read(f.prefix.join(".local-packages/installation.json")).unwrap();
     let blocked = report(
         f.command()
             .args(["uninstall", "--yes", "--json", "--prefix"])
@@ -251,7 +251,7 @@ fn a_service_running_from_the_prefix_blocks_removal_until_shutdown() {
     );
     assert_eq!(blocked["error"]["code"], "package_in_use");
     assert_eq!(
-        fs::read(f.prefix.join(".aw-packages/aw-core.json")).unwrap(),
+        fs::read(f.prefix.join(".local-packages/installation.json")).unwrap(),
         pointer
     );
     assert!(f.prefix.join("bin/aw").is_file());

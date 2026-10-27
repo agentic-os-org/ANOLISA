@@ -58,7 +58,7 @@ fn explicit_consent_preserves_integrity_checks() {
         .as_array()
         .unwrap()
         .is_empty());
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
+    assert!(f.prefix.join(".local-packages/installation.json").is_file());
     let f = Fixture::new();
     success(f.install().output().unwrap());
     let output = f

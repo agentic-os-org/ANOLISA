@@ -1,7 +1,7 @@
 //! Encoded bounds use the journal serializer without creating deep payload directories.
 
 use super::*;
-use crate::{database::*, transaction::SourceFile, Payload};
+use crate::store::{database::*, transaction::SourceFile, Payload};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 fn changes(root: &Path) -> (DatabasePaths, ChangeSet) {
@@ -50,6 +50,7 @@ fn changes(root: &Path) -> (DatabasePaths, ChangeSet) {
     );
     let changes = ChangeSet {
         prefix,
+
         installation_id,
         database_before: None,
         database_after: after,
@@ -67,7 +68,6 @@ fn changes(root: &Path) -> (DatabasePaths, ChangeSet) {
             })
             .collect(),
         removes: BTreeMap::new(),
-        legacy: BTreeMap::new(),
         marker_before: None,
         marker_after,
         source_records: BTreeMap::new(),
@@ -82,7 +82,7 @@ fn existing_parents_keep_the_same_conservative_byte_reservation() {
     let before = encoded_bytes(&paths, &changes, false).unwrap();
     fs::create_dir(&changes.prefix).unwrap();
     fs::set_permissions(&changes.prefix, fs::Permissions::from_mode(0o755)).unwrap();
-    for name in ["bin", ".aw-packages"] {
+    for name in ["bin", ".local-packages"] {
         let directory = changes.prefix.join(name);
         fs::create_dir(&directory).unwrap();
         fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
@@ -92,22 +92,20 @@ fn existing_parents_keep_the_same_conservative_byte_reservation() {
 }
 
 #[test]
-fn legacy_final_locator_removal_reserves_its_post_gate_before_identity() {
+fn locator_removal_reserves_its_existing_identity() {
     let root = tempfile::tempdir().unwrap();
     let (paths, mut changes) = changes(root.path());
-    changes.legacy.insert("aw-core.json".into(), b"{}".to_vec());
     changes.marker_before = Some(b"{}".to_vec());
     changes.marker_after = None;
     let entry = bounded_journal(&paths, &changes, false).unwrap();
     let locator_actions = entry
         .actions
         .iter()
-        .filter(|action| action.path == ".aw-packages/aw-core.json")
+        .filter(|action| action.path == ".local-packages/installation.json")
         .collect::<Vec<_>>();
-    assert_eq!(locator_actions.len(), 2);
-    assert!(locator_actions[0].after.is_some());
-    assert!(locator_actions[1].before.is_some());
-    assert!(locator_actions[1].after.is_none());
+    assert_eq!(locator_actions.len(), 1);
+    assert!(locator_actions[0].before.is_some());
+    assert!(locator_actions[0].after.is_none());
 }
 
 #[test]
@@ -158,24 +156,16 @@ fn counted_journal_matches_real_serde_and_bounds_shorter_runtime_identities() {
 }
 
 #[test]
-fn deep_parent_paths_and_legacy_locator_actions_enter_the_encoded_budget() {
+fn deep_parent_paths_and_locator_actions_enter_the_encoded_budget() {
     let root = tempfile::tempdir().unwrap();
     let (paths, mut changes) = changes(root.path());
     let name = format!("share/{}/quoted\"/tab\t/雪/tool", "long".repeat(40));
     let source = changes.writes.remove("bin/tool").unwrap();
     changes.writes.insert(name.clone(), source);
     changes.marker_before = Some(b"{}".to_vec());
-    changes.legacy = [
-        "aw-core.json",
-        "aw-provider-sec-core.json",
-        "aw-provider-tokenless.json",
-    ]
-    .into_iter()
-    .map(|name| (name.into(), b"{}".to_vec()))
-    .collect();
     let entry = bounded_journal(&paths, &changes, false).unwrap();
     assert_eq!(entry.actions.len(), actions(&paths, &changes).unwrap());
-    assert!(entry.directories.contains_key(".aw-packages"));
+    assert!(entry.directories.contains_key(".local-packages"));
     let parent = PathBuf::from(name)
         .parent()
         .unwrap()

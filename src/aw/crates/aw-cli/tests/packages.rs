@@ -23,7 +23,6 @@ use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::MetadataExt,
-    path::Path,
     process::{Command, Output},
 };
 use support::{success, Fixture};
@@ -43,7 +42,7 @@ fn failure(output: Output) -> String {
 fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
     let f = Fixture::new();
     assert!(success(f.install().output().unwrap()).contains("Installed verified packages"));
-    let receipt = f.prefix.join(".aw-packages/aw-core.json");
+    let receipt = f.prefix.join(".local-packages/installation.json");
     let original_receipt = fs::read(&receipt).unwrap();
     failure(f.install().output().unwrap());
     assert_eq!(fs::read(&receipt).unwrap(), original_receipt);
@@ -55,7 +54,9 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
     assert_eq!(value["spec"]["events"], json!({}));
     assert!(!f.state.exists(), "configuration must not start a runtime");
     assert_eq!(
-        fs::read_dir(f.prefix.join(".aw-packages")).unwrap().count(),
+        fs::read_dir(f.prefix.join(".local-packages"))
+            .unwrap()
+            .count(),
         1
     );
     failure(f.init().output().unwrap());
@@ -80,118 +81,6 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
         fs::read(f.prefix.join("unowned.txt")).unwrap(),
         b"user data"
     );
-}
-
-#[test]
-fn bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command() {
-    let f = Fixture::new();
-    let bootstrap = f.bundle.join("aw");
-    copy_executable(env!("CARGO_BIN_EXE_aw"), &bootstrap);
-
-    let diagnostic = failure(
-        Command::new(&bootstrap)
-            .env("XDG_STATE_HOME", f.root.join("package-state"))
-            .args(["install", "--prefix"])
-            .arg(&f.prefix)
-            .output()
-            .unwrap(),
-    );
-    assert!(diagnostic.contains("--bundle"));
-    assert!(diagnostic.contains("required"));
-    assert!(!f.prefix.exists());
-    success(
-        Command::new(&bootstrap)
-            .env("XDG_STATE_HOME", f.root.join("package-state"))
-            .args(["install", "--bundle"])
-            .arg(&f.bundle)
-            .arg("--prefix")
-            .arg(&f.prefix)
-            .current_dir(&f.root)
-            .output()
-            .unwrap(),
-    );
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
-    assert!(!f.prefix.join("bin/aw-package").exists());
-    assert!(!f.bundle.join("aw-package").exists());
-}
-
-#[test]
-fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
-    use aw_package::{Component, Manifest, Payload};
-    use std::collections::BTreeMap;
-
-    let f = Fixture::new();
-    success(f.install().output().unwrap());
-    let bundle = f.root.join("provider bundle");
-    let mut files = BTreeMap::new();
-    for binary in ["aw-provider-tokenless", "tokenless", "rtk"] {
-        let relative = format!("libexec/aw/providers/tokenless/{binary}");
-        let path = bundle.join("payload").join(&relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::copy("/bin/true", &path).unwrap();
-        files.insert(
-            relative,
-            Payload {
-                sha256: aw_package::digest(&path).unwrap(),
-                mode: 0o755,
-            },
-        );
-    }
-    let component = Component {
-        format: 1,
-        component: "aw-provider-tokenless".into(),
-        version: "0.1.0-preview.1".into(),
-        source_commit: "a".repeat(40),
-        os: "linux".into(),
-        arch: std::env::consts::ARCH.into(),
-        provider_protocol: "aw-provider/v1alpha1".into(),
-        requires: BTreeMap::from([("aw-core".into(), "0.1.0-preview.1".into())]),
-        files,
-    };
-    fs::write(
-        bundle.join("manifest.json"),
-        serde_json::to_vec(&Manifest {
-            format: 1,
-            components: vec![component],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    let bootstrap = bundle.join("aw");
-    copy_executable(env!("CARGO_BIN_EXE_aw"), &bootstrap);
-    assert!(!bundle.join("payload/bin/aw").exists());
-    success(
-        Command::new(&bootstrap)
-            .env("XDG_STATE_HOME", f.root.join("package-state"))
-            .args(["install", "--bundle"])
-            .arg(&bundle)
-            .arg("--prefix")
-            .arg(&f.prefix)
-            .output()
-            .unwrap(),
-    );
-    assert_eq!(
-        fs::read_dir(f.prefix.join(".aw-packages")).unwrap().count(),
-        1
-    );
-    let installed = aw_package::database::Inventory::read(
-        &aw_package::database::DatabasePaths::user(Some(&f.root.join("package-state")), None)
-            .unwrap(),
-        Some(&f.prefix),
-    )
-    .unwrap();
-    assert_eq!(installed.installations[0].packages.len(), 2);
-    drop(installed);
-    assert!(!f.prefix.join("bin/aw-package").exists());
-    success(
-        f.command()
-            .args(["uninstall", "--yes", "--prefix"])
-            .arg(&f.prefix)
-            .output()
-            .unwrap(),
-    );
-    assert!(!f.prefix.join("bin/aw").exists());
-    assert!(!f.prefix.join("libexec/aw/providers/tokenless/rtk").exists());
 }
 
 #[test]
@@ -367,11 +256,11 @@ fn package_help_uses_the_unified_frontend_name() {
             .unwrap(),
     );
     assert!(output.contains("Install a local software bundle"));
-    assert!(output.contains("manifest.json or package.json"));
+    assert!(output.contains("package.json"));
 }
 
 /// Keep writable executable descriptors out of unrelated concurrent test forks.
-fn copy_executable(source: impl AsRef<Path>, destination: &Path) {
+fn copy_executable(source: impl AsRef<std::path::Path>, destination: &std::path::Path) {
     let output = support::invoke(
         Command::new("/bin/cp")
             .arg("--")

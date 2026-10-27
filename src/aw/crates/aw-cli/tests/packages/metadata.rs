@@ -54,7 +54,7 @@ fn install(fixture: &Fixture) {
 
 #[test]
 fn installed_raw_metadata_loss_fails_doctor_json_but_preserves_listed_package_facts() {
-    for name in [".aw-install.lock", ".aw-packages/aw-core.json"] {
+    for name in [".local-install.lock", ".local-packages/installation.json"] {
         let fixture = Fixture::new();
         install(&fixture);
         let database = fixture
@@ -92,8 +92,8 @@ fn removed_last_package_still_requires_the_registered_prefix_metadata() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let lock = fixture.prefix.join(".aw-install.lock");
-    let marker = fixture.prefix.join(".aw-packages/aw-core.json");
+    let lock = fixture.prefix.join(".local-install.lock");
+    let marker = fixture.prefix.join(".local-packages/installation.json");
     fs::remove_file(&lock).unwrap();
     fs::remove_file(&marker).unwrap();
     let listed = query(&fixture, false, true);

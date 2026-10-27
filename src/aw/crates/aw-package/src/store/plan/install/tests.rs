@@ -20,7 +20,7 @@ fn bundle(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let description = json!({
         "schema_version":1,"package_id":format!("example.{name}"),"version":"1.0.0",
         "os":"linux","arch":std::env::consts::ARCH,
-        "files":{relative:{"sha256":crate::digest(&payload).unwrap(),"mode":493}},
+        "files":{relative:{"sha256":crate::store::digest(&payload).unwrap(),"mode":493}},
         "dependencies":[]
     });
     fs::write(
@@ -64,7 +64,7 @@ fn combined_prefix_byte_limit_blocks_append_without_preventing_later_removal() {
     assert_eq!(open_bundle::inspect(&mant).unwrap().payload_bytes, 4);
     let first = plan_with_limit(&paths, &base, &prefix, 7).unwrap();
     assert!(first.ready(), "{:?}", first.problems);
-    crate::plan::execute(&paths, &first, &AtomicBool::new(false)).unwrap();
+    crate::store::plan::execute(&paths, &first, &AtomicBool::new(false)).unwrap();
 
     let before = snapshot(root);
     let blocked = plan_with_limit(&paths, &mant, &prefix, 7).unwrap();
@@ -73,20 +73,20 @@ fn combined_prefix_byte_limit_blocks_append_without_preventing_later_removal() {
         .problems
         .iter()
         .any(|problem| problem.code == "verification_limit"));
-    assert!(crate::plan::execute(&paths, &blocked, &AtomicBool::new(false)).is_err());
+    assert!(crate::store::plan::execute(&paths, &blocked, &AtomicBool::new(false)).is_err());
     assert_eq!(before, snapshot(root));
     assert!(!prefix.join("bin/mant").exists());
 
     let exact = plan_with_limit(&paths, &mant, &prefix, 8).unwrap();
     assert!(exact.ready(), "{:?}", exact.problems);
     assert_eq!(before, snapshot(root));
-    crate::plan::execute(&paths, &exact, &AtomicBool::new(false)).unwrap();
-    let removal = crate::plan::uninstall(&paths, &prefix, &["example.mant".into()]).unwrap();
+    crate::store::plan::execute(&paths, &exact, &AtomicBool::new(false)).unwrap();
+    let removal = crate::store::plan::uninstall(&paths, &prefix, &["example.mant".into()]).unwrap();
     assert!(removal.ready(), "{:?}", removal.problems);
-    crate::plan::execute(&paths, &removal, &AtomicBool::new(false)).unwrap();
+    crate::store::plan::execute(&paths, &removal, &AtomicBool::new(false)).unwrap();
     assert!(prefix.join("bin/base").is_file());
     assert!(!prefix.join("bin/mant").exists());
-    assert!(crate::plan::uninstall(&paths, &prefix, &[])
+    assert!(crate::store::plan::uninstall(&paths, &prefix, &[])
         .unwrap()
         .ready());
 }

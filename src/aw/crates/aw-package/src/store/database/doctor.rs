@@ -1,7 +1,7 @@
 //! Verify installed files through bounded, no-follow descriptors and report all failures.
 
-use super::{paths, read, Installation, Inventory, InventorySource, Manager, Registration};
-use crate::{Error, Payload, Result};
+use super::{paths, read, Installation, Inventory, InventorySource, Manager};
+use crate::store::{Error, Payload, Result};
 use aw_exec::PackageLock;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -115,9 +115,7 @@ pub(super) fn check(inventory: &Inventory) -> Result<DoctorReport> {
                 message,
             );
         }
-        let _prefix_lock = if installation.registration == Registration::Registered
-            && installation.manager == Manager::Raw
-        {
+        let _prefix_lock = if installation.manager == Manager::Raw {
             metadata(inventory, installation, &mut report)
         } else {
             None
@@ -192,8 +190,11 @@ fn metadata(
             .unwrap_or(Path::new("/"))
             .into(),
         scope: installation.scope,
+        manager: inventory._manager,
     };
-    let marker = installation.prefix.join(".aw-packages/aw-core.json");
+    let marker = installation
+        .prefix
+        .join(".local-packages/installation.json");
     if let Err(error) = super::registration::require_registered(
         &paths,
         &installation.prefix,
@@ -208,7 +209,7 @@ fn metadata(
     }
     // Listing may retain central facts after metadata loss. A raw installation cannot be
     // called healthy without the locator and lock that make future mutations safe.
-    let lock_path = installation.prefix.join(".aw-install.lock");
+    let lock_path = installation.prefix.join(".local-install.lock");
     match paths::lock(&lock_path) {
         Ok(lock) => match lock.metadata() {
             Ok(metadata)
