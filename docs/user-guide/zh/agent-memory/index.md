@@ -38,6 +38,18 @@ anolisa install agent-memory
 sudo yum install agent-memory
 ```
 
+| RPM | 内容 |
+|---|---|
+| `agent-memory` | 兼容聚合包：对 core、plugins 的精确 version/release 依赖 |
+| `agent-memory-core` | MCP server、默认配置、MCP descriptor、user unit、tmpfiles 规则、许可证及文档 |
+| `agent-memory-plugins` | OpenClaw bundle、adapter manifest 及检测、注册、卸载脚本；依赖同版本 core |
+
+只需要 stdio MCP 客户端接入时，选择 `sudo yum install agent-memory-core`。
+user 服务仍为可选项，普通 MCP 客户端直接拉起 server。使用 OpenClaw 时添加
+plugins 包，并由实际 Agent 用户另行注册。本地 RPM 通过
+`yum install /absolute/path/to/matching-rpms/*.rpm` 在同一事务中安装或升级，
+目录内应只放匹配 version/release 的产物集合。
+
 RPM 安装到系统级 FHS 路径：
 
 | 用途 | 路径 |
@@ -121,7 +133,10 @@ anolisa adapter enable agent-memory openclaw
 anolisa adapter status agent-memory
 ```
 
-**前置条件**：`openclaw` CLI 在 `$PATH` 上。脚本缺失时输出明确日志并以 0 退出，安装 OpenClaw 后重跑即可。`yum remove agent-memory` 时 spec 的 `%preun` 自动调用 uninstall 脚本，配置不残留孤立项。
+**前置条件**：确保 `openclaw` CLI 在 `$PATH` 上。RPM 安装时选择
+`agent-memory-plugins`。CLI 缺失时脚本会输出日志并以 0 退出，安装 OpenClaw 后重跑即可。卸载
+`agent-memory-plugins` 会运行其 `%preun` uninstall 脚本。若仅卸载兼容包、
+单独保留 plugins 包，其插件注册也会继续保留。
 
 执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。运行 `install.sh` 时设置 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主将拒绝安装，直至自行授予（例如交互式执行 `openclaw plugins install`）。
 

@@ -831,6 +831,13 @@ fn install_raw_end_to_end_from_local_repo() {
                     "%{NAME}\n",
                     "anolisa-component(agentsight)",
                 ] => "no package provides anolisa-component(agentsight)",
+                [
+                    "-q",
+                    "--whatprovides",
+                    "--qf",
+                    "%{NAME}\n",
+                    "anolisa-component-core(agentsight)",
+                ] => "no package provides anolisa-component-core(agentsight)",
                 ["-q", "agentsight"]
                 | [
                     "-q",

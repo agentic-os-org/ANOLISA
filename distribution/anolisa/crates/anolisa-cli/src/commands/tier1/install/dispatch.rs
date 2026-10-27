@@ -64,7 +64,7 @@ use super::owned_ops::{
 use super::raw::{load_dry_run_install_contract, resolve_raw};
 use super::render::repo_config_err;
 use super::rpm::{
-    PinError, RpmTarget, check_rpm_install, resolve_pinned_candidate,
+    PinError, RpmTarget, check_rpm_install, installed_component_packages, resolve_pinned_candidate,
     rpm_package_candidates_with_index,
 };
 use super::types::{RawRepositoryOrigin, RawResolution, ResolveInputs};
@@ -498,7 +498,24 @@ pub(crate) fn plan_component(
                     &command,
                 )?;
                 delegated_pin = fresh.pin;
-                (fresh.target, Some(fresh.package))
+                let probe_package = if args.package.is_none() {
+                    let index = invocation_component_index(
+                        &layout,
+                        env,
+                        &repo_config,
+                        index_base_override.as_deref(),
+                    );
+                    select_installed_probe(
+                        query,
+                        &component,
+                        &fresh.package,
+                        index.as_ref(),
+                        &command,
+                    )?
+                } else {
+                    fresh.package
+                };
+                (fresh.target, Some(probe_package))
             }
         }
     };
@@ -665,6 +682,8 @@ pub(super) fn execute_planned(
     let layout = common::resolve_layout(ctx);
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
     let index_base_override = normalized_repo_override(args)?;
+    let component_index =
+        invocation_component_index(&layout, env, &repo_config, index_base_override.as_deref());
     let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = rpm_install::journal_dir(&layout);
 
@@ -800,6 +819,9 @@ pub(super) fn execute_planned(
             &now,
             &request,
             &provider,
+            query,
+            args.package.is_none(),
+            component_index.as_ref(),
             &command,
             reporter,
             InstallApply::Owned {
@@ -825,6 +847,9 @@ pub(super) fn execute_planned(
         &now,
         &request,
         &provider,
+        query,
+        args.package.is_none(),
+        component_index.as_ref(),
         &command,
         reporter,
         InstallApply::Delegated {
@@ -1105,9 +1130,63 @@ fn system_probe_package(
         Err(err) => return Err(pkg_query_err(err, command)),
     };
     Ok(match candidates.as_slice() {
+        [single] if args.package.is_none() => {
+            let installed = match installed_component_packages(
+                query,
+                component,
+                Some(&single.package),
+                component_index.as_ref(),
+            ) {
+                Ok(installed) => installed,
+                Err(PackageQueryError::CommandMissing { command: bin }) => {
+                    if missing_rpm_tooling_is_fatal(env, rpmdb) {
+                        return Err(rpm_tooling_missing_error(command, &bin, component));
+                    }
+                    return Ok(fallback());
+                }
+                Err(err) => return Err(pkg_query_err(err, command)),
+            };
+            select_probe_candidate(component, &single.package, command, &installed)?
+        }
         [single] => single.package.clone(),
         _ => fallback(),
     })
+}
+
+fn select_installed_probe(
+    query: &dyn PackageQuery,
+    component: &str,
+    preferred: &str,
+    index: Option<&ComponentIndex>,
+    command: &str,
+) -> Result<String, CliError> {
+    let installed = installed_component_packages(query, component, Some(preferred), index)
+        .map_err(|err| match err {
+            PackageQueryError::CommandMissing { command: binary } => {
+                rpm_tooling_missing_error(command, &binary, component)
+            }
+            err => pkg_query_err(err, command),
+        })?;
+    select_probe_candidate(component, preferred, command, &installed)
+}
+
+fn select_probe_candidate(
+    component: &str,
+    preferred: &str,
+    command: &str,
+    installed: &[String],
+) -> Result<String, CliError> {
+    match installed {
+        [] => Ok(preferred.to_string()),
+        [package] => Ok(package.clone()),
+        many => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "multiple installed RPM packages provide '{component}': {}; cannot select a package to observe",
+                many.join(", ")
+            ),
+        }),
+    }
 }
 
 /// Fresh delegated resolution result: the provider target, its bare package,
@@ -1263,6 +1342,9 @@ fn install_applied(
     now: &str,
     request: &InstallRequest,
     provider: &DelegatedProvider,
+    query: &dyn PackageQuery,
+    check_component_provider: bool,
+    component_index: Option<&ComponentIndex>,
     command: &str,
     reporter: &mut dyn ProgressReporter,
     apply: InstallApply<'_>,
@@ -1315,6 +1397,9 @@ fn install_applied(
         journal_dir,
         request,
         degraded_rpmdb,
+        query,
+        check_component_provider,
+        component_index,
         command,
     )?;
 
@@ -1499,6 +1584,9 @@ fn locked_install_steps(
     journal_dir: &Path,
     request: &InstallRequest,
     degraded_rpmdb: Option<&RpmdbProbe>,
+    query: &dyn PackageQuery,
+    check_component_provider: bool,
+    component_index: Option<&ComponentIndex>,
     command: &str,
 ) -> Result<Vec<Step>, CliError> {
     let state_snapshot = observe_install_state(target, scope, now, store, layout, journal_dir)
@@ -1519,6 +1607,29 @@ fn locked_install_steps(
         && rpmdb.rpmdb_exists()
     {
         return Err(rpmdb_appeared_error(command, target));
+    }
+
+    if check_component_provider && matches!(scope, InstallationScope::System) {
+        match installed_component_packages(query, target, native_package, component_index) {
+            Ok(installed) if !installed.is_empty() => {
+                return Err(CliError::InvalidArgument {
+                    command: command.to_string(),
+                    reason: format!(
+                        "system RPM '{}' appeared while '{target}' was being resolved; nothing was changed — run `sudo anolisa --install-mode system adopt {target}` or retry after removing the external package",
+                        installed.join(", ")
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(PackageQueryError::CommandMissing { command: binary }) => match degraded_rpmdb {
+                None => return Err(rpm_tooling_missing_error(command, &binary, target)),
+                Some(rpmdb) if rpmdb.rpmdb_exists() => {
+                    return Err(rpmdb_appeared_error(command, target));
+                }
+                Some(_) => {}
+            },
+            Err(err) => return Err(pkg_query_err(err, command)),
+        }
     }
 
     let snapshot = match observe_install_snapshot(

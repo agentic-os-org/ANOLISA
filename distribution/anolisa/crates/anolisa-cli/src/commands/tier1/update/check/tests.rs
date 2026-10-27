@@ -673,6 +673,36 @@ fn update_check_default_present_via_index_package_without_provide() {
 }
 
 #[test]
+fn update_check_default_selects_installed_aggregate_or_core() {
+    let index = crate::resolution::ComponentIndex::from_toml_str(
+        "schema_version = 2\n\n[[components]]\nname = \"agent-memory\"\ntargets = [{ os = \"linux\", arch = \"x86_64\" }]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"agent-memory\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"agent-memory-core\"\n",
+        "test-components.toml",
+    )
+    .expect("index parses");
+    let mut host = FakeHost::with_cli_noop();
+    host.installed.insert(
+        "agent-memory-core".to_string(),
+        info("agent-memory-core", "0.2.13", Some("1")),
+    );
+    assert!(matches!(
+        probe_default_package(&host, Some(&index), "agent-memory"),
+        DefaultProbe::Installed(package) if package == "agent-memory-core"
+    ));
+    host.provides.insert(
+        "anolisa-component(agent-memory)".to_string(),
+        vec!["agent-memory".to_string()],
+    );
+    host.installed.insert(
+        "agent-memory".to_string(),
+        info("agent-memory", "0.2.13", Some("1")),
+    );
+    assert!(matches!(
+        probe_default_package(&host, Some(&index), "agent-memory"),
+        DefaultProbe::Installed(package) if package == "agent-memory"
+    ));
+}
+
+#[test]
 fn update_check_default_present_via_package_map_without_provide() {
     let mut host = FakeHost::with_cli_noop();
     host.installed.insert(

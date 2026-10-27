@@ -9,7 +9,6 @@ SPEC_FILE := $(NAME).spec
 # =============================================================================
 
 dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM build
-	$(MAKE) generate-component-contract
 	@echo "==> Vendoring crates..."
 	cargo vendor vendor/
 	@mkdir -p .cargo
@@ -35,7 +34,6 @@ dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM bui
 	@cp -R Cargo.toml Cargo.lock src examples config tests \
 		Makefile CHANGELOG.md LICENSE \
 		.gitignore packaging dist/$(NAME)-$(VERSION)/
-	install -m 0644 "$(COMPONENT_CONTRACT)" "dist/$(NAME)-$(VERSION)/$(COMPONENT_CONTRACT_EXPORT)"
 	@mkdir -p dist/$(NAME)-$(VERSION)/.cargo
 	@cp .cargo/config.toml dist/$(NAME)-$(VERSION)/.cargo/config.toml
 	# Adapter: include source + pre-built dist/index.js, exclude
@@ -54,7 +52,8 @@ dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM bui
 	staged="dist/$(NAME)-$(VERSION)"; \
 	for f in src/main.rs src/lib.rs examples/mcp_harness.rs \
 			config/default.toml config/mcp-server.json \
-			packaging/systemd/anolisa-memory@.service \
+			packaging/render-install.py \
+			packaging/systemd/anolisa-memory@.service.in \
 			packaging/systemd/anolisa-memory-tmpfiles.conf \
 			$(ADAPTER_SRC_DIR)/manifest.json \
 			$(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js \
@@ -63,7 +62,7 @@ dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM bui
 			$(OPENCLAW_PLUGIN_SRC_DIR)/scripts/detect.sh \
 			$(OPENCLAW_PLUGIN_SRC_DIR)/scripts/install.sh \
 			$(OPENCLAW_PLUGIN_SRC_DIR)/scripts/uninstall.sh \
-			$(COMPONENT_CONTRACT_EXPORT) CHANGELOG.md LICENSE; do \
+			CHANGELOG.md LICENSE; do \
 		test -e "$$staged/$$f" || { \
 			echo "ERROR: $$f is missing from $$staged but packaging/rpm/agent-memory.spec.in or Cargo.toml requires it" >&2; \
 			exit 1; \

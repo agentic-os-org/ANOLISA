@@ -39,6 +39,18 @@ Produces: `agent-memory` binary, default config, MCP service descriptor, systemd
 sudo yum install agent-memory
 ```
 
+| RPM | Contents |
+|---|---|
+| `agent-memory` | Compatibility aggregate: exact version/release dependencies on core and plugins |
+| `agent-memory-core` | MCP server, default configuration, MCP descriptor, user unit, tmpfiles rule, license, and documentation |
+| `agent-memory-plugins` | OpenClaw bundle, adapter manifest, and detection, registration, and removal scripts; requires matching core |
+
+For stdio MCP clients alone, select `sudo yum install agent-memory-core`.
+The user service remains opt-in; ordinary MCP clients spawn the server
+directly. Add the plugins package for OpenClaw and register it separately as
+the Agent user. Install or upgrade local RPMs as one matching version/release
+set with `yum install /absolute/path/to/matching-rpms/*.rpm`.
+
 RPM installs to system-level FHS paths:
 
 | Purpose | Path |
@@ -124,7 +136,11 @@ anolisa adapter enable agent-memory openclaw
 anolisa adapter status agent-memory
 ```
 
-**Prerequisite**: `openclaw` CLI on `$PATH`. The script logs clearly and exits 0 if missing — rerun after installing OpenClaw. `yum remove agent-memory` triggers `%preun` to call the uninstall script, leaving no orphaned config.
+**Prerequisite**: put the `openclaw` CLI on `$PATH`. For an RPM installation,
+select `agent-memory-plugins`. The script logs clearly and exits 0 if the CLI is
+missing; rerun after installing OpenClaw. Removing `agent-memory-plugins` runs its `%preun` uninstall
+script. Removing only the compatibility package leaves a separately retained
+plugins package and its registration in place.
 
 Running `anolisa adapter enable agent-memory openclaw` or the agent-memory OpenClaw `install.sh` accepts the plugin's declared capabilities. Both entry points pass `--accept-capabilities` only when `plugins install --help` advertises that exact option, so older hosts keep working. Set `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` when running `install.sh` to withhold consent — gating hosts then reject the install until you grant it yourself, e.g. via an interactive `openclaw plugins install`.
 

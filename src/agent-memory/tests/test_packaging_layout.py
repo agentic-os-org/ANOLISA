@@ -190,16 +190,13 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse((adapter / "openclaw/src").exists())
         self.assertTrue((self.destination / "usr/share/doc/agent-memory/LICENSE").is_file())
 
-    def test_native_unit_matches_the_default_template_rendering(self) -> None:
-        native = (COMPONENT / "packaging/systemd/anolisa-memory@.service").read_text()
+    def test_install_renders_the_unit_from_the_template(self) -> None:
         template = (COMPONENT / "packaging/systemd/anolisa-memory@.service.in").read_text()
-        self.assertIn("ExecStart=/usr/bin/agent-memory serve", native)
         self.assertIn("ExecStart={bindir}/agent-memory serve", template)
-        self.assertEqual(template.replace("{bindir}", "/usr/bin"), native)
         result = self.make("install")
         self.assertEqual(result.returncode, 0, result.stderr)
         installed = self.destination / "usr/lib/systemd/user/anolisa-memory@.service"
-        self.assertEqual(installed.read_text(), native)
+        self.assertEqual(installed.read_text(), template.replace("{bindir}", "/usr/bin"))
 
     def test_missing_service_template_fails_before_installation(self) -> None:
         (self.source / "packaging/systemd/anolisa-memory@.service.in").unlink()
@@ -654,7 +651,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse((self.source / "packaging/anolisa/rpm/component.toml").exists())
         self.assertFalse((self.source / ".anolisa").exists())
 
-    def test_dist_exports_generated_rpm_metadata_into_source_archive(self) -> None:
+    def test_dist_preserves_templates_without_generating_rpm_metadata(self) -> None:
         self.mock_plugin_tools()
         for name in ("Cargo.lock", "CHANGELOG.md", ".gitignore"):
             shutil.copyfile(COMPONENT / name, self.source / name)
@@ -680,8 +677,10 @@ class PackagingLayout(unittest.TestCase):
             source.extractall(unpacked, filter="data")
         root = next(path for path in unpacked.iterdir() if path.is_dir())
         rpm_contract = root / "packaging/anolisa/rpm/component.toml"
-        self.assertTrue(rpm_contract.is_file())
-        self.assertNotIn("@VERSION@", rpm_contract.read_text())
+        self.assertFalse(rpm_contract.exists())
+        self.assertTrue(rpm_contract.with_suffix(".toml.in").is_file())
+        self.assertFalse((self.source / "target/packaging/anolisa/rpm/component.toml").exists())
+        self.assertNotIn("Generating component contract", result.stdout)
         self.assertTrue((root / "packaging/anolisa/raw/component.toml.in").is_file())
         self.assertFalse((root / ".anolisa").exists())
         result = subprocess.run(

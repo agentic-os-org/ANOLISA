@@ -30,6 +30,7 @@ BuildRequires:  cargo >= 1.85
 BuildRequires:  rust >= 1.85
 BuildRequires:  gcc
 BuildRequires:  make
+BuildRequires:  python3
 BuildRequires:  cmake
 BuildRequires:  pkgconfig
 BuildRequires:  nodejs >= 18
@@ -37,10 +38,22 @@ BuildRequires:  jq
 BuildRequires:  systemd-devel
 BuildRequires:  systemd-rpm-macros
 
-# Required for ANOLISA RPM component identity resolution.
+Requires:       %{name}-core = %{version}-%{release}
+Requires:       %{name}-plugins = %{version}-%{release}
 Provides:       anolisa-component(agent-memory)
 
 %description
+Compatibility package selecting matching agent-memory core and plugins
+through exact-version dependencies, without a runtime payload of its own.
+
+%package core
+Summary:        Agent memory MCP server and service resources
+Requires(post): systemd
+Provides:       anolisa-component-core(agent-memory)
+Conflicts:      %{name} < %{version}
+Conflicts:      anolisa < 0.3.21
+
+%description core
 Agent memory is a persistent filesystem memory for AI agents, served over
 the MCP (Model Context Protocol) standard. Linux only.
 
@@ -70,12 +83,18 @@ Core Features:
 - Optional systemd-journald audit fan-out
 - Single statically-linked binary (bundled SQLite + vendored libgit2)
 
-Note: OpenClaw plugin (memory-anolisa) is available under
-/usr/share/anolisa/adapters/agent-memory/openclaw/. Run the install
-script to register with OpenClaw:
+%package plugins
+Summary:        Agent memory OpenClaw integration
+Requires:       %{name}-core = %{version}-%{release}
+Requires:       bash
+Requires:       nodejs >= 18
+Requires(preun): bash
+Conflicts:      %{name} < %{version}
+
+%description plugins
+OpenClaw plugin (memory-anolisa), its adapter manifest, and detection,
+registration, and removal scripts. Register it as the target Agent user:
   /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
-- Claude Code: configure in .claude/settings.json mcpServers
-- Cursor / any MCP-compatible client: stdio transport
 
 %prep
 # -q quiet, -a 1 also extract Source1 (vendor) into the unpacked source
@@ -98,33 +117,38 @@ test -f adapters/agent-memory/openclaw/dist/index.js \
 
 %install
 rm -rf %{buildroot}
+install -d -m 0755 \
+    %{buildroot}%{_bindir} \
+    %{buildroot}%{_datadir}/anolisa/agent-memory \
+    %{buildroot}%{_datadir}/anolisa/mcp-servers \
+    %{buildroot}%{_userunitdir} \
+    %{buildroot}%{_tmpfilesdir} \
+    %{buildroot}%{_docdir}/%{name} \
+    %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts \
+    %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
 
 # Install binary
-install -d -m 0755 %{buildroot}%{_bindir}
 install -p -m 0755 target/release/agent-memory %{buildroot}%{_bindir}/
 
 # Install default config
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/agent-memory
 install -p -m 0644 config/default.toml %{buildroot}%{_datadir}/anolisa/agent-memory/default.toml
 
 # Install MCP server descriptor for auto-discovery
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/mcp-servers
 install -p -m 0644 config/mcp-server.json %{buildroot}%{_datadir}/anolisa/mcp-servers/agent-memory.json
 
 # Install systemd user template (opt-in via `systemctl --user enable anolisa-memory@$USER`).
 # Per-user instance because the server is stdio-bound per agent session.
-install -d -m 0755 %{buildroot}%{_userunitdir}
-install -p -m 0644 packaging/systemd/anolisa-memory@.service %{buildroot}%{_userunitdir}/anolisa-memory@.service
+python3 packaging/render-install.py systemd packaging/systemd/anolisa-memory@.service.in \
+    %{buildroot}%{_userunitdir}/anolisa-memory@.service %{_bindir}
+chmod 0644 %{buildroot}%{_userunitdir}/anolisa-memory@.service
 
 # Install tmpfiles.d snippet so /run/anolisa{,/sessions} is created at
 # boot with 0700 permissions even when the unit is started by hand.
-install -d -m 0755 %{buildroot}%{_tmpfilesdir}
 install -p -m 0644 packaging/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
 
 # Install documentation (CHANGELOG only). The bilingual user manual moved
 # to the repository-level docs/user-guide tree and is published with the
 # ANOLISA documentation, not packaged per-component.
-install -d -m 0755 %{buildroot}%{_docdir}/%{name}
 install -p -m 0644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
 
 # Install adapter bundle per FHS spec.
@@ -133,20 +157,23 @@ install -p -m 0644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
 # `files` declares: dist/ (prebuilt bundle), openclaw.plugin.json,
 # scripts/ (install/detect/uninstall), package.json (so OpenClaw can
 # read the plugin's version + name). TS sources are dev-only.
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
-
 install -m 0644 adapters/agent-memory/manifest.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/
-install -m 0755 adapters/agent-memory/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
-install -m 0755 adapters/agent-memory/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
-install -m 0755 adapters/agent-memory/openclaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
-install -m 0644 adapters/agent-memory/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/
-install -m 0644 adapters/agent-memory/openclaw/package.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/
+install -m 0755 \
+    adapters/agent-memory/openclaw/scripts/detect.sh \
+    adapters/agent-memory/openclaw/scripts/install.sh \
+    adapters/agent-memory/openclaw/scripts/uninstall.sh \
+    %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
+install -m 0644 \
+    adapters/agent-memory/openclaw/openclaw.plugin.json \
+    adapters/agent-memory/openclaw/package.json \
+    %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/
 # esbuild bundles typebox inline, so dist/index.js has no external
 # runtime deps beyond the openclaw peerDependency.
 install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist/
 
 %files
+
+%files core
 %defattr(0644,root,root,0755)
 %license LICENSE
 %attr(0755,root,root) %{_bindir}/agent-memory
@@ -158,6 +185,9 @@ install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_data
 %{_userunitdir}/anolisa-memory@.service
 %{_tmpfilesdir}/anolisa-memory.conf
 %doc %{_docdir}/%{name}/CHANGELOG.md
+
+%files plugins
+%defattr(0644,root,root,0755)
 # Adapter bundle (anolisa-adapter-ctl auto-discovery)
 %dir %{_datadir}/anolisa/adapters
 %dir %{_datadir}/anolisa/adapters/agent-memory
@@ -172,7 +202,7 @@ install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_data
 %dir %{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/dist/index.js
 
-%post
+%post core
 # Apply the shipped tmpfiles.d snippet immediately so /run/anolisa{,
 # /sessions} is in place before the first invocation, instead of
 # waiting for the next boot.
@@ -185,7 +215,7 @@ install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_data
 # ~/.anolisa/memory/user-<uid>/ — fed by libc::getuid() — on first
 # run, which is the correct trust boundary.
 
-%preun
+%preun plugins
 # On uninstall ($1=0): run the adapter uninstall script which removes
 # the openclaw plugin (CLI or manual) and cleans openclaw.json entries.
 if [ $1 -eq 0 ]; then

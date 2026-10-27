@@ -82,6 +82,10 @@ package = "agent-memory"
 provides = "anolisa-component(agent-memory)"
 legacy_adopt = true
 
+[[components.aliases]]
+kind = "rpm-package"
+name = "agent-memory-core"
+
 [[components]]
 name = "os-skills"
 display_name = "OS Skills"

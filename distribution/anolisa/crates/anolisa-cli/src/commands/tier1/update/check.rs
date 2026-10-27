@@ -58,12 +58,13 @@ use super::UpdateArgs;
 use crate::commands::common;
 use crate::commands::state_view::{ScopedInstalledObject, StateView, StateVisibility};
 use crate::commands::tier1::component_observation::{self, AggregateSelection};
+use crate::commands::tier1::install::installed_component_packages;
 use crate::context::CliContext;
 use crate::progress;
 use crate::repo_config::{BackendConfig, RepoConfig};
 use crate::resolution::{
     BackendKind, ComponentIndex, ComponentResolver, IndexIdentity, ResolutionSet, ResolveOptions,
-    resolve_index_identity, rpm_component_provide,
+    index_rpm_packages, resolve_index_identity,
 };
 use crate::response::CliError;
 
@@ -1101,8 +1102,8 @@ enum DefaultProbe {
 ///    multiple providers are ambiguous and reported as indeterminate (mirroring
 ///    the CLI-owner "multiple packages = error" rule) rather than silently
 ///    picking one.
-/// 2. For `legacy_adopt` packages that may lack that provide, the RPM package
-///    name(s) the component index maps to.
+/// 2. Installed RPM package names explicitly mapped by the component index,
+///    including aliases that do not provide the component capability.
 ///
 /// Any query error (rpm/dnf missing, permission denied, malformed rpmdb output,
 /// repoquery failure) yields [`DefaultProbe::Indeterminate`] — never `Missing`.
@@ -1111,67 +1112,20 @@ fn probe_default_package(
     index: Option<&ComponentIndex>,
     name: &str,
 ) -> DefaultProbe {
-    match query.what_provides_installed(&rpm_component_provide(name)) {
-        Ok(providers) => match providers.as_slice() {
-            [] => {}
-            [only] => return DefaultProbe::Installed(only.clone()),
-            many => {
-                return DefaultProbe::Indeterminate(format!(
-                    "default component '{name}' is provided by multiple installed RPM packages ({}); cannot pick an upgrade target",
-                    many.join(", ")
-                ));
-            }
+    let packages = index_rpm_packages(index, name);
+    match installed_component_packages(query, name, packages.first().map(String::as_str), index) {
+        Ok(installed) => match installed.as_slice() {
+            [] => DefaultProbe::Missing,
+            [package] => DefaultProbe::Installed(package.clone()),
+            many => DefaultProbe::Indeterminate(format!(
+                "default component '{name}' is provided by multiple installed RPM packages ({}); cannot pick an upgrade target",
+                many.join(", ")
+            )),
         },
-        Err(err) => {
-            return DefaultProbe::Indeterminate(format!(
-                "cannot determine whether default component '{name}' is installed: {err}"
-            ));
-        }
+        Err(err) => DefaultProbe::Indeterminate(format!(
+            "cannot determine whether default component '{name}' is installed: {err}"
+        )),
     }
-
-    for package in index_rpm_packages(index, name) {
-        match query.query_installed(&package) {
-            Ok(Some(_)) => return DefaultProbe::Installed(package),
-            Ok(None) => continue,
-            Err(err) => {
-                return DefaultProbe::Indeterminate(format!(
-                    "cannot query installed version of '{package}' for default component '{name}': {err}"
-                ));
-            }
-        }
-    }
-    DefaultProbe::Missing
-}
-
-/// RPM package names the component index maps `component` to: the `rpm` backend
-/// package plus any `rpm-package` aliases (historical names). Empty when there
-/// is no index or no RPM mapping for the component. Duplicates (e.g. a backend
-/// and an alias sharing a name) are collapsed so rpmdb is not queried twice for
-/// the same package, order-preserving.
-fn index_rpm_packages(index: Option<&ComponentIndex>, component: &str) -> Vec<String> {
-    let Some(index) = index else {
-        return Vec::new();
-    };
-    let Some(entry) = index.components.iter().find(|e| e.name == component) else {
-        return Vec::new();
-    };
-    let mut packages: Vec<String> = Vec::new();
-    let mut push_unique = |package: &str| {
-        if !package.is_empty() && !packages.iter().any(|p| p == package) {
-            packages.push(package.to_string());
-        }
-    };
-    for backend in &entry.backends {
-        if backend.kind == "rpm" {
-            push_unique(&backend.package);
-        }
-    }
-    for alias in &entry.aliases {
-        if alias.kind == "rpm-package" {
-            push_unique(&alias.name);
-        }
-    }
-    packages
 }
 
 /// Evaluate an installed-but-unadopted default against the RPM upgrade scope,

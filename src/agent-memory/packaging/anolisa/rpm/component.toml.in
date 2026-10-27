@@ -8,12 +8,19 @@
 name = "agent-memory"
 version = "@VERSION@"
 
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.3.15"
+
 [[adapters]]
 framework = "openclaw"
 adapter_type = "plugin"
 plugin_id = "memory-anolisa"
 source = "adapters/openclaw"
 dest = "{datadir}/adapters/{component}/openclaw/"
+
+[adapters.backends.rpm]
+managed_packages = ["agent-memory-plugins"]
 
 [adapters.bundle]
 # Entry-point manifest inside the bundle directory (the file the OpenClaw
