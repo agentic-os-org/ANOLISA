@@ -137,3 +137,5 @@ install: delivery-validate-install ## Install all prebuilt V2 files; DESTDIR opt
 
 test-packaging: ## Verify public installation and RPM ownership with fixtures only
 	python3 "$(DELIVERY_ROOT)/tests/v2/packaging/test_delivery.py"
+	python3 "$(DELIVERY_ROOT)/tests/v2/packaging/test_rpm_split.py"
+	python3 "$(DELIVERY_ROOT)/tests/v2/packaging/test_rpm_service_migration.py"

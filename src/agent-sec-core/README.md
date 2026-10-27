@@ -160,7 +160,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrappers and CI helpers
 ├── docs/design/               # Design documents
 ├── tests/                     # Unit, integration, packaging, and e2e tests
-├── .anolisa/component.toml    # ANOLISA component contract
+├── packaging/anolisa/         # ANOLISA component contract
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM packaging spec template
@@ -242,7 +242,7 @@ agent-sec-cli --version
 `agent-sec-core`:
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 

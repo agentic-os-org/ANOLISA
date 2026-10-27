@@ -249,6 +249,7 @@ install-all-for-rpmbuild: install-cli-site $(RPM_INSTALL_COMMON_TARGETS) install
 
 # V2 installs a system-scope unit; the V1 raw/RPM user unit remains separate.
 .PHONY: install-all-for-rpmbuild-v2
+install-all-for-rpmbuild-v2: BINDIR := /usr/bin
 install-all-for-rpmbuild-v2: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)

@@ -5,8 +5,9 @@
 AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on the local machine with zero Token consumption, providing defense-in-depth: prompt injection detection, code scanning, skill integrity verification, PII detection, and sandbox isolation.
 
 For the Rust V2 SkillSec core migration, see the [V2 guide](skillsec-v2.md).
-Release installation and the Agent integrations below describe V1; source builds
-install the V2 Rust CLI and daemon.
+The RPM package selection below describes the V2 Rust CLI and daemon. Agent
+integration resources retain their existing host interfaces; consult the V2
+guide for the backend command and service contracts.
 
 ## Overview
 
@@ -46,17 +47,29 @@ sudo anolisa status sec-core
 agent-sec-cli --version
 ```
 
-`sec-core` is the ANOLISA component name. The RPM keeps its existing package
-name, `agent-sec-core`:
+`sec-core` is the ANOLISA component name. The V2 RPMs separate the backend,
+host integrations, and skills:
 
 ```bash
-sudo yum install anolisa agent-sec-core
+# Backend, sandbox, configuration and system service only.
+sudo yum install agent-sec-core
+
+# Complete direct integrations and security skills.
+sudo yum install agent-sec-core agent-sec-plugins agent-sec-skills
+
+# Optional: use ANOLISA to manage the installed framework integrations.
+sudo yum install anolisa
 sudo anolisa --install-mode system adopt sec-core
 ```
 
 Installing the CLI from YUM makes it available on sudo's system path. Adoption
 records the RPM in system state so the adapter manager can read the installed
 component contract.
+
+`agent-sec-core` no longer installs every framework plugin and skill as
+dependencies. `agent-sec-plugins` contains all six existing host integrations;
+register the selected framework as its owning user after installation.
+The existing ANOLISA raw archive remains a combined delivery.
 
 The repository convenience workflow remains available:
 

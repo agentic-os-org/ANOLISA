@@ -84,7 +84,7 @@ agent-sec-cli log-sandbox \
 
 | | `linux-sandbox` | `agent-sec-cli log-sandbox` |
 |---|---|---|
-| 形态 | 位于 `/usr/local/bin/linux-sandbox` 的独立二进制 | `agent-sec-cli` 的隐藏子命令 |
+| 形态 | 位于 `/usr/bin/linux-sandbox` 的独立二进制 | `agent-sec-cli` 的隐藏子命令 |
 | 职责 | 真正在文件系统与网络隔离下执行命令 | 记录「做过一次决策」这件事 |
 | 对命令的影响 | 包装并执行它 | 无——从不执行、拦截或改写任何东西 |
 | `sandbox-guard` 如何使用 | 改写工具调用，使其经由它执行 | detached spawn，fire-and-forget |

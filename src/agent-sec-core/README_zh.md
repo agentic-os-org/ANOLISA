@@ -148,7 +148,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrapper 与 CI 辅助脚本
 ├── docs/design/               # 设计文档
 ├── tests/                     # 单元测试、集成测试、打包测试、端到端测试
-├── .anolisa/component.toml    # ANOLISA 组件契约
+├── packaging/anolisa/         # ANOLISA 组件契约
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM 打包 spec 模板
@@ -225,7 +225,7 @@ agent-sec-cli --version
 `sec-core` 是 ANOLISA 中的组件名，RPM 继续使用包名 `agent-sec-core`。
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 

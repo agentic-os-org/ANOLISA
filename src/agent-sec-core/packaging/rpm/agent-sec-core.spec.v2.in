@@ -13,7 +13,7 @@
 Name:           agent-sec-core
 Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
-Summary:        Agent Security Core Package (metapackage)
+Summary:        Agent Security V2 runtime and sandbox
 
 License:        Apache-2.0
 URL:            https://github.com/alibaba/anolisa
@@ -34,195 +34,284 @@ BuildRequires:  systemd-rpm-macros
 %{!?systemd_preun:%{error:missing %%systemd_preun; install systemd-rpm-macros in the rpmbuild environment}}
 %{!?systemd_postun_with_restart:%{error:missing %%systemd_postun_with_restart; install systemd-rpm-macros in the rpmbuild environment}}
 
-# Metapackage: pull all subpackages
-Requires:       agent-sec-cli = %{version}-%{release}
-Requires:       agent-sec-cosh-hook = %{version}-%{release}
-Requires:       agent-sec-codex-hook = %{version}-%{release}
-Requires:       agent-sec-qoder-hook = %{version}-%{release}
-Requires:       agent-sec-openclaw-hook = %{version}-%{release}
-Requires:       agent-sec-hermes-hook = %{version}-%{release}
-Requires:       agent-sec-qwen-code-hook = %{version}-%{release}
-Requires:       agent-sec-skills = %{version}-%{release}
+Requires:       systemd
+Conflicts:      anolisa < 0.3.21
+Requires:       bubblewrap
+Requires(pre):  rpm coreutils grep systemd
+Requires(post): systemd
+Requires(posttrans): coreutils systemd
+Provides:       agent-sec-cli = %{version}-%{release}
+# Replace legacy packages from before the split.
+Obsoletes:      agent-sec-cli < 1.1.2
 
 %description
-Agent-Sec-Core is an OS-level security baseline and hardening framework for AI Agents.
-This metapackage installs all agent-sec-core components including CLI, hooks, and skills.
+Native V2 CLI, daemon, health helper, sandbox, configuration and system service.
+Framework integrations and skills are supplied separately by agent-sec-plugins
+and agent-sec-skills. ANOLISA discovery metadata belongs to the distribution.
 
-# =============================================================================
-# Subpackage 1: agent-sec-cli
-# =============================================================================
-%package -n agent-sec-cli
-Summary:        Agent Security CLI tool (Rust, daemon client)
-Requires:       systemd
+%pre
+# A virtual Provides does not preserve the old package's final-erase scriptlets.
+# Capture before unpacking; restore in posttrans, after old preun/postun ran.
+set -eu
+state_dir=/run/agent-sec-core-rpm
+unit=agent-sec-core.service
+if [ -L "$state_dir" ] || { [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; }; then
+    echo "ERROR: unsafe AgentSec RPM migration directory: $state_dir" >&2
+    exit 1
+fi
+if [ -d "$state_dir" ]; then
+    [ -O "$state_dir" ] || { echo "ERROR: unowned AgentSec RPM migration directory" >&2; exit 1; }
+    chmod 0700 "$state_dir"
+    rm -f "$state_dir/state" "$state_dir/state.tmp"
+fi
+# Check the actual NAME, never --whatprovides (which would match the new core).
+installed_names=$(rpm -qa --qf '%%{NAME}\n') || {
+    echo 'ERROR: cannot inspect installed RPM identities; refusing to guess' >&2
+    exit 1
+}
+if ! printf '%s\n' "$installed_names" | grep -Fxq agent-sec-cli; then
+    rmdir "$state_dir" 2>/dev/null || :
+    exit 0
+fi
+install -d -m 0700 "$state_dir"
+umask 077
+mode=offline
+enabled=unknown
+active=unknown
+if [ ! -x /usr/bin/systemctl ]; then
+    echo 'ERROR: systemctl unavailable; refusing to guess AgentSec service state' >&2
+    exit 1
+fi
+if [ -e /usr/lib/systemd/user/agent-sec-core.service ]; then
+    # Preserve the explicit V1 transition, but never infer an offline user state.
+    if [ ! -d /run/systemd/system ]; then
+        echo 'ERROR: offline AgentSec user-unit migration requires explicit deployment' >&2
+        exit 1
+    fi
+    mode=legacy-user
+else
+    # is-enabled reads unit-file policy without a live manager. Old final erase
+    # can remove those links offline too, so capture them before replacement.
+    enabled_status=0
+    enabled=$(/usr/bin/systemctl is-enabled "$unit") || enabled_status=$?
+    case "$enabled:$enabled_status" in
+        enabled:0|enabled-runtime:0|disabled:1|masked:1|masked-runtime:1|static:0|indirect:0) ;;
+        *) echo "ERROR: cannot capture AgentSec unit enablement; refusing to guess" >&2; exit 1 ;;
+    esac
+    if [ -d /run/systemd/system ]; then
+        active_status=0
+        active=$(/usr/bin/systemctl is-active "$unit") || active_status=$?
+        case "$active:$active_status" in
+            active:0|reloading:0|activating:3|inactive:3|failed:3|deactivating:3) ;;
+            *) echo "ERROR: cannot capture AgentSec unit activity; refusing to guess" >&2; exit 1 ;;
+        esac
+        mode=system
+    fi
+fi
+printf '%s\n' "$mode" "$enabled" "$active" > "$state_dir/state.tmp"
+mv -f "$state_dir/state.tmp" "$state_dir/state"
 
-%description -n agent-sec-cli
-Agent-sec-cli provides SkillSec, Code Scan, and Policy, Scope and Binding commands.
-Built from the V2 Rust workspace; it talks to agent-sec-daemon over a Unix
-domain socket to a root system service and carries no Python runtime of its
-own. Agent Hook migration is delivered separately.
+%post
+# Transfers, including offline ones, must not be mistaken for fresh installs.
+if [ ! -f /run/agent-sec-core-rpm/state ] && [ -d /run/systemd/system ]; then
+    %systemd_post agent-sec-core.service
+    if [ "$1" -eq 1 ]; then
+        /usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || \
+            echo 'WARNING: AgentSec initial service activation failed' >&2
+    fi
+fi
 
-%files -n agent-sec-cli
+%posttrans
+state_dir=/run/agent-sec-core-rpm
+unit=agent-sec-core.service
+if [ ! -e "$state_dir/state" ]; then
+    exit 0
+fi
+if [ -L "$state_dir" ] || [ ! -O "$state_dir" ] || [ -L "$state_dir/state" ] || \
+   [ ! -f "$state_dir/state" ] || [ ! -O "$state_dir/state" ]; then
+    echo 'WARNING: refusing untrusted AgentSec RPM migration state' >&2
+    exit 1
+fi
+# Consume once even if restoration fails; a later upgrade must not replay it.
+remask_required=0
+runtime=
+cleanup_migration() {
+    if [ "$remask_required" -eq 1 ]; then
+        /usr/bin/systemctl mask $runtime "$unit" || \
+            echo 'WARNING: AgentSec migration could not restore the original mask' >&2
+    fi
+    rm -f "$state_dir/state" "$state_dir/state.tmp"
+    rmdir "$state_dir" 2>/dev/null || :
+}
+trap cleanup_migration EXIT
+trap 'echo "WARNING: AgentSec service-state restoration interrupted" >&2; exit 1' HUP INT TERM
+if ! { IFS= read -r mode; IFS= read -r enabled; IFS= read -r active; } < "$state_dir/state"; then
+    echo 'WARNING: invalid AgentSec RPM migration state' >&2
+    exit 1
+fi
+case "$mode" in
+    offline|legacy-user|system) ;;
+    *) echo 'WARNING: invalid AgentSec RPM migration mode' >&2; exit 1 ;;
+esac
+if [ ! -x /usr/bin/systemctl ]; then
+    echo 'WARNING: systemctl unavailable; AgentSec service policy was not restored' >&2
+    exit 1
+fi
+if [ "$mode" != offline ]; then
+    if [ ! -d /run/systemd/system ]; then
+        echo 'WARNING: systemd unavailable; AgentSec service state was not restored' >&2
+        exit 1
+    fi
+    if ! /usr/bin/systemctl daemon-reload; then
+        echo 'WARNING: AgentSec daemon-reload failed; service was not started' >&2
+        exit 1
+    fi
+fi
+if [ "$mode" = legacy-user ]; then
+    /usr/bin/systemctl enable --now "$unit" || {
+        echo 'WARNING: legacy AgentSec user-unit migration failed' >&2
+        exit 1
+    }
+    exit 0
+fi
+case "$enabled" in
+    enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect) ;;
+    *) echo 'WARNING: invalid captured AgentSec enablement' >&2; exit 1 ;;
+esac
+reload=
+was_active=unknown
+if [ "$mode" = offline ]; then
+    # Restore boot policy only, even if a manager appeared during the transaction.
+    reload=--no-reload
+else
+    case "$active" in
+        active|reloading|activating) was_active=1 ;;
+        inactive|failed|deactivating) was_active=0 ;;
+        *) echo 'WARNING: invalid captured AgentSec activity' >&2; exit 1 ;;
+    esac
+fi
+restore_failed=0
+case "$enabled" in
+    masked|masked-runtime)
+        # A masked but running unit needs a temporary unmask to resume running.
+        # Re-mask even if unmask/start fails; never enable a masked unit.
+        runtime=
+        [ "$enabled" != masked-runtime ] || runtime=--runtime
+        if [ "$mode" != offline ] && [ "$was_active" -eq 1 ]; then
+            remask_required=1
+            if /usr/bin/systemctl unmask $runtime "$unit"; then
+                /usr/bin/systemctl start "$unit" || restore_failed=1
+            else
+                restore_failed=1
+            fi
+        elif [ "$mode" != offline ]; then
+            /usr/bin/systemctl stop "$unit" || restore_failed=1
+        fi
+        if /usr/bin/systemctl mask $reload $runtime "$unit"; then
+            remask_required=0
+        else
+            restore_failed=1
+        fi
+        ;;
+    *)
+        case "$enabled" in
+            enabled|enabled-runtime|disabled)
+                /usr/bin/systemctl disable $reload --runtime "$unit" || restore_failed=1
+                /usr/bin/systemctl disable $reload "$unit" || restore_failed=1
+                case "$enabled" in
+                    enabled) /usr/bin/systemctl enable $reload "$unit" || restore_failed=1 ;;
+                    enabled-runtime) /usr/bin/systemctl enable $reload --runtime "$unit" || restore_failed=1 ;;
+                esac
+                ;;
+        esac
+        # Do not start after a preceding restoration failure.
+        if [ "$restore_failed" -eq 0 ] && [ "$mode" != offline ]; then
+            if [ "$was_active" -eq 1 ]; then
+                /usr/bin/systemctl start "$unit" || restore_failed=1
+            else
+                /usr/bin/systemctl stop "$unit" || restore_failed=1
+            fi
+        fi
+        ;;
+esac
+if [ "$restore_failed" -ne 0 ]; then
+    echo 'WARNING: AgentSec service state restoration failed; check the unit manually' >&2
+    exit 1
+fi
+
+%preun
+%systemd_preun agent-sec-core.service
+
+%postun
+%systemd_postun_with_restart agent-sec-core.service
+
+%files
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 %attr(0755,root,root) /usr/bin/agent-sec-daemon
 %attr(0755,root,root) /usr/bin/agent-sec-daemon-health
+%attr(0755,root,root) /usr/bin/linux-sandbox
 %{_unitdir}/agent-sec-core.service
 %dir %{_sysconfdir}/agent-sec
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/agent-sec/skillsec.json
-%dir %{_datadir}/anolisa
 %license LICENSE
 
-%post -n agent-sec-cli
-%systemd_post agent-sec-core.service
-if [ -d /run/systemd/system ] && { [ "$1" -eq 1 ] || [ -e /usr/lib/systemd/user/agent-sec-core.service ]; }; then
-    /usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || :
-fi
-
-%preun -n agent-sec-cli
-%systemd_preun agent-sec-core.service
-
-%postun -n agent-sec-cli
-%systemd_postun_with_restart agent-sec-core.service
-
-# =============================================================================
-# Subpackage 2: agent-sec-cosh-hook
-# =============================================================================
-%package -n agent-sec-cosh-hook
-Summary:        CoPilot Shell security hooks with linux-sandbox
-Requires:       agent-sec-cli = %{version}-%{release}
-Requires:       bubblewrap
+%package -n agent-sec-plugins
+Summary:        Agent Security framework plugins and hooks
+Requires:       %{name} = %{version}-%{release}
 Requires:       python3 >= 3.11
 Requires:       python3 < 3.12
-
-%description -n agent-sec-cosh-hook
-Provides code_scanner_hook and linux-sandbox for copilot-shell integration.
-The linux-sandbox binary provides secure sandboxed execution environments.
-
-%files -n agent-sec-cosh-hook
-%defattr(0644,root,root,0755)
-%attr(0755,root,root) /usr/local/bin/linux-sandbox
-%attr(0755,root,root) /usr/share/anolisa/extensions/agent-sec-core/hooks/*.py
-/usr/share/anolisa/extensions/agent-sec-core/
-%license LICENSE
-
-# =============================================================================
-# Subpackage 3: agent-sec-openclaw-hook
-# =============================================================================
-%package -n agent-sec-openclaw-hook
-Summary:        OpenClaw plugin for agent security
-Requires:       agent-sec-cli = %{version}-%{release}
 Requires:       nodejs >= 18
 Requires:       jq
+Provides:       agent-sec-cosh-hook = %{version}-%{release}
+Obsoletes:      agent-sec-cosh-hook < 1.1.2
+Provides:       agent-sec-openclaw-hook = %{version}-%{release}
+Obsoletes:      agent-sec-openclaw-hook < 1.1.2
+Provides:       agent-sec-hermes-hook = %{version}-%{release}
+Obsoletes:      agent-sec-hermes-hook < 1.1.2
+Provides:       agent-sec-qwen-code-hook = %{version}-%{release}
+Obsoletes:      agent-sec-qwen-code-hook < 1.1.2
+Provides:       agent-sec-codex-hook = %{version}-%{release}
+Obsoletes:      agent-sec-codex-hook < 1.1.2
+Provides:       agent-sec-qoder-hook = %{version}-%{release}
+Obsoletes:      agent-sec-qoder-hook < 1.1.2
 
-%description -n agent-sec-openclaw-hook
-OpenClaw IDE plugin providing agent security integration.
-Hooks into OpenClaw to perform code scanning before tool execution.
+%description -n agent-sec-plugins
+Cosh, OpenClaw, Hermes, Qwen Code, Codex and Qoder integration resources.
+Register them separately with the target Agent's user configuration.
 
-%files -n agent-sec-openclaw-hook
+%files -n agent-sec-plugins
 %defattr(0644,root,root,0755)
+%attr(0755,root,root) /usr/share/anolisa/extensions/agent-sec-core/hooks/*.py
+/usr/share/anolisa/extensions/agent-sec-core/
 %attr(0755,root,root) /opt/agent-sec/openclaw-plugin/scripts/deploy.sh
 /opt/agent-sec/openclaw-plugin/
-%license LICENSE
-
-# =============================================================================
-# Subpackage 4: agent-sec-hermes-hook
-# =============================================================================
-%package -n agent-sec-hermes-hook
-Summary:        Hermes Agent plugin for agent security
-Requires:       agent-sec-cli = %{version}-%{release}
-Requires:       jq
-
-%description -n agent-sec-hermes-hook
-Hermes Agent security plugin powered by agent-sec-core.
-Provides OS-level security guardrails for Hermes Agent via agent-sec-cli.
-
-%files -n agent-sec-hermes-hook
-%defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/hermes-plugin/scripts/deploy.sh
 /opt/agent-sec/hermes-plugin/
-%license LICENSE
-
-# =============================================================================
-# Subpackage 5: agent-sec-qwen-code-hook
-# =============================================================================
-%package -n agent-sec-qwen-code-hook
-Summary:        Qwen Code extension for agent security
-Requires:       agent-sec-cli = %{version}-%{release}
-Requires:       python3 >= 3.11
-Requires:       python3 < 3.12
-
-%description -n agent-sec-qwen-code-hook
-Qwen Code security extension powered by agent-sec-core.
-Provides prompt and PII policy enforcement, lifecycle observability, and
-managed Skill Ledger validation through Qwen Code command hooks.
-
-%files -n agent-sec-qwen-code-hook
-%defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/scripts/deploy.sh
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/observability_hook.py
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/pii_checker_hook.py
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/skill_ledger_hook.py
 /opt/agent-sec/qwen-code-extension/
+%attr(0755,root,root) /opt/agent-sec/codex-plugin/install.sh
+/opt/agent-sec/codex-plugin/
+%attr(0755,root,root) /opt/agent-sec/qoder-plugin/install.sh
+/opt/agent-sec/qoder-plugin/
 %license LICENSE
 
-# =============================================================================
-# Subpackage 6: agent-sec-skills
-# =============================================================================
+
 %package -n agent-sec-skills
-Summary:        Agent security skill definitions for copilot-shell
-Requires:       agent-sec-cli = %{version}-%{release}
+Summary:        Agent security skill definitions
+Requires:       %{name} = %{version}-%{release}
 
 %description -n agent-sec-skills
-Skill reference files and documentation for copilot-shell integration.
-Includes skill-ledger, code-scanner, prompt-scanner and related skill definitions.
+Skill reference files and workflow scripts for Agent security integration.
 
 %files -n agent-sec-skills
 %defattr(0644,root,root,0755)
 %{_datadir}/anolisa/skills/
 %license LICENSE
 
-# =============================================================================
-# Subpackage 7: agent-sec-codex-hook
-# =============================================================================
-%package -n agent-sec-codex-hook
-Summary:        Codex plugin security hooks
-Requires:       agent-sec-cli = %{version}-%{release}
-Requires:       python3 >= 3.11
-Requires:       python3 < 3.12
-
-%description -n agent-sec-codex-hook
-Codex security hooks providing code scanning, PII checking, prompt scanning
-and skill ledger verification for Codex agent.
-
-%files -n agent-sec-codex-hook
-%defattr(0644,root,root,0755)
-%attr(0755,root,root) /opt/agent-sec/codex-plugin/install.sh
-/opt/agent-sec/codex-plugin/
-%license LICENSE
-
-# =============================================================================
-# Subpackage 8: agent-sec-qoder-hook
-# =============================================================================
-%package -n agent-sec-qoder-hook
-Summary:        Qoder plugin security hooks
-Requires:       agent-sec-cli = %{version}-%{release}
-Requires:       python3 >= 3.11
-Requires:       python3 < 3.12
-
-%description -n agent-sec-qoder-hook
-Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
-
-%files -n agent-sec-qoder-hook
-%defattr(0644,root,root,0755)
-%attr(0755,root,root) /opt/agent-sec/qoder-plugin/install.sh
-/opt/agent-sec/qoder-plugin/
-%license LICENSE
-
-# =============================================================================
-# Main package has no files (metapackage)
-# =============================================================================
-%files
-%license LICENSE
 
 # =============================================================================
 # Build & Install
