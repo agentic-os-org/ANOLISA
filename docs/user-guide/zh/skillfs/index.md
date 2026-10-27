@@ -41,7 +41,19 @@ SkillFS。
 # 推荐包安装
 sudo anolisa --install-mode system install skillfs
 
+# Alternative: complete RPM installation from a configured repository
+sudo yum install skillfs
 ```
+
+| RPM | 内容 |
+|---|---|
+| `skillfs` | 兼容聚合包：对 core、skills 的精确 version/release 依赖 |
+| `skillfs-core` | CLI、FUSE 运行依赖、许可证和文档 |
+| `skillfs-skills` | 内置挂载 skill；依赖同版本 core |
+
+只需要 CLI 和文件系统时，选择 `sudo yum install skillfs-core`。
+不生成 plugin RPM。安装不会自动挂载文件系统，须按下文显式启动挂载。
+本地 RPM 安装或升级应在同一事务中选择匹配 version/release 的产物。
 
 ### 源码构建（开发者）
 

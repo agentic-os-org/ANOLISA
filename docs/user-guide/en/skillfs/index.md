@@ -42,7 +42,20 @@ it cannot mount SkillFS.
 # Recommended package install
 sudo anolisa --install-mode system install skillfs
 
+# Alternative: complete RPM installation from a configured repository
+sudo yum install skillfs
 ```
+
+| RPM | Contents |
+|---|---|
+| `skillfs` | Compatibility aggregate: exact version/release dependencies on core and skills |
+| `skillfs-core` | CLI, FUSE runtime dependencies, license, and documentation |
+| `skillfs-skills` | Bundled mount skill; requires matching core |
+
+For the CLI and filesystem alone, select `sudo yum install skillfs-core`.
+No plugin RPM is emitted. Installation does not mount a filesystem; start a
+mount explicitly as described below. Install or upgrade a local RPM set in
+one transaction, using matching version/release artifacts.
 
 ### Source build (developers)
 

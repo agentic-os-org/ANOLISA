@@ -1,7 +1,6 @@
 %define anolis_release 1
 %global         rustflags -C opt-level=3 -C codegen-units=1
 %global         debug_package %{nil}
-%global         _localbindir /usr/local/bin
 
 Name:           skillfs
 Version:        @VERSION@
@@ -21,14 +20,33 @@ BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  pkgconfig(fuse3)
 
-Requires:       fuse3
-Requires:       fuse3-libs%{?_isa}
+Requires:       %{name}-core = %{version}-%{release}
+Requires:       %{name}-skills = %{version}-%{release}
 Provides:       anolisa-component(skillfs)
 
 %description
+Compatibility package selecting matching SkillFS core and skills packages
+through exact-version dependencies, without a runtime payload of its own.
+
+%package core
+Summary:        SkillFS filesystem and CLI
+Requires:       fuse3
+Requires:       fuse3-libs%{?_isa}
+Conflicts:      %{name} < %{version}
+Conflicts:      anolisa < 0.3.21
+
+%description core
 SkillFS is a FUSE-based filesystem that exposes AI agent skills through
 filesystem views, while preserving ordinary POSIX passthrough behavior and
 SkillFS-specific security boundaries.
+
+%package skills
+Summary:        SkillFS mount skill
+Requires:       %{name}-core = %{version}-%{release}
+Conflicts:      %{name} < %{version}
+
+%description skills
+Bundled skill documentation and resources for mounting SkillFS.
 
 %prep
 %setup -q -a 1 -n %{name}-%{version}
@@ -40,18 +58,21 @@ cargo build --release --workspace --locked --offline
 %install
 rm -rf %{buildroot}
 
-install -d -m 0755 %{buildroot}%{_localbindir}
-install -p -m 0755 target/release/skillfs %{buildroot}%{_localbindir}/skillfs
-
+install -d -m 0755 %{buildroot}%{_bindir}
+install -p -m 0755 target/release/skillfs %{buildroot}%{_bindir}/skillfs
 
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs
 cp -rp docs/skills/skillfs-mount/. \
     %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs/
 
 %files
+
+%files core
 %license LICENSE
 %doc README.md CHANGELOG.md
-%attr(0755,root,root) %{_localbindir}/skillfs
+%attr(0755,root,root) %{_bindir}/skillfs
+
+%files skills
 %dir %{_datadir}/anolisa/runtime
 %dir %{_datadir}/anolisa/runtime/skills
 %{_datadir}/anolisa/runtime/skills/skillfs/

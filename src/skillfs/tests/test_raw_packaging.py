@@ -82,7 +82,12 @@ class SkillfsPackagingTests(unittest.TestCase):
             COMPONENT.parents[1]
             / "distribution/anolisa/manifests/components/skillfs/component.toml"
         )
-        self.assertEqual(distribution.read_bytes(), CONTRACT.read_bytes())
+        distribution_manifest = tomllib.loads(distribution.read_text())
+        self.assertEqual(
+            distribution_manifest["component"]["health_check"]["binary"], "{bindir}/skillfs"
+        )
+        self.assertEqual(self.manifest["component"]["health_check"]["binary"], "{bindir}/skillfs")
+        self.assertEqual(distribution_manifest, self.manifest)
         for arch in ("x86_64", "aarch64"):
             with self.subTest(arch=arch):
                 self.prepare_binary(arch)
