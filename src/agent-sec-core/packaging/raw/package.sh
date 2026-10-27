@@ -97,6 +97,9 @@ stage_payload() {
         "$ROOT/packaging/systemd/agent-sec-core-v2.service.in" \
         "$stage/share/anolisa/sec-core/agent-sec-core.service.in"
     install -p -m 0644 "$ROOT/LICENSE" "$stage/share/doc/sec-core/LICENSE"
+    local notices="$ROOT/v2/crates/asc-skill-score/assets"
+    printf '\n' >> "$stage/share/doc/sec-core/LICENSE"
+    cat "$notices/skill-score-NOTICE" "$notices/masb-LICENSE" >> "$stage/share/doc/sec-core/LICENSE"
     install -d -m 0755 "$stage/share/anolisa/sec-core/sandbox"
     install -p -m 0644 "$ROOT/packaging/sandbox/permissions.json.template" \
         "$stage/share/anolisa/sec-core/sandbox/permissions.json.template"
@@ -144,12 +147,17 @@ stage_payload() {
         die "bundled Python runtime contains a symbolic link"
     fi
     normalize_modes "$stage"
-    if [ -n "${RAW_SKILL_SCORE_PAYLOAD:-}" ]; then
-        python3 "$ROOT/packaging/raw/stage_skill_score.py" \
-            "$stage" "$RAW_SKILL_SCORE_PAYLOAD" "$VERSION"
-    fi
     python3 "$ROOT/packaging/raw/verify_release.py" \
         "$ROOT" "$CONTRACT" --payload-root "$stage" > /dev/null
+    if [ -n "${RAW_PREVIEW_VERSION:-}" ]; then
+        python3 - "$stage/.anolisa/component.toml" "$VERSION" <<'PYVERSION'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text, count = re.subn(r'(?m)^version = "[^"]+"$', 'version = "' + sys.argv[2] + '"', path.read_text(), count=1)
+assert count == 1
+path.write_text(text)
+PYVERSION
+    fi
 }
 
 resolve_epoch() {
@@ -193,12 +201,10 @@ TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 [ -x "$BUILD_DIR/linux-sandbox" ] || die "missing build output $BUILD_DIR/linux-sandbox"
 
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" "$ROOT" "$CONTRACT")"
-if [ -n "${RAW_SKILL_SCORE_PAYLOAD:-}" ]; then
-    [ -n "${RAW_PREVIEW_VERSION:-}" ] || die "assessment packages require RAW_PREVIEW_VERSION"
-    [ -f "$RAW_SKILL_SCORE_PAYLOAD" ] || die "assessment payload does not exist"
+[ -z "${RAW_SKILL_SCORE_PAYLOAD:-}" ] || die "install sec-core-skill-score separately; base packages cannot embed assessment payloads"
+if [ -n "${RAW_PREVIEW_VERSION:-}" ]; then
+    [[ "$RAW_PREVIEW_VERSION" =~ ^${VERSION//./\.}-skillscore\.[a-f0-9]{12}(\.base\.[a-f0-9]{12})?$ ]] || die "invalid preview version"
     VERSION="$RAW_PREVIEW_VERSION"
-elif [ -n "${RAW_PREVIEW_VERSION:-}" ]; then
-    die "RAW_PREVIEW_VERSION requires RAW_SKILL_SCORE_PAYLOAD"
 fi
 
 if [ "$COMMAND" = "stage" ]; then

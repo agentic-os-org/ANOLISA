@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from agent_sec_cli.skill_score.contracts import ContractError
@@ -10,6 +11,7 @@ from agent_sec_cli.skill_score.evidence.redact import (
     redact_text,
     redact_value,
 )
+from agent_sec_cli.skill_score.io import save
 
 
 def test_redact_text_removes_common_secret_shapes(
@@ -33,14 +35,16 @@ def test_redact_text_removes_common_secret_shapes(
     assert find_secret_markers(redacted) == []
 
 
-def test_redact_value_replaces_sensitive_fields_recursively() -> None:
+def test_saved_evidence_redacts_sensitive_fields_recursively(tmp_path: Path) -> None:
     value = {
         "headers": {"authorization": "Bearer hidden-token-value"},
         "api_key": "hidden-key-value",
         "nested": [{"cookie": "sid=hidden-cookie"}, "safe evidence"],
     }
 
-    redacted = redact_value(value)
+    artifact = tmp_path / "evidence" / "result.json"
+    save(artifact, value)
+    redacted = json.loads(artifact.read_text())
 
     assert redacted["headers"]["authorization"] == "[REDACTED]"
     assert redacted["api_key"] == "[REDACTED]"
@@ -84,15 +88,8 @@ def test_header_detection_does_not_cross_line_boundaries(field: str) -> None:
     assert redact_text(source) == source
 
 
-def test_same_line_credential_assignment_remains_redacted() -> None:
-    redacted = redact_text("api_key = concrete-secret-value")
-
-    assert redacted == 'api_key = "[REDACTED]"'
-    assert find_secret_markers(redacted) == []
-
-
-@pytest.mark.parametrize("spacing", ["\v", "\f", "\u00a0", "\u2003"])
-def test_horizontal_unicode_whitespace_credential_assignment_remains_redacted(
+@pytest.mark.parametrize("spacing", [" ", "\v", "\f", "\u00a0", "\u2003"])
+def test_same_line_credential_assignment_remains_redacted(
     spacing: str,
 ) -> None:
     source = f"api_key{spacing}={spacing}concrete-secret-value"
@@ -101,6 +98,40 @@ def test_horizontal_unicode_whitespace_credential_assignment_remains_redacted(
 
     assert redacted == f'api_key{spacing}={spacing}"[REDACTED]"'
     assert find_secret_markers(redacted) == []
+
+
+def test_benign_digests_and_token_counts_are_not_redacted() -> None:
+    value = {
+        "source_digest": "sha256:" + "a" * 64,
+        "n_input_tokens": 100,
+        "observation": "The controlled marker was created.",
+    }
+
+    assert redact_value(value) == value
+    assert_redacted(value)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "Path('/app/guard/token').read_text()",
+        "os.environ['TOKEN']",
+        "get_secret()",
+        "config.token",
+    ],
+)
+def test_source_expression_is_preserved(expression: str) -> None:
+    source = f"token = {expression}\n"
+    assert redact_text(source) == source
+    assert "credential_assignment" not in find_secret_markers(source)
+
+
+def test_source_literal_and_exact_configured_secret_are_still_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_SEC_MODEL_API_KEY", "actualconfiguredvalue")
+    assert "actualconfiguredvalue" not in redact_text("token = actualconfiguredvalue")
+    assert redact_text('token = "literal-secret-value"') == 'token = "[REDACTED]"'
 
 
 @pytest.mark.parametrize("encodings", [0, 1, 2, 3])
@@ -148,12 +179,11 @@ def test_api_token_is_redacted_in_source_and_serialized_json() -> None:
     }
 
 
-def test_benign_digests_and_token_counts_are_not_redacted() -> None:
-    value = {
-        "source_digest": "sha256:" + "a" * 64,
-        "n_input_tokens": 100,
-        "observation": "The controlled marker was created.",
-    }
-
-    assert redact_value(value) == value
-    assert_redacted(value)
+def test_nested_exact_model_credential_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    literal = 'private-model-"quote"-\\backslash'
+    monkeypatch.setenv("AGENT_SEC_MODEL_API_KEY", literal)
+    nested = json.dumps(json.dumps({"message": literal, "exit_code": 0}))
+    restored = json.loads(json.loads(redact_value(nested)))
+    assert restored == {"message": "[REDACTED]", "exit_code": 0}

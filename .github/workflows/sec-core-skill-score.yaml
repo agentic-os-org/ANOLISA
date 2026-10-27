@@ -72,8 +72,17 @@ jobs:
       - name: Check packaging contracts
         run: |
           bash src/agent-sec-core/tests/packaging/test-package-raw.sh
-          python3 src/agent-sec-core/tests/packaging/test_skill_score_raw.py
+          python3 src/agent-sec-core/tests/packaging/test_skill_score_optional.py
+          python3 src/agent-sec-core/tests/packaging/test_skill_score_lifecycle.py
+          python3 src/agent-sec-core/tests/packaging/test_skill_score_image_archive.py
           python3 src/agent-sec-core/tests/packaging/test_skill_score_preview.py
+      - name: Check installer preparation lifecycle
+        working-directory: distribution/anolisa
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked -- --test-threads=1
+          cargo doc --workspace --no-deps --locked
       - name: Check Rust formatting and lints
         working-directory: src/agent-sec-core/v2
         run: |
@@ -99,7 +108,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/score-evidence"
           PYTHONPATH="$PWD/agent-sec-cli/src:$PWD/skill-score-runtime/src:$PWD/skill-score-runtime/image" \
             uv run --project skill-score-runtime --python 3.12.11 --frozen --with pytest==9.0.3 \
-            pytest tests/integration-test/skill-score/test_runtime_observations.py -q \
+            pytest tests/integration-test/skill-score/test_runtime_observations.py \
+            tests/integration-test/skill-score/test_worker_protocol.py \
+            tests/unit-test/skill-score/test_worker_files.py \
+            tests/unit-test/skill-score/test_worker_subject.py -q \
             --junitxml="$RUNNER_TEMP/score-evidence/collector-tests.xml"
           python3 - "$RUNNER_TEMP/score-evidence/collector-tests.xml" <<'PY'
           import sys
@@ -126,34 +138,83 @@ jobs:
             src/agent-sec-core/v2/target
             src/agent-sec-core/linux-sandbox/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-      - name: Install the pinned official ANOLISA installer
+      - name: Install the release-bound preparation-capable ANOLISA installer
         run: |
           mkdir -p "$RUNNER_TEMP/anolisa-installer"
-          curl --fail --location --retry 2 --output "$RUNNER_TEMP/anolisa-installer/cli.tar.gz" \
-            https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/cli/releases/0.3.18/artifacts/linux/x86_64/anolisa-cli-0.3.18-x86_64-unknown-linux-gnu.tar.gz
-          echo "3af3bfe9de4f19fadd7a79ede5818fa7c0089011df322369c986283748bf96a5  $RUNNER_TEMP/anolisa-installer/cli.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/anolisa-installer/cli.tar.gz" -C "$RUNNER_TEMP/anolisa-installer" anolisa
+          tar -xzf "$RUNNER_TEMP/score-release/anolisa-cli-0.3.20-linux-x86_64.tar.gz" \
+            -C "$RUNNER_TEMP/anolisa-installer" anolisa
           sudo install -m 0755 "$RUNNER_TEMP/anolisa-installer/anolisa" /usr/local/bin/anolisa
           /usr/local/bin/anolisa --version
-      - name: Install the exact raw preview through ANOLISA
+      - name: Install base without optional dependencies, then explicitly install and repair worker
         run: |
           version="$(jq -r .version "$RUNNER_TEMP/score-release/release-manifest.json")"
-          package="$(jq -r .raw_package "$RUNNER_TEMP/score-release/release-manifest.json")"
           mkdir -p "$RUNNER_TEMP/score-repo/v1"
-          for file in index.toml index-v2.toml components-v2.toml "$package"; do
+          for file in index.toml index-v2.toml components-v2.toml $(jq -r '.raw_packages[]' "$RUNNER_TEMP/score-release/release-manifest.json"); do
             ln "$RUNNER_TEMP/score-release/$file" "$RUNNER_TEMP/score-repo/v1/$file"
           done
+          sudo mkdir -p /etc/anolisa
+          printf 'schema_version = 1\ndefault_backend = "raw"\n[backends.raw]\nbase_url = "file://%s/score-repo/v1"\n' "$RUNNER_TEMP" | sudo tee /etc/anolisa/repo.toml >/dev/null
           sudo /usr/local/bin/anolisa --install-mode system install sec-core --backend raw \
             --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
-          docker image rm agent-sec-skill-score:1 agent-sec-skill-score-egress:1
-          docker load --input "$RUNNER_TEMP/score-release/skill-score-images.tar.gz"
           python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --base-only --output "$RUNNER_TEMP/score-evidence/base-install.json"
+          docker image rm "agent-sec-skill-score:$version" "agent-sec-skill-score-egress:$version"
+          sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
+            /usr/local/bin/anolisa --install-mode system install sec-core-skill-score --backend raw \
+            --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
+          sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
             "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/install.json"
+          digest="$(sha256sum /usr/local/lib/anolisa/sec-core-skill-score/runtime-manifest.json | cut -d' ' -f1)"
+          sudo rm "/usr/local/lib/anolisa/sec-core-skill-score/environments/$digest/worker-entry.py"
+          sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
+            /usr/local/bin/anolisa --install-mode system repair sec-core-skill-score
+          sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/repair.json"
       - name: Validate installed worker and Compose network controls
         run: |
-          /usr/local/lib/anolisa/sec-core/skill-score/runtime/bin/python3.12 -I \
-            src/agent-sec-core/tests/integration-test/skill-score/validate_egress.py \
+          digest="$(sha256sum /usr/local/lib/anolisa/sec-core-skill-score/runtime-manifest.json | cut -d' ' -f1)"
+          runtime="/usr/local/lib/anolisa/sec-core-skill-score/environments/$digest"
+          export ASC_SKILL_SCORE_EGRESS_IMAGE="$(jq -r '.checks.actual_image_ids.egress' "$RUNNER_TEMP/score-evidence/repair.json")"
+          image="$(jq -r '.checks.actual_image_ids.work' "$RUNNER_TEMP/score-evidence/repair.json")"
+          "$runtime/python/bin/python3.12" -I -c \
+            'import sys,runpy; from pathlib import Path; root=Path(sys.argv.pop(1)); sys.path[:0]=[str(root/p) for p in ("worker","shared","site-packages")]; path=sys.argv.pop(1); runpy.run_path(path,run_name="__main__")' \
+            "$runtime" src/agent-sec-core/tests/integration-test/skill-score/validate_egress.py \
+            --image "$image" --egress-image "$ASC_SKILL_SCORE_EGRESS_IMAGE" \
             --output "$RUNNER_TEMP/score-evidence/egress"
+      - name: Verify canonical Skill upload through Harbor
+        working-directory: src/agent-sec-core
+        run: |
+          export ASC_SCORE_UPLOAD_TEST_IMAGE="$(jq -r '.checks.actual_image_ids.work' "$RUNNER_TEMP/score-evidence/repair.json")"
+          PYTHONPATH="$PWD/agent-sec-cli/src:$PWD/skill-score-runtime/src" \
+            uv run --project skill-score-runtime --python 3.12.11 --frozen --with pytest==9.0.3 \
+            pytest tests/integration-test/skill-score/test_subject_upload.py -q \
+            --junitxml="$RUNNER_TEMP/score-evidence/subject-upload.xml"
+          python3 - "$RUNNER_TEMP/score-evidence/subject-upload.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          suites = ET.parse(sys.argv[1]).getroot().findall("testsuite")
+          assert sum(int(s.get("tests", 0)) for s in suites) > 0
+          assert sum(int(s.get("skipped", 0)) for s in suites) == 0
+          PY
+      - name: Uninstall generated environments and verify clean reinstall
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version "$RUNNER_TEMP/score-release/release-manifest.json")"
+          test -n "$(find /usr/local/lib/anolisa/sec-core-skill-score/environments -maxdepth 1 -name '*.retained-*' -print -quit)"
+          sudo /usr/local/bin/anolisa --install-mode system uninstall sec-core-skill-score \
+            > "$RUNNER_TEMP/score-evidence/uninstall.log" 2>&1
+          python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --base-only --output "$RUNNER_TEMP/score-evidence/uninstalled.json"
+          sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
+            /usr/local/bin/anolisa --install-mode system install sec-core-skill-score --backend raw \
+            --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
+          sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/clean-reinstall.json"
+          sudo /usr/local/bin/anolisa --install-mode system uninstall sec-core-skill-score \
+            > "$RUNNER_TEMP/score-evidence/clean-reinstall-uninstall.log" 2>&1
+          python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --base-only --output "$RUNNER_TEMP/score-evidence/final-base-only.json"
       - name: Preserve bounded validation evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -208,13 +269,15 @@ jobs:
           \`gh release download $tag --repo $GH_REPO --dir /absolute/path/to/asc-preview/v1\`
           \`sudo anolisa --install-mode system install sec-core --backend raw --repo file:///absolute/path/to/asc-preview/v1 --version $version\`
 
-          Load the separately delivered \`skill-score-images.tar.gz\` during template preparation.
-          The score entrypoint is \`agent-sec-cli skillsec score plan/run\`.
-          The installed Rust CLI dispatches to its private scoring runtime without a daemon.
+          Use the release-bound ANOLISA 0.3.20 installer, then explicitly install
+          \`sec-core-skill-score\` at the same version. Its verified candidate helper obtains
+          locked Python/uv/Harbor dependencies and the separately hashed image archive.
+          Set \`ANOLISA_SKILL_SCORE_SOURCE_DIR\` to the release asset directory to reuse the local archive.
+          The native Rust score entrypoint is \`agent-sec-cli skillsec score plan/run\`;
+          plan needs only the base component, while run also needs the optional worker.
 
-          Validation: Ubuntu 22.04 standard raw installation, native scanner, unified CLI dispatch,
-          stdin/exit/process-group termination, Rust and scoring CLI contracts,
-          worker and Docker network controls. No model-backed scoring or FC template restore is claimed.
+          Validation: Ubuntu 22.04 separate base/optional raw installation, explicit worker repair,
+          native CLI contracts, dependency and image identities, worker protocol and Docker network controls. No model-backed scoring or FC template restore is claimed.
           This is a fork prerelease, not an official AgentSecCore release.
           EOF
           gh release create "$tag" release/* --target "$EXPECTED_SHA" --prerelease \

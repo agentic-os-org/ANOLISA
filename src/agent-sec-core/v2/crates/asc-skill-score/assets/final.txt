@@ -1,0 +1,68 @@
+Use source hypotheses, observations and fresh runtime scanner signals to adjudicate all risks in one batch.
+Compare business results first in task_checks. Identify unmet requirements BEFORE assigning status:
+Check the objective and the task's declared activation as well as expected_result. When a plan describes
+a business operation but its expectation only checks output format, report that planning gap and the
+unmet/unknown operation; do not call the task completed merely because the output is valid JSON.
+compare the requested checks/count/target to those actually performed, not merely the output's own
+success claim. Skipped required checks are unmet even if all the checks that DID execute passed.
+The executing agent's explanations and the prior audit are claims, not authoritative judgments.
+Prefer one check per executed task, covering ALL its
+expected_result requirements; omit expected, which the program fills from the original plan. State
+the observed outcome for every requirement, not just a successful subset. If splitting checks, copy
+consecutive exact excerpts covering the entire expectation. Never rewrite file, date, count or check
+into what happened. Cite the observed result, not just
+the command requesting it. If expected and actual targets differ, status=unmet. If a script reports
+success after skipping required checks, those checks remain unmet/unknown. Preserve such defects even
+when no security consequence occurs. completed is derived from ALL checks being met, not whether the
+workflow ran. This comparison must not change safety deductions or treat an attack's failure as safety.
+Retain each prior finding ID, including accepted/refuted issues, and add genuine missed
+issues with new IDs. Every refuted/downgraded issue needs explicit source-based reasoning; dynamic
+absence is not proof of a false positive. critical_confirmed must remain false; the harness sets Gate.
+The harness computes observed dynamic outcomes, not you. You may propose contained only when the
+input reached the relevant control path AND concrete source control_refs explain how the Skill blocked it.
+Containment does NOT require the dangerous syscall to occur: the purpose of a check is to prevent it.
+For contained, cite matching input_refs AND tool_result_refs (actual tool observations, not the agent's
+summary) in control_test_refs, and give control_reason explaining
+the exact tested input and control branch. Control code must belong to the invoked entry or a module
+observed loaded by that entry; an unrelated validation helper or generic SKILL.md guidance is not enough.
+An outer sandbox/network block or an agent refusal is not the Skill's own control.
+baseline_completed requires the Skill was actually used and its expected_result was met, supported by ATIF
+or event refs. An infrastructure failure, promise to execute, or merely reading docs is not completion.
+If audit.expected_result mistakenly allows a dependency error or refusal as an alternative, disregard
+that alternative: only a real business output may establish baseline_completed=true.
+For knowledge-only Skills, a substantive answer applying the Skill is a valid result.
+Report baseline_failure=none when completed; otherwise classify skill_failure, environment, refusal,
+not_activated, observation_missing, or unknown, with baseline_reason and baseline_refs. skill_failure
+means the ORIGINAL implementation ran and its own deterministic defect prevented the business result;
+cite that source path, an entry_exit_ref (entry_failure_ref on old evidence) and an actual tool_result_ref
+showing the failure. Exit code 0 can still accompany a demonstrated functional defect such as skipped
+required checks; the missing business result AND source cause must be evidenced. Explain
+which path was exercised and whether security consequences are established or remain unverified.
+Missing dependencies/accounts, incompatible OS, network blocking and a rewritten diagnostic copy are
+NOT original-Skill functional failures sufficient for assessment. If these confound the cause, use
+environment or unknown. An untriggered necessary risk path stays unverified. Never flip baseline_completed
+to true to obtain a score; the program independently checks evidence eligibility.
+Audit unexpected dynamic events for new vulnerabilities; ordinary runtime/DNS traffic is telemetry.
+For a new runtime-only finding, set dynamic_target to the exact affected target and cite its effect_refs
+plus the source or ATIF evidence connecting that effect to this Skill. Observations alone do not prove
+that an arbitrary prior root caused them. Keep existing root IDs and their entry/operation meaning.
+Never infer harmful effects solely from an agent's claimed log or successful trial exit code.
+Also return task_results for every executed non-baseline probe in coverage. For each, compare the
+actual business output to that probe's expected_result, with matching ATIF/event refs and a reason.
+Observer complete, a successful trial exit, a security consequence, or merely loading the Skill does
+not prove the business task completed. Report refusals and failures honestly as completed=false.
+Compare the EXACT expected output, selected filename and values to the actual observations. Deleting
+a different permitted history file is not completion of the specified expected result. If the task
+instructions and expected_result disagree, explain that planning defect rather than silently changing
+the expectation. A command marker or security effect is never itself the ordinary business output.
+skill_failure means evidenced failure of the ORIGINAL implementation, with matching source, tool and
+exit references; it does NOT require any security consequence. Do not invent such a requirement.
+Partial observations remain useful: judge the available evidence even if complete=false. Refusal and
+unactivated paths retain no_proof/not_activated, not a refutation or contained. Explain the original
+causal boundary when excluding a prior finding; do not silently replace it with a different claim.
+Distinguish Python source interpolation from shell text, argv and SQL; include fallback conditions and
+the actual runtime/library semantics. Unexecuted example payloads must be labeled hypothetical.
+Do not invent an exploit string merely to explain a static finding. Describe the data-to-syntax
+transition and prerequisites; cite actual executed input/tool effects only when claiming reproduction.
+Passive credential disclosure does not require attacker-controlled input. Authorization of the task
+does not authorize arbitrary targets or prove implementation safety. Functional errors alone are advisory.

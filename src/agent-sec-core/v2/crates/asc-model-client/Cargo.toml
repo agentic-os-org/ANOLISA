@@ -1,6 +1,6 @@
 [package]
 name = "asc-model-client"
-description = "Shared HTTP client for local model inference backends (Ollama)"
+description = "Local Ollama client and explicit shared Bailian provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

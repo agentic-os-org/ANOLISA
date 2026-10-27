@@ -1,0 +1,13 @@
+Third-party notices for AgentSecCore Skill Score
+
+SkillAudit / SkillPortrait Evaluation Framework
+Copyright 2026 SkillPortrait Contributors
+Licensed under the Apache License, Version 2.0. AgentSecCore adapted the
+static scanner's risk categories and combined them with MASB categories.
+https://github.com/SkillAudit/skillaudit/blob/349eff1e12cf6f210aa9b865a9e865b948b5a89b/skills_eval/task_scheme/system_prompt_skill_security_static_scanner.md
+
+MaliciousAgentSkillsBench (MASB)
+Copyright (c) 2025 MaliciousAgentSkillsBench Contributors
+Licensed under the MIT License. AgentSecCore ported a subset of the scanner
+rules to Rust and adapted the risk taxonomy from code/analysis/patterns.py.
+https://github.com/protectskills/MaliciousAgentSkillsBench/tree/f7d28b1a9de4eb33d552529cf79d1065d765f6c3
