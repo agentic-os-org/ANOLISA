@@ -8,6 +8,7 @@
 //! (`running`) terminates the loop on shutdown.
 
 pub mod atif;
+pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini;
@@ -158,12 +159,20 @@ fn process_session(
         std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
     let mut events = qoder::load_jsonl_events(&content);
+    // Cline task files are whole-file JSON arrays; a compact writer puts the
+    // entire array on one JSONL line, so unwrap it before per-record detection.
+    cline::normalize_events(&mut events);
     // Legacy Gemini (<= 0.38) conversations are one pretty-printed JSON
     // document: no line parses, so the whole content is the only unit.
     if events.is_empty() {
         if let Some(doc) = gemini::legacy_document(&content) {
             events.push(doc);
         }
+    }
+    // Cline histories are pretty-printed record arrays, the same whole-file
+    // situation as legacy Gemini conversations.
+    if events.is_empty() {
+        events = cline::record_array(&content).unwrap_or_default();
     }
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
@@ -174,15 +183,22 @@ fn process_session(
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
     // that needs a dedicated converter; Gemini CLI chats use an append-only
-    // record stream with `$`-prefixed correction records; everything else
-    // shares the Claude-style converter.
+    // record stream with `$`-prefixed correction records; Cline task files
+    // hold raw Anthropic message params plus a ui record stream; everything
+    // else shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
     let is_gemini =
         !is_codex && (session.source == "gemini-cli" || gemini::is_gemini_chat(&events));
+    let is_cline = !is_codex && !is_gemini && cline::is_cline_task(&events);
+    if is_cline {
+        cline::append_ui_records(&session.path, &mut events);
+    }
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
     } else if is_gemini {
         gemini::convert_gemini_events(&events, &session.source)?
+    } else if is_cline {
+        cline::convert_cline_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
@@ -202,6 +218,8 @@ fn process_session(
         codex::extract_private_metadata(&events, &session.project)
     } else if is_gemini {
         gemini::extract_private_metadata(&events, &session.project)
+    } else if is_cline {
+        cline::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };
