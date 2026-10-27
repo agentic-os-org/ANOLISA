@@ -500,7 +500,7 @@ pub(super) fn starts_native_intercept_candidate(
 
 /// The whole slice is a proper prefix of `\x1b[200~` / `\x1b[201~`
 /// (#1721): PTY reads may split the delimiter itself at any byte.
-fn is_partial_paste_delimiter(suffix: &[u8]) -> bool {
+pub(super) fn is_partial_paste_delimiter(suffix: &[u8]) -> bool {
     !suffix.is_empty()
         && suffix.len() < BRACKETED_PASTE_START.len()
         && (BRACKETED_PASTE_START.starts_with(suffix) || BRACKETED_PASTE_END.starts_with(suffix))
