@@ -11,13 +11,16 @@ use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 
+mod assets;
+
 #[cfg(test)]
 mod tests;
 
 pub(crate) struct QoderSdk;
 struct Prepared {
     input: LaunchInput,
-    sdk: PathBuf,
+    sdks: std::collections::BTreeMap<String, PathBuf>,
+    policy: assets::Policy,
 }
 
 impl Adapter for QoderSdk {
@@ -50,6 +53,19 @@ impl Adapter for QoderSdk {
         {
             return Err("Qoder SDK requires an existing absolute .mjs worker".into());
         }
+        let agent = &input.document["spec"]["agents"][&input.target];
+        if input.options.reloadable
+            && (agent["qoder_sdk"]["declarative_plugins"] == true
+                || agent["qoder_sdk"]["command_wrappers"]
+                    .as_array()
+                    .is_some_and(|grants| !grants.is_empty()))
+        {
+            return Err(
+                "Qoder SDK declarative plugins and command wrappers require ordinary resident mode"
+                    .into(),
+            );
+        }
+        let policy = assets::Policy::read(agent)?;
         let sdk = adapter::Probe(cancelled).version_output(
             &input.command,
             &[
@@ -58,13 +74,23 @@ impl Adapter for QoderSdk {
                 include_str!("../../native/qoder-sdk/probe.mjs").into(),
                 "--".into(),
                 application.canonicalize()?.into_os_string(),
+                serde_json::to_string(&policy.sites)?.into(),
             ],
         )?;
-        let sdk = PathBuf::from(sdk);
-        if !sdk.is_absolute() || !sdk.is_file() {
-            return Err("Qoder SDK probe did not resolve the installed package".into());
+        let sdks: std::collections::BTreeMap<String, PathBuf> = serde_json::from_str(&sdk)?;
+        if sdks.len() != policy.sites.len()
+            || policy.sites.iter().any(|site| !sdks.contains_key(site))
+            || sdks
+                .values()
+                .any(|sdk| !sdk.is_absolute() || !sdk.is_file())
+        {
+            return Err("Qoder SDK probe did not resolve the declared installed packages".into());
         }
-        Ok(Box::new(Prepared { input, sdk }))
+        Ok(Box::new(Prepared {
+            input,
+            sdks,
+            policy,
+        }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         super::sdk_tools::normalize_tools(binding, event, native, "qoder-sdk")
@@ -145,6 +171,14 @@ impl PreparedLaunch for Prepared {
                 include_bytes!("../../native/qoder-sdk/daemon.mjs").as_slice(),
             ),
             (
+                "command-wrapper.mjs",
+                include_bytes!("../../native/qoder-sdk/command-wrapper.mjs").as_slice(),
+            ),
+            (
+                "native-options.mjs",
+                include_bytes!("../../native/qoder-sdk/native-options.mjs").as_slice(),
+            ),
+            (
                 "private.mjs",
                 include_bytes!("../../native/qoder-sdk/private.mjs").as_slice(),
             ),
@@ -170,7 +204,9 @@ impl PreparedLaunch for Prepared {
         let config = context.files.write(
             "qoder-sdk.json",
             &serde_json::to_vec(&json!({
-                "executable":context.executable, "binding":context.binding_path, "sdk":self.sdk,
+                "executable":context.executable, "binding":context.binding_path, "sdk":self.sdks[&self.policy.sites[0]],
+                "sdks":self.sdks, "default_site":self.policy.sites[0],
+                "native_command_wrappers":self.policy.wrappers(), "native_policy":self.policy,
                 "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable,
                 "resident_policy_reload": !self.input.options.reloadable,
                 "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks

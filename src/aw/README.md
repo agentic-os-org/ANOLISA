@@ -74,6 +74,7 @@ aw stop --config "$AW_HOME/aw.yaml"
 AW currently integrates Qoder CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
 Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
 SDK applications explicitly use managed factories.
+[Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers pinned Bash consumers, Worker imports and declarative role assets.
 The [capability matrix](../../docs/user-guide/en/aw/capabilities.md) compares result handling,
 MCP and policy updates by Adapter and launch mode, with links to supported versions and setup.
 

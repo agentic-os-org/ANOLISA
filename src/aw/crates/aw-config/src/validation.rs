@@ -23,6 +23,11 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     for (name, agent) in spec["agents"].as_object().ok_or(Error::InvalidSchema)? {
         adapters.insert(agent["adapter"].as_str().ok_or(Error::InvalidSchema)?);
         require(
+            agent.get("qoder_sdk").is_none() || agent["adapter"] == "qoder-sdk",
+            &format!("/spec/agents/{name}/qoder_sdk"),
+            "Qoder SDK grants require the Qoder SDK Adapter",
+        )?;
+        require(
             agent.get("qoder").is_none() || agent["adapter"] == "qoder",
             &format!("/spec/agents/{name}/qoder"),
             "Qoder settings require the Qoder Adapter",

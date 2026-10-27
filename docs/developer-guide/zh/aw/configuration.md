@@ -59,6 +59,54 @@ Agent/Provider ID、步骤 ID 和操作名与 `metadata.name` 使用相同语法
 Provider 引用与步骤 ID 重复，避免启用时才暴露引用拼写错误。默认值是合同语义，
 解析器不会将它们填入原始文档。
 
+## Qoder SDK 执行资产
+
+在 `qoder-sdk` 目标的 `agents.<id>.qoder_sdk` 下设置这些字段。
+应用无需执行扩展时，可全部省略。
+
+| 字段 | 接入方式与限制 |
+| --- | --- |
+| `sites` | `global`、`cn` 的非空去重列表，第一个区域为默认值；省略时为 `[global]`。在应用目录安装对应 SDK 包。 |
+| `command_wrappers` | 最多 16 个原生 Bash 消费者授权。每项为 `{path, sha256}`，使用普通文件的绝对路径和 64 位小写十六进制 SHA-256。 |
+| `runtime_preloads` | 最多 16 个受信任 Worker import 授权，文件格式与上项相同。 |
+| `declarative_plugins` | 默认 `false`；为使用受管 Daemon 的普通常驻 Query 接入本地角色、Agent、命令和 Skill 资产快照。 |
+
+每个授权文件最多 16 MiB。将 wrapper 和 preload 固定在镜像中。
+AW 在 SDK 探测前验证文件，并在每个 Query 重新检查；不匹配时拒绝启动。
+这些限制统计安装资产，Query 和工具调用的累计次数没有此上限。修改资产或区域后重启 worker。
+
+Bridge 的 `startDaemon`、`createQuery().options` 和 `createSdkMcpServer` 接受
+`awSite: "global"` 或 `"cn"`。Query 省略区域时继承受管 Daemon 的选择；显式选择不同区域会被拒绝。
+
+### Worker import
+
+`startDaemon` 的 `executableArgs` 接受成对的 `--import` 与已授权 preload 路径。
+若提供 `pathToQoderCLIExecutable`，它必须指向对应 SDK 包的官方 Worker。
+其他 executable 或 transport 替换会被拒绝。固定 Worker-thread transport 忽略
+`executableArgs`，因此直接 Query 拒绝该选项；需要 import 时使用受管 Daemon。
+
+### 声明式插件快照
+
+启用 `declarative_plugins: true` 后，通过原生
+`options.plugins: [{type: "local", path: "/absolute/plugin"}]` 传入本地插件根目录。
+使用元数据 manifest 与声明式 Markdown；Agent 的 `tools` 工具选择受支持。
+AW 拒绝可执行插件 Hook、MCP/settings 重定向、shell 插值、`permissionMode`、
+`allowed-tools`，以及 Skill/命令 frontmatter 中的 `context` 和 `agent`。
+未知或有歧义的 frontmatter、符号链接也会被拒绝。可执行行为改用受管 SDK Hook 或 MCP 工厂。
+
+| 快照资源 | 每个 Query 的上限 |
+| --- | --- |
+| 所有插件根目录下的文件与目录 | 共 10,000 个条目 |
+| 内容总大小 | 128 MiB |
+| 插件根目录以下的目录深度 | 64 层 |
+
+AW 强制设置 `skills.disableShellExecution: true`，并在释放首个提示前确认原生设置。
+直接 Query 无法确认有效设置，因此拒绝此配置。Reloadable 启动在 SDK 探测前拒绝插件快照和命令 wrapper。
+此配置限定于 SDK 1.0.56 / Worker 1.1.78，升级 SDK 后须重新验证。
+
+原生工作与回调确认排空后，AW 删除快照。清理未确认时保留快照和 scope 所有权，排查原因后重启 worker。
+原生命令消费者还需要显式审批与完成确认，见 [Qoder SDK 工厂](agents/qoder-sdk.md#原生-bash-命令消费者)。
+
 ## 缺省布尔 Hook
 
 Provider 省略 `protocol` 时选择 `aw-hook/v1alpha1`，步骤省略 `operation` 或填

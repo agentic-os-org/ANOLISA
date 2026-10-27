@@ -108,10 +108,36 @@ Qoder 结果替换仍不支持。
 `--reloadable` 使用独立的空闲更新合同，不提供严格 Post 和私有执行租约；Qoder 在
 该模式拒绝 `awExecutionFactory`。保留原生权限
 及调用方负责的 daemon 启停生命周期。Qoder 要求 `settingSources: []`，拒绝 settings、
-插件、额外 CLI 参数与运行时可执行文件/transport 覆盖。依赖这些输入的业务工厂，
+未经授权的插件、额外 CLI 参数与运行时可执行文件/transport 覆盖。依赖这些输入的业务工厂，
 须在部署前完成符合运行时准入合同的接入。上面的公共工厂提供凭据接点，保留这些检查。
 
 启动命令见[统一安全配置](../../../../crates/aw-service/examples/aw.sdk-security.yaml)与
 [原生接入指南](../../../../../../docs/developer-guide/zh/aw/deployment/resident.md)。
 实现合同位于 [Qoder 私有执行](../../../../crates/aw-adapter/native/qoder-sdk/private.mjs)与
 [QwenPaw 私有执行](../../../../crates/aw-adapter/native/qwenpaw/aw_private.py)。
+
+## 原生 Bash 消费者
+
+`awNativeExecutionFactory` 为每次原生 Bash 调用持有一份租约，与受管 MCP 的
+`awExecutionFactory` 分开。参数与租约 API 见 [Qoder SDK 指南](../../../../../../docs/developer-guide/zh/aw/agents/qoder-sdk.md#原生-bash-命令消费者)。
+Adapter 保持以下顺序不变量：
+
+1. 安全检查看到冻结的逻辑输入，原生规则检查同一份输入。随后只有显式 `canUseTool`
+   允许才能发布 wrapper 执行参数。固定 Worker 在 bypass/auto 中可能跳过 Hook ask，
+   因此创建、模式切换和 Bash Hook 实际模式均须拒绝这些路径。
+2. 发送权限回复前先登记发布所有权；回复状态不明时，无法判定票据未被使用。
+   原生拒绝发生在发布前时，回收未使用租约，无需消费者 settle。
+3. 消费者确认完成后才结束有限输入和关闭原生传输，原始回调排空后才撤销租约。
+   超时转后台、结果消息与后台快照均无法单独证明消费者结束；通过结构化 session/tool/task
+   身份关联每个已确认的消费者。
+4. 正常 settle 没有任务时长上限。取消使用既有共享 60 秒预算，涵盖消费者 join、原生关闭、
+   回调排空与租约清理。清理未确认时保留租约、快照及 scope 所有权，封锁新工作直至 worker 重启。
+
+## 执行资产验证
+
+每个 Query 以 no-follow 方式打开授权文件。进程内最多缓存 64 个成功结果，按路径、预期摘要及
+`(dev, ino, size, mtimeNs, ctimeNs)` 匹配；身份或摘要变化时重新 hash。
+最近一秒或整秒精度的 ctime 无法确定可复用的文件代次，因此重新验证。
+流式读取限制实际字节数，并在 hash 后复查元数据；缓存淘汰仅增加重新验证的成本。
+快照遍历将 no-follow descriptor 锚定到已打开目录，统计实际条目和字节。
+资源上限与插件字段范围见[配置参考](../../../../../../docs/developer-guide/zh/aw/configuration.md#qoder-sdk-执行资产)。

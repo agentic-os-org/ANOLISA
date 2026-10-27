@@ -17,6 +17,22 @@ Start daily development with the [AW gate](../../../src/aw/CONTRIBUTING.md). Use
 OpenClaw automation covers the official loader/Hook runner; validate complete Gateway model flow separately.
 Qoder SDK hosted MCP still requires manual container evidence. Report the actual boundary recorded in the manifest.
 
+## Qoder execution-asset coverage
+
+The `qoder-sdk` manifest target includes these required suites:
+
+| Suite | Acceptance boundary |
+| --- | --- |
+| `resident-parser` | Pinned SDK parser: approval before wrapper publication, native-mode rejection, unused-ticket release and callback/consumer ownership |
+| `native-command` | Official Worker: daemon/direct execution, logical permission/Post input, application veto, command-specific deny in default/acceptEdits, timeout-background EOF and close/settlement ordering |
+| `declarative-profile` | Installed Bridge: native settings acknowledgement before prompt release, declarative snapshot visibility, daemon reuse and Query cleanup |
+
+The fixture gate also covers bounded asset reads, invalid declarations, snapshot
+cleanup and cache invalidation. Hosted suites need runtime-only test credentials.
+Use the target runner below; preserve each suite's report and verify that native
+processes and AW scopes have retired. Local parser transport alone does not
+establish native Worker authorization behavior.
+
 ## One native target
 
 Use a clean, committed checkout with manifest-required Python, Node 24.16.0, uv 0.11.13 and SDK dependencies.

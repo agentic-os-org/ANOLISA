@@ -37,6 +37,9 @@ Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点�
 Qoder TUI、Qoder SDK 和 QwenPaw 另有受限更新模式，版本与部署步骤见[策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)。
 MCP 工具需按实际输入语义配置安全检查，接线见 [Qoder SDK / QwenPaw MCP](../../../../src/aw/docs/design/zh/adapters/structured-mcp.md) 与 [Claude SDK MCP](../../../../src/aw/docs/design/zh/adapters/claude-mcp.md)。
 
+Qoder SDK 应用还可接入固定摘要的 Bash 凭据消费者、Worker import 和声明式角色资产。
+接线与权限要求见 [Qoder SDK 指南](../../../developer-guide/zh/aw/agents/qoder-sdk.md#原生-bash-命令消费者)。
+
 ## 使用边界
 
 - 普通 Qoder SDK、QwenPaw 可配置后置故障 `withhold_result`，暂扣结果并停止后续派发；已发生的工具副作用保留。

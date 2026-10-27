@@ -17,6 +17,20 @@
 OpenClaw 自动验收覆盖官方 loader/Hook runner，完整 Gateway 模型流程需另验。
 Qoder SDK 托管 MCP 仍有手工容器证据要求。以清单记录的实际边界报告结果。
 
+## Qoder 执行资产覆盖
+
+`qoder-sdk` 原生目标包含以下必需用例组：
+
+| 用例组 | 验收范围 |
+| --- | --- |
+| `resident-parser` | 固定 SDK parser：审批后发布 wrapper、原生模式拒绝、未使用票据回收及回调/消费者所有权 |
+| `native-command` | 官方 Worker：Daemon/直接执行、逻辑权限与 Post 输入、应用拒绝、default/acceptEdits 命令级 deny、超时后台 EOF 和关闭/settle 顺序 |
+| `declarative-profile` | 已安装 Bridge：释放提示前确认原生设置、声明式快照可见性、Daemon 复用和 Query 清理 |
+
+Fixture 门禁另覆盖有界资产读取、非法声明、快照清理和缓存失效。Hosted 用例需在运行时提供测试凭据。
+按下方目标 runner 执行，保留各组报告，并核验原生进程和 AW scope 已退出。
+Parser 的本地 transport 测试需配合真实 Worker 验证原生授权行为。
+
 ## 原生单目标
 
 在干净、已提交的 checkout 中准备清单要求的 Python、Node 24.16.0、uv 0.11.13 和 SDK 依赖。

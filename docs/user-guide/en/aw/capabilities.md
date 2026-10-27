@@ -37,6 +37,10 @@ Qoder CLI has no failed-tool Post callback integration. See each Agent page for 
 Qoder TUI, Qoder SDK and QwenPaw also offer restricted update modes. See [policy updates](../../../developer-guide/en/aw/deployment/policy-updates.md) for versions and deployment.
 Configure MCP security checks for actual input semantics; see [Qoder SDK / QwenPaw MCP wiring](../../../../src/aw/docs/design/en/adapters/structured-mcp.md) and [Claude SDK MCP wiring](../../../../src/aw/docs/design/en/adapters/claude-mcp.md).
 
+Qoder SDK applications can also integrate pinned Bash credential consumers, Worker
+imports and declarative role assets. Setup and permission requirements are in the
+[Qoder SDK guide](../../../developer-guide/en/aw/agents/qoder-sdk.md#native-bash-command-consumers).
+
 ## Boundaries
 
 - Ordinary Qoder SDK and QwenPaw accept Post failure action `withhold_result`, withholding delivery and stopping subsequent dispatch. Existing tool side effects remain.

@@ -91,6 +91,40 @@ async function daemon(f) {
   return f.state.daemon;
 }
 
+test("resident Query inherits its daemon site and rejects a different site before SDK creation", { timeout: 5000 }, async t => {
+  for (const mismatch of [true, false]) {
+    const f = fixture(t);
+    const cn = path.join(path.dirname(f.config.sdk), "cn.mjs");
+    fs.copyFileSync(f.config.sdk, cn);
+    f.config.sdks = { global: f.config.sdk, cn };
+    f.config.default_site = "global";
+    const owner = await managedDaemon({
+      async startDaemon() { return { async stop() {} }; },
+    }, {}, { ...f.config, sdk: cn, sdk_site: "cn" }, bounded);
+    f.state.daemon = owner;
+    f.state.importGate.resolve();
+    const result = await f.create({ daemon: owner, ...(mismatch ? { awSite: "global" } : {}) });
+    if (mismatch) {
+      assert.match(result.error?.message ?? "", /site differs/);
+      assert.equal(f.state.created, 0);
+      assert.equal(f.state.executions, 0);
+      assert.equal(f.state.ready, 0);
+      assert.equal(f.scope.handle, null);
+    } else {
+      assert.ifError(result.error);
+      await f.state.dispatch;
+      assert.equal(f.state.created, 1);
+      assert.equal(f.state.executions, 1);
+      assert.equal(f.state.ready, 1);
+      assert.equal(f.resident.config.sdk, cn);
+      assert.equal(f.resident.config.active_site, "cn");
+      assert.equal(f.state.options.awSite, undefined);
+      f.state.closeGate.resolve();
+      await result.value.close();
+    }
+  }
+});
+
 test("daemon stop during initialization prevents readiness and execution", { timeout: 5000 }, async t => {
   const f = fixture(t, true);
   const owner = await daemon(f);
@@ -312,3 +346,135 @@ for (const mode of ["tool-failure", "cancel"]) {
     assert.deepEqual(f.state.events, ["native-closed", "handler-finally", "lease-released", "scope-closed", "root-released"]);
   });
 }
+
+async function retirementFixture(t, options = {}) {
+  const f = fixture(t);
+  f.config.resident_policy_reload = true;
+  f.scope.reserve = async () => { f.scope.reservation = {}; };
+  f.scope.policy = async () => ({ policy_revision: "a".repeat(64), hooks: [], events: {} });
+  f.scope.acknowledge = async () => {};
+  f.scope.drain = async () => { f.state.events.push("scope-drained"); };
+  f.scope.release = async () => {
+    f.state.events.push("root-released");
+    f.scope.reservation = null;
+  };
+  const owner = await daemon(f);
+  f.state.importGate.resolve();
+  const result = await f.create({ daemon: owner, ...options });
+  assert.ifError(result.error);
+  assert(f.resident.owner.queries.has(f.resident.ownerClose));
+  return { ...f, query: result.value, owner };
+}
+
+function assertRetained(f) {
+  assert(f.scope.handle, "failed cleanup must retain the child scope");
+  assert(f.scope.reservation, "failed cleanup must retain the root reservation");
+  assert(f.resident.owner.queries.has(f.resident.ownerClose), "daemon must retain the Query owner");
+  assert.equal(f.state.scopeCloses, 0);
+  assert(!f.state.events.includes("scope-drained"));
+}
+
+for (const failure of ["missing", "rejected"]) {
+  test(`${failure} native close retains snapshots, scope and daemon ownership`, { timeout: 5000 }, async t => {
+    const f = await retirementFixture(t);
+    f.resident.nativeAssets.close = async () => { f.state.events.push("assets-closed"); };
+    f.resident.nativeClose = failure === "missing" ? undefined : async () => {
+      throw new Error("native close failed");
+    };
+    f.state.daemon = { stop: () => f.owner.stop().catch(() => {}) };
+    await assert.rejects(f.query.close(), /scope retained/);
+    assertRetained(f);
+    assert(!f.state.events.includes("assets-closed"));
+    assert.equal(f.scope.failed, true);
+    await assert.rejects(f.query.close(), /scope retained/);
+    assertRetained(f);
+  });
+}
+
+test("callback finally exceeding its cleanup deadline retains snapshots and ownership", { timeout: 5000 }, async t => {
+  const f = await retirementFixture(t);
+  const finalizing = deferred(), finish = deferred();
+  const callback = f.resident.track(async () => {
+    try { await f.state.closeGate.promise; }
+    finally {
+      finalizing.resolve();
+      await finish.promise;
+      f.state.events.push("callback-finally");
+    }
+  });
+  f.resident.nativeAssets.close = async () => { f.state.events.push("assets-closed"); };
+  f.resident.cleanupBudget = () => 10;
+  f.state.daemon = { stop: () => f.owner.stop().catch(() => {}) };
+  f.state.closeGate.resolve();
+  try {
+    const closing = f.query.close();
+    await finalizing.promise;
+    await assert.rejects(closing, error => error instanceof AggregateError &&
+      error.errors.some(cause => /callback cleanup deadline/.test(cause.message)));
+    assert.equal(f.resident.callbacks.size, 1, "original finally is still running");
+    assert(!f.state.events.includes("assets-closed"));
+    assertRetained(f);
+  } finally {
+    finish.resolve();
+    await callback;
+  }
+  await assert.rejects(f.query.close(), /scope retained/);
+  assertRetained(f);
+  assert(!f.state.events.includes("assets-closed"), "a late finally cannot reopen failed cleanup");
+});
+
+test("snapshot removal IO failure rejects without draining or releasing ownership", { timeout: 5000 }, async t => {
+  const f = fixture(t);
+  const root = path.dirname(f.config.binding);
+  const plugin = path.join(root, "plugin");
+  fs.mkdirSync(plugin);
+  fs.writeFileSync(path.join(plugin, "plugin.json"), JSON.stringify({ name: "cleanup-fixture" }));
+  f.config.native_policy = { declarative_plugins: true };
+  f.state.query.request = async () => ({ sources: { flag: { skills: { disableShellExecution: true } } },
+    effective: { skills: { disableShellExecution: true } } });
+  const owner = await daemon(f);
+  f.state.importGate.resolve();
+  const result = await f.create({ daemon: owner, plugins: [{ type: "local", path: plugin }] });
+  assert.ifError(result.error);
+  f.scope.drain = async () => { f.state.events.push("scope-drained"); };
+  const moved = `${root}-moved`;
+  fs.renameSync(root, moved);
+  t.after(() => fs.rmSync(moved, { recursive: true, force: true }));
+  fs.writeFileSync(root, "ancestor replaced with a file");
+  f.state.daemon = { stop: () => owner.stop().catch(() => {}) };
+  f.state.closeGate.resolve();
+  await assert.rejects(result.value.close(), { code: "ENOTDIR" });
+  assert(f.scope.handle);
+  assert.equal(f.state.scopeCloses, 0);
+  assert(!f.state.events.includes("scope-drained"));
+  assert(f.resident.owner.queries.has(f.resident.ownerClose));
+  await assert.rejects(result.value.close(), { code: "ENOTDIR" });
+});
+
+test("successful cleanup joins callback finally before snapshots and scope retirement", { timeout: 5000 }, async t => {
+  const f = await retirementFixture(t);
+  const finalizing = deferred(), finish = deferred();
+  const callback = f.resident.track(async () => {
+    try { await f.state.closeGate.promise; }
+    finally {
+      finalizing.resolve();
+      await finish.promise;
+      f.state.events.push("callback-finally");
+    }
+  });
+  f.resident.nativeAssets.close = async () => { f.state.events.push("assets-closed"); };
+  const closing = f.query.close();
+  f.state.closeGate.resolve();
+  try {
+    await f.resident.nativeStopped;
+    await finalizing.promise;
+    assertRetained(f);
+    assert(!f.state.events.includes("assets-closed"));
+  } finally { finish.resolve(); }
+  await Promise.all([callback, closing]);
+  assert.deepEqual(f.state.events, ["native-closed", "callback-finally", "assets-closed",
+    "scope-drained", "scope-closed", "root-released"]);
+  assert.equal(f.scope.handle, null);
+  assert.equal(f.scope.reservation, null);
+  assert(!f.resident.owner.queries.has(f.resident.ownerClose));
+});

@@ -67,6 +67,62 @@ fields. Missing Provider references and duplicate step IDs are errors even in
 disabled steps, so enabling a step does not uncover a hidden reference typo.
 Defaults are documented behavior, not values inserted into the parsed document.
 
+## Qoder SDK execution assets
+
+Set these fields under `agents.<id>.qoder_sdk` for a `qoder-sdk` target.
+Omit them when the application needs no execution extensions.
+
+| Field | Integration and limits |
+| --- | --- |
+| `sites` | Nonempty unique list of `global` and/or `cn`; the first entry is the default. Omitted: `[global]`. Install the selected SDK packages in the application directory. |
+| `command_wrappers` | Up to 16 grants for native Bash consumers. Each is `{path, sha256}` with an absolute regular-file path and a 64-character lowercase hexadecimal SHA-256. |
+| `runtime_preloads` | Up to 16 grants with the same file shape, for trusted Worker imports. |
+| `declarative_plugins` | Default `false`; admit snapshots of local role, Agent, command and skill assets on ordinary resident Queries using managed daemons. |
+
+Each granted file is limited to 16 MiB. Keep wrappers and preloads immutable in
+the image. AW verifies files before SDK probing and rechecks them for each Query;
+a mismatch rejects startup. These limits count installed assets, not lifetime
+Queries or tool calls. Changing assets or sites requires a worker restart.
+
+The Bridge accepts `awSite: "global"` or `"cn"` in `startDaemon`,
+`createQuery().options` and `createSdkMcpServer`. Omitted Query sites inherit the
+managed daemon's site; an explicit different site is rejected.
+
+### Worker imports
+
+On `startDaemon`, `executableArgs` accepts paired `--import` arguments naming
+admitted preload paths. `pathToQoderCLIExecutable`, if provided, must identify
+the selected SDK package's official Worker. AW rejects other executable and
+transport replacements. Direct Queries reject `executableArgs` because the pinned
+Worker-thread transport ignores it; use a managed daemon for imports.
+
+### Declarative plugin snapshots
+
+With `declarative_plugins: true`, pass local plugin roots through native
+`options.plugins: [{type: "local", path: "/absolute/plugin"}]`. Use metadata
+manifests and declarative Markdown. Agent `tools` selections are supported.
+AW rejects executable plugin Hooks, MCP/settings redirection, shell interpolation,
+`permissionMode`, `allowed-tools`, and skill/command `context` or `agent`
+frontmatter. Unknown or ambiguous frontmatter and symlinks are rejected.
+Use managed SDK Hooks or MCP factories for executable behavior.
+
+| Snapshot resource | Per-Query limit |
+| --- | --- |
+| Files and directories across all plugin roots | 10,000 entries |
+| Total content | 128 MiB |
+| Directory depth below each root | 64 |
+
+AW forces `skills.disableShellExecution: true` and confirms native settings
+before releasing the first prompt. Direct Queries reject this profile because
+they cannot confirm the effective settings. Reloadable launches reject plugin
+snapshots and command wrappers before SDK probing. This profile is pinned to
+SDK 1.0.56 / Worker 1.1.78; revalidate on SDK upgrades.
+
+After confirmed native and callback drain, AW removes snapshots. Unconfirmed
+cleanup retains snapshots and scope ownership; inspect the failure and restart
+the worker. Native command consumers additionally require explicit approval and
+completion acknowledgement; see the [Qoder SDK factory](agents/qoder-sdk.md#native-bash-command-consumers).
+
 ## Default boolean hooks
 
 Omitting a Provider's `protocol` selects `aw-hook/v1alpha1`. Its step omits

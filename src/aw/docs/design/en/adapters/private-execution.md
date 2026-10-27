@@ -133,7 +133,7 @@ replacement remains unsupported.
 private execution leases. Qoder rejects `awExecutionFactory` in that mode.
 Keep native permissions and the caller-owned daemon start/stop lifecycle.
 Qoder requires `settingSources: []` and rejects settings,
-plugins, extra CLI flags and runtime executable/transport overrides. Business
+unadmitted plugins, extra CLI flags and runtime executable/transport overrides. Business
 factories depending on those inputs need an integration that satisfies the
 runtime admission contract before deployment. The public factory above provides
 the credential seam without changing those guards.
@@ -143,3 +143,37 @@ and [native integration guide](../../../../../../docs/developer-guide/en/aw/depl
 for launch commands. The implementation contracts live in
 [Qoder private execution](../../../../crates/aw-adapter/native/qoder-sdk/private.mjs)
 and [QwenPaw private execution](../../../../crates/aw-adapter/native/qwenpaw/aw_private.py).
+
+## Native Bash consumers
+
+`awNativeExecutionFactory` owns one lease per native Bash invocation, separately
+from managed MCP's `awExecutionFactory`. Its argument and lease API is defined in
+the [Qoder SDK guide](../../../../../../docs/developer-guide/en/aw/agents/qoder-sdk.md#native-bash-command-consumers).
+The Adapter preserves these ordering invariants:
+
+1. Security inspects frozen logical input; native rules evaluate that same input.
+   Only a subsequent explicit `canUseTool` allowance publishes executable wrapper
+   arguments. The pinned Worker can skip Hook asks in bypass/auto, so admission,
+   mode changes and the effective Bash Hook mode must reject those paths.
+2. Publication records ownership before the permission response is sent. An
+   uncertain response cannot prove that a ticket is unused. Native rejection
+   before publication releases its unused lease without consumer settlement.
+3. Consumer acknowledgement precedes finite-input EOF and native shutdown.
+   Original callback drain precedes final revocation. Timeout-backgrounding,
+   result messages and background snapshots alone do not prove consumer completion;
+   typed session/tool/task identities correlate each acknowledged consumer.
+4. Normal settlement has no task-length cap. Cancellation uses the existing
+   shared 60-second budget for consumer join, native close, callback drain and
+   lease cleanup. Unconfirmed cleanup retains leases, snapshots and scope
+   ownership and fences new work until worker restart.
+
+## Execution-asset verification
+
+Every Query opens admitted files without following symlinks. Up to 64 successful
+checks are cached by path, expected digest and `(dev, ino, size, mtimeNs, ctimeNs)`;
+changed identity or digest requires a rehash. Recent one-second or whole-second
+ctime does not establish a reusable generation. Streaming reads enforce the
+actual byte limit and recheck metadata after hashing. Cache eviction only causes
+rehashing. Snapshot traversal anchors no-follow descriptors to opened directories
+and counts actual entries and bytes. Resource limits and accepted plugin fields
+are defined in the [configuration reference](../../../../../../docs/developer-guide/en/aw/configuration.md#qoder-sdk-execution-assets).

@@ -107,7 +107,13 @@ fn denial_and_failed_initialization_never_execute_tools() {
 }
 #[test]
 fn unsupported_versions_overrides_and_replacement_are_rejected() {
-    for mode in ["version", "replacement", "override"] {
+    for mode in [
+        "version",
+        "replacement",
+        "override",
+        "reloadable-plugins",
+        "reloadable-wrappers",
+    ] {
         let f = Fixture::new();
         let mut document = setup(&f);
         if mode == "version" {
@@ -126,12 +132,27 @@ fn unsupported_versions_overrides_and_replacement_are_rejected() {
             document["spec"]["events"]["tool.after"]["steps"][0]["effects"] =
                 json!(["replace_result"]);
         }
+        if mode.starts_with("reloadable-") {
+            document["spec"]["agents"]["sdk"]["qoder_sdk"] = if mode == "reloadable-plugins" {
+                json!({"declarative_plugins":true})
+            } else {
+                json!({"command_wrappers":[{"path":"/absent/wrapper","sha256":"0".repeat(64)}]})
+            };
+        }
         let service = Service::start(&f, &document);
         let mut command = launch(&f);
         if mode == "override" {
             command.args(["--native-settings", "unsupported"]);
         }
-        assert!(!f.run(command).status.success());
+        if mode.starts_with("reloadable-") {
+            command.arg("--reloadable");
+        }
+        let output = f.run(command);
+        assert!(!output.status.success());
+        if mode.starts_with("reloadable-") {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("ordinary resident mode"));
+            assert!(!f.root.join("query-closed").exists());
+        }
         assert!(!f.root.join("executed").exists());
         service.released(&f);
     }
@@ -154,7 +175,7 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 57"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 119"));
 }
 
 #[test]

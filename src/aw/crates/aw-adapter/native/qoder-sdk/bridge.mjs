@@ -9,7 +9,9 @@ import { Resident, bounded, validateHooks } from "./resident.mjs";
 import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
 import { managedMcpServer } from "./mcp.mjs";
 import { Scope } from "./scope.mjs";
+import { pluginsAdmitted, runtimeOptions, sdkEntry, verifyNativeSettings } from "./native-options.mjs";
 export { PRIVATE_EXECUTION_VERSION, executionEnvironment, hookEnvironment } from "./private.mjs";
+export { NATIVE_COMMAND_WRAPPER_VERSION } from "./command-wrapper.mjs";
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
@@ -23,10 +25,8 @@ function configuration() {
   return config;
 }
 
-function runtime(options) {
-  if (options.pathToQoderCLIExecutable != null || options.executable !== undefined ||
-      options.executableArgs !== undefined || options.spawnQoderCLIProcess !== undefined)
-    throw new Error("AW Qoder SDK rejects runtime executable overrides");
+function runtime(config, options, operation) {
+  runtimeOptions(config, options, operation);
   if (process.env.QODERCLI_PATH)
     throw new Error("QODERCLI_PATH overrides the pinned Qoder SDK runtime");
   for (const environment of [process.env, options.env ?? {}])
@@ -37,12 +37,15 @@ function runtime(options) {
 /** Start the pinned daemon after admission; the caller still owns stop(). */
 export async function startDaemon(options) {
   const config = configuration();
+  const { awSite = config.default_site ?? "global", ...nativeOptions } = options;
+  const entry = sdkEntry(config, awSite);
   const environment = { ...process.env, ...(options.env ?? {}) };
+  options = nativeOptions;
   options = { ...options, env: { ...environment },
     ...(options.auth ? { auth: credentialOptions(options.auth) } : {}) };
-  runtime(options);
-  const sdk = await import(pathToFileURL(config.sdk).href);
-  const daemon = await managedDaemon(sdk, options, config, bounded, environment);
+  runtime(config, { ...options, awSite }, "daemon");
+  const sdk = await import(pathToFileURL(entry).href);
+  const daemon = await managedDaemon(sdk, options, { ...config, sdk: entry, sdk_site: awSite }, bounded, environment);
   if (config.resident_policy_reload) {
     try {
       await new Scope(config, "qoder-sdk").ready();
@@ -60,18 +63,19 @@ export async function startDaemon(options) {
 export async function createSdkMcpServer(options) {
   const config = configuration();
   if (!config.resident) throw new Error("Managed MCP requires an AW resident Query");
-  const sdk = await import(pathToFileURL(config.sdk).href);
-  return managedMcpServer(sdk, options);
+  const { awSite, ...nativeOptions } = options;
+  const sdk = await import(pathToFileURL(sdkEntry(config, awSite)).href);
+  return managedMcpServer(sdk, nativeOptions);
 }
 
 function compose(config, options) {
   if (!Array.isArray(options.settingSources) || options.settingSources.length ||
-      options.settings != null || options.plugins?.length ||
+      options.settings != null || !pluginsAdmitted(options.plugins) ||
       Object.keys(options.extraArgs ?? {}).length ||
       options.transport != null || options.permissionPromptToolName != null ||
       options.hooks?.PermissionRequest?.length)
     throw new Error("AW Qoder SDK requires settingSources=[] and no settings, plugins, runtime or permission-hook overrides");
-  runtime(options);
+  runtime(config, options);
   daemonOwner(options.daemon, config);
   if (!config.resident && resolve(options.cwd ?? process.cwd()) !== config.cwd)
     throw new Error("Qoder Query cwd differs from the AW binding");
@@ -116,7 +120,11 @@ function compose(config, options) {
       return { behavior: "deny", message: "Tool argument rewriting is unsupported with AW" };
     return result;
   });
-  return { ...options, hooks, ...(canUseTool ? { canUseTool } : {}) };
+  // The pinned Worker expands skill arguments before shell interpolation. Its
+  // native switch must disable that secondary executor even for inert assets.
+  const settings = config.native_policy?.declarative_plugins ?
+    { settings: { skills: { disableShellExecution: true } } } : {};
+  return { ...options, ...settings, hooks, ...(canUseTool ? { canUseTool } : {}) };
 }
 
 function ready(config) {
@@ -133,13 +141,24 @@ function ready(config) {
 
 /** Return the native Query after its initialization handshake accepts AW callbacks. */
 export async function createQuery({ prompt, options }) {
-  const config = configuration();
+  let config = configuration();
+  if (config.native_policy?.declarative_plugins && !options.daemon)
+    throw new Error("AW declarative profile requires a managed daemon");
   if (config.resident) {
     const resident = new Resident(config);
     return await resident.create(prompt, options, compose, ready);
   }
   if (options.awExecutionFactory !== undefined)
     throw new Error("Private execution requires an AW resident Query");
+  if (options.awNativeExecutionFactory !== undefined)
+    throw new Error("Native command execution requires an AW resident Query");
+  const { awSite, ...nativeOptions } = options;
+  const owner = daemonOwner(options.daemon, config);
+  const site = awSite ?? owner?.site ?? config.default_site ?? "global";
+  const entry = sdkEntry(config, site);
+  if (owner && owner.sdk !== entry) throw new Error("AW Query site differs from its managed daemon");
+  config = { ...config, sdk: entry, active_site: site };
+  options = nativeOptions;
   const reload = config.reloadable ? new Reload(config) : undefined;
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);
@@ -147,6 +166,7 @@ export async function createQuery({ prompt, options }) {
     options: reload ? reload.decorate(composed) : composed });
   try {
     const initialization = await query.initializationResult();
+    await verifyNativeSettings(config, query, bounded);
     const managed = reload ? await reload.attach(query, initialization) : query;
     ready(config);
     return managed;

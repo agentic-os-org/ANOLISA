@@ -54,7 +54,7 @@ aw stop --config /absolute/aw.yaml
 | 项目 | 接入要求 |
 | --- | --- |
 | 工厂覆盖 | 所有受保护 Query 经过 Bridge；直接使用原生工厂的 Query 无 AW 检查 |
-| 原生设置 | `settingSources: []`；不传 settings、plugins、额外 CLI 参数或 transport 覆盖 |
+| 原生设置 | `settingSources: []`；不传 settings、额外 CLI 参数或 transport 覆盖。Import 与本地插件需[执行资产授权](../configuration.md#qoder-sdk-执行资产)。 |
 | 权限与输入 | 保留原生拒绝；不支持参数改写或权限 Hook 覆盖 |
 | 环境与认证 | 共享 daemon 的 Query 不覆盖 env/auth；更换凭据用原生 `daemon.auth()`；不同凭据可用独立 daemon |
 | 后置检查 | 支持观察和 `withhold_result`；不支持结果替换 |
@@ -70,6 +70,58 @@ aw stop --config /absolute/aw.yaml
 
 私有执行通过 `options.awExecutionFactory` 显式接入，handler 消费 `executionEnvironment()`，结果在 Post 与交付前脱敏。内建 Bash 没有环境注入接点。
 API 与清理顺序见[私有执行](../../../../../src/aw/docs/design/zh/adapters/private-execution.md)，MCP 身份见[结构化 MCP](../../../../../src/aw/docs/design/zh/adapters/structured-mcp.md)。
+
+## 原生 Bash 命令消费者
+
+内置 Bash 需要通过应用的凭据消费者执行时，使用 `options.awNativeExecutionFactory`。
+先在[执行资产配置](../configuration.md#qoder-sdk-执行资产)中授权 wrapper executable。
+普通 Daemon 和直接 Query 均支持此工厂，`--reloadable` 会拒绝。
+
+将下面返回的 options 合入现有 Query 工厂，保留 `daemon`、`cwd` 和 `settingSources: []`。
+应用提供原生权限回调 `approveTool`，以及负责获取绑定命令的票据、管理执行进程树的
+`acquireConsumer`。
+
+```javascript
+export function nativeBashOptions(bridge, approveTool, acquireConsumer) {
+  return {
+    permissionMode: "default",
+    canUseTool: approveTool,
+    awNativeExecutionFactory: async (context, control) => {
+      const consumer = await acquireConsumer(context, control);
+      return {
+        version: bridge.NATIVE_COMMAND_WRAPPER_VERSION,
+        commandWrapper: {
+          executable: consumer.executable,
+          ticket: consumer.ticket,
+        },
+        settle: (control) => consumer.settle(control),
+        release: () => consumer.release(),
+      };
+    },
+  };
+}
+```
+
+每个 wrapper Query 都需显式 `canUseTool` 回调，权限模式使用 `default` 或 `acceptEdits`。
+创建与模式切换拒绝 bypass/auto 等其他模式；每次 Bash Hook 还会在获取票据前核对
+Worker 上报的模式。PreTool 保持逻辑命令供原生规则检查，回调明确允许后才通过 SDK
+权限结果发布 wrapper。应用 Hook 不能改写获准输入。
+
+工厂收到冻结的 `{invocationId, nativeToolUseId, sessionId, policyRevision, toolName, input}`
+与 `{signal}`。租约仅接受示例中的四个字段，`commandWrapper` 仅接受 `executable` 和 `ticket`。
+票据为 16–256 个 base64url 字符。已授权 executable 接收两个参数：票据与 base64url
+编码的原始命令。将票据绑定到该命令，隔离凭据、保留退出状态并脱敏输出。
+原生规则、权限回调、AW 策略和应用 Post 输入使用逻辑命令；后续执行元数据可能显示
+wrapper 句柄。票据应为短期 opaque 句柄，并在等待审批期间保持有效。
+
+`settle({signal})` 须确认进程树与消费者 finally 已结束，包括原生工具超时转后台的情况。
+正常完成没有固定任务时长上限；取消要求消费者在共享清理期限内停止并 join。
+应用须限制获取期限、响应 signal，并在获取失败时清理已创建的资源。
+AW 等待消费者确认完成后才结束有限输入、关闭原生传输，
+随后排空原生工作与原始回调，最后调用 `release()` 撤销票据。
+原生拒绝发生在发布前时，直接回收未使用票据，不调用 `settle`。
+settle 或清理失败会保留所有权并封锁 worker；排查原因后重启。
+顺序不变量见[执行设计](../../../../../src/aw/docs/design/zh/adapters/private-execution.md#原生-bash-消费者)。
 
 ## 更新与长期运行
 

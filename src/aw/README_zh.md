@@ -73,6 +73,7 @@ aw stop --config "$AW_HOME/aw.yaml"
 
 当前接入 Qoder CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
 Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需要显式接入受管工厂。
+[Qoder SDK 接入](../../docs/developer-guide/zh/aw/agents/qoder-sdk.md)还支持固定摘要的 Bash 消费者、Worker import 和声明式角色资产。
 [能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)按 Adapter 和启动模式说明
 结果处理、MCP 与策略更新的差异，并链接支持版本与接线步骤。
 

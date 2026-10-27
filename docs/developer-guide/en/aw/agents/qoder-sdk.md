@@ -54,7 +54,7 @@ For security composition, use the [SDK example](../../../../../src/aw/crates/aw-
 | Item | Requirement |
 | --- | --- |
 | Factory coverage | Route every protected Query through the Bridge; direct native factories bypass AW checks |
-| Native settings | Use `settingSources: []`; omit settings, plugins, extra CLI arguments and transport overrides |
+| Native settings | Use `settingSources: []`; omit settings, extra CLI arguments and transport overrides. Imports and local plugins require [execution-asset grants](../configuration.md#qoder-sdk-execution-assets). |
 | Permissions and input | Preserve native denial; argument rewriting and permission Hook overrides are unsupported |
 | Environment and authentication | Queries sharing a daemon cannot override env/auth; use native `daemon.auth()` for credential changes or separate daemons for different credentials |
 | Post checks | Observation and `withhold_result`; no result replacement |
@@ -70,6 +70,69 @@ AW rejects schema default/transform changes to approved arguments before enterin
 
 Opt into private execution with `options.awExecutionFactory`. Handlers consume `executionEnvironment()`; results are redacted before Post and delivery. Built-in Bash has no environment injection seam.
 See [private execution](../../../../../src/aw/docs/design/en/adapters/private-execution.md) for API and cleanup ordering, and [structured MCP](../../../../../src/aw/docs/design/en/adapters/structured-mcp.md) for identity.
+
+## Native Bash command consumers
+
+Use `options.awNativeExecutionFactory` when built-in Bash must run through an
+application-owned credential consumer. Grant the wrapper executable in the
+[execution-asset configuration](../configuration.md#qoder-sdk-execution-assets)
+first. Ordinary daemon and direct Queries support this factory; `--reloadable`
+rejects it.
+
+Merge the options below into the existing Query factory, retaining `daemon`,
+`cwd` and `settingSources: []`. The application supplies `approveTool`, its
+native permission callback, and `acquireConsumer`, which acquires a command-bound
+ticket and owns the execution process tree.
+
+```javascript
+export function nativeBashOptions(bridge, approveTool, acquireConsumer) {
+  return {
+    permissionMode: "default",
+    canUseTool: approveTool,
+    awNativeExecutionFactory: async (context, control) => {
+      const consumer = await acquireConsumer(context, control);
+      return {
+        version: bridge.NATIVE_COMMAND_WRAPPER_VERSION,
+        commandWrapper: {
+          executable: consumer.executable,
+          ticket: consumer.ticket,
+        },
+        settle: (control) => consumer.settle(control),
+        release: () => consumer.release(),
+      };
+    },
+  };
+}
+```
+
+Every wrapper Query requires an explicit `canUseTool` callback and `default` or
+`acceptEdits` mode. Creation and permission changes reject bypass/auto and other
+modes. Every Bash Hook also checks the Worker-reported mode before acquisition.
+PreTool retains the logical command through native rule evaluation; only an
+explicit callback allowance publishes the wrapper through the SDK permission
+result. Application Hooks cannot rewrite the approved input.
+
+The factory receives frozen `{invocationId, nativeToolUseId, sessionId,
+policyRevision, toolName, input}` and `{signal}`. Its lease accepts exactly the
+four fields shown above; `commandWrapper` accepts only `executable` and `ticket`.
+The ticket is 16–256 base64url characters. The admitted executable receives two
+arguments: the ticket and the base64url-encoded original command. Bind the ticket
+to that command, isolate credentials, preserve the exit status and redact output.
+Native rules, the permission callback, AW policies and application Post input
+use the logical command; later execution metadata can show the wrapper handle.
+Use an opaque, short-lived ticket and keep it valid while approval is pending.
+
+`settle({signal})` must confirm that the process tree and consumer finalizers
+have ended, including after native timeout-backgrounding. Normal completion has
+no fixed task-length cap. Cancellation asks the consumer to stop and join within
+the shared cleanup deadline; bound acquisition and honor its signal. Clean up
+partial acquisition before throwing.
+AW holds finite-input EOF and native shutdown until consumer acknowledgement,
+then drains native work and original callbacks before `release()` revokes the
+ticket. Native rejection before publication releases the unused ticket without
+calling `settle`. If settlement or cleanup fails, retain ownership, diagnose the
+failure and restart the fenced worker. Ordering invariants are in the
+[execution design](../../../../../src/aw/docs/design/en/adapters/private-execution.md#native-bash-consumers).
 
 ## Updates and long-running work
 
