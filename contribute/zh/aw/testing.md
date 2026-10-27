@@ -51,7 +51,7 @@ python3 -B scripts/native_acceptance.py --agent agentscope \
 完整主线验收使用已合入 main 的 40 位候选 SHA。fork 可运行无凭据模式，保留 Qoder 托管模型待验项目。
 
 ```bash
-gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
+gh workflow run aw-integration.yml --ref main -f candidate_sha=<40-character-SHA>
 gh workflow run aw-ci.yml --repo <owner>/anolisa --ref <branch> \
   -f integration=true -f credential_free=true
 ```

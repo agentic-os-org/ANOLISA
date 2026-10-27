@@ -6,16 +6,21 @@
 
 ## 选择能力
 
-创建配置时，按需要给 `aw config init` 增加参数。先安装对应 Provider。
+先安装对应 Provider，将 `AW_TEMPLATE_DIR` 设为其解压归档中 `templates/`
+目录的绝对路径，再为 `aw config init` 选择模板。
 
 | 目标 | 参数 | 完整步骤 |
 | --- | --- | --- |
-| 启动 Agent | 不加 Provider 参数 | [安装](installation.md) |
-| 压缩工具输出 | `--provider tokenless` | [Tokenless](tokenless.md) |
-| 检查工具命令 | `--provider sec-core --socket ABS_SOCKET` | [安全检查](security.md) |
-| 同时启用两者 | `--provider sec-core+tokenless --socket ABS_SOCKET` | 先启动 sec-core 后台 |
+| 启动 Agent | 不加模板 | [安装](installation.md) |
+| 压缩工具输出 | `--template "$AW_TEMPLATE_DIR/tokenless.json"` | [Tokenless](tokenless.md) |
+| 检查工具命令 | `--template "$AW_TEMPLATE_DIR/sec-core.json"` | [安全检查](security.md) |
+| 同时启用两者 | `--template "$AW_TEMPLATE_DIR/sec-core-tokenless.json"` | [Tokenless](tokenless.md)和[安全检查](security.md) |
 
-`ABS_SOCKET` 换成实际后台的绝对 socket 路径。生成器目前支持 Qoder 和 OpenClaw；SDK 应用及其他 Agent 见[接入指南](../../../developer-guide/zh/aw/native-agents.md)。
+生成 Provider 配置时，`--prefix` 使用其实际安装前缀。按上述指南中的
+`--template-var` 参数提供后端路径、socket 和 RTK 校验和；`PROVIDERS_DIR` 选择
+实际安装的 Provider 程序，与 AW CLI 前缀独立。`--provider` 仅接受 `none` 或
+`command`。生成器目前支持 Qoder 和 OpenClaw；SDK 应用及其他 Agent
+见[接入指南](../../../developer-guide/zh/aw/native-agents.md)。
 
 ## 修改配置
 
@@ -74,7 +79,7 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
   --native-settings "$AW_OPENCLAW_CONFIG" --native-state-dir "$AW_OPENCLAW_STATE"
 ```
 
-等待 `AW openclaw native hooks ready` 后，通过连接该 Gateway 的客户端使用。`agent --local` 会绕过它。启用安全或压缩时，在 `config init` 中增加上表参数。
+等待 `AW openclaw native hooks ready` 后，通过连接该 Gateway 的客户端使用。`agent --local` 会绕过它。启用安全或压缩时，选择上表中的对应模板。
 
 ## 自定义规则与服务部署
 

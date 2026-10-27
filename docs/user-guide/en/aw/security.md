@@ -3,66 +3,61 @@
 [中文版](../../zh/aw/security.md)
 
 sec-core checks commands before tool execution. AW can block a call when it finds a risk or a
-required check fails. The generated `scan-code` step selects Qoder `Bash` and
-OpenClaw `exec` with `native:qoder:Bash` and `native:openclaw:exec`, including only
-the Agents chosen during generation. Scanning other tools requires explicit
+required check fails. The distribution template selects Qoder `Bash` and
+OpenClaw `exec` with `native:qoder:Bash` and `native:openclaw:exec`. Scanning other tools requires explicit
 selectors and input mappings. This uses native Hooks and does not provide an OS sandbox.
 
 ## Prepare programs and backend
 
-After [installing core](installation.md), install the sec-core extension from the extracted
-artifact directory. Skip this step if all-in-one is installed.
+Install the backend using the [sec-core guide](../agent-sec-core/index.md), including
+its CLI, daemon and service lifecycle. Reuse its actual socket, normally
+`/run/agent-sec-core/daemon.sock`. The AW Provider does not contain or start the
+backend. Root daemons must run from root-controlled backend installations.
+
+After [installing the AW CLI](installation.md), add the Provider bridge:
 
 ```bash
-export AW_VERSION=0.1.0-preview.1
+export AW_VERSION=0.1.0
 export AW_SEC_BUNDLE="aw-provider-sec-core-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_SEC_BUNDLE.tar.gz"
-sudo "./$AW_SEC_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_SEC_BUNDLE" --prefix "$AW_PREFIX"
+export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
+install -d -m 700 "$HOME/.local/lib/aw"
+aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_SEC_BUNDLE"
+export AW_TEMPLATE_DIR="$PWD/$AW_SEC_BUNDLE/templates"
 ```
 
-This continues the installation page's system scope. For a user-owned core prefix,
-omit `sudo` and use `--scope user` for the extension too. Keep the same scope for
-core, every extension and uninstall; `sudo` does not select system scope.
-
-AW does not start sec-core automatically.
-Reuse an existing managed backend socket, such as `/run/agent-sec-core/daemon.sock`.
-For sustained use, follow the [sec-core system service guide](../agent-sec-core/index.md).
-
-For a first local trial, you can start the packaged backend in a separate terminal. These commands
-require a root-managed AW installation under `/opt/aw-preview`. The configuration file must be
-new for this trial; preserve a backup if it already exists.
-
-```bash
-export AW_PREFIX=/opt/aw-preview/0.1.0-preview.1
-sudo install -d -m 755 /run/aw-preview-sec /etc/aw-preview
-sudo install -d -m 700 /var/lib/aw-preview
-printf '{"stateDir":"/var/lib/aw-preview/skillsec"}\n' | sudo tee /etc/aw-preview/skillsec.json
-sudo chmod 600 /etc/aw-preview/skillsec.json
-sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true \
-  "$AW_PREFIX/libexec/aw/providers/sec-core/agent-sec-daemon" serve \
-  --socket /run/aw-preview-sec/daemon.sock --skillsec-config /etc/aw-preview/skillsec.json
-```
-
-Keep the terminal running and use Ctrl-C to stop it after the trial. A root backend must not execute
-programs from a user-writable prefix.
+These commands use a user-owned extension prefix. A root-managed extension prefix
+requires explicit `--scope system` and root privileges for writes.
 
 ## Generate configuration and run
 
-Return to the ordinary-user terminal with `AW_PREFIX`, `AW_HOME` and `AW_QODER` from installation.
-Set `AW_SEC_SOCKET` to the actual backend; this example uses the socket started above.
+Keep `AW_HOME` and `AW_QODER` from installation. Set the CLI and socket to the
+backend's actual locations; keep the unpacked template available:
 
 ```bash
-export AW_SEC_SOCKET=/run/aw-preview-sec/daemon.sock
-aw config init --prefix "$AW_PREFIX" \
+export AW_SEC_CLI="$(command -v agent-sec-cli)"
+export AW_SEC_SOCKET=/run/agent-sec-core/daemon.sock
+export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
+aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --config "$AW_HOME/security.yaml" --state-dir "$AW_HOME/security-state" \
-  --provider sec-core --socket "$AW_SEC_SOCKET" --qoder "$AW_QODER"
+  --template "$AW_TEMPLATE_DIR/sec-core.json" \
+  --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
+  --template-var "SEC_CORE_CLI=$AW_SEC_CLI" --template-var "SOCKET=$AW_SEC_SOCKET" \
+  --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/security.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
 ```
 
-For compression too, install Tokenless and select `--provider sec-core+tokenless`.
+The template requires `PROVIDERS_DIR`, `SEC_CORE_CLI` and `SOCKET`.
+For native or Makefile installations, set `PROVIDERS_DIR` to the actual installed
+Provider root, such as `/usr/libexec/aw/providers` or `/usr/local/libexec/aw/providers`. For compression too, install
+the Tokenless backend and bridge, then select `sec-core-tokenless.json` with the
+three additional backend values described in [Tokenless](tokenless.md).
 OpenClaw uses its [corresponding launch arguments](configuration.md#openclaw).
+
+A Provider delivered by RPM or another owner can instead be referenced directly
+in YAML through its absolute `transport.argv`.
 
 ## Verify checks
 
@@ -79,12 +74,14 @@ or changing configuration, but its TLS-verification disabling option should matc
 produce an AW policy denial. A model declining or never calling the tool is not a successful AW
 check; inspect native prompts when the check did not run.
 
-If checks fail, verify the sec-core backend and socket. Generated configuration blocks selected tools on input or scan errors; unselected tools skip scanning.
+If checks fail, verify the sec-core backend and socket using the
+[backend diagnostics](../../../developer-guide/en/aw/providers/sec-core.md#external-backend-and-explicit-health-diagnostics).
+Generated configuration blocks selected tools on input or scan errors; unselected tools skip scanning.
 
 ## Stop and extend
 
 After exiting the Agent, run `aw stop --config "$AW_HOME/security.yaml"`.
-Stop the foreground trial backend with Ctrl-C; shared system services remain managed by their owner.
+Backend services remain managed through the sec-core installation guide.
 Uninstalling AW preserves external backend configuration and data.
 
 To scan other tools, update both the [step selector](configuration.md#select-tools-for-a-hook-step) and [Provider input mapping](../../../developer-guide/en/aw/providers/sec-core.md#configure-a-provider).

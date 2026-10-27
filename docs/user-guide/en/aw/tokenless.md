@@ -2,44 +2,65 @@
 
 [中文版](../../zh/aw/tokenless.md)
 
-Tokenless compresses text returned by tools to reduce subsequent model context.
-It can also suggest commands that produce more concise output. Safety checks and native Agent
-permissions remain in effect.
+Tokenless compresses tool text to reduce subsequent model context and can suggest
+commands that produce more concise output. Safety checks and native permissions
+remain in effect.
 
 ## Install and enable
 
-Install AW core and `aw-provider-tokenless` from the same build, or install all-in-one.
-Prepare `AW_PREFIX`, `AW_HOME` and `AW_QODER` using the [installation page](installation.md).
-For split packages, add Tokenless from the extracted artifact directory.
+Install the Tokenless backend CLI and its compatible RTK using the
+[Tokenless guide](../tokenless/index.md). This Provider requires patched RTK 0.49.0;
+use the backend owner's matching release. The AW Provider bundle contains only
+the bridge, examples and template, not Tokenless CLI or RTK.
+
+Prepare the AW CLI, `AW_HOME` and `AW_QODER` using [installation](installation.md),
+then install the bridge into its own extension prefix:
 
 ```bash
-export AW_VERSION=0.1.0-preview.1
+export AW_VERSION=0.1.0
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
-sudo "./$AW_TOKENLESS_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_TOKENLESS_BUNDLE" --prefix "$AW_PREFIX"
+export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
+install -d -m 700 "$HOME/.local/lib/aw"
+aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_TOKENLESS_BUNDLE"
+export AW_TEMPLATE_DIR="$PWD/$AW_TOKENLESS_BUNDLE/templates"
 ```
 
-This continues the installation page's system scope. For a user-owned core prefix,
-omit `sudo` and use `--scope user` for the extension too. Keep the same scope for
-core, every extension and uninstall; `sudo` does not select system scope.
+These examples use user scope. Root-managed extension writes require explicit
+`--scope system` and root privileges.
+Avoid enabling an overlapping native Tokenless plugin in the same session.
 
-Skip this step if all-in-one is installed. The package includes Tokenless CLI and the required RTK.
-There is no separate RTK, TOON, Python wheel or native Tokenless plugin to install.
-Avoid enabling an overlapping Tokenless plugin in the same session to prevent duplicate processing.
+Select the actual backend programs and compute the checksum of the selected RTK.
+Resolve any symlink so `RTK_BINARY` identifies the regular executable itself:
 
 ```bash
-aw config init --prefix "$AW_PREFIX" \
+export AW_TOKENLESS_CLI="$(command -v tokenless)"
+export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
+export AW_RTK_BINARY="$(readlink -f "$(command -v rtk)")"
+export AW_RTK_SHA256="$(sha256sum "$AW_RTK_BINARY" | awk '{print $1}')"
+"$AW_RTK_BINARY" --version
+aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --config "$AW_HOME/tokenless.yaml" --state-dir "$AW_HOME/tokenless-state" \
-  --provider tokenless --qoder "$AW_QODER"
+  --template "$AW_TEMPLATE_DIR/tokenless.json" \
+  --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
+  --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI" \
+  --template-var "RTK_BINARY=$AW_RTK_BINARY" --template-var "RTK_SHA256=$AW_RTK_SHA256" \
+  --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/tokenless.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 ```
 
-For OpenClaw, use its [Agent arguments](configuration.md#openclaw). To also check safety,
-install and start [sec-core](security.md) and select
-`--provider sec-core+tokenless --socket /run/agent-sec-core/daemon.sock`. Use the socket path of your running backend.
-For other frameworks and SDKs, see the [integration reference](../../../developer-guide/en/aw/providers/tokenless.md).
+The version command must report `rtk 0.49.0`. Template variables are
+`PROVIDERS_DIR`, `TOKENLESS_CLI`, `RTK_BINARY` and `RTK_SHA256`.
+For native or Makefile installations, use the actual Provider root for `PROVIDERS_DIR`. For security too, install and start
+[sec-core](security.md) and select `sec-core-tokenless.json`, adding
+`SEC_CORE_CLI` and `SOCKET` from that backend. OpenClaw uses its
+[Agent arguments](configuration.md#openclaw); other runtimes use the
+[integration reference](../../../developer-guide/en/aw/providers/tokenless.md).
+
+Providers already installed by RPM or another owner may instead be configured
+through absolute `transport.argv` in YAML.
 
 ## Runtime behavior
 
@@ -47,7 +68,7 @@ For other frameworks and SDKs, see the [integration reference](../../../develope
 - After execution, supported successful text results can be compressed. Failed results, images and unsupported content stay unchanged.
 - Compression errors, timeouts or no savings preserve the original result. Compression cannot override a safety denial.
 
-Generated configuration uses the packaged RTK. Missing or invalid files produce an error;
+Generated configuration uses the explicitly selected RTK path and checksum. Missing or invalid files produce an error;
 AW does not substitute a user-installed RTK. The current AW integration has no recovery entrypoint
 for compressed results.
 

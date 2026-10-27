@@ -2,58 +2,81 @@
 
 [中文版](../../zh/aw/installation.md)
 
-Requires Linux and a signed-in Qoder CLI with native command Hooks; 1.1.64 is the verified baseline. For other Agents, see
-[Configuration and Agent launch](configuration.md).
+Install AW on Linux to launch an existing Agent with optional Provider policies.
+`anolisa install aw` and a published AW RPM channel are not yet available. Agent applications, model credentials and backend components are
+installed separately.
+
+For Qoder, use a signed-in CLI with native command Hooks; 1.1.64 is the verified
+baseline. For other Agents, see [Configuration and Agent launch](configuration.md).
 
 ## Get a package
 
-AW uses Preview packages; ANOLISA CLI and RPM installation are not available yet.
-Download the `aw-preview-linux-x86_64-…` artifact from a
-[successful AW Integration run](https://github.com/agentic-os-org/ANOLISA/actions/workflows/aw-preview.yml).
-Extract the ZIP to obtain the packages and `SHA256SUMS`. CI packages target Linux x86_64
-with glibc 2.39 or later, such as Ubuntu 24.04.
+Use artifacts from a [successful AW Integration run](https://github.com/agentic-os-org/ANOLISA/actions/workflows/aw-integration.yml) for the intended
+source commit. Check the matching `SHA256SUMS`; checksums detect corruption and
+are not publisher signatures. See [source builds](../../../../contribute/en/aw/building.md)
+for the developer delivery entrypoint.
 
-To compile yourself or use Linux aarch64, follow [Build from source](../../../../contribute/en/aw/building.md)
-and then continue here. Building requires network access to download dependencies.
+CI archives target Linux x86_64 with glibc 2.39 or later, such as Ubuntu 24.04.
+For Linux aarch64 or a different build environment, follow the source build guide.
 
-| Package | Contents |
+| Archive | Contents |
 | --- | --- |
-| `aw-core` | AW launch and configuration tools |
-| `aw-provider-tokenless` | Tokenless and its required RTK; install core first |
-| `aw-provider-sec-core` | Security Provider and sec-core programs; install core first |
-| `aw-all-in-one` | All three components above |
+| `aw-core` | AW command-line tool |
+| `aw-provider-sec-core` | Tool safety checks Provider |
+| `aw-provider-tokenless` | Tool output compression and command rewriting Provider |
 
-Split packages must come from the same build. Install all-in-one directly into a new prefix;
-do not also install the split packages there.
+Provider archives contain bridge programs only. Install Tokenless CLI/RTK and
+sec-core CLI/daemon from their backend owner's release or native core package.
 
 ## Install
 
-Run from the extracted artifact directory. Match the version to the downloaded filenames.
-Use core for a first trial, or set `AW_BUNDLE_KIND` to `aw-all-in-one` for all capabilities.
+From the downloaded artifact directory, install the prebuilt AW CLI as your user:
 
 ```bash
-sha256sum -c SHA256SUMS
-export AW_VERSION=0.1.0-preview.1
+export AW_VERSION=0.1.0
 export AW_BUNDLE_KIND=aw-core
 export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
-export AW_PREFIX="/opt/aw-preview/$AW_VERSION"
+sha256sum -c SHA256SUMS
 tar -xzf "$AW_BUNDLE.tar.gz"
-sudo install -d -m 755 /opt/aw-preview
-sudo "./$AW_BUNDLE/aw" install --bundle "$PWD/$AW_BUNDLE" --prefix "$AW_PREFIX" --scope system
+export AW_BUNDLE_DIR="$PWD/$AW_BUNDLE"
+export AW_PREFIX="$HOME/.local"
+make -C "$AW_BUNDLE_DIR" install PREFIX="$AW_PREFIX"
 export PATH="$AW_PREFIX/bin:$PATH"
-aw --help
+aw --version
 ```
 
-Every checksum should report `OK`; a successful install reports the installed packages.
-The installer refuses to overwrite existing components. [Use a new prefix when upgrading](operations.md).
-Set `AW_PREFIX` and `PATH` in subsequent terminals too, or add them to your shell configuration.
+Each checksum should report `OK`; `aw --version` should print the installed version.
 
-For a personal installation, set `AW_PREFIX` to an absolute path you own, omit `sudo` and use `--scope user`.
-Keep the same scope for core and extensions. See [operations](operations.md) for package checks and recovery.
+Change `AW_PREFIX` to choose an installation directory. For a system installation,
+an administrator can use
+`sudo make -C "$AW_BUNDLE_DIR" install PREFIX=/usr/local`.
+
+To add a local Provider extension, install it into a separate extension prefix:
+
+```bash
+export AW_PROVIDER_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
+tar -xzf "$AW_PROVIDER_BUNDLE.tar.gz"
+export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
+install -d -m 700 "$HOME/.local/lib/aw"
+aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_PROVIDER_BUNDLE"
+aw list --installed --prefix "$AW_EXTENSION_PREFIX"
+```
+
+Use the independent sec-core archive in the same way when security checks are needed.
+
+These extension commands use user scope. Root-managed extension writes require
+`sudo` and explicit `--scope system`. Keep each extension prefix's scope consistent;
+`sudo` alone does not select scope. Use `aw install` for local Provider bundles.
+
+A Provider installed by RPM or another deployment owner can instead be referenced
+by its absolute `transport.argv`. See [Provider bundles](../../../developer-guide/en/aw/reference/packages.md) for optional
+raw extension management.
 
 ## Create configuration
 
-Create configuration as your ordinary user, keeping data outside the installation prefix.
+Prepare the Agent using its own installation guide. This example requires a
+signed-in Qoder CLI 1.1.64 or later. Generate an empty policy as your ordinary
+user, keeping configuration and data outside the installation prefix:
 
 ```bash
 export AW_HOME="$HOME/aw"
@@ -66,8 +89,14 @@ aw config init --prefix "$AW_PREFIX" \
 aw validate --config "$AW_HOME/aw.yaml"
 ```
 
-`AW_QODER` must be the absolute path to the real executable. `config init` creates a complete file
-and refuses to overwrite it. Enable [sec-core](security.md) or [Tokenless](tokenless.md) separately.
+`AW_QODER` must select the actual executable by absolute path. `config init`
+refuses to overwrite an existing configuration.
+
+To enable a Provider, use its extension prefix and explicit template/backend
+paths from [Tokenless](tokenless.md) or [security checks](security.md).
+Use actual absolute paths in YAML; AW does not expand shell variables there.
+Other Agent entrypoints and native settings are described in
+[configuration](configuration.md).
 
 ## Launch and verify
 
@@ -76,13 +105,8 @@ cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
-Expect AW instance information followed by the Qoder interface. Ask Qoder to read the current
-directory with a tool, following its native permission prompts. After the tool returns, exit Qoder
-and run these commands in the same terminal.
-
-```bash
-aw status --config "$AW_HOME/aw.yaml"
-aw stop --config "$AW_HOME/aw.yaml"
-```
-
-After enabling a Provider, follow its guide to verify the effect.
+Confirm that the native Agent starts and can call a tool. Exit the Agent, then
+run `aw status --config "$AW_HOME/aw.yaml"` and
+`aw stop --config "$AW_HOME/aw.yaml"`. An empty policy does not perform security
+checks or compression. Enable the selected Provider and verify its actual tool
+effects before using it for a workload.

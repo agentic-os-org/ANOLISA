@@ -14,29 +14,29 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 ## 检查安装
 
-沿用安装时的 `AW_PREFIX`。
+检查本地 Provider 扩展时，沿用安装时的 `AW_EXTENSION_PREFIX`。
 
 ```bash
-aw list --installed --prefix "$AW_PREFIX"
-aw doctor --prefix "$AW_PREFIX"
+aw list --installed --prefix "$AW_EXTENSION_PREFIX"
+aw doctor --prefix "$AW_EXTENSION_PREFIX"
 ```
 
-`list` 列出安装记录；`doctor` 检查文件是否缺失、被修改或权限异常。通过时返回 0，发现问题时返回 1 并列出路径。
+`list` 列出 Provider 扩展记录；`doctor` 检查文件是否缺失、被修改或权限异常。通过时返回 0，发现问题时返回 1 并列出路径。AW CLI 与后端安装仍由原安装者或原生包管理器维护。
 
 ## 升级与卸载
 
 1. 退出 Agent，用旧版 AW 和原配置停止服务。
-2. 备份配置与状态目录，将新包[安装](installation.md)到新目录。
+2. 备份配置与状态目录，通过原安装者升级 AW CLI 和后端，将新 Provider 包[安装](installation.md)到新的扩展目录。
 3. 用新路径生成配置，使用新的状态目录，验证实际工具调用。
 4. 保留旧安装和备份；回退时停止新服务，切回旧路径与配置。
 
-系统安装按以下命令卸载。个人安装去掉 `sudo` 并改用 `--scope user`。
+以下命令移除本地管理的 Provider 扩展：
 
 ```bash
-sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX" --scope system --yes
+aw uninstall --prefix "$AW_EXTENSION_PREFIX" --yes
 ```
 
-卸载保留外部配置、审计和 Agent 数据。包文件被修改、缺失或仍在使用时，按错误处理后重试。
+root 管理的扩展需要 `sudo` 和显式 `--scope system`。卸载保留外部配置、审计和 Agent 数据，不移除 AW CLI、后端或其服务。包文件被修改、缺失或仍在使用时，按错误处理后重试。
 出现 `needs_recovery` 时，停止包写入操作，按[包恢复步骤](../../../developer-guide/zh/aw/reference/packages.md)处理。
 
 ## 数据与排错

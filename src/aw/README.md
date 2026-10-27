@@ -5,7 +5,7 @@
 AW provides unified Hook orchestration, managed MCP integration and hot policy updates for Agents and SDK applications.
 One configuration composes security checks before tool execution, output compression afterward and custom rules.
 Supported resident entrypoints can update policy after tasks drain while keeping the host process running.
-Agents retain their models, interfaces and permissions. AW is available as a Linux Preview.
+Agents retain their models, interfaces and permissions. AW runs on Linux.
 
 ## Shared capabilities
 
@@ -40,7 +40,7 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 
 ## Installation and first run
 
-Get and install a Preview package using the [installation guide](../../docs/user-guide/en/aw/installation.md).
+Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
 AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
 Install and sign in to your Agent first, then generate configuration with `aw config init`.
 

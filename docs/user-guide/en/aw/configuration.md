@@ -6,16 +6,21 @@
 
 ## Choose capabilities
 
-Add the appropriate options to `aw config init`. Install the selected Provider first.
+Install the selected Provider first. Set `AW_TEMPLATE_DIR` to its unpacked
+archive's absolute `templates/` directory, then choose a template for `aw config init`.
 
 | Goal | Options | Steps |
 | --- | --- | --- |
-| Launch an Agent | No Provider option | [Installation](installation.md) |
-| Compress tool output | `--provider tokenless` | [Tokenless](tokenless.md) |
-| Check tool commands | `--provider sec-core --socket ABS_SOCKET` | [Security](security.md) |
-| Enable both | `--provider sec-core+tokenless --socket ABS_SOCKET` | Start the sec-core backend first |
+| Launch an Agent | No template | [Installation](installation.md) |
+| Compress tool output | `--template "$AW_TEMPLATE_DIR/tokenless.json"` | [Tokenless](tokenless.md) |
+| Check tool commands | `--template "$AW_TEMPLATE_DIR/sec-core.json"` | [Security](security.md) |
+| Enable both | `--template "$AW_TEMPLATE_DIR/sec-core-tokenless.json"` | [Tokenless](tokenless.md) and [security](security.md) |
 
-Replace `ABS_SOCKET` with the backend's absolute socket path. The generator supports Qoder and OpenClaw; see [integration guides](../../../developer-guide/en/aw/native-agents.md) for SDK applications and other Agents.
+For Provider configuration, use its actual installation prefix in `--prefix`.
+Supply the backend paths, socket and RTK checksum using the `--template-var`
+arguments shown in those guides. `PROVIDERS_DIR` selects the installed Provider
+programs, independently of the AW CLI prefix. `--provider` accepts only `none`
+or `command`. The generator supports Qoder and OpenClaw; see [integration guides](../../../developer-guide/en/aw/native-agents.md) for SDK applications and other Agents.
 
 ## Edit configuration
 
@@ -74,7 +79,7 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
   --native-settings "$AW_OPENCLAW_CONFIG" --native-state-dir "$AW_OPENCLAW_STATE"
 ```
 
-Wait for `AW openclaw native hooks ready`, then use a client connected to that Gateway. `agent --local` bypasses it. Add the options above to `config init` to enable security or compression.
+Wait for `AW openclaw native hooks ready`, then use a client connected to that Gateway. `agent --local` bypasses it. Select the corresponding template above to enable security or compression.
 
 ## Custom rules and service deployment
 

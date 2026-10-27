@@ -5,7 +5,7 @@
 AW 为 Agent 和 SDK 应用提供统一 Hook 编排、受管 MCP 接入和策略热更新。
 通过一份配置组合工具执行前的安全检查、执行后的输出压缩和自定义规则。
 支持的常驻入口可在任务排空后更新策略，保留宿主进程。
-Agent 继续管理自己的模型、界面和权限。当前提供 Linux Preview。
+Agent 继续管理自己的模型、界面和权限。AW 运行于 Linux。
 
 ## 通用能力
 
@@ -40,7 +40,7 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 
 ## 安装与首次运行
 
-从[安装指南](../../docs/user-guide/zh/aw/installation.md)获取 Preview 包并安装。
+按[安装指南](../../docs/user-guide/zh/aw/installation.md)安装 AW core 和可选 Provider 扩展。
 当前使用独立安装包；`anolisa install aw` 和 RPM 安装入口尚未提供。
 先安装并登录所选 Agent，再用 `aw config init` 生成配置。
 

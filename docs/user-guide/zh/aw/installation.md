@@ -2,56 +2,77 @@
 
 [English](../../en/aw/installation.md)
 
-需要 Linux，以及已登录、支持原生命令 Hook 的 Qoder CLI；已验证基线为 1.1.64。
+在 Linux 上安装 AW，以可选 Provider 策略启动已有 Agent。目前尚未提供
+`anolisa install aw` 或公开 AW RPM 渠道。Agent 应用、模型凭据和后端组件单独安装。
+
+使用 Qoder 时，需要已登录、支持原生命令 Hook 的 CLI；已验证基线为 1.1.64。
 其他 Agent 见[配置与 Agent 启动](configuration.md)。
 
 ## 获取安装包
 
-AW 当前使用 Preview 包，尚未接入 ANOLISA CLI 或 RPM。
-从[通过的 AW Integration 构建](https://github.com/agentic-os-org/ANOLISA/actions/workflows/aw-preview.yml)
-下载 `aw-preview-linux-x86_64-…` artifact，解压 ZIP 后得到安装包和 `SHA256SUMS`。
-CI 包面向 Linux x86_64，要求 glibc 2.39 或更新版本，例如 Ubuntu 24.04。
+使用目标源码提交中[已成功的 AW Integration run](https://github.com/agentic-os-org/ANOLISA/actions/workflows/aw-integration.yml) 的产物，并核对配套
+`SHA256SUMS`。校验和用于发现损坏，不是发布者签名。开发交付入口见
+[源码构建](../../../../contribute/zh/aw/building.md)。
 
-需要自行编译或使用 Linux aarch64 时，按[源码构建](../../../../contribute/zh/aw/building.md)
-生成安装包，再继续本页。构建过程需要联网下载依赖。
+CI 归档面向 Linux x86_64，要求 glibc 2.39 或更高版本，例如 Ubuntu 24.04。
+Linux aarch64 或其他构建环境请按源码构建指南交付。
 
-| 安装包 | 内容 |
+| 归档 | 内容 |
 | --- | --- |
-| `aw-core` | AW 启动与配置工具 |
-| `aw-provider-tokenless` | Tokenless 与其所需 RTK，需先安装 core |
-| `aw-provider-sec-core` | 安全 Provider 和 sec-core 程序，需先安装 core |
-| `aw-all-in-one` | 上述三个组件 |
+| `aw-core` | AW 命令行工具 |
+| `aw-provider-sec-core` | 工具安全检查 Provider |
+| `aw-provider-tokenless` | 工具输出压缩与命令重写 Provider |
 
-分包必须来自同一次构建。选择 all-in-one 时直接安装到新目录，无需再安装分包。
+Provider 归档只包含桥接程序。Tokenless CLI/RTK 与 sec-core CLI/daemon 由后端
+owner 的发行件或原生 core 包安装。
 
 ## 安装
 
-在解压后的 artifact 目录执行。以下版本应与下载包名一致；首次体验使用 core，
-需要全部能力时将 `AW_BUNDLE_KIND` 改为 `aw-all-in-one`。
+在下载产物的目录中，以当前用户安装预构建 AW CLI：
 
 ```bash
-sha256sum -c SHA256SUMS
-export AW_VERSION=0.1.0-preview.1
+export AW_VERSION=0.1.0
 export AW_BUNDLE_KIND=aw-core
 export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
-export AW_PREFIX="/opt/aw-preview/$AW_VERSION"
+sha256sum -c SHA256SUMS
 tar -xzf "$AW_BUNDLE.tar.gz"
-sudo install -d -m 755 /opt/aw-preview
-sudo "./$AW_BUNDLE/aw" install --bundle "$PWD/$AW_BUNDLE" --prefix "$AW_PREFIX" --scope system
+export AW_BUNDLE_DIR="$PWD/$AW_BUNDLE"
+export AW_PREFIX="$HOME/.local"
+make -C "$AW_BUNDLE_DIR" install PREFIX="$AW_PREFIX"
 export PATH="$AW_PREFIX/bin:$PATH"
-aw --help
+aw --version
 ```
 
-校验结果应全部为 `OK`，安装完成会报告已安装的软件包。
-安装器拒绝覆盖已有组件；升级请使用[新安装目录](operations.md)。
-后续终端也需要设置 `AW_PREFIX` 和 `PATH`，可以写入自己的 shell 配置。
+所有校验和应报告 `OK`，`aw --version` 应显示已安装版本。
 
-个人安装可将 `AW_PREFIX` 改为自己拥有的绝对路径，去掉 `sudo` 并使用 `--scope user`。
-core 与扩展保持同一 scope。包检查和恢复见[运行维护](operations.md)。
+可修改 `AW_PREFIX` 选择安装目录。系统安装可由管理员执行
+`sudo make -C "$AW_BUNDLE_DIR" install PREFIX=/usr/local`。
+
+需要本地 Provider 扩展时，安装到独立的扩展 prefix：
+
+```bash
+export AW_PROVIDER_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
+tar -xzf "$AW_PROVIDER_BUNDLE.tar.gz"
+export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
+install -d -m 700 "$HOME/.local/lib/aw"
+aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_PROVIDER_BUNDLE"
+aw list --installed --prefix "$AW_EXTENSION_PREFIX"
+```
+
+需要安全检查时，使用相同方式安装独立 sec-core 归档。
+
+这些扩展命令使用 user scope。root 管理的扩展写入需要 `sudo` 和显式
+`--scope system`。每个扩展 prefix 的 scope 应保持一致；单独使用 `sudo` 不选择
+scope。`aw install` 用于安装本地 Provider bundle。
+
+由 RPM 或其他部署管理者安装的 Provider 也可直接通过绝对 `transport.argv`
+接入。可选 raw 扩展管理见
+[Provider bundle](../../../developer-guide/zh/aw/reference/packages.md)。
 
 ## 创建配置
 
-以普通用户创建配置，数据保存在安装目录之外。
+按 Agent 自身指南准备 Agent。本例要求已登录的 Qoder CLI 1.1.64 或更高版本。
+以普通用户生成空策略配置，将配置和数据保存在安装目录之外：
 
 ```bash
 export AW_HOME="$HOME/aw"
@@ -64,8 +85,12 @@ aw config init --prefix "$AW_PREFIX" \
 aw validate --config "$AW_HOME/aw.yaml"
 ```
 
-`AW_QODER` 应为真实可执行文件的绝对路径。`config init` 创建完整配置，不覆盖已有文件。
-安全与压缩需另行启用，见 [sec-core](security.md)和 [Tokenless](tokenless.md)。
+`AW_QODER` 必须为真实可执行文件的绝对路径。`config init` 拒绝覆盖已有配置。
+
+启用 Provider 时，使用扩展 prefix，
+并按 [Tokenless](tokenless.md) 或[安全检查](security.md)提供显式模板与后端路径。
+YAML 中应填写真实绝对路径，AW 不在其中展开 shell 变量。
+其他 Agent 入口与原生设置见[配置](configuration.md)。
 
 ## 启动并验证
 
@@ -74,12 +99,7 @@ cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
-应看到 AW 实例信息并进入 Qoder。请它用工具读取当前目录，按原生提示处理权限确认。
-确认工具能返回结果后退出 Qoder，在同一终端执行。
-
-```bash
-aw status --config "$AW_HOME/aw.yaml"
-aw stop --config "$AW_HOME/aw.yaml"
-```
-
-启用 Provider 后，按对应页面验证效果。
+确认原生 Agent 启动并能够调用工具。退出 Agent 后，执行
+`aw status --config "$AW_HOME/aw.yaml"` 和
+`aw stop --config "$AW_HOME/aw.yaml"`。空策略不执行安全检查或压缩。
+用于实际工作前，启用所选 Provider 并验证它对真实工具调用的效果。
