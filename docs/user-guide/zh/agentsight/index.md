@@ -37,6 +37,10 @@ sudo yum install agentsight
 cd src/agentsight && make build-all
 ```
 
+通过 RPM 安装时，`agentsight` 会选择 `agentsight-core`，包含 tracer、Dashboard、enforcer 和服务。
+仅在需要接入 DSH 时添加 `agentsight-plugins`；它要求 Node.js 22 或更高版本，
+并需为实际用户的 DSH profile 注册。
+
 ### 3. 启动服务
 
 通过安装包部署时：
@@ -47,7 +51,7 @@ systemctl is-active agentsight.service
 ```
 
 安装包里的 unit 会启动一个守护脚本，同时拉起两个工作进程：`agentsight trace`（eBPF 采集）和
-`agentsight serve --host 0.0.0.0`（API + Dashboard）；如果装了 enforcer 包，它还会顺带拉起
+`agentsight serve --host 0.0.0.0`（API + Dashboard）；它还会顺带拉起 core 包中包含的
 `agentsight-enforcer.service`。
 
 从源码构建时，按[源码构建](deployment.md#源码构建)中的命令直接运行 `trace` 和 `serve`。

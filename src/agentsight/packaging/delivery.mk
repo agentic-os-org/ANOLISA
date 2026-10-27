@@ -147,3 +147,4 @@ uninstall: delivery-validate-uninstall
 
 test-packaging: ## Verify public installation and RPM ownership with fixtures only
 	python3 "$(DELIVERY_ROOT)/scripts/benchmark/tests/test_delivery.py"
+	python3 "$(DELIVERY_ROOT)/scripts/benchmark/tests/test_rpm_split.py"

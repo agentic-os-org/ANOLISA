@@ -13,22 +13,14 @@ destination="$1"
 
 sources=(
     "target/release/agentsight"
-    "packaging/systemd/agentsight-start.sh"
-    "packaging/systemd/agentsight.service"
-    "packaging/systemd/agentsight-enforcer.service"
     "agentsight.json"
-    "packaging/anolisa/rpm/component.toml"
     "README.md"
     "README_zh.md"
     "LICENSE"
 )
 targets=(
     "agentsight"
-    "agentsight-start"
-    "agentsight.service"
-    "agentsight-enforcer.service"
     "agentsight.json"
-    "component.toml"
     "README.md"
     "README_zh.md"
     "LICENSE"
@@ -41,7 +33,25 @@ for source in "${sources[@]}"; do
         missing=1
     fi
 done
+for source in packaging/systemd/render.py packaging/systemd/agentsight-start.sh.in \
+    packaging/systemd/agentsight.service.in packaging/systemd/agentsight-enforcer.service.in; do
+    if [[ ! -f "$project_root/$source" ]]; then
+        echo "missing AgentSight RPM payload source: $project_root/$source" >&2
+        missing=1
+    fi
+done
 if (( missing != 0 )); then
+    exit 1
+fi
+
+for source in dsh-plugin/package.json dsh-plugin/cordis.patch.yml dsh-plugin/lib/index.js; do
+    if [[ ! -f "$project_root/$source" ]]; then
+        echo "missing AgentSight RPM plugin source: $project_root/$source; run make build-dsh-plugin" >&2
+        exit 1
+    fi
+done
+if [[ -n "$(find "$project_root/dsh-plugin/lib" -type l -print -quit)" ]]; then
+    echo "AgentSight RPM plugin resources must not contain symlinks" >&2
     exit 1
 fi
 
@@ -59,10 +69,22 @@ python3 "$project_root/scripts/copy-enforcer.py" "$ENFORCER_BIN" "$destination/a
 for index in "${!sources[@]}"; do
     mode=0644
     case "${targets[$index]}" in
-        agentsight|agentsight-start)
+        agentsight)
             mode=0755
             ;;
     esac
     install -p -m "$mode" \
         "$project_root/${sources[$index]}" "$destination/${targets[$index]}"
 done
+
+install -d -m 0755 "$destination/packaging/systemd"
+install -p -m 0644 "$project_root/packaging/systemd/render.py" \
+    "$project_root/packaging/systemd/agentsight-start.sh.in" \
+    "$project_root/packaging/systemd/agentsight.service.in" \
+    "$project_root/packaging/systemd/agentsight-enforcer.service.in" \
+    "$destination/packaging/systemd/"
+
+install -d -m 0755 "$destination/dsh-plugin"
+cp -Rp "$project_root/dsh-plugin/lib" "$destination/dsh-plugin/"
+install -p -m 0644 "$project_root/dsh-plugin/package.json" \
+    "$project_root/dsh-plugin/cordis.patch.yml" "$destination/dsh-plugin/"

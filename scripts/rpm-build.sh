@@ -512,6 +512,11 @@ build_agentsight() {
         log "clang not found, installing..."
         install_package clang || { err "Failed to install clang"; return 1; }
     fi
+    if ! command -v node >/dev/null 2>&1 || \
+        ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+        err "AgentSight RPM builds require Node.js >=22 for the DSH plugin."
+        return 1
+    fi
     local ENFORCER_BIN
     ENFORCER_BIN=$(
         set -e
@@ -533,6 +538,7 @@ build_agentsight() {
             exit 1
         fi
         cargo build --release --bin agentsight
+        make build-dsh-plugin
         ./scripts/build-enforcer.sh >&3
     )
 

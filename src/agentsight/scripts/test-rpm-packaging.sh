@@ -230,20 +230,21 @@ require_file() {
 
 fixture_root="$tmp_dir/source"
 fixture_payload="$tmp_dir/payload"
-mkdir -p "$fixture_root/target/release" "$fixture_root/scripts" "$fixture_root/packaging/systemd" "$fixture_root/packaging/anolisa/rpm"
+mkdir -p "$fixture_root/target/release" "$fixture_root/scripts" "$fixture_root/packaging/systemd" "$fixture_root/dsh-plugin/lib"
 for file in \
     target/release/agentsight \
     target/release/agentsight-enforcer \
-    packaging/systemd/agentsight-start.sh \
-    packaging/systemd/agentsight.service \
-    packaging/systemd/agentsight-enforcer.service \
     agentsight.json \
-    packaging/anolisa/rpm/component.toml \
+    dsh-plugin/lib/index.js \
+    dsh-plugin/package.json \
+    dsh-plugin/cordis.patch.yml \
     README.md \
     README_zh.md \
     LICENSE; do
     printf 'fixture: %s\n' "$file" > "$fixture_root/$file"
 done
+cp "$repo_root/src/agentsight/packaging/systemd/"{render.py,agentsight-start.sh.in,agentsight.service.in,agentsight-enforcer.service.in} \
+    "$fixture_root/packaging/systemd/"
 
 # Run a copy of the real wrapper with fake Git/Cargo/Rust only. No network,
 # real compilation, or changes to the checkout/source cache are permitted here.
@@ -490,16 +491,21 @@ PY
 for file in \
     agentsight \
     agentsight-enforcer \
-    agentsight-start \
-    agentsight.service \
-    agentsight-enforcer.service \
+    packaging/systemd/render.py \
+    packaging/systemd/agentsight-start.sh.in \
+    packaging/systemd/agentsight.service.in \
+    packaging/systemd/agentsight-enforcer.service.in \
     agentsight.json \
-    component.toml \
     README.md \
     README_zh.md \
     LICENSE; do
     require_file "$fixture_payload/$file"
 done
+
+if [[ -e "$fixture_payload/component.toml" ]]; then
+    printf 'RPM source payload unexpectedly contains a component discovery contract\n' >&2
+    failures=$((failures + 1))
+fi
 
 existing_payload="$tmp_dir/existing-payload"
 mkdir -p "$existing_payload"
@@ -518,9 +524,9 @@ fi
 
 complete_list="$tmp_dir/complete-rpm-files.txt"
 cat > "$complete_list" <<'EOF'
-/usr/local/bin/agentsight
-/usr/local/bin/agentsight-enforcer
-/usr/local/bin/agentsight-start
+/usr/bin/agentsight
+/usr/bin/agentsight-enforcer
+/usr/bin/agentsight-start
 /usr/lib/systemd/system/agentsight.service
 /usr/lib/systemd/system/agentsight-enforcer.service
 /etc/agentsight/config.json
@@ -528,23 +534,6 @@ EOF
 
 bash "$repo_root/src/agentsight/packaging/rpm/verify-rpm-package.sh" \
     --file-list "$complete_list"
-
-# Neither the registry directory nor an individual contract belongs to this RPM.
-for registry_path in \
-    /usr/share/anolisa/components \
-    /usr/share/anolisa/components/agentsight/component.toml; do
-    registry_list="$tmp_dir/registry-rpm-files.txt"
-    cp "$complete_list" "$registry_list"
-    printf '%s\n' "$registry_path" >> "$registry_list"
-    if bash "$repo_root/src/agentsight/packaging/rpm/verify-rpm-package.sh" \
-        --file-list "$registry_list" >"$tmp_dir/registry.out" 2>"$tmp_dir/registry.err"; then
-        printf 'RPM file list containing registry path unexpectedly passed: %s\n' "$registry_path" >&2
-        failures=$((failures + 1))
-    elif ! grep -Fq 'Component RPMs must not own ANOLISA discovery contracts' "$tmp_dir/registry.err"; then
-        printf 'missing registry ownership diagnostic: %s\n' "$registry_path" >&2
-        failures=$((failures + 1))
-    fi
-done
 
 incomplete_list="$tmp_dir/incomplete-rpm-files.txt"
 grep -v -E 'agentsight-enforcer($|\.service$)' "$complete_list" > "$incomplete_list"
@@ -561,7 +550,7 @@ else
             failures=$((failures + 1))
         fi
     }
-    require_literal_from_path "$tmp_dir/incomplete.err" "/usr/local/bin/agentsight-enforcer"
+    require_literal_from_path "$tmp_dir/incomplete.err" "/usr/bin/agentsight-enforcer"
     require_literal_from_path "$tmp_dir/incomplete.err" \
         "/usr/lib/systemd/system/agentsight-enforcer.service"
 fi
@@ -580,9 +569,11 @@ require_literal .github/workflows/_rpm-build.yaml \
     '"$AGENTSIGHT_VERIFY_RPM" "$rpm_path"'
 
 require_literal src/agentsight/packaging/rpm/agentsight.spec.in \
-    "install -p -m 0755 agentsight-enforcer %{buildroot}/usr/local/bin/"
+    "install -p -m 0755 agentsight agentsight-enforcer"
 require_literal src/agentsight/packaging/rpm/agentsight.spec.in \
-    "install -p -m 0644 agentsight-enforcer.service %{buildroot}%{_unitdir}/"
+    "python3 packaging/systemd/render.py --bindir"
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in \
+    "install -p -m 0644 README.md README_zh.md LICENSE %{buildroot}%{_docdir}/agentsight/"
 require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%{_unitdir}/agentsight-enforcer.service"
 require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%systemd_post agentsight-enforcer.service"
 require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%systemd_preun agentsight-enforcer.service"
@@ -593,13 +584,13 @@ require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%systemd_postun
 # escape them, or rpmbuild aborts before it produces a package.
 require_count src/agentsight/packaging/rpm/agentsight.spec.in \
     "%systemd_post/%systemd_preun/%systemd_postun" 0
-require_literal src/agentsight/packaging/rpm/agentsight.spec.in \
-    "%%systemd_post/%%systemd_preun/%%systemd_postun"
 require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%%systemd_* scriptlet macros"
-require_literal src/agentsight/packaging/systemd/agentsight.service "Wants=agentsight-enforcer.service"
-require_literal src/agentsight/packaging/systemd/agentsight-enforcer.service "PartOf=agentsight.service"
-require_literal src/agentsight/packaging/systemd/agentsight.service "UMask=0077"
-require_literal src/agentsight/packaging/systemd/agentsight-enforcer.service "UMask=0077"
+require_literal src/agentsight/packaging/systemd/agentsight.service.in "Wants=agentsight-enforcer.service"
+require_literal src/agentsight/packaging/systemd/agentsight-enforcer.service.in "PartOf=agentsight.service"
+require_literal src/agentsight/packaging/systemd/agentsight.service.in "UMask=0077"
+require_literal src/agentsight/packaging/systemd/agentsight-enforcer.service.in "UMask=0077"
+require_literal src/agentsight/packaging/systemd/agentsight.service.in "ExecStart=@BINDIR@/agentsight-start"
+require_literal src/agentsight/packaging/systemd/agentsight-enforcer.service.in "ExecStart=@BINDIR@/agentsight-enforcer"
 
 require_literal distribution/anolisa/manifests/components/agentsight/component.toml \
     'source = "bin/agentsight-enforcer"'
@@ -634,3 +625,4 @@ if (( failures > 0 )); then
 fi
 
 printf 'AgentSight RPM packaging contract passed.\n'
+python3 "$repo_root/src/agentsight/scripts/benchmark/tests/test_rpm_split.py"

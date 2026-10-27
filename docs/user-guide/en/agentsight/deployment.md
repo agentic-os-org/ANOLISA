@@ -31,7 +31,7 @@ Two units are installed:
 
 | Unit | Role |
 |---|---|
-| `agentsight.service` | Runs `/usr/local/bin/agentsight-start`, which supervises `agentsight trace` and `agentsight serve --host 0.0.0.0` |
+| `agentsight.service` | Runs `/usr/bin/agentsight-start`, which supervises `agentsight trace` and `agentsight serve --host 0.0.0.0` |
 | `agentsight-enforcer.service` | Optional ActPlane enforcement daemon; pulled in by the main unit and required for the Risk Enforcement page |
 
 What the packaged unit gives you:

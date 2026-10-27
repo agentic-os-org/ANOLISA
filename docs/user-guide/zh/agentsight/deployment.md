@@ -30,7 +30,7 @@ sudo systemctl enable --now agentsight.service
 
 | Unit | 职责 |
 |---|---|
-| `agentsight.service` | 运行 `/usr/local/bin/agentsight-start`，由它守护 `agentsight trace` 和 `agentsight serve --host 0.0.0.0` |
+| `agentsight.service` | 运行 `/usr/bin/agentsight-start`，由它守护 `agentsight trace` 和 `agentsight serve --host 0.0.0.0` |
 | `agentsight-enforcer.service` | 可选的 ActPlane 拦截守护进程；由主 unit 顺带拉起，风险拦截页面依赖它 |
 
 安装包 unit 自带的保障：

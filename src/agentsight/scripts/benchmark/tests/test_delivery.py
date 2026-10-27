@@ -31,9 +31,6 @@ class DeliveryTests(unittest.TestCase):
             "packaging/validate-stage.py",
             "packaging/rpm/stage-rpm-payload.sh",
             "scripts/copy-enforcer.py",
-            "packaging/systemd/agentsight-start.sh",
-            "packaging/systemd/agentsight.service",
-            "packaging/systemd/agentsight-enforcer.service",
             "packaging/systemd/render.py",
             "packaging/systemd/agentsight-start.sh.in",
             "packaging/systemd/agentsight.service.in",
@@ -421,6 +418,39 @@ class DeliveryTests(unittest.TestCase):
             (stage / "usr/lib/systemd/system/agentsight.service").read_text(),
         )
 
+    def test_default_service_assets_match_explicit_templates(self):
+        generated = self.base / "default-services"
+        result = subprocess.run(
+            [
+                "python3",
+                str(self.source / "packaging/systemd/render.py"),
+                "--bindir",
+                "/usr/bin",
+                "--binary",
+                "/usr/bin/agentsight",
+                "--launcher",
+                str(generated / "agentsight-start.sh"),
+                "--unitdir",
+                str(generated),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        launcher = (generated / "agentsight-start.sh").read_text()
+        self.assertIn("/usr/bin/agentsight trace &", launcher)
+        self.assertIn("/usr/bin/agentsight serve --host 0.0.0.0 &", launcher)
+        self.assertEqual((generated / "agentsight-start.sh").stat().st_mode & 0o777, 0o755)
+        for name, binary in (
+            ("agentsight.service", "agentsight-start"),
+            ("agentsight-enforcer.service", "agentsight-enforcer"),
+        ):
+            with self.subTest(asset=name):
+                unit = generated / name
+                self.assertIn(f"ExecStart=/usr/bin/{binary}", unit.read_text())
+                self.assertEqual(unit.stat().st_mode & 0o777, 0o644)
+
     def test_source_launcher_workers_read_the_installed_configuration(self):
         prefix = self.base / "source-install"
         calls = self.base / "worker-calls"
@@ -463,9 +493,6 @@ class DeliveryTests(unittest.TestCase):
 
     def test_relocated_rpm_stager_keeps_the_compact_payload_contract(self):
         destination = self.base / "rpm-payload"
-        contract = self.source / "packaging/anolisa/rpm/component.toml"
-        contract.parent.mkdir(parents=True)
-        shutil.copy2(ROOT / "packaging/anolisa/rpm/component.toml", contract)
         environment = os.environ.copy()
         environment.pop("AGENTSIGHT_PROJECT_ROOT", None)
         environment["ENFORCER_BIN"] = str(self.enforcer)
@@ -486,28 +513,31 @@ class DeliveryTests(unittest.TestCase):
             {
                 "agentsight",
                 "agentsight-enforcer",
-                "agentsight-start",
-                "agentsight.service",
-                "agentsight-enforcer.service",
+                "packaging",
                 "agentsight.json",
-                "component.toml",
                 "README.md",
                 "README_zh.md",
                 "LICENSE",
+                "dsh-plugin",
             },
         )
         self.assertEqual(
             (destination / "agentsight-enforcer").read_bytes(),
             self.enforcer.read_bytes(),
         )
-        for target, source in (
-            ("agentsight-start", "agentsight-start.sh"),
-            ("agentsight.service", "agentsight.service"),
-            ("agentsight-enforcer.service", "agentsight-enforcer.service"),
+        self.assertTrue((destination / "dsh-plugin/lib/index.js").is_file())
+        self.assertTrue((destination / "dsh-plugin/package.json").is_file())
+        self.assertTrue((destination / "dsh-plugin/cordis.patch.yml").is_file())
+        self.assertFalse((destination / "dsh-plugin/node_modules").exists())
+        for name in (
+            "render.py",
+            "agentsight-start.sh.in",
+            "agentsight.service.in",
+            "agentsight-enforcer.service.in",
         ):
             self.assertEqual(
-                (destination / target).read_bytes(),
-                (self.source / "packaging/systemd" / source).read_bytes(),
+                (destination / "packaging/systemd" / name).read_bytes(),
+                (self.source / "packaging/systemd" / name).read_bytes(),
             )
 
     def test_enforcer_handoff_is_explicit_and_tampering_is_rejected(self):

@@ -326,18 +326,18 @@ sudo yum install agentsight
 ```
 
 Installs:
-- `/usr/local/bin/agentsight` — CLI binary
-- `/usr/local/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight` — CLI binary
+- `/usr/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight-start` — trace/serve supervisor
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight system unit
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — enforcement system unit
 
-The RPM is a Linux system package. Its units are installed but not enabled by
-default; when both units run, AgentSight is ordered after the enforcer.
+The RPM is a Linux system package. When both units run, AgentSight is ordered
+after the enforcer.
 
 ### Start the Service
 
-Both package routes leave the units stopped and disabled. Start the main unit
-when you are ready to begin collection:
+Start the main unit when you are ready to begin collection:
 
 ```bash
 sudo systemctl enable --now agentsight.service

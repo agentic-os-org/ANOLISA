@@ -1,4 +1,4 @@
-"""Render service assets for explicit install paths without editing RPM defaults."""
+"""Render service assets for the selected installation paths."""
 
 import argparse
 import shlex

@@ -324,17 +324,18 @@ sudo yum install agentsight
 ```
 
 安装内容：
-- `/usr/local/bin/agentsight` — CLI 可执行文件
-- `/usr/local/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight` — CLI 可执行文件
+- `/usr/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight-start` — trace/serve 监督脚本
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight systemd 单元
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — 强制执行 systemd 单元
 
-RPM 是 Linux system 包。两个单元会随包安装，但默认不会启用；当两个单元都运行时，
+RPM 是 Linux system 包。两个单元会随包安装；当两个单元都运行时，
 AgentSight 会排在 enforcer 之后启动。
 
 ### 启动服务
 
-两种包安装都会让单元保持停止且不启用。准备开始采集时，再启动主服务。
+准备开始采集时，再启动主服务。
 
 ```bash
 sudo systemctl enable --now agentsight.service

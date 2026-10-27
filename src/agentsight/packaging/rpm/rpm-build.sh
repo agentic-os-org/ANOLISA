@@ -18,8 +18,8 @@
 #   2. Build the AgentSight binary and attested ActPlane enforcer
 #   3. Create a tarball: agentsight-<version>.tar.gz
 #   4. The tarball contains: agentsight, agentsight-enforcer, agentsight-start,
-#      both systemd units, component.toml, agentsight.json, README.md,
-#      README_zh.md, LICENSE
+#      both systemd units, agentsight.json, README.md,
+#      README_zh.md, LICENSE, dsh-plugin/
 # =============================================================================
 
 set -e
@@ -55,8 +55,8 @@ The script will:
     2. Build the AgentSight binary and attested ActPlane enforcer
     3. Create a tarball: agentsight-<version>.tar.gz
     4. The tarball contains: agentsight, agentsight-enforcer, agentsight-start,
-       both systemd units, component.toml, agentsight.json, README.md,
-       README_zh.md, LICENSE
+       both systemd units, agentsight.json, README.md,
+       README_zh.md, LICENSE, dsh-plugin/
 
 Example:
     $(basename "$0")                    # Build with default version
@@ -149,6 +149,9 @@ if [[ ! -f "target/release/agentsight" ]]; then
 fi
 
 log_info "Binary built successfully"
+
+# The optional plugin has its own RPM, assembled from prebuilt runtime files.
+make build-dsh-plugin
 
 # Step 2: Prepare tarball contents
 TARBALL_NAME="agentsight-${VERSION}"

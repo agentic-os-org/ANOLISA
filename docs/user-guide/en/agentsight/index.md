@@ -39,6 +39,10 @@ sudo yum install agentsight
 cd src/agentsight && make build-all
 ```
 
+For RPM installations, `agentsight` selects `agentsight-core`, which includes the tracer,
+Dashboard, enforcer and services. Add `agentsight-plugins` only for DSH integration; it requires
+Node.js 22 or later and registration with the target user's DSH profile.
+
 ### 3. Start the service
 
 For package installations:
@@ -50,7 +54,7 @@ systemctl is-active agentsight.service
 
 The packaged unit starts a supervisor that runs both workers: `agentsight trace` (eBPF capture)
 and `agentsight serve --host 0.0.0.0` (API + Dashboard). It also pulls in
-`agentsight-enforcer.service` when that package is installed.
+`agentsight-enforcer.service`, which is included in the core package.
 
 For a source build, run `trace` and `serve` directly as shown in
 [Source build](deployment.md#source-build).
