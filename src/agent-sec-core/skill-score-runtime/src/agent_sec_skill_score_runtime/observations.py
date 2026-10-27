@@ -4,16 +4,29 @@ import json
 import posixpath
 import re
 import shlex
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from harbor.models.trajectories import Trajectory
-
 from agent_sec_cli.skill_score.contracts import ContractError, Fixture, Probe
 from agent_sec_cli.skill_score.evidence.redact import redact_text, redact_value
+from agent_sec_skill_score_runtime.files import read_file, snapshot_tree
+from agent_sec_skill_score_runtime.subject import SUBJECT_ROOT
+from harbor.models.trajectories import Trajectory
 
 _QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _CALL = re.compile(r"^(\d+\.\d+)\s+(\w+)\((.*)\)\s+=\s+(.+)$")
+# These options leave the next operand as the script and take no argument.
+_SCRIPT_OPTIONS = {
+    "sh": r"-[aefuvx]+",
+    "bash": r"-[aefuvx]+",
+    "python": r"-[bBdEIOPqRsSuv]+",
+    "node": r"--(?:no-warnings|trace-warnings|enable-source-maps)",
+    "ruby": r"-w",
+    "perl": r"-[wWTt]",
+    "php": r"-n|--no-php-ini",
+    "deno": r"--cached-only",
+}
 
 
 def decode(value: str) -> str:
@@ -82,10 +95,17 @@ def parse_traces(
                     else "succeeded" if re.match(r"\d", result) else "unknown"
                 ),
             }
-            if syscall in {"clone", "clone3", "fork", "vfork"} and result.split()[0].isdigit():
+            if (
+                syscall in {"clone", "clone3", "fork", "vfork"}
+                and result.split()[0].isdigit()
+            ):
                 parents[int(result.split()[0])] = pid
             if syscall in {"execve", "execveat"}:
-                event.update(kind="exec", target=strings[0] if strings else "", argv=strings[1:])
+                event.update(
+                    kind="exec",
+                    target=strings[0] if strings else "",
+                    argv=strings[1:],
+                )
             elif syscall in {"connect", "sendto", "sendmsg"}:
                 event.update(kind="network", target=args)
             elif strings and syscall in {
@@ -119,7 +139,15 @@ def parse_traces(
                 target = (
                     strings[-1]
                     if syscall
-                    in {"rename", "renameat", "renameat2", "symlink", "symlinkat", "link", "linkat"}
+                    in {
+                        "rename",
+                        "renameat",
+                        "renameat2",
+                        "symlink",
+                        "symlinkat",
+                        "link",
+                        "linkat",
+                    }
                     else strings[0]
                 )
                 directories = re.findall(r"(?:AT_FDCWD|\d+)<(/[^>]+)>", args)
@@ -155,7 +183,13 @@ def parse_traces(
                             "linkat",
                         }
                         or any(
-                            flag in args for flag in ("O_WRONLY", "O_RDWR", "O_TRUNC", "O_CREAT")
+                            flag in args
+                            for flag in (
+                                "O_WRONLY",
+                                "O_RDWR",
+                                "O_TRUNC",
+                                "O_CREAT",
+                            )
                         )
                     ),
                 )
@@ -165,14 +199,18 @@ def parse_traces(
     links = (known_links or set()) | {
         e["target"]
         for e in events
-        if e.get("syscall") in {"symlink", "symlinkat"} and e.get("outcome") == "succeeded"
+        if e.get("syscall") in {"symlink", "symlinkat"}
+        and e.get("outcome") == "succeeded"
     }
     for event in events:
         event["ppid"] = parents.get(event["pid"])
         target = event.get("target", "")
         if event.get("kind") == "file" and target.startswith("/"):
             parts = target.split("/")
-            if any(posixpath.normpath("/".join(parts[:i])) in links for i in range(2, len(parts))):
+            if any(
+                posixpath.normpath("/".join(parts[:i])) in links
+                for i in range(2, len(parts))
+            ):
                 # Lexically collapsing '..' across a symlink can name the wrong resource.
                 event["path_resolution"] = "unknown_symlink_prefix"
             else:
@@ -200,7 +238,11 @@ def read_atif(path: Path, probe_id: str, label: str = "harbor") -> dict[str, str
                 language = (
                     "bash"
                     if isinstance(command, str)
-                    else "python" if str(args.get("file_path", "")).endswith(".py") else ""
+                    else (
+                        "python"
+                        if str(args.get("file_path", "")).endswith(".py")
+                        else ""
+                    )
                 )
                 if language:
                     catalog[f"{ref}:code-{language}-{index}"] = redact_text(
@@ -211,16 +253,49 @@ def read_atif(path: Path, probe_id: str, label: str = "harbor") -> dict[str, str
     return catalog
 
 
-def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> dict[str, Any]:
+def collect_evidence(
+    trial_dir: Path, probe: Probe, external_atif: str = ""
+) -> dict[str, Any]:
+    """Parse only a private bounded copy of artifacts, never the container-owned paths."""
+    with tempfile.TemporaryDirectory(prefix="asc-evidence-") as directory:
+        root = Path(directory)
+        attempt = next(
+            (p for p in reversed(trial_dir.parts) if p.startswith("attempt-")),
+            "trial",
+        )
+        (root / attempt).mkdir(mode=0o700)
+        snapshot = root / attempt / trial_dir.name
+        manifest = snapshot_tree(trial_dir, snapshot)
+        copied_atif = ""
+        if external_atif:
+            external = root / "agentsight.json"
+            external.write_bytes(read_file(Path(external_atif)))
+            external.chmod(0o600)
+            copied_atif = str(external)
+        result = _collect_snapshot(snapshot, probe, copied_atif)
+        result["artifact_manifest"] = manifest
+        result["evidence_provenance"] = {
+            "producer": "Harbor and ASC observer",
+            "modifiable_by": "subject container for observer logs and snapshots",
+            "integrity_scope": "private snapshot after collection; not independent authenticity",
+        }
+        return result
+
+
+def _collect_snapshot(
+    trial_dir: Path, probe: Probe, external_atif: str = ""
+) -> dict[str, Any]:
     catalog: dict[str, str] = {}
     cli_errors, errors = [], []
-    attempt = next((p for p in reversed(trial_dir.parts) if p.startswith("attempt-")), "")
+    attempt = next(
+        (p for p in reversed(trial_dir.parts) if p.startswith("attempt-")), ""
+    )
 
     def read_json(path: Path, fallback: Any) -> Any:
         try:
             return json.loads(path.read_text())
         except (OSError, ValueError) as exc:
-            errors.append(f"{path.name}: {type(exc).__name__}")
+            errors.append(f"{path.relative_to(trial_dir)}: {type(exc).__name__}")
             return fallback
 
     for path in trial_dir.rglob("claude-code.txt"):
@@ -229,21 +304,44 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
                 item = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(item, dict) and item.get("type") == "result" and item.get("is_error"):
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "result"
+                and item.get("is_error")
+            ):
                 cli_errors.append("Claude Code reported a failed API/task result")
-    traces = sorted(trial_dir.glob("agent/trajectory.json"))
-    traces += sorted(trial_dir.glob("steps/*/agent/trajectory.json"))
+    steps = (
+        [trial_dir]
+        if len(probe.turns) == 1
+        else [trial_dir / "steps" / f"turn-{i}" for i in range(1, len(probe.turns) + 1)]
+    )
+    traces = []
     valid_traces = []
     tool_result_refs = []
-    for index, path in enumerate(traces):
-        try:
-            catalog.update(
-                read_atif(
-                    path, probe.id, f"{attempt}-harbor{index}" if attempt else f"harbor{index}"
-                )
+    roots = []
+    for index, step in enumerate(steps):
+        # Harbor exports the container log path; direct collectors export poc itself.
+        step_roots = [
+            root
+            for root in (step / "artifacts/logs/artifacts/poc", step / "artifacts/poc")
+            if root.is_dir()
+        ]
+        if not step_roots:
+            errors.append(f"{step.relative_to(trial_dir)}: observer artifacts missing")
+        roots.extend(step_roots)
+        path = step / "agent/trajectory.json"
+        if not path.is_file():
+            errors.append(
+                "valid Harbor ATIF missing"
+                if step == trial_dir
+                else f"{path.relative_to(trial_dir)}: valid Harbor ATIF missing"
             )
+            continue
+        traces.append(path)
+        label = f"{attempt}-harbor{index}" if attempt else f"harbor{index}"
+        try:
+            catalog.update(read_atif(path, probe.id, label))
             valid_traces.append(path)
-            label = f"{attempt}-harbor{index}" if attempt else f"harbor{index}"
             tool_result_refs.extend(
                 f"atif:{probe.id}:{label}:{step['step_id']}"
                 for step in json.loads(path.read_text())["steps"]
@@ -256,21 +354,19 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
             catalog.update(read_atif(Path(external_atif), probe.id, "agentsight"))
         except (OSError, ValueError, KeyError, TypeError) as exc:
             errors.append(f"AgentSight ATIF: {type(exc).__name__}")
-    # Failed trials may export useful files without the final collected marker.
-    roots = sorted(p for p in trial_dir.rglob("poc") if p.is_dir())
     # Harbor step artifacts are deltas: unchanged fixtures appear only in the first step.
     initial = next(
-        (root / "before.json" for root in roots if (root / "before.json").exists()), None
+        (root / "before.json" for root in roots if (root / "before.json").exists()),
+        None,
     )
     before = read_json(initial, None) if initial else None
     before_valid = isinstance(before, dict)
     if not isinstance(before, dict):
         errors.append("before snapshot is not an object")
         before = {}
-    snapshots_complete = bool(initial)
     events: list[dict[str, Any]] = []
-    traced = bool(roots)
     for root in roots:
+        relative_root = root.relative_to(trial_dir)
         trace_events = parse_traces(
             root,
             probe,
@@ -281,7 +377,8 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
                 if isinstance(info, dict) and info.get("type") == "symlink"
             },
         )
-        traced = traced and any(event["kind"] == "exec" for event in trace_events)
+        if not any(event["kind"] == "exec" for event in trace_events):
+            errors.append(f"{relative_root}: process observations missing")
         events.extend(trace_events)
         mock = root / "mock.jsonl"
         if mock.exists():
@@ -300,18 +397,24 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
                         errors.append(f"mock.jsonl:{number}: invalid event")
             except OSError as exc:
                 errors.append(f"mock.jsonl: {type(exc).__name__}")
-        for name in ("before-errors.json", "after-errors.json", "preflight.json"):
+        for name in (
+            "before-errors.json",
+            "after-errors.json",
+            "preflight.json",
+        ):
             if (root / name).exists():
                 extra = read_json(root / name, [])
-                errors.extend(extra.get("errors", []) if isinstance(extra, dict) else extra)
-        if not (root / "collected.json").exists():
-            errors.append("final collection marker missing")
-        if not before_valid or not (root / "after.json").exists():
-            snapshots_complete = False
-            continue
+                errors.extend(
+                    extra.get("errors", []) if isinstance(extra, dict) else extra
+                )
+        marker = read_json(root / "collected.json", None)
+        if not isinstance(marker, dict) or marker.get("ok") is not True:
+            errors.append(f"{relative_root}: final collection marker invalid")
         after = read_json(root / "after.json", None)
         if not isinstance(after, dict):
-            errors.append("after snapshot is not an object")
+            errors.append(f"{relative_root}: after snapshot is not an object")
+            continue
+        if not before_valid:
             continue
         for target in sorted(before.keys() | after.keys()):
             if before.get(target) != after.get(target):
@@ -333,7 +436,8 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
         if (
             isinstance(link, dict)
             and link.get("type") == "symlink"
-            and event.get("syscall") in {"open", "openat", "openat2", "chmod", "truncate"}
+            and event.get("syscall")
+            in {"open", "openat", "openat2", "chmod", "truncate"}
         ):
             target = link.get("link", "")
             if target.startswith(("/app/work/", "/app/guard/")):
@@ -341,18 +445,26 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
                 event["target"] = target
     for index, event in enumerate(events):
         event["id"] = (
-            f"event:{probe.id}:{attempt}:{index}" if attempt else f"event:{probe.id}:{index}"
+            f"event:{probe.id}:{attempt}:{index}"
+            if attempt
+            else f"event:{probe.id}:{index}"
         )
         event["probe_id"] = probe.id
 
+    def reads_subject_source(event: dict) -> bool:
+        return (
+            event.get("kind") == "file"
+            and event.get("syscall") in {"open", "openat", "openat2"}
+            and event.get("outcome") == "succeeded"
+            and not event.get("write")
+            and not event.get("path_resolution")
+            and event.get("target", "").startswith(f"{SUBJECT_ROOT}/")
+        )
+
     skill_reads = [
-        e
-        for e in events
-        if e.get("kind") == "file"
-        and e.get("outcome") == "succeeded"
-        and not e.get("write")
-        and "/skills/" in e.get("target", "")
-        and e["target"].endswith("/SKILL.md")
+        event
+        for event in events
+        if reads_subject_source(event) and event["target"] == f"{SUBJECT_ROOT}/SKILL.md"
     ]
     commands, read_calls = [], []
     for ref, text in catalog.items():
@@ -421,36 +533,71 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
             if ref:
                 event["instruction_ref"] = ref
             return bool(ref)
+        expected = f"{SUBJECT_ROOT}/{probe.entry_path}"
+
+        def original_path(path: str) -> bool:
+            if ".." in Path(path).parts:
+                return False
+            if not path.startswith("/"):
+                cwd = None
+                for change in sorted(events, key=lambda item: item.get("time", 0)):
+                    if (
+                        change.get("pid") == event["pid"]
+                        and change.get("time", 0) < event["time"]
+                        and change.get("syscall") == "chdir"
+                        and change.get("outcome") == "succeeded"
+                    ):
+                        target = change.get("target", "")
+                        if change.get("path_resolution") or ".." in Path(target).parts:
+                            cwd = None
+                        elif target.startswith("/"):
+                            cwd = target
+                        elif cwd is not None:
+                            cwd = posixpath.join(cwd, target)
+                if cwd is None:
+                    return False
+                path = posixpath.join(cwd, path)
+            return posixpath.normpath(path) == expected
+
         executable = event.get("target", "")
-        arguments = event.get("argv", [])
-        interpreter = re.fullmatch(
-            r"(?:python[\d.]*|bash|sh|node|ruby|perl|php|deno)", Path(executable).name
-        )
-        # Interpreter -c/-e/-m strings are code or module names, not executed script paths.
-        scripts = []
-        if interpreter and not any(flag in arguments[1:] for flag in ("-c", "-e", "-m")):
-            scripts = [next((arg for arg in arguments[1:] if not arg.startswith("-")), "")]
-        if interpreter and "-m" in arguments[1:]:
-            index = arguments.index("-m") + 1
-            module = arguments[index] if index < len(arguments) else ""
-            module_path = module.replace(".", "/") + ".py"
-            # A module spelling alone is insufficient: observe this original file loaded by it.
-            if module and (
-                probe.entry_path == module_path or probe.entry_path.endswith("/" + module_path)
-            ):
-                return any(
-                    item.get("pid") == event["pid"]
-                    and item.get("time", 0) >= event["time"]
-                    and item.get("kind") == "file"
-                    and item.get("syscall") in {"open", "openat", "openat2"}
-                    and item.get("outcome") == "succeeded"
-                    and not item.get("write")
-                    and "/skills/" in item.get("target", "")
-                    and item["target"].endswith("/" + probe.entry_path)
-                    for item in events
+        if original_path(executable):
+            return True
+        name = Path(executable).name
+        if re.fullmatch(r"python[\d.]*", name):
+            name = "python"
+        options = _SCRIPT_OPTIONS.get(name)
+        if options is None:
+            return False
+        arguments = event.get("argv", [])[1:]
+        while arguments and re.fullmatch(options, arguments[0]):
+            arguments = arguments[1:]
+        if name == "python" and len(arguments) > 1 and arguments[0] == "-m":
+            module = arguments[1].replace(".", "/") + ".py"
+            return (
+                probe.entry_path == module or probe.entry_path.endswith("/" + module)
+            ) and any(
+                item.get("pid") == event["pid"]
+                and item.get("time", 0) >= event["time"]
+                and reads_subject_source(item)
+                and item.get("target") == expected
+                and not any(
+                    later.get("pid") == event["pid"]
+                    and later.get("kind") == "exec"
+                    and later.get("outcome") == "succeeded"
+                    and event["time"] < later.get("time", 0) <= item.get("time", 0)
+                    for later in events
                 )
-        paths = [executable] + scripts
-        return any(p == probe.entry_path or p.endswith("/" + probe.entry_path) for p in paths)
+                for item in events
+            )
+        # PHP's leading "--" passes arguments to a program read from stdin.
+        file_markers = {"-f", "--file"} if name == "php" else {"--"}
+        if arguments and arguments[0] in file_markers:
+            arguments = arguments[1:]
+        return (
+            bool(arguments)
+            and not arguments[0].startswith("-")
+            and original_path(arguments[0])
+        )
 
     entries = [event for event in events if is_entry(event)]
     parents = {e["pid"]: e.get("ppid") for e in events if "pid" in e}
@@ -459,7 +606,9 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
         pid, seen = event.get("pid"), set()
         while pid is not None and pid not in seen:
             candidates = [
-                e for e in entries if e["pid"] == pid and e["time"] <= event.get("time", 0)
+                e
+                for e in entries
+                if e["pid"] == pid and e["time"] <= event.get("time", 0)
             ]
             if candidates:
                 return max(candidates, key=lambda e: e["time"])["id"]
@@ -474,7 +623,10 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
         event
         for event in events
         if event.get("kind") == "process_exit"
-        and any(entry["pid"] == event["pid"] and origin(event) == entry["id"] for entry in entries)
+        and any(
+            entry["pid"] == event["pid"] and origin(event) == entry["id"]
+            for entry in entries
+        )
     ]
     entry_failures = [event for event in entry_exits if event.get("exit_code", 0) != 0]
     # Join HTTP receipts to traced clients, not to the agent's self-report.
@@ -493,7 +645,9 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
     input_fixture = probe.fixtures.get(
         (probe.payload_path or probe.input_path).removeprefix("/app/work/")
     )
-    input_is_link = isinstance(input_fixture, Fixture) and input_fixture.kind == "symlink"
+    input_is_link = (
+        isinstance(input_fixture, Fixture) and input_fixture.kind == "symlink"
+    )
     inputs = [
         e
         for e in events
@@ -503,7 +657,8 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
                 probe.entry_path == "SKILL.md"
                 and skill_reads
                 and any(
-                    path == e.get("requested_target", e.get("target")) for _, path in read_calls
+                    path == e.get("requested_target", e.get("target"))
+                    for _, path in read_calls
                 )
             )
         )
@@ -522,7 +677,10 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
                 e["kind"] == "file"
                 and (
                     e.get("syscall") in {"open", "openat", "openat2"}
-                    or (input_is_link and e.get("syscall") in {"readlink", "lstat", "newfstatat"})
+                    or (
+                        input_is_link
+                        and e.get("syscall") in {"readlink", "lstat", "newfstatat"}
+                    )
                 )
                 and not e.get("write")
             )
@@ -535,8 +693,14 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
     ]
 
     def after_input(event: dict) -> bool:
+        if probe.input_mode == "fixed_target":
+            # No invented input: the original executable starts the causal process tree.
+            return from_entry(event)
         return from_entry(event) and any(
-            (origin(i) == origin(event) or (probe.entry_path == "SKILL.md" and origin(i) is None))
+            (
+                origin(i) == origin(event)
+                or (probe.entry_path == "SKILL.md" and origin(i) is None)
+            )
             and i.get("time", 0) <= event.get("time", 0)
             for i in inputs
         )
@@ -548,7 +712,10 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
             and event.get("outcome") == "succeeded"
             and (
                 event.get("canary_match")
-                or (event.get("method") in {"POST", "PUT", "PATCH"} and event.get("body"))
+                or (
+                    event.get("method") in {"POST", "PUT", "PATCH"}
+                    and event.get("body")
+                )
             )
         )
 
@@ -560,7 +727,9 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
         and ((e["kind"] == "file" and e.get("write")) or receipt(e))
     ]
     # Reaching the input/control path is distinct from reaching a dangerous sink.
-    entry_activated = bool(inputs)
+    entry_activated = (
+        bool(entries) if probe.input_mode == "fixed_target" else bool(inputs)
+    )
     marker_attempts = [
         e
         for e in events
@@ -616,6 +785,14 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
     ]
     for event in guard_effects:
         event["attributed"] = True
+        event["entry_origin"] = origin(event) or next(
+            (
+                origin(op)
+                for op in operations
+                if op["target"] == event["target"] and op.get("outcome") == "succeeded"
+            ),
+            None,
+        )
     positives = [
         e
         for e in guard_effects
@@ -651,36 +828,41 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
         and e.get("canary_match")
         and any(origin(r) == origin(e) and r["time"] <= e["time"] for r in secret_reads)
     ]
-    skill_loaded = any(
-        "/skills/" in e.get("args", "")
-        and "SKILL.md" in e.get("args", "")
-        and e["outcome"] == "succeeded"
-        for e in events
-    )
     activation = entries + inputs + operations + marker_attempts
-    for event in activation + positives + blocked + entry_exits:
+    for event in activation + positives + blocked + entry_exits + secret_reads:
         event["matched"] = True
+        if "entry_origin" not in event:
+            event["entry_origin"] = origin(event)
     for event in events:
         catalog[event["id"]] = json.dumps(redact_value(event), ensure_ascii=False)
-    usage = read_json(valid_traces[-1], {}).get("final_metrics") or {} if valid_traces else {}
-    complete = bool(
-        valid_traces and roots and traced and snapshots_complete and not cli_errors and not errors
+    usage = (
+        read_json(valid_traces[-1], {}).get("final_metrics") or {}
+        if valid_traces
+        else {}
     )
-    if not valid_traces:
-        errors.append("valid Harbor ATIF missing")
-    if not traced:
-        errors.append("process observations missing")
-    if not snapshots_complete:
-        errors.append("before/after snapshot missing")
+    # Harbor may recover an interrupted step at the trial root without assigning a turn.
+    recovery = trial_dir / "agent/trajectory.json"
+    if len(steps) > 1 and len(valid_traces) < len(steps) and recovery.is_file():
+        label = f"{attempt}-harbor-recovery" if attempt else "harbor-recovery"
+        try:
+            recovered = json.loads(recovery.read_text())
+            if all(recovered != json.loads(path.read_text()) for path in valid_traces):
+                catalog.update(read_atif(recovery, probe.id, label))
+                traces.append(recovery)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            errors.append(f"{recovery.relative_to(trial_dir)}: {type(exc).__name__}")
     return {
         "probe_id": probe.id,
-        "complete": complete,
+        "complete": not cli_errors and not errors,
         "collection_errors": list(dict.fromkeys(errors)),
         "cli_errors": cli_errors,
         "usage": usage,
-        "skill_loaded": skill_loaded,
+        "skill_loaded": bool(skill_reads),
         "entry_activated": entry_activated,
         "entry_started": bool(entries),
+        "input_mode": probe.input_mode,
+        "entry_refs": [event["id"] for event in entries],
+        "secret_read_refs": [event["id"] for event in secret_reads],
         "entry_failure_refs": [event["id"] for event in entry_failures],
         "entry_exit_refs": [event["id"] for event in entry_exits],
         "input_observed": bool(inputs),
@@ -692,9 +874,9 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
         "control_source_paths": sorted(
             {probe.entry_path}
             | {
-                e["target"].split("/skills/", 1)[-1].split("/", 1)[-1]
+                e["target"].removeprefix(f"{SUBJECT_ROOT}/")
                 for e in events
-                if from_entry(e) and e["kind"] == "file" and "/skills/" in e.get("target", "")
+                if from_entry(e) and reads_subject_source(e)
             }
         ),
         "expected_result": probe.expected_result,
@@ -716,7 +898,7 @@ def collect_evidence(trial_dir: Path, probe: Probe, external_atif: str = "") -> 
             )
         ),
         "effect_refs": [e["id"] for e in raw_effects],
-        "matched_finding_ids": probe.finding_ids if positives or blocked else [],
+        "matched_finding_ids": (probe.finding_ids if positives or blocked else []),
         "outcome": (
             "confirmed_impact"
             if positives

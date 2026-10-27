@@ -1,6 +1,6 @@
 //! Shared HTTP client for local model inference backends.
 //!
-//! Only Ollama is supported today.  Configuration is read from the same
+//! The default factory supports only local Ollama. Configuration is read from the same
 //! environment variables the rest of the toolchain uses:
 //!
 //! - `AGENT_SEC_MODEL_SERVICE_BACKEND` (default `ollama`)
@@ -15,6 +15,8 @@
 //! [`ModelClient`] so their transport stays decoupled from this crate.
 
 pub mod provider;
+/// Explicit remote access for callers whose product contract permits sending model input.
+pub mod remote;
 
 use std::time::Duration;
 

@@ -8,7 +8,10 @@ from pathlib import Path
 with urllib.request.urlopen(sys.argv[1], timeout=5) as response:
     metadata = json.loads(response.read(1048576))
 source = Path(metadata["source"]).resolve()
-if not source.is_relative_to(Path("/app/work")) or metadata["destination"] != "/allowed":
+if (
+    not source.is_relative_to(Path("/app/work"))
+    or metadata["destination"] != "/allowed"
+):
     print("rejected unauthorized delivery metadata")
     sys.exit(0)
 with source.open("rb") as stream:

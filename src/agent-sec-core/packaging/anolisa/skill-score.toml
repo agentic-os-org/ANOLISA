@@ -1,0 +1,47 @@
+manifest_version = 2
+
+[component]
+name = "sec-core-skill-score"
+version = "1.1.0"
+layer = "runtime"
+domain = "security"
+display_name = "Agent Security Core optional Skill Score runtime"
+owner = "agent-sec-core-team"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.3.20"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64"]
+
+[[component.dependencies]]
+name = "python3"
+kind = "system-package"
+probe = "python3 --version"
+packages = { rpm = "python3", deb = "python3" }
+
+[component.prepare]
+script = "usr/local/lib/anolisa/sec-core-skill-score/prepare.sh"
+timeout_secs = 1800
+
+[[component.hooks]]
+phase = "pre_uninstall"
+script = "{libdir}/sec-core-skill-score/uninstall.py"
+timeout_secs = 120
+strict = true
+
+[component.layout]
+modes = ["system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/sec-core-skill-score/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "lib/anolisa/sec-core-skill-score/"
+target = "{libdir}/sec-core-skill-score/"

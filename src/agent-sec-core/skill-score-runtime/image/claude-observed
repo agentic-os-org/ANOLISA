@@ -1,6 +1,7 @@
 #!/bin/sh
-# Reuse Harbor's installed Agent unchanged; only observe actual CLI executions.
-case "$1" in --version|-v|--help) exec /usr/bin/claude "$@" ;; esac
+# Keep the observed executable independent of Harbor's PATH and installation probe.
+claude_real=/opt/asc/claude/node_modules/.bin/claude
+case "$1" in --version|-v|--help) exec "$claude_real" "$@" ;; esac
 mkdir -p /logs/artifacts/poc
 exec strace -ff -ttt -yy -s 2048 -e trace=%process,%file,%network \
-  -o /logs/artifacts/poc/trace /usr/bin/claude "$@"
+  -o /logs/artifacts/poc/trace "$claude_real" "$@"

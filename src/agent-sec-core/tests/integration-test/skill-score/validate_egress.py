@@ -5,6 +5,8 @@ import asyncio
 import hashlib
 import importlib.metadata
 import json
+import os
+import re
 import selectors
 import shlex
 import socket
@@ -16,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import harbor
+from agent_sec_skill_score_runtime.egress import POLICY_PATH, prepare_egress
 from harbor.environments.factory import EnvironmentFactory
 from harbor.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
 from harbor.models.task.config import NetworkMode, NetworkPolicy
@@ -24,14 +27,14 @@ from harbor.models.trial.config import (
 )
 from harbor.models.trial.paths import TrialPaths
 
-from agent_sec_skill_score_runtime.egress import POLICY_PATH, prepare_egress
-
 ALLOW_HOST = "example.com"
 DENY_HOST = "www.iana.org"
 
 
 def command(arguments: list[str]) -> str:
-    return subprocess.run(arguments, check=True, capture_output=True, text=True, timeout=30).stdout
+    return subprocess.run(
+        arguments, check=True, capture_output=True, text=True, timeout=30
+    ).stdout
 
 
 def package_hash() -> str:
@@ -39,7 +42,9 @@ def package_hash() -> str:
     root = Path(harbor.__file__).parent
     for path in sorted(root.rglob("*")):
         if path.is_file() and "__pycache__" not in path.parts:
-            digest.update(str(path.relative_to(root)).encode() + b"\0" + path.read_bytes())
+            digest.update(
+                str(path.relative_to(root)).encode() + b"\0" + path.read_bytes()
+            )
     return digest.hexdigest()
 
 
@@ -56,7 +61,9 @@ def diagnostic_command(arguments: list[str]) -> dict[str, Any]:
     """Bound diagnostics without allowing a failed probe to prevent cleanup."""
     data = bytearray()
     limit = 64 * 1024
-    process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    process = subprocess.Popen(
+        arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     deadline = time.monotonic() + 10
     try:
         with selectors.DefaultSelector() as selected:
@@ -104,9 +111,18 @@ def diagnostics(output: Path, project: str) -> None:
                 "inspect": diagnostic_command(
                     ["docker", "inspect", "--format", fields, identifier]
                 ),
-                "logs": diagnostic_command(["docker", "logs", "--tail", "100", identifier]),
+                "logs": diagnostic_command(
+                    ["docker", "logs", "--tail", "100", identifier]
+                ),
                 "name_resolution": diagnostic_command(
-                    ["docker", "exec", identifier, "sh", "-c", "cat /etc/hosts /etc/resolv.conf"]
+                    [
+                        "docker",
+                        "exec",
+                        identifier,
+                        "sh",
+                        "-c",
+                        "cat /etc/hosts /etc/resolv.conf",
+                    ]
                 ),
             }
             if identifier in objects(project, service="asc-egress"):
@@ -136,7 +152,9 @@ def curl(host: str, address: str = "") -> str:
     return shlex.join([*args, f"https://{host}/"])
 
 
-def environment(root: Path, project: str, image: str, address: str, failing: bool) -> Any:
+def environment(
+    root: Path, project: str, image: str, address: str, failing: bool
+) -> Any:
     root.mkdir()
     prepare_egress(root / "task", ALLOW_HOST, [address])
     compose_path = root / "task/environment/docker-compose.yaml"
@@ -158,7 +176,11 @@ def environment(root: Path, project: str, image: str, address: str, failing: boo
         session_id=project,
         trial_paths=paths,
         task_env_config=TaskEnvironmentConfig(
-            docker_image=image, network_mode=NetworkMode.PUBLIC, workdir="/", cpus=1, memory_mb=512
+            docker_image=image,
+            network_mode=NetworkMode.PUBLIC,
+            workdir="/",
+            cpus=1,
+            memory_mb=512,
         ),
         network_policy=public,
         phase_network_policies=[public],
@@ -167,16 +189,22 @@ def environment(root: Path, project: str, image: str, address: str, failing: boo
 
 async def exercise(args: argparse.Namespace, report: dict[str, Any]) -> None:
     addresses = {
-        host: sorted({row[4][0] for row in socket.getaddrinfo(host, 443, socket.AF_INET)})[0]
+        host: sorted(
+            {row[4][0] for row in socket.getaddrinfo(host, 443, socket.AF_INET)}
+        )[0]
         for host in (ALLOW_HOST, DENY_HOST)
     }
     report["resolved_ipv4"] = addresses
     for host, address in addresses.items():
         command(shlex.split(curl(host, address)))
     project = "asc-egress-" + uuid.uuid4().hex[:12]
-    normal = environment(args.output / "normal", project, args.image, addresses[ALLOW_HOST], False)
+    normal = environment(
+        args.output / "normal", project, args.image, addresses[ALLOW_HOST], False
+    )
 
-    async def check(name: str, text: str, *, success: bool = True, service: str = "") -> str:
+    async def check(
+        name: str, text: str, *, success: bool = True, service: str = ""
+    ) -> str:
         result = (
             await normal.service_exec(text, service=service, timeout_sec=20)
             if service
@@ -236,7 +264,9 @@ async def exercise(args: argparse.Namespace, report: dict[str, Any]) -> None:
         upload = args.output / "upload.txt"
         upload.write_text("ASC public file transfer\n")
         await normal.upload_file(upload, "/run/asc-transfer.txt")
-        await normal.download_file("/run/asc-transfer.txt", args.output / "download.txt")
+        await normal.download_file(
+            "/run/asc-transfer.txt", args.output / "download.txt"
+        )
         assert (args.output / "download.txt").read_bytes() == upload.read_bytes()
         report["checks"]["file_transfer"] = True
 
@@ -253,9 +283,13 @@ async def exercise(args: argparse.Namespace, report: dict[str, Any]) -> None:
                 ]
             ),
         )
-        shared = await check("sidecar_observes_poison", "cat /etc/hosts", service="asc-egress")
+        shared = await check(
+            "sidecar_observes_poison", "cat /etc/hosts", service="asc-egress"
+        )
         assert poison in shared
-        assert "Example Domain" in await check("mapper_ignores_shared_hosts", curl(ALLOW_HOST))
+        assert "Example Domain" in await check(
+            "mapper_ignores_shared_hosts", curl(ALLOW_HOST)
+        )
         await check(
             "mixed_case_mapping_miss_denied",
             shlex.join(
@@ -282,11 +316,15 @@ async def exercise(args: argparse.Namespace, report: dict[str, Any]) -> None:
         assert f"hit host mapper: {ALLOW_HOST}" in logs
         assert "resolver: domain ExAmPlE.CoM does not exist" in logs
         await check(
-            "pause_proxy", "kill -STOP $(cat /run/asc-egress.gost.pid)", service="asc-egress"
+            "pause_proxy",
+            "kill -STOP $(cat /run/asc-egress.gost.pid)",
+            service="asc-egress",
         )
         await check("paused_proxy_denied", curl(ALLOW_HOST), success=False)
         await check(
-            "resume_proxy", "kill -CONT $(cat /run/asc-egress.gost.pid)", service="asc-egress"
+            "resume_proxy",
+            "kill -CONT $(cat /run/asc-egress.gost.pid)",
+            service="asc-egress",
         )
         assert "Example Domain" in await check("resumed_proxy", curl(ALLOW_HOST))
         command(["docker", "stop", "--time", "2", sidecar_ids[0]])
@@ -324,7 +362,9 @@ async def exercise(args: argparse.Namespace, report: dict[str, Any]) -> None:
         ids = objects(failed_project, service="asc-egress")
         assert len(ids) == 1
         assert (
-            command(["docker", "inspect", "--format", "{{.State.ExitCode}}", ids[0]]).strip()
+            command(
+                ["docker", "inspect", "--format", "{{.State.ExitCode}}", ids[0]]
+            ).strip()
             == "42"
         )
     finally:
@@ -348,12 +388,17 @@ async def exercise(args: argparse.Namespace, report: dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--image", default="agent-sec-skill-score:1")
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--egress-image", required=True)
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("run this integration test on Linux")
     if importlib.metadata.version("harbor") != "0.22.0":
         parser.error("this contract targets Harbor 0.22.0")
+    for identity in (args.image, args.egress_image):
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", identity):
+            parser.error("pass both immutable image IDs from runtime-manifest.json")
+    os.environ["ASC_SKILL_SCORE_EGRESS_IMAGE"] = args.egress_image
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     before = package_hash()

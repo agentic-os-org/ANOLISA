@@ -89,6 +89,24 @@ revision、搜索路径、已有测试和未自动验证项；不使用构建产
 5. 少数纯函数能力是否允许 Rust CLI 直接调用必须形成独立产品合同；在批准前，不构成通用
    daemon fallback。
 
+#### 3.1.1 显式 Skill 安全评测合同
+
+`agent-sec-cli skillsec score plan/run` 是明确调用的本地评测入口，生产调用方为单机
+Linux 用户与 SkillEval。其 Rust 入口直接调用 `asc-skill-score`，规划、共享模型接入、
+证据裁决和评分均在 Rust 中执行。它不访问 daemon 的 SQLite、PCP 或 Repository，
+不接管 daemon 生命周期，也不因 daemon 故障自动触发。
+
+首版明确保留一个外部执行边界：用户显式安装 `sec-core-skill-score` 后，由固定版本的
+Python 3.12 Harbor worker 运行第三方 Harbor、回收 Docker 探针环境并归一化观测。
+该 worker 的自有代码、最小共享契约和锁文件单独交付；它不承担 Judge、风险分级或
+扣分。基础 `sec-core` 安装不下载这些依赖。此例外仅适用于该评测入口，不允许 V1
+Python CLI、daemon、middleware 或评分核心作为 V2 产品的运行时后备。
+
+接口使用 task-v1/report-v1 和有版本的 worker-v1 文件协议；执行前绑定完整输入摘要，
+每个请求拥有独立资源记录，超时与取消必须核验回收状态。验收包括 Python oracle
+差分、已安装包调用、独立 Linux 与 FC 上的真实任务，不能由编译或单元测试替代。
+细节及兼容变化见 [Skill Score 原生设计](skill-score-native-design_zh.md)。
+
 ### 3.2 系统服务、身份与查询
 
 1. Host 上默认 one daemon per host，由 system-scope systemd 管理；Kubernetes 上每个 Node

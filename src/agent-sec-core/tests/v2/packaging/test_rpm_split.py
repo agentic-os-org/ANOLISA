@@ -67,6 +67,13 @@ def patterns(text):
 
 
 class RpmSplitTests(unittest.TestCase):
+    def test_base_rpm_ships_skill_score_notices(self):
+        files = sections(SPEC.read_text())["files", "agent-sec-core"].splitlines()
+        for name in ("skill-score-NOTICE", "masb-LICENSE"):
+            path = f"v2/crates/asc-skill-score/assets/{name}"
+            self.assertIn(f"%license {path}", files)
+            self.assertTrue((ROOT / path).is_file())
+
     @unittest.skipUnless(shutil.which("rpmspec"), "rpmspec is required")
     def test_rpm_build_modes_select_matching_sources_and_commands(self):
         with tempfile.TemporaryDirectory(prefix="sec-rpm-spec-") as temporary:

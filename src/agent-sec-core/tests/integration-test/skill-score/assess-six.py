@@ -1,14 +1,12 @@
-"""Fresh six-Skill CLI acceptance; plan before optional RPM installation, run after it."""
+"""Exercise the installed native Skill Score CLI on six sample Skills."""
 
 import argparse
 import concurrent.futures
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -30,31 +28,22 @@ def write(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
-def assess(name, snapshot, output, stage, python_module=False):
+def assess(name, snapshot, output, stage, cli):
     root = output / name
     root.mkdir(parents=True, exist_ok=True)
     result = root / ("task.json" if stage == "plan" else "report.json")
     if result.exists() or (root / f"{stage}-status.json").exists():
         raise ValueError(f"refusing to reuse prior {stage} result: {root}")
-    command = (
-        ["agent-sec-cli"]
-        if not python_module and shutil.which("agent-sec-cli")
-        else [sys.executable, "-m", "agent_sec_cli.cli"]
-    )
-    check = subprocess.run(
-        command + ["skill-score", stage, "--help"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    if check.returncode:
-        raise RuntimeError(
-            f"assessment harness selected an incompatible CLI: {command}; skill-score {stage} unavailable"
-        )
-    command += ["skill-score", stage]
-    command += [str(snapshot / "skills" / name) if stage == "plan" else str(root / "task.json")]
-    command += ["--output-file", str(result)]
+    source = snapshot / "skills" / name if stage == "plan" else root / "task.json"
+    command = [
+        cli,
+        "skillsec",
+        "score",
+        stage,
+        str(source),
+        "--output-file",
+        str(result),
+    ]
     if stage == "run":
         command += ["--evidence-dir", str(root / "evidence")]
     started = time.monotonic()
@@ -75,23 +64,25 @@ def assess(name, snapshot, output, stage, python_module=False):
             code = 1
     data = read(result)
     raw = (root / f"{stage}.stdout").read_text()
-    valid_stdout = bool(data) and json.loads(raw) == data
-    calls = re.findall(
-        r"\[skill-score\] Judge \w+ attempt=\d+ tokens=(\d+) seconds=([\d.]+)",
-        (root / f"{stage}.stderr").read_text(),
-    )
+    try:
+        valid_stdout = bool(data) and json.loads(raw) == data
+    except json.JSONDecodeError:
+        valid_stdout = False
     status = {
         "exit_code": code,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "stdout_matches_json": valid_stdout,
-        "judge_responses": len(calls),
-        "judge_tokens": sum(int(tokens) for tokens, _ in calls),
     }
     if stage == "run" and data:
         expected = [p["id"] for p in read(root / "task.json")["audit"]["probes"]]
-        status["all_tasks_reported"] = expected == [e["task_id"] for e in data["execution"]]
+        status["all_tasks_reported"] = expected == [
+            e["task_id"] for e in data["execution"]
+        ]
     write(root / f"{stage}-status.json", status)
-    print(f"{name}: {stage} exit={code}, decision={data.get('decision', '-')}", flush=True)
+    print(
+        f"{name}: {stage} exit={code}, decision={data.get('decision', '-')}", flush=True
+    )
+    return code == 0 and valid_stdout and status.get("all_tasks_reported", True)
 
 
 def summarize(output, names=SKILLS):
@@ -153,11 +144,15 @@ def summarize(output, names=SKILLS):
             ]
             (root / "report.md").write_text("\n".join(lines) + "\n")
     ranking = sorted(
-        (r for r in rows if r["decision"] == "scored"), key=lambda r: (-r["score"], r["skill"])
+        (r for r in rows if r["decision"] == "scored"),
+        key=lambda r: (-r["score"], r["skill"]),
     )
     write(
         output / "ranking.json",
-        [{"rank": i + 1, "skill": r["skill"], "score": r["score"]} for i, r in enumerate(ranking)],
+        [
+            {"rank": i + 1, "skill": r["skill"], "score": r["score"]}
+            for i, r in enumerate(ranking)
+        ],
     )
     write(output / "summary.json", rows)
     lines = [
@@ -181,7 +176,16 @@ def summarize(output, names=SKILLS):
             "",
             "```json",
             json.dumps(
-                {k: r[k] for k in ("plan", "run", "usage", "corrections", "dynamic_diagnostic")},
+                {
+                    k: r[k]
+                    for k in (
+                        "plan",
+                        "run",
+                        "usage",
+                        "corrections",
+                        "dynamic_diagnostic",
+                    )
+                },
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -202,12 +206,20 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path)
     parser.add_argument("--stage", choices=("plan", "run"), required=True)
     parser.add_argument("--skills", nargs="+", default=SKILLS)
-    parser.add_argument(
-        "--python-module",
-        action="store_true",
-        help="Use the installed RPM's Python entry point without replacing the host CLI",
-    )
     args = parser.parse_args()
+    cli = shutil.which("agent-sec-cli")
+    if cli is None:
+        parser.exit(
+            1, "agent-sec-cli is missing; install the native sec-core package\n"
+        )
+    check = subprocess.run(
+        [cli, "skillsec", "score", args.stage, "--help"],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if check.returncode:
+        parser.exit(1, f"{cli} does not support skillsec score {args.stage}\n")
     args.output.mkdir(parents=True, exist_ok=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         jobs = [
@@ -217,11 +229,11 @@ if __name__ == "__main__":
                 args.snapshot.resolve(),
                 args.output.resolve(),
                 args.stage,
-                args.python_module,
+                cli,
             )
             for name in args.skills
         ]
-        for job in concurrent.futures.as_completed(jobs):
-            job.result()
+        results = [job.result() for job in jobs]
     if args.stage == "run":
         summarize(args.output, args.skills)
+    raise SystemExit(0 if all(results) else 1)

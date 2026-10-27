@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/protectskills/MaliciousAgentSkillsBench",
+  "commit": "f7d28b1a9de4eb33d552529cf79d1065d765f6c3",
+  "path": "code/scanner/skill-security-scan",
+  "license": "MIT",
+  "changes": "A subset of the scanner rules was ported to Rust for the Skill Score static detector."
+}

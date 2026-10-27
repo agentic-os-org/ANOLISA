@@ -16,7 +16,7 @@ Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
 Summary:        Agent Security V2 runtime and sandbox
 
-License:        Apache-2.0
+License:        Apache-2.0 AND MIT
 URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 %if ! %{with nightly_online}
@@ -324,8 +324,11 @@ fi
 %config(noreplace) %attr(0644,root,root) %{_sysconfdir}/agent-sec/sandbox/permissions.json.template
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/agent-sec/skillsec.json
 %license LICENSE
+%license v2/crates/asc-skill-score/assets/skill-score-NOTICE
+%license v2/crates/asc-skill-score/assets/masb-LICENSE
 
 %package -n agent-sec-plugins
+License:        Apache-2.0
 Summary:        Agent Security framework plugins and hooks
 Requires:       %{name} = %{version}-%{release}
 Requires:       python3 >= 3.11
@@ -370,6 +373,7 @@ Register them separately with the target Agent's user configuration.
 
 
 %package -n agent-sec-skills
+License:        Apache-2.0
 Summary:        Agent security skill definitions
 Requires:       %{name} = %{version}-%{release}
 
