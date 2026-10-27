@@ -38,14 +38,13 @@ impl Selection {
                 .filter(|package| names.contains(&package.package_id.as_str()))
                 .map(|package| (package.package_id.clone(), package.clone()))
                 .collect();
-
             Ok(Self {
                 packages,
-
                 _inventory: Some(inventory),
                 _prefix_lock: Some(lock),
             })
         } else {
+            crate::database::reject_legacy_prefix(prefix)?;
             Ok(Self::unmanaged())
         }
     }
@@ -53,7 +52,6 @@ impl Selection {
     fn unmanaged() -> Self {
         Self {
             packages: BTreeMap::new(),
-
             _inventory: None,
             _prefix_lock: None,
         }
@@ -119,7 +117,7 @@ mod tests {
             openclaw: None,
         };
         crate::configuration::configure_using(&settings, |path, bytes| {
-            let database_lock = crate::store::filesystem::safe_file(&paths.root.join("lock"))?;
+            let database_lock = crate::database::safe_file(&paths.root.join("lock"))?;
             use std::os::fd::AsRawFd;
             // SAFETY: this fixture retains the owned descriptor across the nonblocking call.
             assert_ne!(unsafe { libc::flock(database_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);

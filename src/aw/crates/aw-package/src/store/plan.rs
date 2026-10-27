@@ -134,6 +134,7 @@ impl PackagePlan {
 ///
 /// # Errors
 /// Rejects malformed input, unsafe paths and inconsistent database records.
+#[cfg(test)]
 pub fn install(paths: &DatabasePaths, bundle: &Path, prefix: &Path) -> Result<PackagePlan> {
     install_checked(paths, bundle, prefix, |_| Ok(()))
 }

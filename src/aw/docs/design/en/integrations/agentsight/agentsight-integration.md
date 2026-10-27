@@ -59,7 +59,7 @@ store and does not parse or write private AW Journal files.
 
 `required` mode needs evidence for each requested source capability before launch. Admission must distinguish query compatibility, trajectory collection and eBPF coverage; unsupported or unready required capabilities reject startup. Optional-source failures retain the existing bounded degradation behavior in the [connector](agentsight-readonly.md).
 
-All-in-one packaging must select artifacts and profiles by capability, permit an AW-only installation and distinguish installed, enabled and ready. Deployment owns privileged probes and worker shutdown. Hooks must not install packages, change file capabilities or start root workers; ending one AW run must preserve shared services.
+Deployment selects independently delivered artifacts and profiles by capability, permits an AW-only installation and distinguishes installed, enabled and ready. Deployment owns privileged probes and worker shutdown. Hooks must not install packages, change file capabilities or start root workers; ending one AW run must preserve shared services.
 
 ## Proposed semantic evaluation contract
 

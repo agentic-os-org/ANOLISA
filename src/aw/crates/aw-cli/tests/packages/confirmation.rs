@@ -45,7 +45,7 @@ fn noninteractive_and_json_removal_require_explicit_consent_without_writes() {
 fn explicit_consent_preserves_integrity_checks() {
     let f = Fixture::new();
     success(f.install().output().unwrap());
-    fs::write(f.prefix.join("bin/aw"), b"modified").unwrap();
+    fs::write(f.prefix.join("bin/provider"), b"modified").unwrap();
     let output = invoke(
         f.command()
             .args(["uninstall", "-y", "--json", "--prefix"])
@@ -69,5 +69,5 @@ fn explicit_consent_preserves_integrity_checks() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(!f.prefix.join("bin/aw").exists());
+    assert!(!f.prefix.join("bin/provider").exists());
 }

@@ -54,6 +54,7 @@ pub struct RecoveryReport {
 /// # Errors
 /// Rejects unknown journals, unsafe paths, unavailable exclusive locks, changed databases,
 /// and cancellation. Ownership conflicts are returned in the report; bytes and journals remain.
+#[cfg(test)]
 pub fn recover(paths: &DatabasePaths, cancel: &AtomicBool) -> Result<RecoveryReport> {
     recover_checked(paths, cancel, |_| Ok(()))
 }

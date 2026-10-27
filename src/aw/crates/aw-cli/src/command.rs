@@ -21,7 +21,7 @@ use package::{Configure, Edit, Install, Show};
     about = "Run native Agents and manage local AW software and configuration",
     disable_help_subcommand = true,
     arg_required_else_help = true,
-    after_help = "Install accepts local unpacked bundles with package.json.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
+    after_help = "Install accepts local unpacked Provider bundles with package.json.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -44,7 +44,7 @@ enum Command {
     },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
-    /// Install a local software bundle, or connect native Hooks
+    /// Install a local Provider extension, or connect native Hooks
     Install(Install),
     /// Remove selected packages or an entire installation, preserving unknown files
     Uninstall(package::Uninstall),

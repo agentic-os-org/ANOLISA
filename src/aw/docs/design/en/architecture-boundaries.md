@@ -3,8 +3,8 @@
 [中文版](../zh/architecture-boundaries.md)
 
 The internal Adapter library compiles with AW; concrete Providers connect through
-a process protocol. This migration aligns source ownership and regression gates
-while preserving commands, protocols and Preview installation behavior.
+a process protocol. AW owns runtime integration and Provider configuration;
+component owners build their backends, and distribution selects and packages them.
 
 ## Directories and ownership
 
@@ -24,7 +24,7 @@ ANOLISA/
 │   │   ├── aw-core/                # Plan API and Journal
 │   │   ├── aw-cli/                 # Unified aw command frontend
 │   │   ├── aw-service/             # Client, service and runtime state
-│   │   └── aw-package/             # Current Preview build, install and config editing
+│   │   └── aw-package/             # AW extension management and config editing
 │   ├── tests/                     # Regression matrix, native inventory and shared checks
 │   └── scripts/                   # Unified gate
 ├── providers/                     # Independent concrete Provider collaboration
@@ -32,7 +32,8 @@ ANOLISA/
 │   └── tokenless/                 # Own workspace, lockfile, source and tests
 ├── src/agent-sec-core/            # Security engine and public product interfaces
 ├── src/tokenless/                 # Compression engine and public product interfaces
-└── distribution/                  # OS distribution composition
+└── distribution/                  # Product installation and composition
+    └── packaging/aw/              # Build/package scripts and concrete Provider templates
 ```
 
 `providers/` accepts first-party and community implementations. External
@@ -45,18 +46,25 @@ development dependencies on them.
 
 `aw-cli` owns the unified `aw` command. The standalone `aw-package` executable
 has been removed; the Rust crate remains.
-It directly calls the `aw-package` library for installation and offline editing;
-`aw-build` remains a maintenance binary in `aw-package`. `aw-service` provides
+It directly calls `aw-package` for local Provider management and offline
+editing. File verification and transactions stay in its private `store` module;
+runtime leases belong to `aw-exec`. Product installation remains the distributor
+or native manager responsibility. `make -C src/aw build` builds the AW CLI, while
+`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` invokes ordinary build/package scripts in
+`distribution/packaging/aw/`. Independent backend delivery and configuration
+defaults belong to distribution. `aw-service` provides
 the client and service as a library. Libraries do not depend on `aw-cli`.
 Both launcher and service use `aw-adapter`, which does not depend on service,
 Host or CLI internals.
 
-Software installation uses `aw install --prefix ... --bundle ...`; native Hook
+Local AW extension installation uses `aw install --prefix ... --bundle ...`; native Hook
 registration uses `aw agent connect --config ... --agent ...`. The old native
 `aw install --config ... --agent ...` remains compatible. Mixed installation
-and native-registration arguments fail before mutation. Preview still accepts
-only its existing local packages; this extraction adds no URL installer, package
-manager backend, automatic activation or receipt migration.
+and native-registration arguments fail before mutation. Local packages use
+`package.json` and declare the Provider protocol; `manifest.json` and core/backend
+bundles are rejected. This path does not fetch URLs, invoke a native package manager or
+activate a Provider. Installed Providers also connect directly through
+`transport.argv` without an AW package record; RPM-owned files retain RPM ownership.
 
 | Interface or state | Ownership |
 | --- | --- |
@@ -116,18 +124,17 @@ externally installed Providers integrate through their public contract. The SDK
 is a source interface, while JSON/stdio is the runtime boundary. This does not
 promise a stable Rust binary ABI.
 
-### This migration and subsequent releases
+### Independent delivery
 
-Independent workspaces, lockfiles and test entrypoints are implemented. Both
-Providers still use repository-local AW library paths, and Tokenless composition
-tests reference the sec-core Provider. Builds and releases outside the repository
-are not yet supported for these implementations.
+The Providers own independent workspaces, lockfiles and test entrypoints.
+The bundled implementations still use repository-local AW SDK paths, and
+Tokenless composition tests reference the sec-core Provider. Out-of-tree builds
+for these implementations still require published, pinned SDK packages.
 
-Preview currently delivers core and Providers as one build set. Installation
-therefore checks matching versions and source commits to establish their common
-origin. Published SDKs and Provider artifacts will underpin a compatibility matrix
-before installation rules change, with migration tests for old receipts. This
-migration requires no user configuration or receipt changes.
+Integration builds select and test framework, Provider and backend versions
+together. Provider bundles declare their own IDs and versions; the AW extension
+API requires the process protocol, not matching AW core package records.
+Core and backend installation remains outside AW's Provider management API.
 
 ## Regression boundary
 

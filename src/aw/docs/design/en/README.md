@@ -4,6 +4,11 @@
 
 Design documents explain implementation ownership, protocol invariants and trade-offs. Operational steps live in the [developer guide](../../../../../docs/developer-guide/en/aw/index.md). Start with [architecture](architecture.md) and [boundaries](architecture-boundaries.md), then follow the area you are changing.
 
+`aw-package` owns local Provider management and configuration through a private
+file-transaction store; `aw-exec` owns runtime file leases. Distribution Make
+targets and scripts build release artifacts. Independently installed Providers
+connect through the process protocol without AW package records.
+
 ## Request execution
 
 | Area | Contract |
@@ -12,7 +17,7 @@ Design documents explain implementation ownership, protocol invariants and trade
 | Native wiring | [Adapter dispatch](adapters/adapter-dispatch.md) |
 | Runtime | [Service](runtime/local-service.md) · [Policy updates](runtime/policy-reload.md) · [Host](runtime/provider-host.md) · [Bounded execution](runtime/bounded-execution.md) |
 | Capability plans | [Core execution](core-execution.md) |
-| Packages | [Package management](packaging/package-management.md) |
+| Provider extensions | [Local Provider management](packaging/package-management.md) |
 
 ## Adapters and extensions
 

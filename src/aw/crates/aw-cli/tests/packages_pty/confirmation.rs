@@ -38,7 +38,7 @@ fn tty_acceptance_runs_removal_and_quiet_does_not_bypass_the_prompt() {
         let output = captured(&f, "accept", &options);
         assert_eq!(output["code"], 0);
         assert!(text(&output, "terminal").contains("[y/N]"));
-        assert!(!f.prefix.join("bin/aw").exists());
+        assert!(!f.prefix.join("bin/provider").exists());
         if options.contains(&"--quiet") {
             assert!(text(&output, "stdout").is_empty());
         }
@@ -63,7 +63,7 @@ fn tty_refusal_default_and_eof_preserve_every_installed_byte() {
         assert!(text(&output, "stdout").is_empty());
         assert_eq!(fs::read(&receipt).unwrap(), before);
         assert_eq!(fs::metadata(&receipt).unwrap().ino(), inode);
-        assert!(f.prefix.join("bin/aw").is_file());
+        assert!(f.prefix.join("bin/provider").is_file());
     }
 }
 

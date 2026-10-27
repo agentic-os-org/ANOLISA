@@ -2,8 +2,8 @@
 
 use super::{Fixture, Process, TIMEOUT};
 use aw_package::database::{
-    DatabasePaths, Installation, InstalledDatabase, Inventory, Manager, Registration as Registered,
-    RegistrationPointer, Scope,
+    DatabasePaths, Installation, InstalledDatabase, InstalledPackage, Inventory, Manager,
+    Registration as Registered, RegistrationPointer, Scope,
 };
 use serde_json::{json, Value};
 use std::{
@@ -47,7 +47,8 @@ impl Registration {
         let executable = core_bundle.join("payload/bin/aw");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::copy(env!("CARGO_BIN_EXE_aw"), &executable).unwrap();
-        package(&core_bundle, "aw-core", &["bin/aw"]);
+        // Provider fixtures carry launcher copies to exercise file leases, not core delivery.
+        package(&core_bundle, "fixture.launcher-provider", &["bin/aw"]);
         let core_record = seed(&paths, &core_bundle, &core, "registration-core");
 
         let bundle = fixture.root.join("bundle-agent");
@@ -78,7 +79,7 @@ time.sleep(30)
         .unwrap();
         package(
             &bundle,
-            "example.agent",
+            "fixture.agent-provider",
             &["bin/hermes", "bin/python-fixture"],
         );
         let agent_record = seed(&paths, &bundle, &agent, "registration-agent");
@@ -192,7 +193,11 @@ fn seed(
     prefix: &Path,
     installation_id: &str,
 ) -> Installation {
-    let packages = aw_package::open_bundle::inspect(bundle).unwrap().packages;
+    let descriptor = bundle.join("package.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
+    record.as_object_mut().unwrap().remove("schema_version");
+    record["source"] = json!({"bundle_sha256": aw_package::digest(&descriptor).unwrap()});
+    let packages: Vec<InstalledPackage> = vec![serde_json::from_value(record).unwrap()];
     for package in &packages {
         for (name, payload) in &package.files {
             let destination = prefix.join(name);
@@ -242,7 +247,8 @@ fn package(bundle: &Path, id: &str, names: &[&str]) {
         bundle.join("package.json"),
         serde_json::to_vec(&json!({
             "schema_version":1,"package_id":id,"version":"1.2.3","os":"linux",
-            "arch":std::env::consts::ARCH,"files":files,"dependencies":[]
+            "arch":std::env::consts::ARCH,"files":files,"dependencies":[],
+            "provider":{"protocol":"aw-provider/v1alpha1"}
         }))
         .unwrap(),
     )

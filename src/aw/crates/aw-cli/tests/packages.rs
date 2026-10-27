@@ -8,8 +8,6 @@ mod management;
 mod metadata;
 #[path = "packages/output.rs"]
 mod output;
-#[path = "packages/registered.rs"]
-mod registered;
 #[path = "packages/scope.rs"]
 mod scope;
 #[path = "packages/support.rs"]
@@ -72,7 +70,7 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
             .output()
             .unwrap(),
     );
-    assert!(!f.prefix.join("bin/aw").exists());
+    assert!(!f.prefix.join("bin/provider").exists());
     let pointer: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
     assert_eq!(pointer["schema_version"], 1);
     assert_eq!(fs::read(&f.config).unwrap(), original_config);
@@ -255,22 +253,6 @@ fn package_help_uses_the_unified_frontend_name() {
             .output()
             .unwrap(),
     );
-    assert!(output.contains("Install a local software bundle"));
-    assert!(output.contains("package.json"));
-}
-
-/// Keep writable executable descriptors out of unrelated concurrent test forks.
-fn copy_executable(source: impl AsRef<std::path::Path>, destination: &std::path::Path) {
-    let output = support::invoke(
-        Command::new("/bin/cp")
-            .arg("--")
-            .arg(source.as_ref())
-            .arg(destination)
-            .current_dir(destination.parent().unwrap()),
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.contains("Install a local Provider extension"));
+    assert!(output.contains("Provider bundles with package.json"));
 }

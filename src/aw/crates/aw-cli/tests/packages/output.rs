@@ -54,7 +54,7 @@ fn install_init_and_uninstall_report_local_outcomes_without_starting_a_runtime()
     );
     assert_eq!(removed["result"], json!({"kind":"uninstalled"}));
     assert_eq!(fs::read(&f.config).unwrap(), bytes);
-    assert!(!f.prefix.join("bin/aw").exists());
+    assert!(!f.prefix.join("bin/provider").exists());
 }
 
 #[test]

@@ -97,7 +97,7 @@ fn output_write_failure_does_not_undo_a_completed_installation() {
         assert!(!diagnostic.contains("rollback") && !diagnostic.contains("panicked"));
         assert!(diagnostic.starts_with("aw:"));
         assert!(f.prefix.join(".local-packages/installation.json").is_file());
-        assert!(f.prefix.join("bin/aw").is_file());
+        assert!(f.prefix.join("bin/provider").is_file());
     }
     let f = Fixture::new();
     let output = captured(
@@ -110,5 +110,5 @@ fn output_write_failure_does_not_undo_a_completed_installation() {
     assert!(text(&output, "stdout").starts_with("Installed "));
     assert!(text(&output, "stderr").is_empty());
     assert!(f.prefix.join(".local-packages/installation.json").is_file());
-    assert!(f.prefix.join("bin/aw").is_file());
+    assert!(f.prefix.join("bin/provider").is_file());
 }

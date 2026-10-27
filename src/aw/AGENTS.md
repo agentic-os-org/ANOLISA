@@ -92,12 +92,12 @@ Provider owners own dependencies, tests and releases; the OS distributor selects
 versions, validates composition and delivers installation and upgrades. Target
 out-of-tree Provider builds against pinned public AW libraries. Third parties
 need only the public process protocol and YAML, not a Rust SDK or OS checkout.
-The bundled implementations still use local SDK paths. Preview delivers one
-build set and checks matching versions and source commits for common origin.
-Independent SDK publication and native RPM/DEB delivery remain later work.
-Local package changes use the central database, read-only plans and durable
-recovery in `aw-package`; the Linux gate builds a pinned historical installer
-to verify record migration. Preserve existing package and binary
+The bundled implementations still use local SDK paths. Integration builds select
+and test framework, Provider and backend versions together.
+Independent SDK publication remains later work. Native RPM/DEB delivery and
+product installation belong to the distributor or native package manager. Local AW extension changes
+use read-only plans and durable recovery through `aw-package`, whose private
+`store` module owns file verification, records and transactions. Preserve existing package and binary
 names when moving source directories. New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
@@ -107,7 +107,7 @@ crates separately from concrete Providers:
 
 | Responsibility | Framework crates | Boundary |
 | --- | --- | --- |
-| Build and install | `aw-package` | Package composition, installation and configuration generation |
+| Provider management and configuration | `aw-package` | Admitted local Provider extensions, private file transactions and AW configuration |
 | Native dialects | `aw-adapter` | Catalog, registration, callbacks, native phases and effect adoption |
 | Unified user entrypoint | `aw-cli` | CLI parsing, presentation, compatibility and command orchestration |
 | Local runtime | `aw-service` | Client, bindings, events, deadlines, cancellation and audit |
@@ -124,11 +124,26 @@ through dev-dependencies. `aw-adapter` must not depend on `aw-service`, `aw-host
 or CLI internals. Keep Client, wire DTOs and full Binding in `aw-service`;
 serialized HookBinding, argument parsing, launch signal handling and CLI-owned
 resources belong in `aw-cli`. The CLI calls `aw-package` Rust APIs directly for
-software installation and offline configuration; libraries must not depend on
-the CLI or print its user-facing output. The standalone `aw-package` executable
-has been removed; do not reintroduce a second installer CLI. Bundles carry `aw`
-at their root for bootstrap, and software installation requires an explicit
-absolute `--bundle` path. `aw-build` remains in the `aw-package` Rust crate.
+local AW extension management and offline configuration; libraries must not depend
+on the CLI or print its user-facing output. The standalone `aw-package` executable
+has been removed; do not reintroduce a second installer CLI. Local extension
+installation requires an explicit absolute `--bundle` path. Every input uses
+`package.json` and declares `aw-provider/v1alpha1`; `manifest.json`, AW core and
+ordinary backend packages are rejected. The private `aw-package::store` engine is not a public software installation API.
+Backend source builds,
+component composition and concrete Provider defaults belong to distribution's
+Makefile and `packaging/aw/` scripts. `make -C src/aw build` builds only
+the AW CLI. Component-root Makefiles include their own packaging/build.mk and
+install.mk; install consumes prebuilt files with PREFIX, AWPRJ and DESTDIR, without
+backend installation, AW records, Hook registration or service activation. Providers
+keep their aw/providers/<id> identity below any optional AWPRJ namespace. No
+compiled distribution builder belongs to the framework.
+AW rejects foreign-manager locators. Runtime file leases belong to `aw-exec`
+and work without reading a package database. Do not duplicate ownership or
+automatically transfer files between databases.
+Installed Providers connect through explicit `transport.argv` and their process
+protocol without an AW package record. RPM-owned Providers and backends stay
+under their native manager; local raw Provider registration is optional.
 Preserve legacy native `aw install --config ... --agent ...` semantics while
 offering `aw agent connect`; reject mixed package/native options before writes.
 Pass only NativeContext and typed options into the Adapter. The caller supplies
@@ -235,7 +250,7 @@ documentation and shared-crate test changes retain fixture coverage without a
 real backend build. Preserve Tokenless's independent component CI. Other
 component internals remain in component CI; validate newly consumed contracts explicitly.
 Keep daily checks credential-free. The nightly integration workflow builds all
-Preview packages once and reuses checksummed candidate-SHA binaries for pinned
+packages once and reuses checksummed candidate-SHA binaries for pinned
 native acceptance. Preserve exact version evidence, bounded processes, complete
 reports and visible manual boundaries. Missing or skipped suites must fail the
 integration result. Prepare private native tool environments; do not weaken

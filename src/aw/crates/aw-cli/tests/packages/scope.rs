@@ -31,7 +31,7 @@ fn extension(fixture: &Fixture) -> PathBuf {
         "files": {"bin/other-provider": {
             "sha256": aw_package::digest(&path).unwrap(), "mode": 0o755
         }},
-        "dependencies": [{"package_id": "aw-core", "version": "1.0.0"}],
+        "dependencies": [{"package_id": "external.provider", "version": "1.0.0"}],
         "provider": {"protocol": "aw-provider/v1alpha1"}
     });
     fs::write(
@@ -86,7 +86,7 @@ fn split_extensions_and_uninstall_require_consistent_explicit_scope() {
     );
     assert!(!fixture.prefix.join("bin/other-provider").exists());
     report(&mut append("user"), 0);
-    assert!(fixture.prefix.join("bin/aw").is_file());
+    assert!(fixture.prefix.join("bin/provider").is_file());
     assert!(fixture.prefix.join("bin/other-provider").is_file());
     let removal = |scope: &str| {
         let mut command = fixture.command();
@@ -98,9 +98,9 @@ fn split_extensions_and_uninstall_require_consistent_explicit_scope() {
     let mut wrong = removal("system");
     wrong.arg("--dry-run");
     assert_eq!(report(&mut wrong, 1)["error"]["code"], "package_contract");
-    assert!(fixture.prefix.join("bin/aw").is_file());
+    assert!(fixture.prefix.join("bin/provider").is_file());
     assert!(fixture.prefix.join("bin/other-provider").is_file());
     report(&mut removal("user"), 0);
-    assert!(!fixture.prefix.join("bin/aw").exists());
+    assert!(!fixture.prefix.join("bin/provider").exists());
     assert!(!fixture.prefix.join("bin/other-provider").exists());
 }

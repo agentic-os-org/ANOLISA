@@ -31,21 +31,10 @@ impl Fixture {
         let root = directory.path().canonicalize().unwrap();
         let bundle = root.join("bundle");
         let mut files: BTreeMap<String, Payload> = BTreeMap::new();
-        let name = "bin/aw";
+        let name = "bin/provider";
         let path = bundle.join("payload").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let copied = invoke(
-            Command::new("/bin/cp")
-                .arg("--")
-                .arg(env!("CARGO_BIN_EXE_aw"))
-                .arg(&path)
-                .current_dir(path.parent().unwrap()),
-        );
-        assert!(
-            copied.status.success(),
-            "{}",
-            String::from_utf8_lossy(&copied.stderr)
-        );
+        fs::copy("/bin/true", &path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         files.insert(
             name.into(),
@@ -58,12 +47,13 @@ impl Fixture {
             bundle.join("package.json"),
             serde_json::to_vec(&json!({
                 "schema_version": 1,
-                "package_id": "aw-core",
+                "package_id": "external.provider",
                 "version": "1.0.0",
                 "os": "linux",
                 "arch": std::env::consts::ARCH,
                 "files": files,
-                "dependencies": []
+                "dependencies": [],
+                "provider": {"protocol": "aw-provider/v1alpha1"}
             }))
             .unwrap(),
         )

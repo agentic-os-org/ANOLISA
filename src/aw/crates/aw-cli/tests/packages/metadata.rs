@@ -67,13 +67,13 @@ fn installed_raw_metadata_loss_fails_doctor_json_but_preserves_listed_package_fa
             let listed = query(&fixture, false, prefix);
             assert_eq!(
                 listed["result"]["inventory"]["installations"][0]["packages"][0]["package_id"],
-                "aw-core"
+                "external.provider"
             );
             missing(&query(&fixture, true, prefix), &path);
         }
         assert_eq!(fs::read(database).unwrap(), committed);
         assert!(!path.exists());
-        assert!(fixture.prefix.join("bin/aw").is_file());
+        assert!(fixture.prefix.join("bin/provider").is_file());
     }
 }
 

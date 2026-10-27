@@ -397,7 +397,7 @@ fn hermes_rejects_non_executable_or_special_explicit_entrypoints() {
             assert!(started.elapsed() < Duration::from_secs(3));
             assert!(!fixture.root.join("version-started").exists());
             assert!(!fixture.root.join("writer-started").exists());
-            assert!(!profile.join(".aw-install.lock").exists());
+            assert!(!profile.join(".local-install.lock").exists());
             assert_eq!(
                 fs::read(profile.join("config.yaml")).unwrap(),
                 original.as_bytes()
@@ -449,7 +449,7 @@ fn hermes_rejects_writable_native_paths_before_any_probe() {
                 );
                 assert!(!fixture.root.join("version-started").exists());
                 assert!(!fixture.root.join("writer-started").exists());
-                assert!(!profile.join(".aw-install.lock").exists());
+                assert!(!profile.join(".local-install.lock").exists());
                 assert_eq!(
                     fs::read(profile.join("config.yaml")).unwrap(),
                     original.as_bytes()
@@ -479,7 +479,7 @@ fn hermes_rejects_writable_git_helpers_before_execution() {
         assert!(error.contains("permits modification"), "{error}");
         assert!(!fixture.root.join("git-started").exists());
         assert!(!fixture.root.join("version-started").exists());
-        assert!(!profile.join(".aw-install.lock").exists());
+        assert!(!profile.join(".local-install.lock").exists());
         assert_eq!(
             fs::read(profile.join("config.yaml")).unwrap(),
             b"unknown: keep\n"
