@@ -394,8 +394,17 @@ test-benchmark-rtk-probe:
 	@echo "==> Testing benchmark RTK version probe..."
 	bash tests/test-benchmark-rtk-version-probe.sh
 
+# Check both RTK entrypoints before exercising the unchanged standalone consumer.
+.PHONY: test-rtk-library
+test-rtk-library:
+	bash scripts/setup-rtk.sh
+	cargo fmt --manifest-path third_party/rtk/Cargo.toml --all -- --check
+	cargo clippy --manifest-path third_party/rtk/Cargo.toml --all-targets --locked -- -D warnings
+	cargo test --manifest-path third_party/rtk/Cargo.toml --locked
+	cargo doc --manifest-path third_party/rtk/Cargo.toml --no-deps --locked
+
 # Hook counterfactuals need both real binaries to rule out fail-open success.
-test-rtk-integration: test-benchmark-rtk-probe
+test-rtk-integration: test-benchmark-rtk-probe test-rtk-library
 	cargo build --locked -p tokenless-cli
 	bash scripts/setup-rtk.sh
 	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml

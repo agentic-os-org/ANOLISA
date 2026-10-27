@@ -4,6 +4,7 @@
 Run after scripts/build-windows.ps1 and npm/scripts/package-npm.js --target win32-x64.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -241,6 +242,17 @@ class WindowsPackagingTests(unittest.TestCase):
         setup = (scripts / "setup-rtk.sh").read_text(encoding="utf-8")
         self.revision = re.search(r'^RTK_COMMIT="([0-9a-f]{40})"', setup, re.M).group(1)
         (self.rtk / ".anolisa-rtk-commit").write_text(self.revision, encoding="utf-8")
+        patch_dir = self.component / "third_party/patches"
+        shutil.copytree(ROOT / "third_party/patches", patch_dir)
+        setup = setup.replace('rtk-library.patch)', 'rtk-library.patch future-fix.patch)')
+        (scripts / "setup-rtk.sh").write_text(setup, encoding="utf-8")
+        (patch_dir / "future-fix.patch").write_text("fixture", encoding="utf-8")
+        digest = hashlib.sha256()
+        for name in re.search(r"^PATCHES=\(([^)]+)\)", setup, re.M).group(1).split():
+            digest.update(name.encode() + b"\0")
+            digest.update((patch_dir / name).read_text(encoding="utf-8").encode())
+        (self.rtk / ".anolisa-rtk-patches").write_text(digest.hexdigest(), encoding="utf-8")
+        (self.rtk / ".anolisa-rtk-tree").write_text(hashlib.sha256(b"").hexdigest(), encoding="utf-8")
         self.metadata = self.root / "metadata.py"
         self.metadata.write_text(
             "import json, sys\n"
@@ -347,6 +359,13 @@ try {
             self.assertEqual(
                 (output / f"{binary}.exe").read_text(encoding="utf-8"), f"fresh {binary} {profile}"
             )
+
+    def test_modified_rtk_source_is_rejected(self) -> None:
+        (self.rtk / "injected.rs").write_text("local source edit", encoding="utf-8")
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RTK applied source has changed", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
 
     def test_default_build_directories(self) -> None:
         self.assert_staged(self.run_build(), "release")

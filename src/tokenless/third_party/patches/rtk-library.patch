@@ -1,0 +1,1684 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -83,3 +83,6 @@
+ [lints.rust]
+ unsafe_code = "deny"
+ warnings = "deny"
++
++# Keep source snapshots independent of any enclosing build workspace.
++[workspace]
+diff --git a/src/cmds/cloud/aws_cmd.rs b/src/cmds/cloud/aws_cmd.rs
+--- a/src/cmds/cloud/aws_cmd.rs
++++ b/src/cmds/cloud/aws_cmd.rs
+@@ -12,7 +12,7 @@
+     human_bytes, join_with_overflow,
+     resolved_command, shorten_arn, truncate_iso_date,
+ };
+-use crate::json_cmd;
++use crate::cmds::system::json_cmd;
+ use anyhow::{Context, Result};
+ use regex::Regex;
+ use serde_json::Value;
+diff --git a/src/cmds/cloud/container.rs b/src/cmds/cloud/container.rs
+--- a/src/cmds/cloud/container.rs
++++ b/src/cmds/cloud/container.rs
+@@ -338,7 +338,7 @@
+             format!(
+                 "[docker] Logs for {}:\n{}",
+                 container,
+-                crate::log_cmd::run_stdin_str(raw)
++                crate::cmds::system::log_cmd::run_stdin_str(raw)
+             )
+         },
+         RunOptions::default().early_exit_on_failure(),
+@@ -514,7 +514,7 @@
+             format!(
+                 "Logs for {}:\n{}",
+                 pod,
+-                crate::log_cmd::run_stdin_str(stdout)
++                crate::cmds::system::log_cmd::run_stdin_str(stdout)
+             )
+         },
+         RunOptions::stdout_only().early_exit_on_failure(),
+@@ -584,7 +584,7 @@
+ 
+     // docker compose logs prefixes each line with "service-N  | "
+     // Use the existing log deduplication engine
+-    let analyzed = crate::log_cmd::run_stdin_str(raw);
++    let analyzed = crate::cmds::system::log_cmd::run_stdin_str(raw);
+     format!("[compose] Logs:\n{}", analyzed)
+ }
+ 
+diff --git a/src/cmds/dotnet/dotnet_cmd.rs b/src/cmds/dotnet/dotnet_cmd.rs
+--- a/src/cmds/dotnet/dotnet_cmd.rs
++++ b/src/cmds/dotnet/dotnet_cmd.rs
+@@ -1,13 +1,13 @@
+ //! Filters dotnet CLI output — build, test, and format results.
+ 
+-use crate::binlog;
++use crate::cmds::dotnet::binlog;
+ use crate::core::guard::never_worse;
+ use crate::core::stream::exec_capture;
+ use crate::core::tracking;
+ use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
+ use crate::core::utils::{resolved_command, truncate};
+-use crate::dotnet_format_report;
+-use crate::dotnet_trx;
++use crate::cmds::dotnet::dotnet_format_report;
++use crate::cmds::dotnet::dotnet_trx;
+ use anyhow::{Context, Result};
+ use quick_xml::events::Event;
+ use quick_xml::Reader;
+@@ -1360,7 +1360,7 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::dotnet_format_report;
++    use crate::cmds::dotnet::dotnet_format_report;
+     use std::fs;
+     use std::time::Duration;
+ 
+diff --git a/src/cmds/dotnet/dotnet_trx.rs b/src/cmds/dotnet/dotnet_trx.rs
+--- a/src/cmds/dotnet/dotnet_trx.rs
++++ b/src/cmds/dotnet/dotnet_trx.rs
+@@ -1,6 +1,6 @@
+ //! Parses .trx test result files (Visual Studio XML format) into compact summaries.
+ 
+-use crate::binlog::{FailedTest, TestSummary};
++use crate::cmds::dotnet::binlog::{FailedTest, TestSummary};
+ use chrono::{DateTime, FixedOffset};
+ use quick_xml::events::{BytesStart, Event};
+ use quick_xml::Reader;
+diff --git a/src/cmds/git/diff_cmd.rs b/src/cmds/git/diff_cmd.rs
+--- a/src/cmds/git/diff_cmd.rs
++++ b/src/cmds/git/diff_cmd.rs
+@@ -186,10 +186,11 @@
+             };
+             return (
+                 format!(
+-                    "{} {}, {}; use `rtk proxy diff` for the full text\n",
++                    "{} {}, {}; use `{name} proxy diff` for the full text\n",
+                     count_lines(*count),
+                     verb,
+-                    reason
++                    reason,
++                    name = crate::COMMAND_NAME
+                 ),
+                 1,
+             );
+@@ -208,14 +209,15 @@
+             // like one invites reading it as the amount of change.
+             return (
+                 format!(
+-                    "at least {} lines differ, too different to align line by line\ndifferences fall between lines {}-{} of {} and {}-{} of {}; use `rtk proxy diff` for the full text\n",
++                    "at least {} lines differ, too different to align line by line\ndifferences fall between lines {}-{} of {} and {}-{} of {}; use `{name} proxy diff` for the full text\n",
+                     differing_floor,
+                     first,
+                     last1,
+                     file1.display(),
+                     first,
+                     last2,
+-                    file2.display()
++                    file2.display(),
++                    name = crate::COMMAND_NAME
+                 ),
+                 1,
+             );
+@@ -243,12 +245,13 @@
+             };
+             return (
+                 format!(
+-                    "{} changed in {}, {} changed in {}; {}, use `rtk proxy diff` for the full text\n",
++                    "{} changed in {}, {} changed in {}; {}, use `{name} proxy diff` for the full text\n",
+                     count_lines(*removed),
+                     file1.display(),
+                     count_lines(*added),
+                     file2.display(),
+-                    reason
++                    reason,
++                    name = crate::COMMAND_NAME
+                 ),
+                 1,
+             );
+@@ -7174,7 +7177,7 @@
+         // are pre-pairing, and these two lines are 99.99991% identical.
+         assert_eq!(
+             out,
+-            "1 line changed in a.txt, 1 line changed in b.txt; 2.2MB of text, too large to list, use `rtk proxy diff` for the full text\n"
++            format!("1 line changed in a.txt, 1 line changed in b.txt; 2.2MB of text, too large to list, use `{name} proxy diff` for the full text\n", name = crate::COMMAND_NAME)
+         );
+ 
+         // The one-sided path reaches the same budget through `DifferingLines`.
+@@ -7183,7 +7186,7 @@
+         assert_eq!(code, 1);
+         assert_eq!(
+             out,
+-            "1 line differs, 3.0MB of text, too large to list; use `rtk proxy diff` for the full text\n"
++            format!("1 line differs, 3.0MB of text, too large to list; use `{name} proxy diff` for the full text\n", name = crate::COMMAND_NAME)
+         );
+     }
+ }
+diff --git a/src/cmds/git/gh_cmd.rs b/src/cmds/git/gh_cmd.rs
+--- a/src/cmds/git/gh_cmd.rs
++++ b/src/cmds/git/gh_cmd.rs
+@@ -6,7 +6,7 @@
+ use crate::core::runner::{self, RunOptions};
+ use crate::core::truncate::CAP_LIST;
+ use crate::core::utils::{ok_confirmation, resolved_command, truncate};
+-use crate::git;
++use crate::cmds::git::git;
+ use anyhow::Result;
+ use regex::Regex;
+ use serde_json::Value;
+diff --git a/src/cmds/git/git.rs b/src/cmds/git/git.rs
+--- a/src/cmds/git/git.rs
++++ b/src/cmds/git/git.rs
+@@ -1,6 +1,5 @@
+ //! Filters git output — log, status, diff, and more — keeping just the essential info.
+ 
+-use crate::core::args_utils;
+ use crate::core::guard::never_worse;
+ use crate::core::runner::{self, RunOptions};
+ use crate::core::stream::{
+@@ -118,7 +117,7 @@
+     let timer = tracking::TimedExecution::start();
+ 
+     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
+-    let args = &args_utils::restore_double_dash(args);
++    let args = &args.to_vec();
+ 
+     // Check if user wants stat output
+     let wants_stat = args
+@@ -830,7 +829,7 @@
+     // without this, `rtk git log -- -p` loses its literal "--" and
+     // `requests_raw_log_output`/`log_arg_tokens` can no longer tell that
+     // `-p` is a pathspec, not the real patch flag.
+-    let args = &args_utils::restore_double_dash(args);
++    let args = &args.to_vec();
+ 
+     if requests_raw_log_output(args) {
+         let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("log"))
+@@ -1652,7 +1651,7 @@
+ }
+ 
+ fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+-    let args = args_utils::restore_double_dash(args);
++    let args = args.to_vec();
+ 
+     if verbose > 0 {
+         eprintln!("git checkout");
+diff --git a/src/cmds/git/gt_cmd.rs b/src/cmds/git/gt_cmd.rs
+--- a/src/cmds/git/gt_cmd.rs
++++ b/src/cmds/git/gt_cmd.rs
+@@ -136,18 +136,18 @@
+     // gt passes unknown subcommands to git, so "gt status" = "git status".
+     // Route known git commands to RTK's git filters for token savings.
+     match subcommand.as_ref() {
+-        "status" => crate::git::run(crate::git::GitCommand::Status, &rest, None, verbose, &[]),
+-        "diff" => crate::git::run(crate::git::GitCommand::Diff, &rest, None, verbose, &[]),
+-        "show" => crate::git::run(crate::git::GitCommand::Show, &rest, None, verbose, &[]),
+-        "add" => crate::git::run(crate::git::GitCommand::Add, &rest, None, verbose, &[]),
+-        "push" => crate::git::run(crate::git::GitCommand::Push, &rest, None, verbose, &[]),
+-        "pull" => crate::git::run(crate::git::GitCommand::Pull, &rest, None, verbose, &[]),
+-        "fetch" => crate::git::run(crate::git::GitCommand::Fetch, &rest, None, verbose, &[]),
++        "status" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Status, &rest, None, verbose, &[]),
++        "diff" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Diff, &rest, None, verbose, &[]),
++        "show" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Show, &rest, None, verbose, &[]),
++        "add" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Add, &rest, None, verbose, &[]),
++        "push" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Push, &rest, None, verbose, &[]),
++        "pull" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Pull, &rest, None, verbose, &[]),
++        "fetch" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Fetch, &rest, None, verbose, &[]),
+         "stash" => {
+             let stash_sub = rest.first().cloned();
+             let stash_args = rest.get(1..).unwrap_or(&[]);
+-            crate::git::run(
+-                crate::git::GitCommand::Stash {
++            crate::cmds::git::git::run(
++                crate::cmds::git::git::GitCommand::Stash {
+                     subcommand: stash_sub,
+                 },
+                 stash_args,
+@@ -156,7 +156,7 @@
+                 &[],
+             )
+         }
+-        "worktree" => crate::git::run(crate::git::GitCommand::Worktree, &rest, None, verbose, &[]),
++        "worktree" => crate::cmds::git::git::run(crate::cmds::git::git::GitCommand::Worktree, &rest, None, verbose, &[]),
+         _ => passthrough_gt(&subcommand, &rest, verbose),
+     }
+ }
+diff --git a/src/cmds/go/go_cmd.rs b/src/cmds/go/go_cmd.rs
+--- a/src/cmds/go/go_cmd.rs
++++ b/src/cmds/go/go_cmd.rs
+@@ -6,7 +6,7 @@
+ use crate::core::tracking;
+ use crate::core::truncate::CAP_ERRORS;
+ use crate::core::utils::{resolved_command, truncate};
+-use crate::golangci_cmd;
++use crate::cmds::go::golangci_cmd;
+ use anyhow::{Context, Result};
+ use serde::Deserialize;
+ use std::collections::HashMap;
+diff --git a/src/cmds/js/lint_cmd.rs b/src/cmds/js/lint_cmd.rs
+--- a/src/cmds/js/lint_cmd.rs
++++ b/src/cmds/js/lint_cmd.rs
+@@ -6,8 +6,8 @@
+ use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
+ use crate::core::utils::{resolved_command, tool_exec, truncate, MissingTool};
+ use crate::cmds::python::sqlfluff_cmd;
+-use crate::mypy_cmd;
+-use crate::ruff_cmd;
++use crate::cmds::python::mypy_cmd;
++use crate::cmds::python::ruff_cmd;
+ use anyhow::{Context, Result};
+ use serde::{Deserialize, Serialize};
+ use std::collections::HashMap;
+diff --git a/src/cmds/js/vitest_cmd.rs b/src/cmds/js/vitest_cmd.rs
+--- a/src/cmds/js/vitest_cmd.rs
++++ b/src/cmds/js/vitest_cmd.rs
+@@ -13,7 +13,14 @@
+     truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
+     TokenFormatter,
+ };
+-use crate::Commands;
++/// Selects the test runner without depending on a CLI argument type.
++#[derive(Clone, Copy)]
++pub enum TestFramework {
++    /// Vitest runner.
++    Vitest,
++    /// Jest runner.
++    Jest,
++}
+ 
+ /// Vitest JSON output structures (tool-specific format)
+ #[derive(Debug, Deserialize)]
+@@ -199,12 +206,12 @@
+     failures
+ }
+ 
+-pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
++pub fn run_test(command: TestFramework, args: &[String], verbose: u8) -> Result<i32> {
+     let timer = tracking::TimedExecution::start();
+     let mut passthrough_requested = false;
+ 
+     let (framework, mut cmd) = match command {
+-        Commands::Vitest { .. } => {
++        TestFramework::Vitest => {
+             let framework = "vitest";
+             let mut cmd = package_manager_exec(framework);
+             let effective_args = build_vitest_effective_args(args);
+@@ -212,7 +219,7 @@
+             cmd.args(effective_args.args);
+             (framework, cmd)
+         }
+-        Commands::Jest { .. } => {
++        TestFramework::Jest => {
+             let framework = "jest";
+             let mut cmd = package_manager_exec(framework);
+             cmd
+@@ -222,10 +229,9 @@
+                 .arg("--json");
+             (framework, cmd)
+         }
+-        _ => unreachable!(),
+     };
+ 
+-    if !matches!(command, Commands::Vitest { .. }) {
++    if !matches!(command, TestFramework::Vitest) {
+         for arg in args {
+             if arg == "run"
+                 || arg.starts_with("--json")
+diff --git a/src/cmds/rust/cargo_cmd.rs b/src/cmds/rust/cargo_cmd.rs
+--- a/src/cmds/rust/cargo_cmd.rs
++++ b/src/cmds/rust/cargo_cmd.rs
+@@ -1,6 +1,5 @@
+ //! Filters cargo output — build errors, test results, clippy warnings.
+ 
+-use crate::core::args_utils;
+ use crate::core::runner;
+ use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
+ use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
+@@ -278,7 +277,7 @@
+     let mut cmd = resolved_command("cargo");
+     cmd.arg(subcommand);
+ 
+-    let restored_args = args_utils::restore_double_dash(args);
++    let restored_args = args.to_vec();
+     for arg in &restored_args {
+         cmd.arg(arg);
+     }
+@@ -310,7 +309,7 @@
+     let mut cmd = resolved_command("cargo");
+     cmd.arg(subcommand);
+ 
+-    let restored_args = args_utils::restore_double_dash(args);
++    let restored_args = args.to_vec();
+     for arg in &restored_args {
+         cmd.arg(arg);
+     }
+@@ -337,7 +336,7 @@
+     let mut cmd = resolved_command("cargo");
+     cmd.arg(subcommand);
+ 
+-    let restored_args = args_utils::restore_double_dash(args);
++    let restored_args = args.to_vec();
+     for arg in &restored_args {
+         cmd.arg(arg);
+     }
+diff --git a/src/cmds/system/format_cmd.rs b/src/cmds/system/format_cmd.rs
+--- a/src/cmds/system/format_cmd.rs
++++ b/src/cmds/system/format_cmd.rs
+@@ -5,8 +5,8 @@
+ use crate::core::tracking;
+ use crate::core::truncate::CAP_WARNINGS;
+ use crate::core::utils::{package_manager_exec, resolved_command};
+-use crate::prettier_cmd;
+-use crate::ruff_cmd;
++use crate::cmds::js::prettier_cmd;
++use crate::cmds::python::ruff_cmd;
+ use anyhow::{Context, Result};
+ use std::path::Path;
+ 
+diff --git a/src/cmds/system/ls.rs b/src/cmds/system/ls.rs
+--- a/src/cmds/system/ls.rs
++++ b/src/cmds/system/ls.rs
+@@ -520,7 +520,7 @@
+         // is the standard one-shot retrieval command over the hidden entries.
+         if hint.lines().count() > 1 {
+             assert!(
+-                hint.contains("[see remaining: tail -n +1 ") || hint.contains("hidden: rtk recall "),
++                hint.contains("[see remaining: tail -n +1 ") || hint.contains(&format!("hidden: {} recall ", crate::COMMAND_NAME)),
+                 "recovery hint must be a standard retrieval form: {hint}"
+             );
+         }
+diff --git a/src/cmds/system/search.rs b/src/cmds/system/search.rs
+--- a/src/cmds/system/search.rs
++++ b/src/cmds/system/search.rs
+@@ -11,7 +11,7 @@
+ };
+ use crate::core::tracking;
+ use crate::core::utils::{resolved_command, strip_ansi};
+-use crate::core::{args_utils, config};
++use crate::core::config;
+ use anyhow::{Context, Result};
+ use regex::Regex;
+ use std::collections::HashMap;
+@@ -520,7 +520,7 @@
+     }
+ 
+     // Re-insert `--` when clap's trailing_var_arg consumed it
+-    let args = args_utils::restore_double_dash(args);
++    let args = args.to_vec();
+     let real_cmd = format!("{} {}", engine.label(), args.join(" "));
+     let rtk_label = format!("rtk {}", engine.label());
+ 
+diff --git a/src/core/args_utils.rs b/src/core/args_utils.rs
+--- a/src/core/args_utils.rs
++++ b/src/core/args_utils.rs
+@@ -1,17 +1,7 @@
+ //! Utility functions for argument handling, particularly for restoring "--" escape
+ //! arguments that clap consumes during parsing.
+ 
+-/// Restores `--` tokens that clap consumed when using `trailing_var_arg = true`.
+-///
+-/// Returns `parsed_args` unchanged when `raw_args` has the same or fewer `--` tokens
+-/// than `parsed_args` (nothing was consumed). Otherwise restores all consumed `--` at
+-/// their original positions by returning the user-args suffix of `raw_args` verbatim.
+-pub fn restore_double_dash(parsed_args: &[String]) -> Vec<String> {
+-    let raw_args: Vec<String> = std::env::args().collect();
+-    restore_double_dash_with_raw(parsed_args, &raw_args)
+-}
+-
+-/// Testable version that takes raw_args explicitly.
++/// Restores clap-consumed separators using explicit caller arguments.
+ ///
+ /// Precondition: all callers use `trailing_var_arg = true`, which guarantees that
+ /// `parsed_args` is the exact suffix of `raw_args` minus any `--` tokens that clap
+diff --git a/src/core/retriever.rs b/src/core/retriever.rs
+--- a/src/core/retriever.rs
++++ b/src/core/retriever.rs
+@@ -631,8 +631,9 @@
+ }
+ 
+ pub fn run_recall(args: RecallArgs) -> Result<i32> {
++    let name = crate::COMMAND_NAME;
+     if args.hash.is_none() && !args.list {
+-        eprintln!("rtk recall: provide a <hash> (from a recovery hint) or --list");
++        eprintln!("{name} recall: provide a <hash> (from a recovery hint) or --list");
+         return Ok(2);
+     }
+     let cfg = Config::load().unwrap_or_default().retriever;
+@@ -643,11 +644,11 @@
+                 println!("(no recall entries)");
+                 return Ok(0);
+             }
+-            eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
++            eprintln!("{name} recall: no matching entry (try `{name} recall --list`)");
+             return Ok(1);
+         }
+         Err(e) => {
+-            eprintln!("rtk recall: store unavailable: {e}");
++            eprintln!("{name} recall: store unavailable: {e}");
+             return Ok(1);
+         }
+     };
+@@ -664,13 +665,13 @@
+     let row = match load_by_hash(&conn, hash) {
+         Ok(row) => row,
+         Err(e) => {
+-            eprintln!("rtk recall: {e}");
++            eprintln!("{name} recall: {e}");
+             return Ok(1);
+         }
+     };
+ 
+     let Some(row) = row else {
+-        eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
++        eprintln!("{name} recall: no matching entry (try `{name} recall --list`)");
+         return Ok(1);
+     };
+ 
+@@ -688,7 +689,7 @@
+         Some(pat) => {
+             if regex::bytes::Regex::new(pat).is_err() {
+                 eprintln!(
+-                    "rtk recall: note: --grep pattern is not a valid regex, matching it literally"
++                    "{name} recall: note: --grep pattern is not a valid regex, matching it literally"
+                 );
+             }
+             grep_bytes(&sliced, pat)
+@@ -698,7 +699,7 @@
+ 
+     if out.is_empty() && row.truncated && args.grep.is_none() {
+         eprintln!(
+-            "rtk recall: the requested lines were lost — this entry was stored truncated at the cap in force at the time"
++            "{name} recall: the requested lines were lost — this entry was stored truncated at the cap in force at the time"
+         );
+         return Ok(1);
+     }
+@@ -708,7 +709,7 @@
+ 
+     if row.truncated {
+         eprintln!(
+-            "rtk recall: note: this entry was stored truncated (output exceeded the cap in force at the time)"
++            "{name} recall: note: this entry was stored truncated (output exceeded the cap in force at the time)"
+         );
+     }
+     Ok(0)
+diff --git a/src/core/stream.rs b/src/core/stream.rs
+--- a/src/core/stream.rs
++++ b/src/core/stream.rs
+@@ -463,7 +463,7 @@
+     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
+ 
+     let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
+-    let _signal_relay = signal_relay::Relay::install(child.0.id());
++    let _signal_relay = crate::RELAY_SIGNALS.then(|| signal_relay::Relay::install(child.0.id()));
+ 
+     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
+         StdinMode::Filter(mut filter) => {
+diff --git a/src/core/tee.rs b/src/core/tee.rs
+--- a/src/core/tee.rs
++++ b/src/core/tee.rs
+@@ -21,7 +21,11 @@
+     exit_code: Option<i32>,
+ ) -> Option<String> {
+     match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
+-        Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
++        Stored::Saved(s) => Some(format!(
++            "[full output: {} recall {}]",
++            crate::COMMAND_NAME,
++            s.hash
++        )),
+         Stored::Unavailable | Stored::Empty => None,
+     }
+ }
+@@ -97,8 +101,10 @@
+         RecoveryMode::Sqlite => {
+             match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
+                 Stored::Saved(s) if s.hidden_lines > 0 => Some(format!(
+-                    "[+{} hidden: rtk recall {}]",
+-                    s.hidden_lines, s.hash
++                    "[+{} hidden: {} recall {}]",
++                    s.hidden_lines,
++                    crate::COMMAND_NAME,
++                    s.hash
+                 )),
+                 Stored::Saved(_) | Stored::Unavailable | Stored::Empty => None,
+             }
+diff --git a/src/core/tracking.rs b/src/core/tracking.rs
+--- a/src/core/tracking.rs
++++ b/src/core/tracking.rs
+@@ -12,7 +12,7 @@
+ //!
+ //! # Quick Start
+ //!
+-//! ```no_run
++//! ```text
+ //! use rtk::tracking::{TimedExecution, Tracker};
+ //!
+ //! // Track a command execution
+@@ -79,7 +79,7 @@
+ ///
+ /// # Examples
+ ///
+-/// ```no_run
++/// ```text
+ /// use rtk::tracking::Tracker;
+ ///
+ /// let tracker = Tracker::new()?;
+@@ -461,7 +461,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::Tracker;
+     ///
+     /// let tracker = Tracker::new()?;
+@@ -500,7 +500,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::Tracker;
+     ///
+     /// let tracker = Tracker::new()?;
+@@ -801,7 +801,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::Tracker;
+     ///
+     /// let tracker = Tracker::new()?;
+@@ -939,7 +939,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::Tracker;
+     ///
+     /// let tracker = Tracker::new()?;
+@@ -1012,7 +1012,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::Tracker;
+     ///
+     /// let tracker = Tracker::new()?;
+@@ -1087,7 +1087,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::Tracker;
+     ///
+     /// let tracker = Tracker::new()?;
+@@ -1163,7 +1163,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::Tracker;
+     ///
+     /// let tracker = Tracker::new()?;
+@@ -1646,7 +1646,7 @@
+ ///
+ /// # Examples
+ ///
+-/// ```
++/// ```text
+ /// use rtk::tracking::estimate_tokens;
+ ///
+ /// assert_eq!(estimate_tokens(""), 0);
+@@ -1667,7 +1667,7 @@
+ ///
+ /// # Examples
+ ///
+-/// ```no_run
++/// ```text
+ /// use rtk::tracking::TimedExecution;
+ ///
+ /// let timer = TimedExecution::start();
+@@ -1689,7 +1689,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::TimedExecution;
+     ///
+     /// let timer = TimedExecution::start();
+@@ -1718,7 +1718,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::TimedExecution;
+     ///
+     /// let timer = TimedExecution::start();
+@@ -1758,7 +1758,7 @@
+     ///
+     /// # Examples
+     ///
+-    /// ```no_run
++    /// ```text
+     /// use rtk::tracking::TimedExecution;
+     ///
+     /// let timer = TimedExecution::start();
+@@ -1782,7 +1782,7 @@
+ ///
+ /// # Examples
+ ///
+-/// ```
++/// ```text
+ /// use std::ffi::OsString;
+ /// use rtk::tracking::args_display;
+ ///
+@@ -1863,14 +1863,18 @@
+         .unwrap_or(true)
+ }
+ 
++// These files use the owning Tokenless workspace's Rust 2024 formatting.
++#[rustfmt::skip]
+ #[allow(unsafe_code)] // Shared passwd lookup requires libc and contains documented safety proofs.
+ #[path = "../../../../crates/tokenless-stats/src/home.rs"]
+ mod tokenless_home;
++#[rustfmt::skip]
+ #[path = "../../../../crates/tokenless-stats/src/path_policy.rs"]
+ mod tokenless_path_policy;
+ use tokenless_path_policy as path_policy;
+ // The producer shares the store with Core, which owns begin/consume operations.
+ #[allow(dead_code)]
++#[rustfmt::skip]
+ #[path = "../../../../crates/tokenless-stats/src/rtk_outcome.rs"]
+ mod tokenless_rtk_outcome;
+ 
+diff --git a/src/core/utils.rs b/src/core/utils.rs
+--- a/src/core/utils.rs
++++ b/src/core/utils.rs
+@@ -41,7 +41,7 @@
+ /// * `max_len` - Maximum length before truncation (minimum 3 to include "...")
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::truncate;
+ /// assert_eq!(truncate("hello world", 8), "hello...");
+ /// assert_eq!(truncate("hi", 10), "hi");
+@@ -64,7 +64,7 @@
+ /// * `text` - Text potentially containing ANSI escape codes
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::strip_ansi;
+ /// let colored = "\x1b[31mError\x1b[0m";
+ /// assert_eq!(strip_ansi(colored), "Error");
+@@ -112,7 +112,7 @@
+ /// Formatted string (e.g., "1.2M", "59.2K", "694")
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::format_tokens;
+ /// assert_eq!(format_tokens(1_234_567), "1.2M");
+ /// assert_eq!(format_tokens(59_234), "59.2K");
+@@ -137,7 +137,7 @@
+ /// Formatted string with $ prefix
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::format_usd;
+ /// assert_eq!(format_usd(1234.567), "$1234.57");
+ /// assert_eq!(format_usd(12.345), "$12.35");
+@@ -164,7 +164,7 @@
+ /// Formatted string like "$3.86/MTok"
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::format_cpt;
+ /// assert_eq!(format_cpt(0.000003), "$3.00/MTok");
+ /// assert_eq!(format_cpt(0.0000038), "$3.80/MTok");
+@@ -181,7 +181,7 @@
+ /// Join items into a newline-separated string, appending an overflow hint when total > max.
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::join_with_overflow;
+ /// let items = vec!["a".to_string(), "b".to_string()];
+ /// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n... +2 more items");
+@@ -198,7 +198,7 @@
+ /// Truncate an ISO 8601 datetime string to just the date portion (first 10 chars).
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::truncate_iso_date;
+ /// assert_eq!(truncate_iso_date("2024-01-15T10:30:00Z"), "2024-01-15");
+ /// assert_eq!(truncate_iso_date("2024-01-15"), "2024-01-15");
+@@ -216,7 +216,7 @@
+ /// Used for write operations (merge, create, comment, edit, etc.)
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::ok_confirmation;
+ /// assert_eq!(ok_confirmation("merged", "#42"), "ok merged #42");
+ /// assert_eq!(ok_confirmation("created", "PR #5 https://..."), "ok created PR #5 https://...");
+@@ -382,7 +382,7 @@
+ /// Returns "pnpm", "yarn", "bun", or "npm" based on lockfile presence.
+ ///
+ /// # Examples
+-/// ```no_run
++/// ```text
+ /// use rtk::utils::detect_package_manager;
+ /// let pm = detect_package_manager();
+ /// // "pnpm" for pnpm-lock.yaml, "yarn" for yarn.lock, "bun" for bun.lock(b), else "npm"
+@@ -615,7 +615,7 @@
+ /// configured when it is not, so pair every `option_env!` gate with this.
+ ///
+ /// # Examples
+-/// ```
++/// ```text
+ /// use rtk::utils::env_is_some;
+ /// assert!(env_is_some(Some("https://example.com")));
+ /// assert!(!env_is_some(Some("")));
+diff --git a/src/hooks/rewrite_cmd.rs b/src/hooks/rewrite_cmd.rs
+--- a/src/hooks/rewrite_cmd.rs
++++ b/src/hooks/rewrite_cmd.rs
+@@ -72,13 +72,7 @@
+ }
+ 
+ pub fn run(cmd: &str) -> anyhow::Result<()> {
+-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+-
+-    let outcome = evaluate(cmd, &excluded, &transparent_prefixes);
+-    if !matches!(outcome, RewriteOutcome::Deny) {
+-        track_tee_read(cmd);
+-    }
+-    match outcome {
++    match rewrite(cmd) {
+         RewriteOutcome::Allow(rewritten) => {
+             print!("{}", rewritten);
+             let _ = std::io::stdout().flush();
+@@ -94,11 +88,27 @@
+     }
+ }
+ 
++/// Rewrites a command without printing or terminating the caller.
++pub fn rewrite(cmd: &str) -> RewriteOutcome {
++    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
++
++    let outcome = evaluate(cmd, &excluded, &transparent_prefixes);
++    if !matches!(outcome, RewriteOutcome::Deny) {
++        track_tee_read(cmd);
++    }
++    outcome
++}
++
++/// Rewrite decision; permission outcomes are distinct from execution errors.
+ #[derive(Debug, PartialEq)]
+-enum RewriteOutcome {
++pub enum RewriteOutcome {
++    /// Rewritten command allowed by the permission rules.
+     Allow(String),
++    /// No supported rewrite; preserve the original command.
+     Passthrough,
++    /// Defer rejection to the native permission layer.
+     Deny,
++    /// Rewritten command still requires native permission.
+     Ask(String),
+ }
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+new file mode 100644
+--- /dev/null
++++ b/src/lib.rs
+@@ -0,0 +1,233 @@
++//! Command rewriting and execution for hosts that own their CLI and process lifecycle.
++
++// Compile the upstream entry file privately so its parser and dispatcher stay in
++// place and have one source of truth. The library never calls main or run_cli.
++#[allow(dead_code)] // Standalone startup and management handlers are not library APIs.
++#[path = "main.rs"]
++mod cli;
++use cli::{cmds, core, discover, hooks, learn, parser};
++
++use clap::{CommandFactory, FromArgMatches};
++use std::ffi::OsString;
++
++pub use hooks::rewrite_cmd::RewriteOutcome;
++
++/// Rewrites text using permissions and configuration without executing a command.
++///
++/// A rewrite does not authorize execution or bypass the native permission layer.
++pub fn rewrite(command: &str) -> RewriteOutcome {
++    hooks::rewrite_cmd::rewrite(command)
++}
++
++/// Version of the pinned RTK implementation linked into the host.
++pub const VERSION: &str = env!("CARGO_PKG_VERSION");
++
++/// Failures returned without terminating the embedding process.
++#[derive(Debug, thiserror::Error)]
++pub enum RtkError {
++    /// Invalid execution arguments, or a requested help/version response.
++    #[error(transparent)]
++    Arguments(#[from] clap::Error),
++    /// Command execution failed.
++    #[error(transparent)]
++    Execution(#[from] anyhow::Error),
++}
++
++const MANAGEMENT_COMMANDS: &[&str] = &[
++    "init",
++    "hook",
++    "hook-audit",
++    "gain",
++    "cc-economics",
++    "discover",
++    "session",
++    "telemetry",
++    "learn",
++    "config",
++    "trust",
++    "untrust",
++    "verify",
++    "rewrite",
++];
++
++/// Executes command arguments without their program name using the caller's stdio.
++///
++/// The host owns signal handling, deadlines and final process termination. This
++/// entry does not inspect or execute legacy hook scripts, install hooks or start
++/// telemetry. Use [`rewrite`] for rewriting.
++///
++/// # Examples
++/// ```
++/// use std::ffi::OsString;
++/// // Help returns to the host without terminating it.
++/// let result = rtk::execute(&[OsString::from("--help")]);
++/// assert!(matches!(result, Err(rtk::RtkError::Arguments(_))));
++/// assert_eq!(rtk::VERSION, "0.49.0");
++/// ```
++///
++/// # Errors
++/// Returns argument errors for unsupported management commands, and execution
++/// errors when command processing fails.
++pub fn execute(args: &[OsString]) -> Result<i32, RtkError> {
++    let raw: Vec<OsString> = std::iter::once(OsString::from("rtk"))
++        .chain(args.iter().cloned())
++        .collect();
++    let mut parser = cli::Cli::command().bin_name("tokenless rtk");
++    for name in MANAGEMENT_COMMANDS {
++        parser = parser.mut_subcommand(name, |command| command.hide(true));
++    }
++    let matches = match parser.try_get_matches_from(&raw) {
++        Ok(matches) => matches,
++        Err(error) => {
++            if matches!(
++                error.kind(),
++                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
++            ) || args.is_empty()
++                || args.first().is_some_and(|arg| {
++                    arg.to_str().is_some_and(|arg| {
++                        arg.starts_with('-') || core::constants::RTK_META_COMMANDS.contains(&arg)
++                    })
++                })
++            {
++                return Err(error.into());
++            }
++            return cli::run_fallback(error, args).map_err(Into::into);
++        }
++    };
++    if matches
++        .subcommand_name()
++        .is_some_and(|name| MANAGEMENT_COMMANDS.contains(&name))
++    {
++        return Err(clap::Error::raw(
++            clap::error::ErrorKind::InvalidSubcommand,
++            "this RTK management command is not exposed by Tokenless",
++        )
++        .into());
++    }
++    let mut cli = cli::Cli::from_arg_matches(&matches)?;
++    cli::restore_arguments(&mut cli, &raw);
++    cli::dispatch(cli).map_err(Into::into)
++}
++
++const COMMAND_NAME: &str = "tokenless rtk";
++// Signal handlers belong to the embedding host, including during command execution.
++const RELAY_SIGNALS: bool = false;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn every_upstream_command_has_an_explicit_exposure_decision() {
++        let exposed = [
++            "ls",
++            "tree",
++            "read",
++            "smart",
++            "git",
++            "gh",
++            "glab",
++            "aws",
++            "psql",
++            "pnpm",
++            "err",
++            "test",
++            "json",
++            "deps",
++            "env",
++            "find",
++            "diff",
++            "log",
++            "dotnet",
++            "docker",
++            "kubectl",
++            "oc",
++            "summary",
++            "grep",
++            "rg",
++            "wget",
++            "wc",
++            "jest",
++            "vitest",
++            "ctest",
++            "prisma",
++            "tsc",
++            "next",
++            "lint",
++            "prettier",
++            "format",
++            "playwright",
++            "cargo",
++            "npm",
++            "npx",
++            "bun",
++            "bunx",
++            "curl",
++            "run",
++            "proxy",
++            "recall",
++            "pipe",
++            "ruff",
++            "sqlfluff",
++            "pytest",
++            "mypy",
++            "php",
++            "phpunit",
++            "phpstan",
++            "pest",
++            "paratest",
++            "ecs",
++            "pint",
++            "phpt",
++            "rake",
++            "rubocop",
++            "rspec",
++            "pip",
++            "uv",
++            "deno",
++            "go",
++            "sbt",
++            "gt",
++            "golangci-lint",
++            "gradlew",
++            "mvn",
++            "mvnd",
++        ];
++        let parser = cli::Cli::command();
++        let actual: std::collections::BTreeSet<_> = parser
++            .get_subcommands()
++            .map(|command| command.get_name())
++            .collect();
++        let expected: std::collections::BTreeSet<_> = exposed
++            .into_iter()
++            .chain(MANAGEMENT_COMMANDS.iter().copied())
++            .collect();
++        assert_eq!(
++            actual, expected,
++            "classify every upstream subcommand before repinning RTK"
++        );
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn executed_failures_return_without_exiting_the_host() {
++        let _guard = core::utils::TEST_ENV_LOCK.lock().unwrap();
++        assert_eq!(execute(&["false".into()]).unwrap(), 1);
++        assert_eq!(execute(&["true".into()]).unwrap(), 0);
++    }
++
++    #[test]
++    fn management_and_help_return_to_the_host() {
++        for name in MANAGEMENT_COMMANDS {
++            for extra in [None, Some("--invalid")] {
++                let args = std::iter::once(OsString::from(name))
++                    .chain(extra.map(OsString::from))
++                    .collect::<Vec<_>>();
++                assert!(execute(&args).is_err(), "{args:?}");
++            }
++        }
++        let error = execute(&["--help".into()]).unwrap_err();
++        assert!(matches!(error, RtkError::Arguments(ref error)
++            if error.kind() == clap::error::ErrorKind::DisplayHelp));
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,14 +1,14 @@
+ mod analytics;
+-mod cmds;
+-mod core;
+-mod discover;
+-mod hooks;
+-mod learn;
+-mod parser;
++pub(crate) mod cmds;
++pub(crate) mod core;
++pub(crate) mod discover;
++pub(crate) mod hooks;
++pub(crate) mod learn;
++pub(crate) mod parser;
+ 
+ // Re-export command modules for routing
+ use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+-use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
++use cmds::dotnet::dotnet_cmd;
+ use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
+ use cmds::go::{go_cmd, golangci_cmd};
+ use cmds::js::{
+@@ -33,6 +33,10 @@
+ use clap::{Parser, Subcommand, ValueEnum};
+ use std::ffi::OsString;
+ use std::path::{Path, PathBuf};
++
++const COMMAND_NAME: &str = "rtk";
++// Only the standalone binary owns process-wide signal handling.
++const RELAY_SIGNALS: bool = true;
+ 
+ /// Target agent for hook installation.
+ #[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+@@ -70,7 +74,7 @@
+     about = "Rust Token Killer - Minimize LLM token consumption",
+     long_about = "A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context."
+ )]
+-struct Cli {
++pub(crate) struct Cli {
+     #[command(subcommand)]
+     command: Commands,
+ 
+@@ -1516,21 +1520,25 @@
+     }
+ }
+ 
+-fn run_fallback(parse_error: clap::Error) -> Result<i32> {
+-    let args: Vec<String> = std::env::args().skip(1).collect();
+-
++pub(crate) fn run_fallback(parse_error: clap::Error, args: &[std::ffi::OsString]) -> Result<i32> {
+     // No args → show Clap's error (user ran just "rtk" with bad syntax)
+     if args.is_empty() {
+-        parse_error.exit();
++        parse_error.print()?;
++        return Ok(parse_error.exit_code());
+     }
+ 
+     // RTK meta-commands should never fall back to raw execution.
+     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
+-    if core::constants::RTK_META_COMMANDS.contains(&args[0].as_str()) {
+-        parse_error.exit();
+-    }
+-
+-    let raw_command = args.join(" ");
++    if core::constants::RTK_META_COMMANDS.contains(&args[0].to_string_lossy().as_ref()) {
++        parse_error.print()?;
++        return Ok(parse_error.exit_code());
++    }
++
++    let raw_command = args
++        .iter()
++        .map(|arg| arg.to_string_lossy())
++        .collect::<Vec<_>>()
++        .join(" ");
+     let error_message = core::utils::strip_ansi(&parse_error.to_string());
+ 
+     // Start timer before execution to capture actual command runtime
+@@ -1542,9 +1550,10 @@
+         let base = std::path::Path::new(&args[0])
+             .file_name()
+             .map(|n| n.to_string_lossy().into_owned())
+-            .unwrap_or_else(|| args[0].clone());
++            .unwrap_or_else(|| args[0].to_string_lossy().into_owned());
+         std::iter::once(base.as_str())
+-            .chain(args[1..].iter().map(|s| s.as_str()))
++            .map(std::borrow::Cow::Borrowed)
++            .chain(args[1..].iter().map(|s| s.to_string_lossy()))
+             .collect::<Vec<_>>()
+             .join(" ")
+     };
+@@ -1558,14 +1567,14 @@
+         // TOML match: capture stdout for filtering
+         let result = if filter.filter_stderr {
+             // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
+-            core::utils::resolved_command(&args[0])
++            resolved_command(&args[0])
+                 .args(&args[1..])
+                 .stdin(std::process::Stdio::inherit())
+                 .stdout(std::process::Stdio::piped())
+                 .stderr(std::process::Stdio::piped()) // captured for merging
+                 .output()
+         } else {
+-            core::utils::resolved_command(&args[0])
++            resolved_command(&args[0])
+                 .args(&args[1..])
+                 .stdin(std::process::Stdio::inherit())
+                 .stdout(std::process::Stdio::piped()) // capture
+@@ -1628,13 +1637,13 @@
+             Err(e) => {
+                 // Command not found — same behaviour as no-TOML path
+                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+-                eprintln!("[rtk: {}]", e);
++                eprintln!("[{}: {}]", crate::COMMAND_NAME, e);
+                 Ok(127)
+             }
+         }
+     } else {
+         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
+-        let status = core::utils::resolved_command(&args[0])
++        let status = resolved_command(&args[0])
+             .args(&args[1..])
+             .stdin(std::process::Stdio::inherit())
+             .stdout(std::process::Stdio::inherit())
+@@ -1652,10 +1661,17 @@
+             Err(e) => {
+                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                 // Command not found or other OS error — single message, no duplicate Clap error
+-                eprintln!("[rtk: {}]", e);
++                eprintln!("[{}: {}]", crate::COMMAND_NAME, e);
+                 Ok(127)
+             }
+         }
++    }
++}
++
++fn resolved_command(name: &std::ffi::OsStr) -> std::process::Command {
++    match name.to_str() {
++        Some(name) => core::utils::resolved_command(name),
++        None => std::process::Command::new(name),
+     }
+ }
+ 
+@@ -1752,8 +1768,8 @@
+                     _ => unreachable!(),
+                 };
+                 let msg = format!(
+-                    "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
+-                    cmd_name
++                    "[{}] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
++                    crate::COMMAND_NAME, cmd_name
+                 );
+                 return Some(msg);
+             }
+@@ -1833,17 +1849,53 @@
+     }
+ }
+ 
++/// Restores separators before passing arguments to command implementations.
++pub(crate) fn restore_arguments(cli: &mut Cli, raw: &[OsString]) {
++    let args = match &mut cli.command {
++        Commands::Git {
++            command:
++                GitCommands::Diff { args } | GitCommands::Log { args } | GitCommands::Checkout { args },
++            ..
++        } => Some(args),
++        Commands::Cargo {
++            command:
++                CargoCommands::Build { args }
++                | CargoCommands::Test { args }
++                | CargoCommands::Clippy { args }
++                | CargoCommands::Check { args }
++                | CargoCommands::Install { args }
++                | CargoCommands::Nextest { args },
++            ..
++        } => Some(args),
++        Commands::Grep {
++            extra_args: args, ..
++        }
++        | Commands::Rg {
++            extra_args: args, ..
++        } => Some(args),
++        _ => None,
++    };
++    if let Some(args) = args {
++        let raw: Vec<String> = raw
++            .iter()
++            .map(|arg| arg.to_string_lossy().into_owned())
++            .collect();
++        *args = core::args_utils::restore_double_dash_with_raw(args, &raw);
++    }
++}
++
+ fn run_cli() -> Result<i32> {
+     // Fire-and-forget telemetry ping (1/day, non-blocking)
+     core::telemetry::maybe_ping();
+ 
+-    let cli = match Cli::try_parse_from(std::env::args_os()) {
++    let raw: Vec<OsString> = std::env::args_os().collect();
++    let mut cli = match Cli::try_parse_from(&raw) {
+         Ok(cli) => cli,
+         Err(e) => {
+             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                 e.exit();
+             }
+-            return run_fallback(e);
++            return run_fallback(e, &raw[1..]);
+         }
+     };
+ 
+@@ -1860,6 +1912,12 @@
+         hooks::integrity::runtime_check()?;
+     }
+ 
++    restore_arguments(&mut cli, &raw);
++    dispatch(cli)
++}
++
++/// Runs already-parsed commands without standalone process startup.
++pub(crate) fn dispatch(cli: Cli) -> Result<i32> {
+     let code = match cli.command {
+         Commands::Ls { args } => ls::run(&args, cli.verbose)?,
+ 
+@@ -1878,7 +1936,10 @@
+             for file in &files {
+                 let result = if file == Path::new("-") {
+                     if stdin_seen {
+-                        eprintln!("rtk: warning: stdin specified more than once");
++                        eprintln!(
++                            "{}: warning: stdin specified more than once",
++                            crate::COMMAND_NAME
++                        );
+                         continue;
+                     }
+                     stdin_seen = true;
+@@ -2465,9 +2526,15 @@
+             0
+         }
+ 
+-        Commands::Jest { ref args } | Commands::Vitest { ref args } => {
+-            vitest_cmd::run_test(&cli.command, args, cli.verbose)?
+-        }
++        Commands::Jest { ref args } | Commands::Vitest { ref args } => vitest_cmd::run_test(
++            if matches!(cli.command, Commands::Vitest { .. }) {
++                vitest_cmd::TestFramework::Vitest
++            } else {
++                vitest_cmd::TestFramework::Jest
++            },
++            args,
++            cli.verbose,
++        )?,
+ 
+         Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
+ 
+@@ -2864,7 +2931,8 @@
+ 
+             if args.is_empty() {
+                 anyhow::bail!(
+-                    "proxy requires a command to execute\nUsage: rtk proxy <command> [args...]"
++                    "proxy requires a command to execute\nUsage: {} proxy <command> [args...]",
++                    crate::COMMAND_NAME
+                 );
+             }
+ 
+@@ -2903,7 +2971,7 @@
+ 
+             #[cfg(unix)]
+             #[allow(unsafe_code)]
+-            {
++            if crate::RELAY_SIGNALS {
+                 unsafe extern "C" fn handle_signal(sig: libc::c_int) {
+                     let pid = PROXY_CHILD_PID.load(Ordering::SeqCst);
+                     if pid != 0 {
+@@ -4007,7 +4075,7 @@
+                 let warning = validate_pnpm_filters(&filter, &command).unwrap();
+ 
+                 assert_eq!(filter, vec!["@app1", "@app2"]);
+-                assert_eq!(warning, "[rtk] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored")
++                assert_eq!(warning, format!("[{}] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored", crate::COMMAND_NAME))
+             }
+             _ => panic!("Expected Pnpm Build command"),
+         }
+diff --git a/tests/library_api.rs b/tests/library_api.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/library_api.rs
+@@ -0,0 +1,311 @@
++//! Exercise the public library in isolated hosts, independently of Tokenless's CLI.
++
++#![cfg(unix)]
++
++use std::ffi::OsString;
++use std::os::unix::ffi::OsStringExt;
++use std::os::unix::fs::PermissionsExt;
++use std::process::Command;
++
++fn isolated(name: &str, test: impl FnOnce()) {
++    if std::env::var("RTK_LIBRARY_CASE").as_deref() == Ok(name) {
++        test();
++        return;
++    }
++    let root = tempfile::tempdir().unwrap();
++    std::fs::create_dir(root.path().join(".claude")).unwrap();
++    let output = Command::new(std::env::current_exe().unwrap())
++        .args(["--exact", name, "--nocapture"])
++        .current_dir(root.path())
++        .env("RTK_LIBRARY_CASE", name)
++        .env("HOME", root.path())
++        .env("CLAUDE_CONFIG_DIR", root.path().join(".claude"))
++        .env("XDG_CONFIG_HOME", root.path().join("config"))
++        .env("XDG_DATA_HOME", root.path().join("data"))
++        .env("TOKENLESS_DATA_DIR", root.path().join("state"))
++        .env("TOKENLESS_STATS_ENABLED", "0")
++        .env_remove("TOKENLESS_STATS_DB")
++        .output()
++        .unwrap();
++    assert!(output.status.success(), "{name}: {output:?}");
++    if name == "recall_survives_legacy_hook_changes" {
++        let stdout = String::from_utf8(output.stdout).unwrap();
++        let (filtered, recovered) = stdout.split_once("RECALL_BEGIN\n").unwrap();
++        assert!(filtered.contains("tokenless rtk recall "), "{filtered}");
++        let (recovered, _) = recovered.split_once("RECALL_END\n").unwrap();
++        assert_eq!(recovered, recovery_output());
++    }
++}
++
++#[test]
++fn rewrite_preserves_permissions_and_native_command_names() {
++    isolated(
++        "rewrite_preserves_permissions_and_native_command_names",
++        || {
++            tamper_legacy_hook();
++            for (rule, expected) in [
++                ("allow", rtk::RewriteOutcome::Allow("rtk git status".into())),
++                ("ask", rtk::RewriteOutcome::Ask("rtk git status".into())),
++                ("deny", rtk::RewriteOutcome::Deny),
++            ] {
++                std::fs::write(
++                    ".claude/settings.json",
++                    serde_json::json!({"permissions":{rule:["Bash(git status)"]}}).to_string(),
++                )
++                .unwrap();
++                assert_eq!(rtk::rewrite("git status"), expected);
++            }
++            std::fs::remove_file(".claude/settings.json").unwrap();
++            assert_eq!(
++                rtk::rewrite("printf hello"),
++                rtk::RewriteOutcome::Passthrough
++            );
++            assert!(matches!(rtk::rewrite("rtk git status"),
++            rtk::RewriteOutcome::Allow(value) | rtk::RewriteOutcome::Ask(value)
++                if value == "rtk git status"));
++        },
++    );
++}
++
++fn tamper_legacy_hook() {
++    std::fs::create_dir_all(".claude/hooks").unwrap();
++    std::fs::write(
++        ".claude/hooks/rtk-rewrite.sh",
++        "#!/bin/sh\n: > hook-executed\n",
++    )
++    .unwrap();
++    std::fs::write(
++        ".claude/hooks/.rtk-hook.sha256",
++        format!("{}  rtk-rewrite.sh\n", "0".repeat(64)),
++    )
++    .unwrap();
++}
++
++#[test]
++fn legacy_hooks_do_not_gate_library_execution() {
++    isolated("legacy_hooks_do_not_gate_library_execution", || {
++        assert!(Command::new("git")
++            .args(["init", "-q"])
++            .status()
++            .unwrap()
++            .success());
++        tamper_legacy_hook();
++        // This parsed command still requires hook integrity in the standalone CLI.
++        assert_eq!(rtk::execute(&["git".into(), "status".into()]).unwrap(), 0);
++        for (args, file, code) in [
++            (
++                vec!["run", "-c", "printf parsed > parsed-result; exit 7"],
++                "parsed-result",
++                7,
++            ),
++            (
++                vec!["sh", "-c", "printf fallback > fallback-result; exit 9"],
++                "fallback-result",
++                9,
++            ),
++        ] {
++            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
++            assert_eq!(rtk::execute(&args).unwrap(), code);
++            assert!(std::fs::metadata(file).unwrap().len() > 0);
++        }
++        let standalone = Command::new(env!("CARGO_BIN_EXE_rtk"))
++            .args(["rewrite", "git status"])
++            .output()
++            .unwrap();
++        // Standalone rewriting remains exempt: 0 allows, 3 asks for native permission.
++        assert!(matches!(standalone.status.code(), Some(0 | 3)));
++        let standalone = Command::new(env!("CARGO_BIN_EXE_rtk"))
++            .args(["git", "status"])
++            .output()
++            .unwrap();
++        assert_eq!(standalone.status.code(), Some(1));
++        let stderr = String::from_utf8_lossy(&standalone.stderr);
++        assert!(stderr.contains("hook integrity check FAILED"), "{stderr}");
++        assert!(stderr.contains("rtk init -g --auto-patch"), "{stderr}");
++        assert!(stderr.contains("rtk verify"), "{stderr}");
++        assert!(!std::path::Path::new("hook-executed").exists());
++    });
++}
++
++fn recovery_output() -> String {
++    (0..80)
++        .map(|i| format!("detail {i}: retained original command output\n"))
++        .collect()
++}
++
++#[test]
++fn recall_survives_legacy_hook_changes() {
++    isolated("recall_survives_legacy_hook_changes", || {
++        let database = std::env::current_dir().unwrap().join("recall.db");
++        // This disposable host owns its environment and recovery store.
++        std::env::set_var("RTK_RECALL_DB", &database);
++        std::env::set_var("RTK_RECALL", "1");
++        std::env::set_var("RTK_TEE", "1");
++        std::fs::write("recovery.txt", recovery_output()).unwrap();
++        assert_eq!(
++            rtk::execute(&["err".into(), "cat recovery.txt; exit 7".into()]).unwrap(),
++            7
++        );
++        let connection = rusqlite::Connection::open(&database).unwrap();
++        let hash: String = connection
++            .query_row("SELECT hash FROM recall", [], |row| row.get(0))
++            .unwrap();
++        drop(connection);
++        tamper_legacy_hook();
++        println!("RECALL_BEGIN");
++        assert_eq!(
++            rtk::execute(&["recall".into(), hash.clone().into(), "--full".into()]).unwrap(),
++            0
++        );
++        println!("RECALL_END");
++        let standalone = Command::new(env!("CARGO_BIN_EXE_rtk"))
++            .args(["recall", &hash, "--full"])
++            .output()
++            .unwrap();
++        assert!(standalone.status.success());
++        assert_eq!(standalone.stdout, recovery_output().as_bytes());
++        assert!(!std::path::Path::new("hook-executed").exists());
++        assert_eq!(rtk::execute(&["true".into()]).unwrap(), 0);
++    });
++}
++
++#[test]
++fn management_commands_cannot_enter_native_fallback() {
++    isolated("management_commands_cannot_enter_native_fallback", || {
++        for name in [
++            "init",
++            "hook",
++            "hook-audit",
++            "gain",
++            "cc-economics",
++            "discover",
++            "session",
++            "telemetry",
++            "learn",
++            "config",
++            "trust",
++            "untrust",
++            "verify",
++            "rewrite",
++        ] {
++            let path = std::env::current_dir().unwrap().join(name);
++            std::fs::write(&path, "#!/bin/sh\n: > forbidden-executed\n").unwrap();
++            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
++            // This process is a private test host; its environment cannot affect other tests.
++            std::env::set_var("PATH", std::env::current_dir().unwrap());
++            for args in [
++                vec![name],
++                vec![name, "--invalid"],
++                vec!["--", name],
++                vec!["-v", name, "--invalid"],
++            ] {
++                let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
++                assert!(rtk::execute(&args).is_err(), "{args:?}");
++                assert!(!std::path::Path::new("forbidden-executed").exists());
++            }
++        }
++    });
++}
++
++#[test]
++fn execute_uses_explicit_arguments_and_returns_to_its_host() {
++    isolated(
++        "execute_uses_explicit_arguments_and_returns_to_its_host",
++        || {
++            for prefix in [vec!["proxy", "sh"], vec!["sh"]] {
++                let mut args = prefix.into_iter().map(OsString::from).collect::<Vec<_>>();
++                args.extend(
++                    [
++                        "-c",
++                        "printf '%s' \"$1\" > 'result file'; exit 7",
++                        "host",
++                        "argument with spaces",
++                    ]
++                    .into_iter()
++                    .map(OsString::from),
++                );
++                assert_eq!(rtk::execute(&args).unwrap(), 7);
++                assert_eq!(
++                    std::fs::read("result file").unwrap(),
++                    b"argument with spaces"
++                );
++            }
++            let args = [
++                "sh".into(),
++                "-c".into(),
++                "printf '%s' \"$1\" > 'result file'".into(),
++                "host".into(),
++                OsString::from_vec(vec![b'a', 0xff]),
++            ];
++            assert_eq!(rtk::execute(&args).unwrap(), 0);
++            assert_eq!(std::fs::read("result file").unwrap(), [b'a', 0xff]);
++            assert_eq!(rtk::execute(&["true".into()]).unwrap(), 0);
++        },
++    );
++}
++
++// Each caller runs in a disposable host process, so signal state is isolated.
++#[allow(unsafe_code)] // libc is required to install and inspect the host's signal handlers.
++fn assert_host_signals_survive(args: &[OsString]) {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    static RECEIVED: AtomicUsize = AtomicUsize::new(0);
++    extern "C" fn handle(sig: libc::c_int) {
++        RECEIVED.fetch_or(1 << sig, Ordering::SeqCst);
++    }
++    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGPIPE] {
++        // SAFETY: handle has the required C ABI and only performs an atomic operation.
++        assert_ne!(
++            unsafe { libc::signal(sig, handle as *const () as libc::sighandler_t) },
++            libc::SIG_ERR
++        );
++    }
++    assert_eq!(rtk::execute(args).unwrap(), 7);
++    assert_eq!(
++        RECEIVED.load(Ordering::SeqCst),
++        (1 << libc::SIGINT) | (1 << libc::SIGTERM)
++    );
++    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGPIPE] {
++        // SAFETY: sigaction writes an initialized output and the null input leaves it unchanged.
++        let action = unsafe {
++            let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
++            assert_eq!(
++                libc::sigaction(sig, std::ptr::null(), action.as_mut_ptr()),
++                0
++            );
++            action.assume_init()
++        };
++        assert_eq!(
++            action.sa_sigaction,
++            handle as *const () as libc::sighandler_t
++        );
++    }
++    assert_eq!(rtk::execute(&["true".into()]).unwrap(), 0);
++}
++
++#[test]
++fn proxy_preserves_host_signal_handlers() {
++    isolated("proxy_preserves_host_signal_handlers", || {
++        assert_host_signals_survive(&[
++            "proxy".into(),
++            "sh".into(),
++            "-c".into(),
++            "kill -INT \"$PPID\"; kill -TERM \"$PPID\"; exit 7".into(),
++        ]);
++    });
++}
++
++#[test]
++fn streamed_execution_preserves_host_signal_handlers() {
++    isolated("streamed_execution_preserves_host_signal_handlers", || {
++        let bin = std::env::current_dir().unwrap().join("bin");
++        std::fs::create_dir(&bin).unwrap();
++        let cargo = bin.join("cargo");
++        std::fs::write(&cargo, "#!/bin/sh\nkill -INT \"$PPID\"\nkill -TERM \"$PPID\"\nprintf 'error: fixture failure\\n' >&2\nexit 7\n").unwrap();
++        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
++        let mut paths = vec![bin];
++        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
++        // This process is a private test host; its environment cannot affect other tests.
++        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
++        assert_host_signals_survive(&["cargo".into(), "build".into()]);
++    });
++}

@@ -18,14 +18,60 @@ function Get-CargoTargetDirectory([string]$Manifest) {
         [Console]::OutputEncoding = $previousEncoding
     }
 }
+# Match setup-rtk.sh's applied-tree digest; metadata and Cargo output are excluded.
+function Get-RtkTreeDigest([string]$Root) {
+    $rootPath = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $paths = @{}
+    foreach ($item in Get-ChildItem -LiteralPath $rootPath -Recurse -Force) {
+        $relative = $item.FullName.Substring($rootPath.Length + 1).Replace('\', '/')
+        if ($relative -match '^(\.git|target)(/|$)|^\.anolisa-rtk-[^/]+$') { continue }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "RTK source contains an unsupported link: $relative"
+        }
+        if (!$item.PSIsContainer) { $paths["./$relative"] = $item.FullName }
+    }
+    [string[]]$names = @($paths.Keys)
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $stream = [IO.MemoryStream]::new()
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        foreach ($name in $names) {
+            $hash = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash.ToLowerInvariant()
+            $bytes = [Text.Encoding]::UTF8.GetBytes($name + [char]0 + $hash + '  ' + $name + "`n")
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        return [BitConverter]::ToString($sha.ComputeHash($stream.ToArray())).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
 # The existing setup script remains the single source of the pinned revision.
 $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'setup-rtk.sh') -Raw
 $revision = [regex]::Match($source, '(?m)^RTK_COMMIT="([0-9a-f]{40})"').Groups[1].Value
 $repository = [regex]::Match($source, '(?m)^RTK_REPOSITORY="([^"]+)"').Groups[1].Value
 if (!$revision -or !$repository) { throw 'RTK source pin is missing from setup-rtk.sh' }
+$patches = [regex]::Match($source, '(?m)^PATCHES=\(([^)]+)\)').Groups[1].Value.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+if (!$patches.Count) { throw 'RTK patch order is missing from setup-rtk.sh' }
+$patchBytes = [IO.MemoryStream]::new()
+foreach ($patch in $patches) {
+    $contents = [IO.File]::ReadAllText((Join-Path $component "third_party/patches/$patch")).Replace("`r`n", "`n")
+    $bytes = [Text.Encoding]::UTF8.GetBytes($patch + [char]0 + $contents)
+    $patchBytes.Write($bytes, 0, $bytes.Length)
+}
+$patchDigest = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($patchBytes.ToArray())).Replace("-", "").ToLowerInvariant()
+$patchBytes.Dispose()
 if (Test-Path -LiteralPath $rtk) {
     $marker = Get-Content -LiteralPath (Join-Path $rtk '.anolisa-rtk-commit') -Raw
     if ($marker.Trim() -ne $revision) { throw 'RTK checkout does not match the pinned revision' }
+    $patchMarker = Join-Path $rtk '.anolisa-rtk-patches'
+    if (!(Test-Path -LiteralPath $patchMarker) -or (Get-Content -LiteralPath $patchMarker -Raw).Trim() -ne $patchDigest) {
+        throw 'RTK patches have changed; remove the generated RTK checkout and retry'
+    }
+    $treeMarker = Join-Path $rtk '.anolisa-rtk-tree'
+    if (!(Test-Path -LiteralPath $treeMarker) -or (Get-Content -LiteralPath $treeMarker -Raw).Trim() -ne (Get-RtkTreeDigest $rtk)) {
+        throw 'RTK applied source has changed or its digest is missing; preserve edits and prepare a clean checkout'
+    }
     $head = & git -C $rtk rev-parse HEAD
     if ($LASTEXITCODE -ne 0 -or $head -ne $revision) { throw 'RTK HEAD does not match the pinned revision' }
 } else {
@@ -37,7 +83,7 @@ if (Test-Path -LiteralPath $rtk) {
     if ($LASTEXITCODE -ne 0) { throw "RTK fetch failed; incomplete checkout retained at $stage" }
     & git -C $stage checkout --quiet --detach FETCH_HEAD
     if ($LASTEXITCODE -ne 0) { throw 'RTK checkout failed' }
-    foreach ($patch in @('rtk-tokenless-stats.patch', 'rtk-pytest-error-report.patch')) {
+    foreach ($patch in $patches) {
         $patchFile = Join-Path $stage '.tokenless-apply.patch'
         $patchText = [IO.File]::ReadAllText((Join-Path $component "third_party/patches/$patch")).Replace("`r`n", "`n")
         [IO.File]::WriteAllText($patchFile, $patchText, [Text.UTF8Encoding]::new($false))
@@ -46,6 +92,8 @@ if (Test-Path -LiteralPath $rtk) {
         Remove-Item -LiteralPath $patchFile
     }
     [IO.File]::WriteAllText((Join-Path $stage '.anolisa-rtk-commit'), "$revision`n")
+    [IO.File]::WriteAllText((Join-Path $stage '.anolisa-rtk-patches'), "$patchDigest`n")
+    [IO.File]::WriteAllText((Join-Path $stage '.anolisa-rtk-tree'), "$(Get-RtkTreeDigest $stage)`n")
     Move-Item -LiteralPath $stage -Destination $rtk
 }
 $buildArgs = @('build', '--locked', '--target', 'x86_64-pc-windows-msvc')

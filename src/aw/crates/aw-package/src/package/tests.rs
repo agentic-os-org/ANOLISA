@@ -106,12 +106,15 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         "NOTICE",
         "src/tokenless/third_party/rtk/LICENSE",
         "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
+        "src/tokenless/third_party/rtk/.anolisa-rtk-patches",
         "src/tokenless/crates/tokenless-stats/src/home.rs",
         "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
         "src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs",
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+        "src/tokenless/third_party/patches/rtk-library.patch",
+        "src/tokenless/third_party/patches/future-fix.patch",
         "docs/user-guide/en/aw/installation.md",
         "docs/user-guide/zh/aw/installation.md",
     ] {
@@ -119,6 +122,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "fixture").unwrap();
     }
+    fs::write(repo.join("src/tokenless/scripts/setup-rtk.sh"),
+        "PATCHES=(rtk-tokenless-stats.patch rtk-pytest-error-report.patch rtk-library.patch future-fix.patch)\n").unwrap();
     let output = repo.join("output");
     fs::create_dir(&output).unwrap();
     let cancel = AtomicBool::new(false);
@@ -464,12 +469,15 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         "NOTICE",
         "src/tokenless/third_party/rtk/LICENSE",
         "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
+        "src/tokenless/third_party/rtk/.anolisa-rtk-patches",
         "src/tokenless/crates/tokenless-stats/src/home.rs",
         "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
         "src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs",
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+        "src/tokenless/third_party/patches/rtk-library.patch",
+        "src/tokenless/third_party/patches/future-fix.patch",
         "docs/user-guide/en/aw/installation.md",
         "docs/user-guide/zh/aw/installation.md",
     ] {
@@ -477,6 +485,8 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "fixture").unwrap();
     }
+    fs::write(repo.join("src/tokenless/scripts/setup-rtk.sh"),
+        "PATCHES=(rtk-tokenless-stats.patch rtk-pytest-error-report.patch rtk-library.patch future-fix.patch)\n").unwrap();
     let output = repo.join("output");
     fs::create_dir(&output).unwrap();
     let archives = stage(
@@ -507,6 +517,18 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         serde_json::from_slice(&fs::read(package.join("payload").join(provenance_path)).unwrap())
             .unwrap();
     assert_eq!(provenance["anolisa_source_commit"], "a".repeat(40));
+    assert!(provenance["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|input| input["payload"] == "future-fix.patch"));
+    assert_eq!(
+        fs::read_to_string(
+            package.join("payload/share/doc/aw-provider-tokenless/rtk/future-fix.patch")
+        )
+        .unwrap(),
+        "fixture"
+    );
     assert!(provenance["shared_sources_reason"]
         .as_str()
         .unwrap()

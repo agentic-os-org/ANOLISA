@@ -229,6 +229,7 @@ install -d -m 0755 "$CURRENT_BUILD/scripts" "$CURRENT_BUILD/third_party/patches"
 cp "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$CURRENT_BUILD/scripts/"
 cp "$REPO_ROOT/src/tokenless/third_party/patches/rtk-tokenless-stats.patch" \
     "$REPO_ROOT/src/tokenless/third_party/patches/rtk-pytest-error-report.patch" \
+    "$REPO_ROOT/src/tokenless/third_party/patches/rtk-library.patch" \
     "$CURRENT_BUILD/third_party/patches/"
 PATH="$HISTORICAL_FAKE_BIN:$PATH" \
     HISTORICAL_FAKE_HEAD="$CURRENT_RTK_COMMIT" \
@@ -237,9 +238,61 @@ PATH="$HISTORICAL_FAKE_BIN:$PATH" \
     bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD"
 grep -Fq "fetch --quiet --depth 1 origin $CURRENT_RTK_COMMIT" \
     "$TEMPORARY/current-git.log"
-[ "$(wc -l < "$TEMPORARY/current-patch.log")" -eq 2 ]
+[ "$(wc -l < "$TEMPORARY/current-patch.log")" -eq 3 ]
 [ "$(cat "$CURRENT_BUILD/third_party/rtk/.anolisa-rtk-commit")" = \
     "$CURRENT_RTK_COMMIT" ]
+
+# Applied-source changes must be rejected even when revision and patch markers match.
+cp "$CURRENT_BUILD/third_party/rtk/Cargo.toml" "$TEMPORARY/clean-cargo.toml"
+printf '# local source edit\n' >> "$CURRENT_BUILD/third_party/rtk/Cargo.toml"
+if PATH="$HISTORICAL_FAKE_BIN:$PATH" HISTORICAL_FAKE_HEAD="$CURRENT_RTK_COMMIT" \
+    HISTORICAL_GIT_LOG="$TEMPORARY/current-git.log" \
+    bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD" >"$TEMPORARY/source-drift.log" 2>&1; then
+    printf 'ERROR: modified RTK source cache was accepted\n' >&2
+    exit 1
+fi
+grep -Fq 'RTK applied source has changed' "$TEMPORARY/source-drift.log"
+cp "$TEMPORARY/clean-cargo.toml" "$CURRENT_BUILD/third_party/rtk/Cargo.toml"
+# Source archives omit Git metadata but must still verify their applied tree.
+rm -rf "$CURRENT_BUILD/third_party/rtk/.git"
+bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD"
+printf 'untracked source\n' > "$CURRENT_BUILD/third_party/rtk/injected.rs"
+if bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD" >"$TEMPORARY/untracked-drift.log" 2>&1; then
+    printf 'ERROR: RTK source archive accepted an untracked addition\n' >&2
+    exit 1
+fi
+grep -Fq 'RTK applied source has changed' "$TEMPORARY/untracked-drift.log"
+rm "$CURRENT_BUILD/third_party/rtk/injected.rs"
+
+# Cache validity includes the complete ordered patch set, even at the same revision.
+printf '\n# changed fixture\n' >> "$CURRENT_BUILD/third_party/patches/rtk-library.patch"
+if PATH="$HISTORICAL_FAKE_BIN:$PATH" \
+    HISTORICAL_FAKE_HEAD="$CURRENT_RTK_COMMIT" \
+    HISTORICAL_GIT_LOG="$TEMPORARY/current-git.log" \
+    HISTORICAL_PATCH_LOG="$TEMPORARY/current-patch.log" \
+    bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD" >"$TEMPORARY/patch-drift.log" 2>&1; then
+    printf 'ERROR: stale RTK patch cache was accepted\n' >&2
+    exit 1
+fi
+grep -Fq 'RTK patches have changed' "$TEMPORARY/patch-drift.log"
+
+# Windows uses git apply, which requires Git metadata for newly created files.
+python3 - "$REPO_ROOT/src/tokenless/third_party/patches/rtk-library.patch" "$TEMPORARY/library-patch" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+patch = Path(sys.argv[1]).read_text()
+created = ["diff --git " + block for block in patch.split("diff --git ")[1:]
+           if "\n--- /dev/null\n" in block]
+assert created, "library patch must create its library entrypoint"
+destination = Path(sys.argv[2])
+destination.mkdir()
+subprocess.run(["git", "apply", "--ignore-space-change"], input="".join(created),
+               text=True, cwd=destination, check=True)
+assert (destination / "src/lib.rs").is_file()
+assert (destination / "tests/library_api.rs").is_file()
+PY
 
 RTK_DRIFT="$TEMPORARY/rtk-drift"
 install -d -m 0755 "$RTK_DRIFT"

@@ -86,14 +86,9 @@ pub(super) fn stage(
             "src/tokenless/scripts/setup-rtk.sh",
         ),
         (
-            "rtk-tokenless-stats.patch",
-            repo.join("src/tokenless/third_party/patches/rtk-tokenless-stats.patch"),
-            "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
-        ),
-        (
-            "rtk-pytest-error-report.patch",
-            repo.join("src/tokenless/third_party/patches/rtk-pytest-error-report.patch"),
-            "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+            "patches-sha256",
+            rtk.join(".anolisa-rtk-patches"),
+            "setup-rtk.sh:.anolisa-rtk-patches",
         ),
     ] {
         add(
@@ -105,6 +100,30 @@ pub(super) fn stage(
             cancel,
         )?;
         inputs.push(serde_json::json!({"source":origin,"payload":name,"sha256":digest(&source)?}));
+    }
+    let setup = fs::read_to_string(repo.join("src/tokenless/scripts/setup-rtk.sh"))?;
+    let patches = setup
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("PATCHES=(")
+                .and_then(|line| line.strip_suffix(')'))
+        })
+        .filter(|list| !list.trim().is_empty())
+        .ok_or_else(|| Error::Invalid("RTK patch list is missing".into()))?;
+    for name in patches.split_whitespace() {
+        let source = repo.join("src/tokenless/third_party/patches").join(name);
+        add(
+            root,
+            &format!("{directory}/{name}"),
+            &source,
+            false,
+            files,
+            cancel,
+        )?;
+        inputs.push(serde_json::json!({
+            "source":format!("src/tokenless/third_party/patches/{name}"),
+            "payload":name,"sha256":digest(&source)?
+        }));
     }
     let provenance = root.join("rtk-provenance.json");
     fs::write(

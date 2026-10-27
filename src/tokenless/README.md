@@ -16,6 +16,7 @@ conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rt
 not isolated by Tokenless tenant or session.
 See [bundled RTK commands](../../docs/user-guide/en/tokenless/cli-reference.md#bundled-rtk-commands)
 for flag migration, pipeline behavior, and output recovery.
+See [RTK library API maintenance](../../docs/developer-guide/en/tokenless/rtk-library.md) for the public API, pinned-source patch and validation commands.
 
 Agent adapters are available for:
 

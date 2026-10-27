@@ -144,7 +144,9 @@ SOURCE_VERSION="$(
 RTK_ROOT="$COMPONENT_ROOT/third_party/rtk"
 # RTK is excluded from Tokenless's workspace; make its cloned source an explicit
 # workspace root so Cargo never searches the persistent /tmp parent hierarchy.
-printf '\n[workspace]\n' >> "$RTK_ROOT/Cargo.toml"
+if ! grep -q '^\[workspace\]' "$RTK_ROOT/Cargo.toml"; then
+    printf '\n[workspace]\n' >> "$RTK_ROOT/Cargo.toml"
+fi
 
 if [ -e "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
     die "output directory must be empty: $OUTPUT_DIR"

@@ -9,6 +9,7 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 不按 Tokenless 租户或 Session 隔离。
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/tokenless/cli-reference.md#随包提供的-rtk-命令)。
+公开 API、固定源码补丁及验证命令见 [RTK 库接口维护](../../docs/developer-guide/zh/tokenless/rtk-library.md)。
 
 当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行格式压紧和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 

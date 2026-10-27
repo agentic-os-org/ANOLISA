@@ -973,7 +973,7 @@ jobs:
       - uses: extractions/setup-just@v2
 
       - name: Install RTK Rust toolchain
-        run: rustup toolchain install 1.91.0 --profile minimal
+        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
 
       - name: Identify bundled RTK cache inputs
         id: rtk-cache-inputs
