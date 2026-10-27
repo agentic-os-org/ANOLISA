@@ -24,7 +24,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = PathBuf::from("/tmp").join(format!("fp-topology-{}", Uuid::new_v4().simple()));
+        // Keep real-proc fixtures off container overlay filesystems.
+        let root =
+            PathBuf::from("/dev/shm").join(format!("fp-topology-{}", Uuid::new_v4().simple()));
         fs::create_dir(&root).expect("create fixture root");
         Self { root }
     }
