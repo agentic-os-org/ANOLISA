@@ -21,6 +21,8 @@ flowchart LR
     Host --> Exec[aw-exec]
     Exec --> Provider[Provider process]
     Provider --> Backend[Tokenless or sec-core CLI]
+    Provider --> Semantic[semantic-arbiter library and model HTTP]
+    Semantic --> Records[Private local shadow records]
     Service --> Journal[aw-core FileJournal]
 ```
 
@@ -47,6 +49,7 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | Independent Provider development and contribution | [Shared directory](../../../../../providers/README.md) and [distribution guide](../../../../../docs/developer-guide/en/aw/providers/index.md) |
 | Security Provider and backend readiness | [sec-core Provider](providers/sec-core/sec-core-provider.md), then [sec-core health](providers/sec-core/sec-core-health.md) |
 | Tokenless Provider | [Integration reference](../../../../../docs/developer-guide/en/aw/providers/tokenless.md) |
+| Semantic task-scope observer | [Explicit task binding and private shadow records](../../../../../providers/semantic-arbiter/README.md); no execution effects or installer integration |
 | Packaging and configuration editing | [Build guide](../../../../../contribute/en/aw/building.md), then [Configuration editing](configuration/configuration-editing.md) |
 | Local package database, preview, removal and crash recovery | [Local package management](packaging/package-management.md) |
 | Read-only inspection | [Provider views](../../../../../docs/developer-guide/en/aw/providers/views.md); independent of Hook admission |

@@ -52,6 +52,10 @@ def structure(metadata: dict, root: Path) -> None:
             "libc",
             "jsonschema",
         },
+        "aw-provider-semantic-arbiter": {
+            "aw-provider", "semantic-arbiter", "serde", "serde_json", "sha2",
+            "thiserror", "tokio", "tempfile", "libc", "aw-host", "aw-config",
+        },
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},
         "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
@@ -79,7 +83,11 @@ def structure(metadata: dict, root: Path) -> None:
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
     }
-    providers = {"aw-provider-sec-core": "agent-sec-core", "aw-provider-tokenless": "tokenless"}
+    providers = {
+        "aw-provider-sec-core": "agent-sec-core",
+        "aw-provider-tokenless": "tokenless",
+        "aw-provider-semantic-arbiter": "semantic-arbiter",
+    }
     if members.keys() != allowed.keys() - providers.keys():
         raise ValueError("AW workspace members changed; review the crate boundaries")
     independent = metadata.get("provider_workspaces", [])
@@ -97,6 +105,8 @@ def structure(metadata: dict, root: Path) -> None:
         members[name] = package
     locations = {name: root / "crates" / name for name in allowed}
     locations.update({name: root.parents[1] / "providers" / directory for name, directory in providers.items()})
+    # The backend is a local dependency, not an AW or Provider workspace member.
+    dependency_locations = {**locations, "semantic-arbiter": root.parent / "semantic-arbiter"}
     binaries = {
         "aw-cli": {"aw"},
         "aw-package": {"aw-build"},
@@ -119,14 +129,18 @@ def structure(metadata: dict, root: Path) -> None:
         for dependency in package["dependencies"]:
             if dependency["name"] not in allowed[name]:
                 raise ValueError(f"{name}: unreviewed dependency {dependency['name']}")
-            if dependency["name"] in locations:
+            if (name == "aw-provider-semantic-arbiter"
+                    and dependency["name"] in {"aw-host", "aw-config"}
+                    and dependency.get("kind") != "dev"):
+                raise ValueError(f"{name}: {dependency['name']} is a test-only dependency")
+            if dependency["name"] in dependency_locations:
                 path = dependency.get("path")
                 if (
                     not path
                     or dependency.get("source") is not None
-                    or Path(path).resolve() != locations[dependency["name"]].resolve()
+                    or Path(path).resolve() != dependency_locations[dependency["name"]].resolve()
                 ):
-                    raise ValueError(f"{name}: local dependency must use this workspace")
+                    raise ValueError(f"{name}: local dependency must use its reviewed location")
             elif dependency.get("path") is not None or dependency.get("source", "").startswith(
                 "git+"
             ):

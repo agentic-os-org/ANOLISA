@@ -155,6 +155,28 @@ class ScopeTests(GateFixture):
         removed = self.git("rev-parse", "HEAD")
         self.assertTrue(gate.scope("push", {"before": head, "after": removed}, removed, self.root))
 
+    def test_semantic_changes_select_aw_without_tokenless(self) -> None:
+        base = self.init_git()
+        for path in ("src/semantic-arbiter/src/lib.rs", "src/semantic-arbiter/Cargo.lock",
+                     "providers/semantic-arbiter/src/lib.rs"):
+            head = self.commit(path, "semantic change")
+            events = {
+                "push": {"before": base, "after": head},
+                "pull_request": {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}},
+                "merge_group": {"merge_group": {"base_sha": base, "head_sha": head}},
+            }
+            for name, event in events.items():
+                with self.subTest(path=path, event=name):
+                    self.assertTrue(gate.scope(name, event, head, self.root))
+                    self.assertFalse(gate.scope(name, event, head, self.root, compatibility=True))
+            self.git("rm", path)
+            self.git("commit", "-qm", "remove semantic fixture")
+            removed = self.git("rev-parse", "HEAD")
+            event = {"before": head, "after": removed}
+            self.assertTrue(gate.scope("push", event, removed, self.root))
+            self.assertFalse(gate.scope("push", event, removed, self.root, compatibility=True))
+            base = removed
+
     def test_merge_group_selects_only_aw_changes(self) -> None:
         base = self.init_git()
         head = self.commit("src/tokenless/unrelated.txt", "unrelated")
@@ -204,6 +226,10 @@ class GateTests(GateFixture):
         provider_directories = {
             "aw-provider-sec-core": self.root.parents[1] / "providers/agent-sec-core",
             "aw-provider-tokenless": self.root.parents[1] / "providers/tokenless",
+            "aw-provider-semantic-arbiter": self.root.parents[1] / "providers/semantic-arbiter",
+        }
+        dependency_directories = {
+            **provider_directories, "semantic-arbiter": self.root.parent / "semantic-arbiter",
         }
         packages = []
         for name, directory, dependencies in (
@@ -248,6 +274,11 @@ class GateTests(GateFixture):
                  "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde", "serde_json",
                  "serde_yaml_ng", "sha2", "tempfile", "reqwest"],
             ),
+            (
+                "aw-provider-semantic-arbiter", provider_directories["aw-provider-semantic-arbiter"],
+                ["aw-provider", "semantic-arbiter", "serde", "serde_json", "sha2",
+                 "thiserror", "tokio", "tempfile", "libc", "aw-host", "aw-config"],
+            ),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -267,11 +298,13 @@ class GateTests(GateFixture):
                     "dependencies": [
                         {
                             "name": dependency,
+                            "kind": "dev" if name == "aw-provider-semantic-arbiter"
+                            and dependency in {"aw-host", "aw-config"} else None,
                             "path": (
-                                str(provider_directories.get(dependency, self.root / "crates" / dependency))
-                                if dependency.startswith("aw-") else None
+                                str(dependency_directories.get(dependency, self.root / "crates" / dependency))
+                                if dependency.startswith("aw-") or dependency == "semantic-arbiter" else None
                             ),
-                            "source": None if dependency.startswith("aw-") else "registry+fixture",
+                            "source": None if dependency.startswith("aw-") or dependency == "semantic-arbiter" else "registry+fixture",
                         }
                         for dependency in dependencies
                     ],
@@ -287,21 +320,47 @@ class GateTests(GateFixture):
             ],
         }
         gate.structure(metadata, self.root)
-        for name in ("aw-cli", "aw-package", "aw-core", "aw-provider-sec-core"):
+        for dependency in ("aw-host", "aw-config"):
+            for kind in (None, "build"):
+                invalid = deepcopy(metadata)
+                local = next(d for d in invalid["packages"][-1]["dependencies"] if d["name"] == dependency)
+                local["kind"] = kind
+                with self.subTest(dependency=dependency, kind=kind), self.assertRaisesRegex(
+                    ValueError, "test-only dependency"
+                ):
+                    gate.structure(invalid, self.root)
+        for path, source in (
+            (None, "registry+fixture"), (None, "git+fixture"), (None, None),
+            (str(self.root / "crates/semantic-arbiter"), None),
+            (str(dependency_directories["semantic-arbiter"]), "registry+fixture"),
+        ):
+            invalid = deepcopy(metadata)
+            dependency = invalid["packages"][-1]["dependencies"][1]
+            dependency.update(path=path, source=source)
+            with self.subTest(path=path, source=source), self.assertRaisesRegex(
+                ValueError, "local dependency must use its reviewed location"
+            ):
+                gate.structure(invalid, self.root)
+        invalid = deepcopy(metadata)
+        invalid["packages"].append({"id": "semantic-arbiter", "name": "semantic-arbiter"})
+        invalid["workspace_members"].append("semantic-arbiter")
+        with self.assertRaisesRegex(ValueError, "AW workspace members changed"):
+            gate.structure(invalid, self.root)
+        for name in ("aw-cli", "aw-package", "aw-core", *provider_directories):
             invalid = deepcopy(metadata)
             package = next(p for p in invalid["packages"] if p["name"] == name)
             package["targets"].append({"name": "aw-package", "kind": ["bin"],
                                        "src_path": str(Path(package["manifest_path"]).parent / "src/bin/aw-package.rs")})
             with self.subTest(binary_owner=name), self.assertRaisesRegex(ValueError, "executable targets changed"):
                 gate.structure(invalid, self.root)
-        for name in ("aw-cli", "aw-package", "aw-provider-sec-core", "aw-provider-tokenless"):
+        for name in ("aw-cli", "aw-package", *provider_directories):
             invalid = deepcopy(metadata)
             package = next(p for p in invalid["packages"] if p["name"] == name)
             package["targets"] = [target for target in package["targets"] if "bin" not in target["kind"]]
             with self.subTest(missing_binary=name), self.assertRaisesRegex(ValueError, "executable targets changed"):
                 gate.structure(invalid, self.root)
-        for workspaces in ([], metadata["provider_workspaces"][:1],
-                           metadata["provider_workspaces"][:1] * 2):
+        for workspaces in ([], metadata["provider_workspaces"][:-1],
+                           metadata["provider_workspaces"][:1] * 3):
             with self.assertRaises(ValueError):
                 gate.structure({**metadata, "provider_workspaces": workspaces}, self.root)
         invalid = deepcopy(metadata)
@@ -321,6 +380,7 @@ class GateTests(GateFixture):
             (10, "aw-service"), (10, "aw-host"), (10, "aw-provider-tokenless"),
             (11, "aw-provider-tokenless"), (11, "aw-provider-sec-core"),
             (6, "clap_complete"), (10, "clap_complete"),
+            (12, "aw-service"), (12, "reqwest"), (1, "semantic-arbiter"),
         ):
             invalid = deepcopy(metadata)
             invalid["packages"][package]["dependencies"].append({"name": dependency})
@@ -365,6 +425,7 @@ class GateTests(GateFixture):
         for name, directory in (
             ("aw-provider-sec-core", "crates/aw-provider-sec-core"),
             ("aw-provider-tokenless", "crates/aw-provider-tokenless"),
+            ("aw-provider-semantic-arbiter", "crates/aw-provider-semantic-arbiter"),
             ("aw-provider", "providers/protocol"),
         ):
             invalid = deepcopy(metadata)

@@ -9,6 +9,10 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README_zh.md) | 命令安全检查 | 第一方 sec-core CLI 与后端 |
 | [Tokenless](tokenless/README_zh.md) | 工具输出压缩和命令建议 | 第一方 Tokenless CLI 与随包 RTK |
+| [Semantic Arbiter](semantic-arbiter/README_zh.md) | 仅观察的 `task_scope` shadow 评估 | 第一方 `src/semantic-arbiter` 库 |
+
+Semantic Arbiter 使用独立的 `aw-provider-semantic-arbiter` 包和同名程序。
+Shadow 评估不批准或阻断工具执行；该 Provider 不包含在 AW 安装器或 Preview 包中。
 
 ## 协作与分发
 
@@ -29,9 +33,10 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 组件 owner 负责实现、依赖和发布；OS 发行方选择版本、验证组合并交付安装升级。
 一方 Provider 的目标是依赖固定版本的公共 AW 库，在仓库外构建、测试和发布。
 
-目前两个 Rust Provider 通过仓库内路径复用 AW 库，Tokenless 组合测试还使用 sec-core
-桥接库，尚不支持仓库外构建。SDK 独立发布和基于产物的组合测试留待后续。
-Preview 按同一批构建交付，安装时校验 core 与 Provider 的版本和源码提交一致。
+目前仓库内的 Rust Provider 通过本地路径复用 AW 库，Tokenless 组合测试还使用 sec-core
+桥接库，Semantic Arbiter 则链接 `src/semantic-arbiter` 库，尚不支持仓库外构建。
+SDK 独立发布和基于产物的组合测试留待后续。Preview 按同一批构建交付，
+安装时校验 core 与随包 Provider 的版本和源码提交一致。
 
 现有打包器支持 core、sec-core 和 Tokenless。新增目录不会自动加入安装包；
 独立 Provider 自带安装方式。若要纳入统一分发，还需补包清单、构建安装逻辑及生命周期测试。

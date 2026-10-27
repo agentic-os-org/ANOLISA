@@ -155,7 +155,7 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO,
         )
     return any(
         tokenless_input(path) if compatibility else
-        (path.startswith(("src/aw/", "providers/")) or tokenless_input(path)
+        (path.startswith(("src/aw/", "providers/", "src/semantic-arbiter/")) or tokenless_input(path)
          or path == ".github/workflows/aw-preview.yml")
         for path in changed
     )
@@ -234,7 +234,9 @@ def check() -> None:
             capture=True,
         )
     )
-    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless")]
+    provider_roots = [
+        REPO / "providers" / name for name in ("agent-sec-core", "tokenless", "semantic-arbiter")
+    ]
     metadata["provider_workspaces"] = []
     for root in provider_roots:
         run(["cargo", "fmt", "--all", "--", "--check"], root)

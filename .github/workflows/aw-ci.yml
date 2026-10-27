@@ -7,6 +7,7 @@ on:
       - 'src/aw/**'
       - 'providers/**'
       - 'src/tokenless/**'
+      - 'src/semantic-arbiter/**'
       - '.github/workflows/aw-preview.yml'
       - '.github/workflows/aw-ci.yml'
   pull_request:
@@ -15,6 +16,7 @@ on:
       - 'src/aw/**'
       - 'providers/**'
       - 'src/tokenless/**'
+      - 'src/semantic-arbiter/**'
       - '.github/workflows/aw-preview.yml'
   merge_group:
   workflow_dispatch:
@@ -105,6 +107,8 @@ jobs:
             src/aw
             providers/agent-sec-core
             providers/tokenless
+            providers/semantic-arbiter
+            src/semantic-arbiter
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks

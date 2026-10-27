@@ -83,8 +83,8 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
                 raise ValueError(f"{agent}/{event}: missing effect coverage")
             for effect, cases in effects.items():
                 covered(cases, f"{agent}/{event}/{effect}")
-    if set(matrix["providers"]) != {"sec-core", "tokenless"}:
-        raise ValueError("sec-core and Tokenless provider contracts are required")
+    if set(matrix["providers"]) != {"sec-core", "tokenless", "semantic-arbiter"}:
+        raise ValueError("sec-core, Tokenless and semantic-arbiter provider contracts are required")
     for provider, cases in matrix["providers"].items():
         covered(cases, provider)
     for readme in ("README.md", "README_zh.md"):

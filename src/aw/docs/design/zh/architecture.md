@@ -72,8 +72,12 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
 | --- | --- | --- | --- |
 | `aw-provider-sec-core` | `providers/agent-sec-core/` | 桥接 sec-core CLI，提供安全检查 | exec、provider |
 | `aw-provider-tokenless` | `providers/tokenless/` | 桥接 Tokenless CLI，提供输出压缩 | exec、provider |
+| `aw-provider-semantic-arbiter` | `providers/semantic-arbiter/` | 判断显式单任务范围并保存本地旁路记录 | provider；host 和 config 仅用于测试 |
 
-这两个实现在仓库根目录下各自拥有 Cargo workspace 和锁文件，通过独立进程
+语义 Provider 使用独立的 `semantic-arbiter` 库，保留完整原生候选，声明观测能力，
+返回空执行效果。它单独构建，未纳入 Preview 安装。
+
+这些实现在仓库根目录下各自拥有 Cargo workspace 和锁文件，通过独立进程
 接入，不计入 10 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
 其他团队可独立开发、分发 Provider，见[协作指南](../../../../../docs/developer-guide/zh/aw/providers/index.md)。
 
@@ -83,7 +87,8 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
 2. Agent 触发回调，Adapter 把原生事件转成服务请求。
 3. `aw-service` 管理绑定、事件期限和审计，交给 `aw-host` 执行步骤。
 4. Host 用 `aw-provider` 校验协议，通过 `aw-exec` 启动配置中的 Provider 命令。
-   内置桥接程序再调用 Tokenless 或 sec-core CLI；双方通过进程协议连接。
+   安全和压缩桥接程序再通过公开 CLI 调用 sec-core 或 Tokenless。
+   语义观测程序使用 arbiter 库和配置的模型 HTTP 后端，并保存私有本地记录。
 5. 调用结果沿原路返回，Adapter 按原生接口采用阻断或结果替换。Provider 返回成功
    只表示调用成功，是否实际采用效果须由 Adapter 确认。
 
@@ -110,7 +115,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 ## 目录与代码入口
 
 `src/aw/Cargo.toml` 只定义 workspace。10 个通用框架 crate 位于 `crates/`，
-2 个具体 Provider 位于仓库根 `providers/`，各自拥有 workspace、源码和测试。原来根目录 `src/`
+3 个具体 Provider 位于仓库根 `providers/`，各自拥有 workspace、源码和测试。原来根目录 `src/`
 中的 contracts 代码已迁入 `crates/aw-contracts/`。
 
 `providers/` 是协作入口，允许收录第一方与社区实现；Provider 也可以独立发布，
@@ -126,7 +131,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | `crates/aw-package/src/{database,open_bundle,plan,transaction}.rs` | 包记录、本地包检查、预览和持久文件变更 |
 | `crates/aw-exec/src/packages.rs` | 运行时对已知安装文件持有读锁 |
 | `crates/aw-contracts/src/registry.rs` | 编译进程序的契约 Schema 清单 |
-| `../../providers/agent-sec-core/`、`../../providers/tokenless/` | 具体 Provider 实现、配置示例和测试 |
+| `../../providers/agent-sec-core/`、`../../providers/tokenless/`、`../../providers/semantic-arbiter/` | 具体 Provider 实现、配置示例和测试 |
 | `crates/aw-adapter/src/` | 启动器与服务共用的原生方言、能力目录 |
 | `crates/aw-adapter/native/` | 随包分发的 Python/JavaScript 原生桥接资源 |
 | `scripts/`、`tests/` | workspace 检查、跨语言向量检查和原生验收 |

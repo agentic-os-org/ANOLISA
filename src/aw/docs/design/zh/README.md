@@ -19,6 +19,8 @@ flowchart LR
     Host --> Exec[aw-exec]
     Exec --> Provider[Provider 进程]
     Provider --> Backend[Tokenless 或 sec-core CLI]
+    Provider --> Semantic[semantic-arbiter 库与模型 HTTP]
+    Semantic --> Records[私有本地旁路记录]
     Service --> Journal[aw-core FileJournal]
 ```
 
@@ -45,6 +47,7 @@ flowchart LR
 | Provider 独立开发与收录 | [协作目录](../../../../../providers/README_zh.md)与[开发分发指南](../../../../../docs/developer-guide/zh/aw/providers/index.md) |
 | 安全 Provider 与后端就绪检查 | [sec-core Provider](providers/sec-core/sec-core-provider.md)，再读 [sec-core 健康检查](providers/sec-core/sec-core-health.md) |
 | Tokenless Provider | [接入参考](../../../../../docs/developer-guide/zh/aw/providers/tokenless.md) |
+| 语义任务范围观测 | [显式任务绑定与私有旁路记录](../../../../../providers/semantic-arbiter/README_zh.md)；空执行效果，未接安装器 |
 | 打包和配置编辑 | [构建指南](../../../../../contribute/zh/aw/building.md)，再读[配置编辑](configuration/configuration-editing.md) |
 | 本地包数据库、预览、卸载和中断恢复 | [本地包管理](packaging/package-management.md) |
 | 只读查看状态 | [Provider 视图](../../../../../docs/developer-guide/zh/aw/providers/views.md)，独立于 Hook 准入 |

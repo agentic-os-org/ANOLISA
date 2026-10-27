@@ -13,6 +13,29 @@ from check_matrix import END, START, table, validate
 
 
 class InventoryTests(GateFixture):
+    def test_gate_collects_every_independent_provider_before_layout_validation(self) -> None:
+        commands = []
+
+        def run(command: list[str], cwd: Path, **kwargs: object) -> str:
+            commands.append((command, cwd))
+            return json.dumps({"workspace_root": str(cwd)})
+
+        with (
+            patch.object(gate, "candidate", return_value="a" * 40),
+            patch.object(gate, "selftest"),
+            patch.object(gate, "run", side_effect=run),
+            patch("check_native.load"),
+            patch.object(gate, "structure", side_effect=ValueError("stop before compile")) as layout,
+            self.assertRaisesRegex(ValueError, "stop before compile"),
+        ):
+            gate.check()
+        roots = [gate.REPO / "providers" / name
+                 for name in ("agent-sec-core", "tokenless", "semantic-arbiter")]
+        self.assertEqual(layout.call_args.args[0]["provider_workspaces"],
+                         [{"workspace_root": str(root)} for root in roots])
+        self.assertEqual([root for command, root in commands if command[1] == "fmt"],
+                         [gate.AW, *roots])
+
     def test_build_once_and_reject_missing_empty_ignored_or_failed_targets(self) -> None:
         metadata = {
             "workspace_members": ["cli"],
@@ -108,7 +131,7 @@ class MatrixTests(GateFixture):
     def test_independent_workspaces_preserve_the_complete_matrix(self) -> None:
         names = {target.split("/", 1)[0] for target in self.runnable}
         names.update(target.split("/", 1)[0] for target in self.matrix["opt_in_targets"])
-        providers = {"aw-provider-sec-core", "aw-provider-tokenless"}
+        providers = {"aw-provider-sec-core", "aw-provider-tokenless", "aw-provider-semantic-arbiter"}
 
         def workspace(packages: set[str], root: Path) -> dict:
             return {
@@ -122,7 +145,7 @@ class MatrixTests(GateFixture):
             workspace({name}, self.root / name) for name in sorted(providers)
         ]
         (self.root / "tests").mkdir()
-        for mode in ("valid", "missing-provider", "duplicate-target", "unknown-opt-in"):
+        for mode in ("valid", *sorted(providers), "duplicate-target", "unknown-opt-in"):
             matrix = copy.deepcopy(self.matrix)
             if mode == "unknown-opt-in":
                 matrix["opt_in_targets"]["unknown/test/acceptance"] = "fixture"
@@ -131,7 +154,7 @@ class MatrixTests(GateFixture):
             def collected(root: Path, data: dict, run: object, opt_in: frozenset) -> dict:
                 owned = set(data["workspace_members"])
                 self.assertTrue(all(target.split("/", 1)[0] in owned for target in opt_in))
-                if mode == "missing-provider" and owned == {"aw-provider-tokenless"}:
+                if owned == {mode}:
                     return {}
                 result = {
                     target: tests for target, tests in self.runnable.items()
@@ -144,7 +167,7 @@ class MatrixTests(GateFixture):
             with self.subTest(mode=mode), patch("check_inventory.collect", side_effect=collected) as build:
                 if mode == "valid":
                     check_inventory(self.root, metadata, object())
-                    self.assertEqual(build.call_count, 3)
+                    self.assertEqual(build.call_count, 4)
                 else:
                     with self.assertRaises(ValueError):
                         check_inventory(self.root, metadata, object())
@@ -156,6 +179,17 @@ class MatrixTests(GateFixture):
                 runnable[case["target"]].remove(case["test"])
                 with self.assertRaisesRegex(ValueError, "missing or ignored"):
                     validate(self.matrix, runnable, self.root)
+
+    def test_provider_omission_and_empty_or_unknown_coverage_fail(self) -> None:
+        for provider in ("sec-core", "tokenless", "semantic-arbiter"):
+            for mode in ("omitted", "empty", "unknown"):
+                matrix = copy.deepcopy(self.matrix)
+                if mode == "omitted":
+                    matrix["providers"].pop(provider, None)
+                else:
+                    matrix["providers"][provider] = [] if mode == "empty" else ["undefined-case"]
+                with self.subTest(provider=provider, mode=mode), self.assertRaises(ValueError):
+                    validate(matrix, self.runnable, self.root)
 
     def test_new_agent_hook_effect_and_composition_need_coverage(self) -> None:
         for mode in (

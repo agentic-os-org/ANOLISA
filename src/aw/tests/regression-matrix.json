@@ -22,6 +22,9 @@
     "aw-package/test/build_cli",
     "aw-package/test/database",
     "aw-provider-sec-core/test/provider",
+    "aw-provider-semantic-arbiter/bin/aw-provider-semantic-arbiter",
+    "aw-provider-semantic-arbiter/test/provider",
+    "aw-provider-semantic-arbiter/test/storage_deadline",
     "aw-provider-tokenless/test/managed_rtk",
     "aw-provider-tokenless/test/pretool",
     "aw-provider-tokenless/test/provider",
@@ -47,6 +50,90 @@
     "aw-cli/test/qoder_sdk"
   ],
   "cases": {
+    "semantic-delete": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "explicit_single_path_delete_is_advisory_and_rejects_extra_targets"
+    },
+    "semantic-publication-race": {
+      "target": "aw-provider-semantic-arbiter/bin/aw-provider-semantic-arbiter",
+      "test": "storage::tests::enumerated_pending_entry_survives_atomic_publication"
+    },
+    "semantic-budget-encoding": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "integral_decimal_and_exponent_budgets_follow_aw_protocol"
+    },
+    "semantic-host": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "public_aw_host_admits_and_invokes_observe_only_provider"
+    },
+    "semantic-offline": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "describe_and_offline_closed_config"
+    },
+    "semantic-config": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "invalid_config_and_duplicate_fields_are_sanitized"
+    },
+    "semantic-candidate": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "full_candidate_normal_and_denial_never_emit_effects"
+    },
+    "semantic-authority": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "explicit_permissions_are_not_candidate_derived"
+    },
+    "semantic-preserve": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "preserve_overrides_allowance_without_model_call"
+    },
+    "semantic-uncovered": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "mismatches_missing_identity_and_unmapped_tools_are_uncovered"
+    },
+    "semantic-size": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "oversized_candidate_is_saved_without_truncation_or_inference"
+    },
+    "semantic-errors": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "credentials_and_remote_failures_remain_sanitized_shadow_results"
+    },
+    "semantic-binding": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "changed_content_and_complete_native_ids_change_bindings"
+    },
+    "semantic-private-root": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "recording_requires_existing_private_nonsymlink_root"
+    },
+    "semantic-quotas": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "private_files_and_fixed_reserve_enforce_both_quotas"
+    },
+    "semantic-concurrency": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "record_lock_is_nonblocking_and_concurrency_cannot_overreserve"
+    },
+    "semantic-interruption": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "input_and_model_projection_survive_killed_process"
+    },
+    "semantic-directory-binding": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "pinned_root_ignores_path_replacement_during_inference"
+    },
+    "semantic-atomic-record": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "atomic_publication_never_overwrites_existing_result"
+    },
+    "semantic-preparation-budget": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "preparation_time_consumes_original_aw_and_config_budgets"
+    },
+    "semantic-model-budget": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "slow_http_keeps_budget_failure_and_no_effects"
+    },
     "package-unified-bootstrap": {
       "target": "aw-cli/test/packages",
       "test": "bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command"
@@ -1144,6 +1231,29 @@
     }
   },
   "providers": {
+    "semantic-arbiter": [
+      "semantic-delete",
+      "semantic-publication-race",
+      "semantic-budget-encoding",
+      "semantic-host",
+      "semantic-offline",
+      "semantic-config",
+      "semantic-candidate",
+      "semantic-authority",
+      "semantic-preserve",
+      "semantic-uncovered",
+      "semantic-size",
+      "semantic-errors",
+      "semantic-binding",
+      "semantic-private-root",
+      "semantic-quotas",
+      "semantic-concurrency",
+      "semantic-interruption",
+      "semantic-directory-binding",
+      "semantic-atomic-record",
+      "semantic-preparation-budget",
+      "semantic-model-budget"
+    ],
     "sec-core": [
       "security-block",
       "security-error",
