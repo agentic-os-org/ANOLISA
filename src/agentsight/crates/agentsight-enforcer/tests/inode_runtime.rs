@@ -859,6 +859,117 @@ fn directory_tree_guard() {
     assert_eq!(worker.run("rmdir", &[TreeFiles::text(&empty)]), "ok");
 }
 
+fn structured_write_only_policy_allows_deep_deletes() {
+    let files = TreeFiles::new();
+    let write_target = files.root.join("write-only-target");
+    fs::write(&write_target, b"protected content").expect("write-only fixture");
+
+    let mut deep = files.outside.clone();
+    for _ in 0..260 {
+        deep.push("d");
+        fs::create_dir(&deep).expect("deep unrelated directory");
+    }
+    let deep_unlink = deep.join("unlink");
+    let deep_empty = deep.join("empty");
+    let deep_rename_source = deep.join("rename-source");
+    let shallow_rename_destination = files.outer.join("renamed-from-deep");
+    let shallow_rename_source = files.outer.join("rename-into-deep");
+    let deep_rename_destination = deep.join("rename-destination");
+    let deep_exchange = deep.join("exchange-deep");
+    let shallow_exchange = files.outer.join("exchange-shallow");
+    fs::write(&deep_unlink, b"unlink").expect("deep unlink fixture");
+    fs::create_dir(&deep_empty).expect("deep empty directory");
+    fs::write(&deep_rename_source, b"deep source").expect("deep rename source");
+    fs::write(&shallow_rename_source, b"shallow source").expect("shallow rename source");
+    fs::write(&deep_exchange, b"deep exchange").expect("deep exchange endpoint");
+    fs::write(&shallow_exchange, b"shallow exchange").expect("shallow exchange endpoint");
+
+    let mut worker = TreeWorker::spawn();
+    let backend = ActPlaneBackend::open().expect("write-only structured runtime");
+    let binding_id = Uuid::new_v4();
+    backend
+        .apply(ApplyPolicy {
+            binding_id,
+            agent_id: "structured-write-only-kernel-test".into(),
+            session_id: None,
+            root_pid: worker.pid(),
+            process_start_time: worker.start_time(),
+            policy_id: "structured-write-only-kernel".into(),
+            policy_revision: "1".into(),
+            policy_dsl: String::new(),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: Some(FileProtectionPolicy {
+                version: FILE_PROTECTION_POLICY_VERSION,
+                topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                targets: vec![FileProtectionTarget {
+                    path: TreeFiles::text(&write_target).into(),
+                    kind: FileProtectionTargetKind::ExactFile,
+                    protections: FileProtections {
+                        delete: false,
+                        ordinary_write: true,
+                    },
+                    exclusions: vec![],
+                }],
+            }),
+        })
+        .expect("apply strict structured write-only policy");
+
+    for operation in ["write", "pwrite"] {
+        assert_eq!(
+            worker.run(operation, &[TreeFiles::text(&write_target)]),
+            "errno=1",
+            "write-only target must deny {operation}"
+        );
+    }
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&deep_unlink)]),
+        "ok",
+        "write-only domains must not classify unrelated deep unlink"
+    );
+    assert_eq!(
+        worker.run("rmdir", &[TreeFiles::text(&deep_empty)]),
+        "ok",
+        "write-only domains must not classify unrelated deep rmdir"
+    );
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&deep_rename_source),
+                TreeFiles::text(&shallow_rename_destination),
+            ]
+        ),
+        "ok",
+        "write-only domains must not classify an unrelated deep rename source"
+    );
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&shallow_rename_source),
+                TreeFiles::text(&deep_rename_destination),
+            ]
+        ),
+        "ok",
+        "write-only domains must not classify an unrelated deep rename destination"
+    );
+    assert_eq!(
+        worker.run(
+            "exchange",
+            &[
+                TreeFiles::text(&deep_exchange),
+                TreeFiles::text(&shallow_exchange),
+            ]
+        ),
+        "ok",
+        "write-only domains must not classify unrelated exchange endpoints"
+    );
+
+    backend
+        .detach(binding_id)
+        .expect("detach structured write-only binding");
+}
+
 fn structured_policy_classifier() {
     let files = TreeFiles::new();
     let mut worker = TreeWorker::spawn_private_mount();
@@ -880,6 +991,28 @@ fn structured_policy_classifier() {
             &[
                 TreeFiles::text(&external_mount_source),
                 TreeFiles::text(&protected_submount),
+            ]
+        ),
+        "ok"
+    );
+    let real_parent = files.outer.join("real");
+    let real_tree = real_parent.join("tree");
+    fs::create_dir_all(&real_tree).expect("create canonical symlink target tree");
+    let intermediate_alias = files.outside.join("alias");
+    std::os::unix::fs::symlink(&real_parent, &intermediate_alias)
+        .expect("create intermediate target symlink");
+    let authored_alias_tree = intermediate_alias.join("tree");
+    let alias_mount_source = files.outside.join("alias-mount-source");
+    let alias_submount = real_tree.join("mounted");
+    fs::create_dir(&alias_mount_source).expect("create aliased-tree mount source");
+    fs::write(alias_mount_source.join("entry"), b"mounted through alias")
+        .expect("create aliased-tree mounted entry");
+    assert_eq!(
+        worker.run(
+            "bind",
+            &[
+                TreeFiles::text(&alias_mount_source),
+                TreeFiles::text(&alias_submount),
             ]
         ),
         "ok"
@@ -1024,6 +1157,13 @@ fn structured_policy_classifier() {
                         ],
                     ),
                     protected(
+                        &authored_alias_tree,
+                        FileProtectionTargetKind::DirectoryTree,
+                        true,
+                        true,
+                        vec![],
+                    ),
+                    protected(
                         &nested_direct,
                         FileProtectionTargetKind::ExactFile,
                         true,
@@ -1163,6 +1303,16 @@ fn structured_policy_classifier() {
         ),
         "errno=1"
     );
+    for operation in ["write", "pwrite", "unlink"] {
+        assert_eq!(
+            worker.run(
+                operation,
+                &[TreeFiles::text(&alias_mount_source.join("entry"))]
+            ),
+            "errno=1",
+            "the backing source of a submount below an intermediate-symlink target must be registered"
+        );
+    }
     assert_eq!(worker.run("unlink", &[TreeFiles::text(&exact)]), "errno=1");
     let replacement = files.outside.join("replacement");
     fs::write(&replacement, b"replacement").expect("replacement source");
@@ -1648,6 +1798,12 @@ fn inode_guard_and_credential_events_on_live_kernel() {
 #[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
 fn directory_tree_guard_on_live_kernel() {
     directory_tree_guard();
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn structured_write_only_policy_on_live_kernel() {
+    structured_write_only_policy_allows_deep_deletes();
 }
 
 #[test]

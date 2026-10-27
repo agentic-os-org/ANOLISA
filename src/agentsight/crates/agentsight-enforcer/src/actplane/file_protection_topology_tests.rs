@@ -1,8 +1,9 @@
-use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use agentsight_enforcement_protocol::{
     FILE_PROTECTION_POLICY_VERSION, FileProtectionExclusion, FileProtectionPolicy,
@@ -10,8 +11,11 @@ use agentsight_enforcement_protocol::{
 };
 use uuid::Uuid;
 
-use super::super::file_protection_mountinfo::{MAX_MOUNTINFO_LINE_BYTES, parse_mountinfo};
+use super::super::file_protection_mountinfo::{
+    MAX_MOUNTINFO_LINE_BYTES, parse_mountinfo, visible_paths_for_mount_root,
+};
 use super::super::file_protection_policy::normalize;
+use super::super::read_process_start_time;
 use super::*;
 
 struct Fixture {
@@ -47,14 +51,24 @@ impl Drop for Fixture {
     }
 }
 
+type OpenAction = Box<dyn FnOnce() + Send>;
+
+struct FakeState {
+    snapshots: VecDeque<TopologySnapshot>,
+    last: Option<TopologySnapshot>,
+    open_count: usize,
+    snapshot_count: usize,
+    open_action: Option<(usize, OpenAction)>,
+    snapshot_action: Option<(usize, OpenAction)>,
+}
+
 struct FakeSource {
     root: File,
-    snapshots: RefCell<VecDeque<Snapshot>>,
-    last: RefCell<Option<Snapshot>>,
+    state: Mutex<FakeState>,
 }
 
 impl FakeSource {
-    fn new(root: &Path, snapshots: Vec<Snapshot>) -> Self {
+    fn new(root: &Path, snapshots: Vec<TopologySnapshot>) -> Self {
         let root = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_DIRECTORY)
@@ -62,27 +76,83 @@ impl FakeSource {
             .expect("open fixture root");
         Self {
             root,
-            snapshots: RefCell::new(snapshots.into()),
-            last: RefCell::new(None),
+            state: Mutex::new(FakeState {
+                snapshots: snapshots.into(),
+                last: None,
+                open_count: 0,
+                snapshot_count: 0,
+                open_action: None,
+                snapshot_action: None,
+            }),
         }
+    }
+
+    fn act_after_opens(&self, additional: usize, action: impl FnOnce() + Send + 'static) {
+        let mut state = self.state.lock().expect("lock fake topology source");
+        let open_count = state.open_count;
+        state.open_action = Some((open_count + additional, Box::new(action)));
+    }
+
+    fn act_on_next_open(&self, action: impl FnOnce() + Send + 'static) {
+        self.act_after_opens(1, action);
+    }
+
+    fn act_after_snapshots(&self, additional: usize, action: impl FnOnce() + Send + 'static) {
+        let mut state = self.state.lock().expect("lock fake topology source");
+        let snapshot_count = state.snapshot_count;
+        state.snapshot_action = Some((snapshot_count + additional, Box::new(action)));
     }
 }
 
 impl TopologySource for FakeSource {
     fn open_root(&self) -> io::Result<File> {
+        let action = {
+            let mut state = self.state.lock().expect("lock fake topology source");
+            state.open_count += 1;
+            if state
+                .open_action
+                .as_ref()
+                .is_some_and(|(at, _)| *at == state.open_count)
+            {
+                state.open_action.take().map(|(_, action)| action)
+            } else {
+                None
+            }
+        };
+        if let Some(action) = action {
+            action();
+        }
         self.root.try_clone()
     }
 
-    fn snapshot(&self) -> Result<Snapshot, BackendError> {
-        if let Some(snapshot) = self.snapshots.borrow_mut().pop_front() {
-            *self.last.borrow_mut() = Some(snapshot.clone());
-            Ok(snapshot)
-        } else {
-            self.last
-                .borrow()
-                .clone()
-                .ok_or_else(|| invalid("fixture has no snapshot"))
+    fn snapshot(&self) -> Result<TopologySnapshot, BackendError> {
+        let (snapshot, action) = {
+            let mut state = self.state.lock().expect("lock fake topology source");
+            state.snapshot_count += 1;
+            let action = if state
+                .snapshot_action
+                .as_ref()
+                .is_some_and(|(at, _)| *at == state.snapshot_count)
+            {
+                state.snapshot_action.take().map(|(_, action)| action)
+            } else {
+                None
+            };
+            let snapshot = if let Some(snapshot) = state.snapshots.pop_front() {
+                state.last = Some(snapshot.clone());
+                snapshot
+            } else {
+                state
+                    .last
+                    .clone()
+                    .ok_or_else(|| invalid("fixture has no snapshot"))?
+            };
+            (snapshot, action)
+        };
+        if let Some(action) = action {
+            action();
         }
+        Ok(snapshot)
     }
 }
 
@@ -97,8 +167,8 @@ fn mount(id: u32, parent_id: u32, root: &str, mountpoint: &str, fs_type: &str) -
     }
 }
 
-fn snapshot(start_time: u64, digest: u64, mounts: Vec<MountInfo>) -> Snapshot {
-    Snapshot {
+fn snapshot(start_time: u64, digest: u64, mounts: Vec<MountInfo>) -> TopologySnapshot {
+    TopologySnapshot {
         namespace: (1, 2),
         start_time,
         mountinfo_digest: digest,
@@ -137,7 +207,7 @@ fn prepare_fixture(
         policy,
         123,
         77,
-        &FakeSource::new(&fixture.root, vec![stable.clone(), stable]),
+        Arc::new(FakeSource::new(&fixture.root, vec![stable.clone(), stable])),
     )
 }
 
@@ -371,6 +441,7 @@ fn overlay_rejection_is_scoped_to_targets_exclusions_and_submounts() {
         "/tree",
         FileProtectionTargetKind::DirectoryTree,
     )]);
+    fixture.mkdir("/unrelated");
     let base = mount(1, 0, "/", "/", "ext4");
     assert!(
         reject_relevant_overlay(
@@ -437,15 +508,18 @@ fn topology_change_retries_but_persistent_change_fails() {
     let policy = normalized(vec![target("/config", FileProtectionTargetKind::ExactFile)]);
     let a = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
     let b = snapshot(77, 2, vec![mount(1, 0, "/", "/", "ext4")]);
-    let retry = FakeSource::new(
+    let retry = Arc::new(FakeSource::new(
         &fixture.root,
         vec![a.clone(), b.clone(), b.clone(), b.clone()],
-    );
-    assert!(prepare_from(&policy, 123, 77, &retry).is_ok());
+    ));
+    assert!(prepare_from(&policy, 123, 77, retry).is_ok());
 
-    let changing = FakeSource::new(&fixture.root, vec![a.clone(), b.clone(), a, b]);
+    let changing = Arc::new(FakeSource::new(
+        &fixture.root,
+        vec![a.clone(), b.clone(), a, b],
+    ));
     let error =
-        prepare_from(&policy, 123, 77, &changing).expect_err("two unstable snapshots must fail");
+        prepare_from(&policy, 123, 77, changing).expect_err("two unstable snapshots must fail");
     assert!(error.to_string().contains("topology changed"));
 }
 
@@ -455,20 +529,243 @@ fn process_identity_and_namespace_changes_fail_closed() {
     fixture.write("/config");
     let policy = normalized(vec![target("/config", FileProtectionTargetKind::ExactFile)]);
     let stale = snapshot(78, 1, vec![mount(1, 0, "/", "/", "ext4")]);
-    let source = FakeSource::new(&fixture.root, vec![stale]);
+    let source = Arc::new(FakeSource::new(&fixture.root, vec![stale]));
     assert!(matches!(
-        prepare_from(&policy, 123, 77, &source),
+        prepare_from(&policy, 123, 77, source),
         Err(BackendError::StaleProcess { pid: 123 })
     ));
 
     let before = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
     let mut after = before.clone();
     after.namespace = (1, 3);
-    let source = FakeSource::new(
+    let source = Arc::new(FakeSource::new(
         &fixture.root,
         vec![before.clone(), after.clone(), before, after],
+    ));
+    assert!(prepare_from(&policy, 123, 77, source).is_err());
+}
+
+#[test]
+fn intermediate_symlink_target_discovers_canonical_submount() {
+    let fixture = Fixture::new();
+    fixture.mkdir("/real/tree/mounted");
+    symlink("real", fixture.host("/alias")).expect("intermediate directory symlink");
+    let prepared = prepare_fixture(
+        &fixture,
+        &normalized(vec![target(
+            "/alias/tree",
+            FileProtectionTargetKind::DirectoryTree,
+        )]),
+        vec![
+            mount(1, 0, "/", "/", "ext4"),
+            mount(2, 1, "/outside/source", "/real/tree/mounted", "ext4"),
+        ],
+    )
+    .expect("prepare canonical submount through authored alias");
+    assert!(
+        prepared
+            .existing_submounts
+            .iter()
+            .any(|record| record.path.authored_path == "/real/tree/mounted")
     );
-    assert!(prepare_from(&policy, 123, 77, &source).is_err());
+    assert!(
+        prepared
+            .known_bind_aliases
+            .iter()
+            .any(|record| record.path.authored_path == "/real/tree")
+    );
+    assert_eq!(prepared.direct_targets[0].path.authored_path, "/alias/tree");
+    prepared.validate().expect("stable intermediate alias");
+}
+
+#[test]
+fn authored_path_aba_during_prepare_is_rejected() {
+    let fixture = Fixture::new();
+    fixture.mkdir("/config");
+    fixture.mkdir("/other");
+    let expected_ino = fs::metadata(fixture.host("/config"))
+        .expect("original directory")
+        .ino();
+    let path = fixture.host("/config");
+    let other = fixture.host("/other");
+    let temporary = fixture.host("/swap");
+    let stable = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
+    let source = Arc::new(FakeSource::new(&fixture.root, vec![stable]));
+    let swap_path = path.clone();
+    let swap_other = other.clone();
+    let swap_temporary = temporary.clone();
+    source.act_on_next_open(move || {
+        fs::rename(&swap_path, &swap_temporary).expect("move authored inode aside");
+        fs::rename(&swap_other, &swap_path).expect("install transient inode");
+        fs::rename(&swap_temporary, &swap_other).expect("complete first exchange");
+    });
+    source.act_after_snapshots(2, move || {
+        fs::rename(&path, &temporary).expect("move transient inode aside");
+        fs::rename(&other, &path).expect("restore authored inode");
+        fs::rename(&temporary, &other).expect("complete ABA exchange");
+    });
+
+    let error = prepare_from(
+        &normalized(vec![target(
+            "/config",
+            FileProtectionTargetKind::DirectoryTree,
+        )]),
+        123,
+        77,
+        source,
+    )
+    .expect_err("fresh-root re-resolution must detect a restored authored path");
+
+    assert!(error.to_string().contains("identity changed"));
+    assert_eq!(
+        fs::metadata(fixture.host("/config"))
+            .expect("restored directory")
+            .ino(),
+        expected_ino
+    );
+}
+
+#[test]
+fn authored_path_aba_before_activation_is_rejected() {
+    let fixture = Fixture::new();
+    fixture.write("/config");
+    let stable = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
+    let source = Arc::new(FakeSource::new(&fixture.root, vec![stable]));
+    let prepared = prepare_from(
+        &normalized(vec![target("/config", FileProtectionTargetKind::ExactFile)]),
+        123,
+        77,
+        source.clone(),
+    )
+    .expect("prepare stable identity manifest");
+    let path = fixture.host("/config");
+    let retired = fixture.host("/retired-config");
+    source.act_on_next_open(move || {
+        fs::rename(&path, &retired).expect("retire prepared inode");
+        fs::write(&path, b"replacement").expect("replace authored path");
+    });
+
+    let error = prepared
+        .validate()
+        .expect_err("activation validation must detect path replacement");
+
+    assert!(error.to_string().contains("identity changed"));
+}
+
+#[test]
+fn future_exclusion_must_still_have_a_missing_final_component() {
+    let fixture = Fixture::new();
+    fixture.mkdir("/tree");
+    let mut tree = target("/tree", FileProtectionTargetKind::DirectoryTree);
+    tree.exclusions.push(FileProtectionExclusion {
+        path: "/tree/future".into(),
+        kind: FileProtectionExclusionKind::ExactEntry,
+    });
+    let stable = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
+    let source = Arc::new(FakeSource::new(&fixture.root, vec![stable]));
+    let prepared = prepare_from(&normalized(vec![tree]), 123, 77, source.clone())
+        .expect("prepare future exclusion");
+    let future = fixture.host("/tree/future");
+    source.act_on_next_open(move || {
+        fs::write(future, b"now present").expect("materialize future exclusion");
+    });
+
+    let error = prepared
+        .validate()
+        .expect_err("activation validation must reject a materialized exclusion");
+
+    assert!(error.to_string().contains("now exists"));
+}
+
+#[test]
+fn unrelated_unresolvable_mounts_do_not_abort_tree_preparation() {
+    let fixture = Fixture::new();
+    fixture.mkdir("/tree");
+    symlink("loop", fixture.host("/loop")).expect("unrelated looping symlink");
+    let policy = normalized(vec![target(
+        "/tree",
+        FileProtectionTargetKind::DirectoryTree,
+    )]);
+    let prepared = prepare_fixture(
+        &fixture,
+        &policy,
+        vec![
+            mount(1, 0, "/", "/", "ext4"),
+            mount(2, 1, "/missing", "/hidden/missing", "ext4"),
+            mount(3, 1, "/loop", "/loop/mounted", "ext4"),
+        ],
+    )
+    .expect("unrelated inaccessible mountpoints must not reject policy");
+    prepared.validate().expect("stable relevant identities");
+    assert!(prepared.existing_submounts.is_empty());
+
+    assert!(
+        prepare_fixture(
+            &fixture,
+            &policy,
+            vec![
+                mount(1, 0, "/", "/", "ext4"),
+                mount(2, 1, "/missing", "/tree/missing", "ext4"),
+            ],
+        )
+        .is_err(),
+        "an unresolvable protected submount must still fail closed"
+    );
+}
+
+#[test]
+fn symlink_entry_exclusion_and_followed_parent_keep_separate_identities() {
+    let fixture = Fixture::new();
+    fixture.mkdir("/tree");
+    fixture.write("/outside/file");
+    symlink("../outside", fixture.host("/tree/link")).expect("excluded symlink entry");
+    let mut tree = target("/tree", FileProtectionTargetKind::DirectoryTree);
+    tree.exclusions.push(FileProtectionExclusion {
+        path: "/tree/link".into(),
+        kind: FileProtectionExclusionKind::ExactEntry,
+    });
+    let prepared = prepare_fixture(
+        &fixture,
+        &normalized(vec![
+            tree,
+            target("/tree/link/file", FileProtectionTargetKind::ExactFile),
+        ]),
+        vec![mount(1, 0, "/", "/", "ext4")],
+    )
+    .expect("the excluded symlink and followed directory are distinct expectations");
+    prepared.validate().expect("validate both resolution modes");
+    fs::rename(fixture.host("/outside"), fixture.host("/retired-outside"))
+        .expect("retire followed parent");
+    fixture.write("/outside/file");
+    assert!(
+        prepared.validate().is_err(),
+        "a stable symlink inode must not hide a replaced parent"
+    );
+}
+
+#[test]
+fn submount_discovery_matches_underlying_identity_across_mount_ids() {
+    let fixture = Fixture::new();
+    fixture.mkdir("/tree/mounted");
+    symlink("tree", fixture.host("/view")).expect("simulate alias spelling");
+    let source = FakeSource::new(&fixture.root, Vec::new());
+    let root = source.open_root().expect("open fixture root");
+    let mut identity = resolve_held(&root, "/tree")
+        .expect("target identity")
+        .identity;
+    identity.mnt_id = identity.mnt_id.wrapping_add(1);
+    let discovery = discover_submounts(
+        &root,
+        &[
+            mount(1, 0, "/", "/", "ext4"),
+            mount(2, 1, "/source", "/view/mounted", "ext4"),
+        ],
+        "/tree",
+        identity,
+    )
+    .expect("discover alias submount with a distinct namespace mount id");
+    assert_eq!(discovery.indices, vec![1]);
+    assert!(discovery.target_spellings.contains("/view"));
 }
 
 #[test]

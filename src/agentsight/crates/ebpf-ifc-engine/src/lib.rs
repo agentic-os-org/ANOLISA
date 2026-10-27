@@ -99,13 +99,13 @@ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
 // the marker check loudly instead of being silently reused with mismatched
 // links.
 const PINNED_FILE_PROFILE_MARKER: &str =
-    "agentsight_profile_file_v9_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_file_v10_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
-    "agentsight_profile_credential_exfiltration_v10_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_credential_exfiltration_v11_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v9_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v10_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v10_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -4831,7 +4831,7 @@ mod tests {
     #[test]
     fn pinned_profile_marker_captures_revision_profile_and_schema() {
         let marker = HookReserve::file_enforcement().profile_marker();
-        assert!(marker.contains("file_v9"));
+        assert!(marker.contains("file_v10"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -4868,7 +4868,7 @@ mod tests {
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v9"));
+        assert!(marker.contains("agent_file_guard_v10"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -4920,7 +4920,7 @@ mod tests {
             .expect("credential exfiltration profile");
         let marker = reserve.profile_marker();
 
-        assert!(marker.contains("credential_exfiltration_v10"));
+        assert!(marker.contains("credential_exfiltration_v11"));
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }

@@ -160,8 +160,9 @@ change legacy DSL handling.
   descriptors opened before activation. Reads and opening a writable descriptor remain allowed.
 - Ancestry walks are bounded to 256 steps each, including mount transitions. If no protection
   can be established within that budget, classification is UNKNOWN: ordinary writes are allowed,
-  while deletion and rename fail closed. Deep descendants can therefore be writable; an explicit
-  file target or a nearby directory-tree root can still establish protection at the same depth.
+  while deletion and rename fail closed only when the active domain requests delete protection.
+  Deep descendants can therefore be writable; an explicit file target or a nearby directory-tree
+  root can still establish protection at the same depth.
 - An otherwise unprotected hardlink outside the policy scope can still write the same inode and
   change the protected file's content. Protect that alias explicitly when needed. Removing the
   outside hardlink is allowed because it does not remove the protected directory entry.
@@ -170,6 +171,9 @@ change legacy DSL handling.
   also outside the phase-one coverage guarantee; `complete_content_protection` remains false.
 - Mount topology is fixed at apply time. Existing supported bind aliases/submounts are resolved,
   but later mount/bind/unmount changes and dynamic overlay changes are not supported.
+- Preparation and pre-activation checks re-resolve path identities, but do not atomically lock
+  pathnames through activation. Keep targets, exclusions, ancestors and the process root stable
+  until Apply returns; concurrent rename/exchange or root changes during Apply are unsupported.
 
 This is bounded operation protection, not a guarantee that protected content is immutable.
 

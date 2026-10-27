@@ -114,9 +114,14 @@ impl StagedFileProtection {
         let staging = self.staging.take().ok_or_else(|| {
             BackendError::KernelFailure("file-protection staging is absent".into())
         })?;
-        let active = staging
-            .activate(self.activation)
-            .map_err(|error| kernel("activate structured file-protection generation", error))?;
+        let topology = &self
+            .prepared
+            .as_ref()
+            .ok_or_else(|| {
+                BackendError::KernelFailure("file-protection topology is absent".into())
+            })?
+            .topology;
+        let active = activate_validated(topology, || staging.activate(self.activation))?;
         Ok(ActiveFileProtection {
             prepared: self.prepared.take(),
             owner: GenerationOwner::Active(active),
@@ -418,6 +423,14 @@ fn stable_hash64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     })
+}
+
+fn activate_validated<T>(
+    topology: &PreparedFileProtectionTopology,
+    activate: impl FnOnce() -> io::Result<T>,
+) -> Result<T, BackendError> {
+    topology.validate()?;
+    activate().map_err(|error| kernel("activate structured file-protection generation", error))
 }
 
 fn compile(message: impl Into<String>) -> BackendError {

@@ -2,24 +2,26 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
-use std::io;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use agentsight_enforcement_protocol::{FileProtectionExclusionKind, FileProtectionTargetKind};
 
-use super::file_protection_mountinfo::{
-    MountInfo, read_mountinfo, underlying_mount_path, visible_paths_for_mount_root,
+use super::file_protection_discovery::{
+    discover_submounts, lexical_ancestors, path_in_scope, underlying_submount_paths,
 };
+use super::file_protection_manifest::{
+    IdentityManifest, ProcTopologySource, TopologySnapshot, TopologySource, TopologyValidation,
+    open_fresh_root,
+};
+use super::file_protection_mountinfo::{MountInfo, underlying_mount_path};
 use super::file_protection_policy::NormalizedFileProtectionPolicy;
 use super::file_protection_resolver::{
-    HeldPath, open_held as resolve_held, require_directory, require_type,
+    HeldPath, open_held as resolve_held, open_held_directory as resolve_held_directory,
+    require_directory, require_type,
 };
-use super::read_process_start_time;
 use crate::BackendError;
-
-const MAX_SNAPSHOT_ATTEMPTS: usize = 2;
 
 #[derive(Clone, Debug)]
 pub(super) struct PreparedEntrySlot {
@@ -61,45 +63,12 @@ pub(super) struct PreparedFileProtectionTopology {
     pub(super) underlying_submounts: Vec<TopologyPathRecord>,
     pub(super) known_bind_aliases: Vec<TopologyPathRecord>,
     pub(super) capacities: TopologyCapacityCounts,
+    validation: TopologyValidation,
 }
 
-#[derive(Clone, Debug)]
-struct Snapshot {
-    namespace: (u64, u64),
-    start_time: u64,
-    mountinfo_digest: u64,
-    mounts: Vec<MountInfo>,
-}
-
-trait TopologySource {
-    fn open_root(&self) -> io::Result<File>;
-    fn snapshot(&self) -> Result<Snapshot, BackendError>;
-}
-
-struct ProcSource {
-    pid: i32,
-}
-
-impl TopologySource for ProcSource {
-    fn open_root(&self) -> io::Result<File> {
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_DIRECTORY)
-            .open(format!("/proc/{}/root", self.pid))
-    }
-
-    fn snapshot(&self) -> Result<Snapshot, BackendError> {
-        let namespace = fs::metadata(format!("/proc/{}/ns/mnt", self.pid))
-            .map(|metadata| (metadata.dev(), metadata.ino()))
-            .map_err(|error| kernel(format!("read target mount namespace: {error}")))?;
-        let start_time = read_process_start_time(self.pid)?;
-        let (mounts, mountinfo_digest) = read_mountinfo(self.pid)?;
-        Ok(Snapshot {
-            namespace,
-            start_time,
-            mountinfo_digest,
-            mounts,
-        })
+impl PreparedFileProtectionTopology {
+    pub(super) fn validate(&self) -> Result<(), BackendError> {
+        self.validation.validate()
     }
 }
 
@@ -112,7 +81,7 @@ pub(super) fn prepare(
         policy,
         host_pid,
         process_start_time,
-        &ProcSource { pid: host_pid },
+        Arc::new(ProcTopologySource::new(host_pid)),
     )
 }
 
@@ -120,28 +89,29 @@ fn prepare_from(
     policy: &NormalizedFileProtectionPolicy,
     host_pid: i32,
     process_start_time: u64,
-    source: &impl TopologySource,
+    source: Arc<dyn TopologySource>,
 ) -> Result<PreparedFileProtectionTopology, BackendError> {
     let mut changed = None;
-    for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+    for _ in 0..2 {
         let before = source.snapshot()?;
-        validate_identity(host_pid, process_start_time, &before)?;
-        let root = source
-            .open_root()
-            .map_err(|error| kernel(format!("open /proc/{host_pid}/root with O_PATH: {error}")))?;
-        let prepared = prepare_once(policy, &root, &before.mounts)?;
+        before.validate_process(host_pid, process_start_time)?;
+        let root = open_fresh_root(source.as_ref(), host_pid)?;
+        let prepared = prepare_once(
+            policy,
+            &root,
+            &before,
+            host_pid,
+            process_start_time,
+            Arc::clone(&source),
+        )?;
         let after = source.snapshot()?;
-        validate_identity(host_pid, process_start_time, &after)?;
-        if before.namespace == after.namespace
-            && before.mountinfo_digest == after.mountinfo_digest
-            && before.mounts == after.mounts
-        {
-            return Ok(prepared);
+        after.validate_process(host_pid, process_start_time)?;
+        if !before.same_topology(&after) {
+            changed = Some(before.change_message(&after));
+            continue;
         }
-        changed = Some(format!(
-            "target mount topology changed while preparing policy (namespace {:?}->{:?}, digest {}->{})",
-            before.namespace, after.namespace, before.mountinfo_digest, after.mountinfo_digest
-        ));
+        prepared.validate()?;
+        return Ok(prepared);
     }
     Err(kernel(changed.unwrap_or_else(|| {
         "target mount topology was unstable".into()
@@ -151,8 +121,12 @@ fn prepare_from(
 fn prepare_once(
     policy: &NormalizedFileProtectionPolicy,
     root: &File,
-    mounts: &[MountInfo],
+    snapshot: &TopologySnapshot,
+    host_pid: i32,
+    process_start_time: u64,
+    source: Arc<dyn TopologySource>,
 ) -> Result<PreparedFileProtectionTopology, BackendError> {
+    let mounts = &snapshot.mounts;
     let mut direct_targets = Vec::new();
     let mut direct_slots = Vec::new();
     let mut exclusions = Vec::new();
@@ -190,7 +164,7 @@ fn prepare_once(
             FileProtectionTargetKind::DirectoryTree => &target.path,
         };
         for ancestor in lexical_ancestors(stable_path) {
-            let held_ancestor = open_held(root, ancestor)?;
+            let held_ancestor = open_directory(root, ancestor)?;
             if ancestor_seen.insert((target_id, held_ancestor.identity)) {
                 ancestor_slots.push(TopologyPathRecord {
                     target_id,
@@ -200,10 +174,32 @@ fn prepare_once(
         }
 
         if target.kind == FileProtectionTargetKind::DirectoryTree {
-            for mount in mounts.iter().filter(|mount| {
-                mount.mountpoint != target.path
-                    && is_component_descendant(&target.path, &mount.mountpoint)
-            }) {
+            let discovery = discover_submounts(root, mounts, &target.path, held.identity)?;
+            let target_spellings = discovery.target_spellings;
+            let mut alias_seen = HashSet::new();
+            for alias in discovery.aliases {
+                alias_seen.insert(alias.authored_path.clone());
+                known_bind_aliases.push(TopologyPathRecord {
+                    target_id,
+                    path: alias,
+                });
+            }
+            for spelling in target_spellings.iter().filter(|path| *path != &target.path) {
+                if alias_seen.insert(spelling.clone()) {
+                    known_bind_aliases.push(TopologyPathRecord {
+                        target_id,
+                        path: open_directory(root, spelling)?,
+                    });
+                }
+            }
+            for index in discovery.indices {
+                let mount = &mounts[index];
+                if matches!(mount.fs_type.as_str(), "overlay" | "overlayfs") {
+                    return Err(invalid(format!(
+                        "overlay filesystem at {:?} intersects protected scope {:?}",
+                        mount.mountpoint, target.path
+                    )));
+                }
                 let path = open_held(root, &mount.mountpoint)?;
                 require_directory(&path)?;
                 for underlying in underlying_submount_paths(root, mounts, mount, &path) {
@@ -214,16 +210,25 @@ fn prepare_once(
                 }
                 existing_submounts.push(TopologyPathRecord { target_id, path });
             }
-            // Bind aliases expose the target's filesystem-relative path as
-            // their mount root. Identity comparison below prevents inference
-            // from shared filesystem metadata alone.
-            let underlying_root = underlying_mount_path(mounts, &target.path)?;
+            // Bind aliases expose a canonical filesystem-relative target path
+            // as their mount root. Identity comparison prevents inference from
+            // shared filesystem metadata alone.
+            let underlying_roots: HashSet<_> = target_spellings
+                .iter()
+                .map(|path| underlying_mount_path(mounts, path))
+                .collect::<Result<_, _>>()?;
             for mount in mounts.iter().filter(|mount| {
-                !path_in_scope(&target.path, &mount.mountpoint) && mount.root == underlying_root
+                target_spellings
+                    .iter()
+                    .all(|path| !path_in_scope(path, &mount.mountpoint))
+                    && underlying_roots.contains(&mount.root)
             }) {
-                let alias = open_held(root, &mount.mountpoint)?;
+                let Ok(alias) = resolve_held(root, &mount.mountpoint) else {
+                    continue;
+                };
                 if alias.identity.ino == held.identity.ino
                     && alias.identity.dev == held.identity.dev
+                    && alias_seen.insert(alias.authored_path.clone())
                 {
                     known_bind_aliases.push(TopologyPathRecord {
                         target_id,
@@ -260,6 +265,16 @@ fn prepare_once(
         &underlying_submounts,
         &known_bind_aliases,
     )?;
+    let mut manifest = identity_manifest(
+        &direct_targets,
+        &direct_slots,
+        &exclusions,
+        &ancestor_slots,
+        &existing_submounts,
+        &underlying_submounts,
+        &known_bind_aliases,
+    )?;
+    manifest.add_existing(&open_held(root, "/")?)?;
     Ok(PreparedFileProtectionTopology {
         direct_targets,
         direct_slots,
@@ -269,6 +284,13 @@ fn prepare_once(
         underlying_submounts,
         known_bind_aliases,
         capacities,
+        validation: TopologyValidation::new(
+            host_pid,
+            process_start_time,
+            snapshot.clone(),
+            manifest,
+            source,
+        ),
     })
 }
 
@@ -294,8 +316,7 @@ fn prepare_entry_slot(
     let parent_text = parent_path
         .to_str()
         .ok_or_else(|| invalid("file protection parent is not UTF-8"))?;
-    let parent = open_held(root, parent_text)?;
-    require_directory(&parent)?;
+    let parent = open_directory(root, parent_text)?;
     Ok(PreparedEntrySlot {
         target_id,
         parent,
@@ -330,39 +351,50 @@ fn open_held(root: &File, authored_path: &str) -> Result<HeldPath, BackendError>
     resolve_held(root, authored_path).map_err(|error| invalid(error.to_string()))
 }
 
-fn validate_identity(
-    pid: i32,
-    expected_start: u64,
-    snapshot: &Snapshot,
-) -> Result<(), BackendError> {
-    if snapshot.start_time == expected_start {
-        Ok(())
-    } else {
-        Err(BackendError::StaleProcess { pid })
-    }
+fn open_directory(root: &File, authored_path: &str) -> Result<HeldPath, BackendError> {
+    resolve_held_directory(root, authored_path).map_err(|error| invalid(error.to_string()))
 }
 
-fn underlying_submount_paths(
-    root: &File,
-    mounts: &[MountInfo],
-    mount: &MountInfo,
-    mounted: &HeldPath,
-) -> Vec<HeldPath> {
-    let mut paths = Vec::new();
-    let mut seen = HashSet::new();
-    for candidate in visible_paths_for_mount_root(mounts, mount) {
-        let Ok(path) = resolve_held(root, &candidate) else {
-            continue;
-        };
-        if path.identity.mode & libc::S_IFMT as u16 == libc::S_IFDIR as u16
-            && path.identity.ino == mounted.identity.ino
-            && path.identity.dev == mounted.identity.dev
-            && seen.insert(path.identity)
-        {
-            paths.push(path);
+fn identity_manifest(
+    direct_targets: &[TopologyPathRecord],
+    direct_slots: &[PreparedEntrySlot],
+    exclusions: &[PreparedExclusion],
+    ancestors: &[TopologyPathRecord],
+    submounts: &[TopologyPathRecord],
+    underlying_submounts: &[TopologyPathRecord],
+    aliases: &[TopologyPathRecord],
+) -> Result<IdentityManifest, BackendError> {
+    let mut manifest = IdentityManifest::default();
+    for record in direct_targets
+        .iter()
+        .chain(submounts)
+        .chain(underlying_submounts)
+    {
+        manifest.add_existing(&record.path)?;
+    }
+    for record in ancestors.iter().chain(aliases) {
+        manifest.add_directory(&record.path)?;
+    }
+    for slot in direct_slots {
+        manifest.add_directory(&slot.parent)?;
+    }
+    for exclusion in exclusions {
+        manifest.add_directory(&exclusion.slot.parent)?;
+        if let Some(existing) = exclusion.existing.as_ref() {
+            manifest.add_existing(existing)?;
+        } else {
+            let path = if exclusion.slot.parent.authored_path == "/" {
+                format!("/{}", exclusion.slot.name)
+            } else {
+                format!(
+                    "{}/{}",
+                    exclusion.slot.parent.authored_path, exclusion.slot.name
+                )
+            };
+            manifest.add_missing_final(&path, &exclusion.slot.parent)?;
         }
     }
-    paths
+    Ok(manifest)
 }
 
 fn reject_relevant_overlay(
@@ -383,33 +415,6 @@ fn reject_relevant_overlay(
         }
     }
     Ok(())
-}
-
-fn path_in_scope(root: &str, candidate: &str) -> bool {
-    root == candidate || is_component_descendant(root, candidate)
-}
-
-fn is_component_descendant(root: &str, candidate: &str) -> bool {
-    root == "/" && candidate != "/"
-        || candidate
-            .strip_prefix(root)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn lexical_ancestors(path: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut current = path;
-    loop {
-        result.push(current);
-        let Some(index) = current.rfind('/') else {
-            break;
-        };
-        if index == 0 {
-            break;
-        }
-        current = &current[..index];
-    }
-    result
 }
 
 fn capacity_counts(

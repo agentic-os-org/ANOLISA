@@ -105,6 +105,21 @@ impl fmt::Display for ResolutionError {
 impl std::error::Error for ResolutionError {}
 
 pub(super) fn open_held(root: &File, authored_path: &str) -> Result<HeldPath, ResolutionError> {
+    open_held_with_flags(root, authored_path, libc::O_NOFOLLOW)
+}
+
+pub(super) fn open_held_directory(
+    root: &File,
+    authored_path: &str,
+) -> Result<HeldPath, ResolutionError> {
+    open_held_with_flags(root, authored_path, libc::O_DIRECTORY)
+}
+
+fn open_held_with_flags(
+    root: &File,
+    authored_path: &str,
+    final_flags: i32,
+) -> Result<HeldPath, ResolutionError> {
     let relative = authored_path.strip_prefix('/').unwrap_or(authored_path);
     let relative = if relative.is_empty() { "." } else { relative };
     let path = CString::new(relative).map_err(|_| {
@@ -115,7 +130,7 @@ pub(super) fn open_held(root: &File, authored_path: &str) -> Result<HeldPath, Re
         )
     })?;
     let how = OpenHow {
-        flags: (libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64,
+        flags: (libc::O_PATH | libc::O_CLOEXEC | final_flags) as u64,
         mode: 0,
         resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
     };

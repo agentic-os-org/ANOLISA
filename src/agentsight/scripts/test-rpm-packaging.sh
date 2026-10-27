@@ -7,6 +7,182 @@ failures=0
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+# EM_BPF does not identify the host ABI. Assert the dispatcher inside the ELF
+# function symbol, including its map relocations, without scanning BTF/debug data.
+python3 - "$repo_root/src/agentsight/crates/ebpf-ifc-engine" <<'PY'
+import hashlib
+import pathlib
+import re
+import struct
+import sys
+
+
+def git_blob(data):
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+
+def rename_dispatcher(data, arch):
+    assert data[:6] == b"\x7fELF\x02\x01", "expected ELF64 little-endian"
+    header = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
+    assert header[0] == 1 and header[1] == 247, "expected relocatable EM_BPF"
+    shoff, shsize, shnum, shstrndx = header[5], header[10], header[11], header[12]
+    assert shsize == 64
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shsize)
+                for i in range(shnum)]
+
+    def section_data(section):
+        start, size = section[4:6]
+        assert start + size <= len(data), "section exceeds ELF bounds"
+        return data[start:start + size]
+
+    def string(table, offset):
+        return table[offset:table.index(b"\0", offset)].decode("ascii")
+
+    names = section_data(sections[shstrndx])
+    symtabs = [(i, section) for i, section in enumerate(sections) if section[1] == 2]
+    assert len(symtabs) == 1
+    symtab_index, symtab = symtabs[0]
+    assert symtab[9] == 24
+    strings = section_data(sections[symtab[6]])
+    symbols = [struct.unpack_from("<IBBHQQ", section_data(symtab), offset)
+               for offset in range(0, symtab[5], 24)]
+    functions = [symbol for symbol in symbols
+                 if symbol[1] & 15 == 2 and string(strings, symbol[0]) == "guard_rename_enter"]
+    assert len(functions) == 1, "missing/duplicate guard_rename_enter function"
+    _, _, _, section_index, address, size = functions[0]
+    section = sections[section_index]
+    assert string(names, section[0]) == "tracepoint/raw_syscalls/sys_enter"
+    start = address - section[3]
+    assert size > 0 and start >= 0 and start + size <= section[5] and size % 8 == 0
+    code = section_data(section)[start:start + size]
+    instructions = list(struct.iter_unpack("<BBhi", code))
+    # clang 17 -O2 emits direct JEQ/JNE immediates (verified by disassembly),
+    # each immediately following a ctx->id load through the saved r6 pointer.
+    assert instructions[0] == (0xbf, 0x16, 0, 0), "ctx is not saved in r6"
+    comparisons = []
+    for index, (opcode, registers, offset, immediate) in enumerate(instructions):
+        if opcode in (0x15, 0x55) and immediate:
+            assert index > 0
+            assert instructions[index - 1] == (0x79, 0x60 | (registers & 15), 8, 0), \
+                "nonzero compare is not against ctx->id"
+            comparisons.append(immediate)
+    expected = {"x86_64": {316, 82, 264}, "aarch64": {276, 38}}[arch]
+    assert set(comparisons) == expected and len(comparisons) == len(expected), \
+        f"{arch} guard_rename_enter comparisons {comparisons}, expected {sorted(expected)}"
+
+    map_helpers = []
+    for relocation_section in sections:
+        if relocation_section[1] not in (4, 9) or relocation_section[7] != section_index:
+            continue
+        assert relocation_section[6] == symtab_index
+        fmt = "<QQq" if relocation_section[1] == 4 else "<QQ"
+        assert relocation_section[9] == struct.calcsize(fmt)
+        for entry in struct.iter_unpack(fmt, section_data(relocation_section)):
+            offset, info = entry[:2]
+            if not start <= offset < start + size:
+                continue
+            symbol = symbols[info >> 32]
+            if string(strings, symbol[0]) != "te_rename_context":
+                continue
+            assert info & 0xffffffff == 1, "expected R_BPF_64_64 map relocation"
+            index = (offset - start) // 8
+            assert instructions[index][0:2] == (0x18, 0x01), "map is not loaded into r1"
+            calls = [insn for insn in instructions[index + 2:] if insn[0] == 0x85]
+            assert calls and calls[0][1] == 0
+            map_helpers.append(calls[0][3])
+    assert map_helpers == [3, 2], "rename context must be deleted then updated"
+    return comparisons
+
+
+engine = pathlib.Path(sys.argv[1])
+constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
+                           (engine.parents[1] / "scripts/build-enforcer.sh").read_text(), re.M))
+for name, key in {
+    "build.rs": "STAGED_BPF_BUILD",
+    "process.bpf.c": "STAGED_PROCESS_BPF",
+    "process.h": "STAGED_PROCESS_HEADER",
+    "taint.h": "STAGED_TAINT_HEADER",
+    "taint_engine.bpf.h": "STAGED_TAINT_ENGINE_HEADER",
+    "capability.bpf.h": "STAGED_CAPABILITY_HEADER",
+    "channel.bpf.h": "STAGED_CHANNEL_HEADER",
+}.items():
+    assert git_blob((engine / name).read_bytes()) == constants[f"ACTPLANE_{key}_BLOB"], \
+        f"stale source inventory: {name}"
+for arch, opposite in (("x86_64", "aarch64"), ("aarch64", "x86_64")):
+    for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+        path = engine / "prebuilt" / arch / name
+        data = path.read_bytes()
+        variant = "PREBUILT_BPF" if name == "process.bpf.o" else "INODE_BPF"
+        assert git_blob(data) == constants[f"ACTPLANE_STAGED_{arch.upper()}_{variant}_BLOB"], \
+            f"stale artifact inventory: {path}"
+        rename_dispatcher(data, arch)
+        # Opposite-ABI immediates outside the function must not affect the test.
+        rename_dispatcher(data + struct.pack("<III", 276, 38, 316), arch)
+        try:
+            rename_dispatcher(data, opposite)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"wrong-architecture object accepted: {path}")
+        print(f"Verified {arch} {name} guard_rename_enter function and relocations")
+PY
+
+# Execute the real build.rs with both target ABIs on this host, without Cargo
+# cross-linking. Missing/unsupported artifacts must never trigger implicit make.
+rustc --edition=2021 "$repo_root/src/agentsight/crates/ebpf-ifc-engine/build.rs" \
+    -o "$tmp_dir/engine-build"
+python3 - "$repo_root/src/agentsight/crates/ebpf-ifc-engine" "$tmp_dir" <<'PY'
+import os
+import pathlib
+import subprocess
+import sys
+
+engine, tmp = map(pathlib.Path, sys.argv[1:])
+for arch in ("x86_64", "aarch64", "riscv64"):
+    out = tmp / arch
+    out.mkdir()
+    env = dict(os.environ, CARGO_MANIFEST_DIR=str(engine), OUT_DIR=str(out),
+               CARGO_CFG_TARGET_ARCH=arch)
+    env.pop("ACTPLANE_REBUILD_BPF", None)
+    result = subprocess.run([str(tmp / "engine-build")], env=env, capture_output=True)
+    if arch == "riscv64":
+        assert result.returncode != 0 and b"unsupported BPF target architecture" in result.stderr
+        assert not list(out.iterdir())
+    else:
+        assert result.returncode == 0, result.stderr
+        for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+            assert (out / name).read_bytes() == (engine / "prebuilt" / arch / name).read_bytes()
+
+fixture = tmp / "rebuild-engine"
+fixture.mkdir()
+tools = tmp / "rebuild-tools"
+tools.mkdir()
+(tools / "make").write_text('''#!/usr/bin/env python3
+import pathlib, sys
+args = sys.argv[1:]
+assert "-W" in args and args[args.index("-W") + 1] == "process.bpf.c"
+arch = next(arg[5:] for arg in args if arg.startswith("ARCH="))
+output = next(arg[7:] for arg in args if arg.startswith("OUTPUT="))
+assert arch == {".output/x86_64": "x86", ".output/aarch64": "arm64"}[output]
+assert output + "/process.bpf.o" in args and "process-inode-only" in args
+root = pathlib.Path(args[args.index("-C") + 1])
+(root / output).mkdir(parents=True, exist_ok=True)
+for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+    (root / output / name).write_text(arch + name)
+''')
+(tools / "make").chmod(0o755)
+for arch, bpf_arch in (("x86_64", "x86"), ("aarch64", "arm64")):
+    env = dict(os.environ, CARGO_MANIFEST_DIR=str(fixture), OUT_DIR=str(tmp / arch),
+               CARGO_CFG_TARGET_ARCH=arch, PATH=str(tools) + os.pathsep + os.environ["PATH"])
+    env.pop("ACTPLANE_REBUILD_BPF", None)
+    result = subprocess.run([str(tmp / "engine-build")], env=env, capture_output=True)
+    assert result.returncode != 0 and b"copy " in result.stderr, "missing object triggered make"
+    env["ACTPLANE_REBUILD_BPF"] = "1"
+    subprocess.run([str(tmp / "engine-build")], env=env, check=True, capture_output=True)
+    for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+        assert (tmp / arch / name).read_text() == bpf_arch + name
+PY
+
 require_literal() {
     local file="$1"
     local expected="$2"
@@ -100,8 +276,11 @@ for name in ("process.bpf.c", "process.h", "taint.h", "taint_engine.bpf.h",
 for name in ("file_protection_generation.rs", "file_protection_generation_tests.rs",
              "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
     (engine / "src" / name).write_text(name)
-(engine / "prebuilt/process.bpf.o").write_bytes(b"full-object")
-(engine / "prebuilt/process-inode-only.bpf.o").write_bytes(b"inode-object")
+(engine / "build.rs").write_bytes(b"staged-build")
+for arch in ("x86_64", "aarch64"):
+    (engine / "prebuilt" / arch).mkdir()
+    (engine / "prebuilt" / arch / "process.bpf.o").write_bytes(f"{arch}-full-object".encode())
+    (engine / "prebuilt" / arch / "process-inode-only.bpf.o").write_bytes(f"{arch}-inode-object".encode())
 (source / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
 (tools / "git").write_text('''#!/usr/bin/env python3
 import pathlib, sys
@@ -113,6 +292,7 @@ elif command == "checkout":
     # Model the source reset performed by the real cache checkout/reset.
     source = pathlib.Path(source)
     (source / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
+    (source / "bpf/build.rs").write_bytes(b"patched-build")
     for name in ("lib.rs", "file_protection_generation.rs",
                  "file_protection_generation_tests.rs",
                  "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
@@ -121,20 +301,32 @@ elif command == "checkout":
 elif command == "hash-object":
     path = pathlib.Path(source) / args[0]
     keys = {
-        "build.rs": "PATCHED_BPF_BUILD",
         "Makefile": "PATCHED_BPF_MAKEFILE",
         "file_protection_generation.rs": "STAGED_FILE_PROTECTION_GENERATION",
         "file_protection_generation_tests.rs": "STAGED_FILE_PROTECTION_GENERATION_TESTS",
         "file_protection_map_writer.rs": "STAGED_FILE_PROTECTION_MAP_WRITER",
         "file_protection_pinned_maps.rs": "STAGED_FILE_PROTECTION_PINNED_MAPS",
-        "process-inode-only.bpf.o": "STAGED_INODE_BPF",
+        "process.bpf.c": "STAGED_PROCESS_BPF",
+        "process.h": "STAGED_PROCESS_HEADER",
+        "taint.h": "STAGED_TAINT_HEADER",
+        "taint_engine.bpf.h": "STAGED_TAINT_ENGINE_HEADER",
+        "capability.bpf.h": "STAGED_CAPABILITY_HEADER",
+        "channel.bpf.h": "STAGED_CHANNEL_HEADER",
     }
     key = keys.get(path.name)
-    if path.name == "lib.rs":
+    if path.name == "build.rs":
+        data = path.read_bytes()
+        key = {b"staged-build": "STAGED_BPF_BUILD", b"patched-build": "PATCHED_BPF_BUILD"}.get(data)
+    elif path.name == "lib.rs":
         key = "STAGED_BPF_LIB" if path.exists() and path.read_bytes() == b"staged-bpf-lib" else "PATCHED_BPF_LIB"
-    if key is None:
-        key = "PREBUILT_BPF" if path.read_bytes() == b"upstream-object" else "STAGED_PREBUILT_BPF"
-    print(constants["ACTPLANE_" + key + "_BLOB"])
+    elif path.suffix == ".o":
+        data = path.read_bytes()
+        key = "PREBUILT_BPF" if data == b"upstream-object" else None
+        for arch in ("x86_64", "aarch64"):
+            for variant, suffix in (("full", "PREBUILT_BPF"), ("inode", "INODE_BPF")):
+                if data == f"{arch}-{variant}-object".encode():
+                    key = f"STAGED_{arch.upper()}_{suffix}"
+    print(constants["ACTPLANE_" + key + "_BLOB"] if key else "0" * 40)
 elif command not in ("reset", "clean", "diff", "ls-files", "submodule"):
     sys.exit("unexpected fixture Git command: " + command)
 ''')
@@ -151,9 +343,22 @@ assert target.is_absolute() and target.parent.name.startswith("enforcer.")
 assert target != root / "target"
 output = target / host / "release/agentsight-enforcer"
 output.parent.mkdir(parents=True)
-output.write_bytes(str(target).encode() + b"full-object inode-object")
+arch = host.split("-")[0]
+patch_config = args[args.index("--config") + 1]
+source = pathlib.Path(patch_config.split('path="')[1].rstrip('"'))
+assert (source / "build.rs").read_bytes() == b"staged-build"
+objects = source / "prebuilt" / arch
+assert (objects / "process.bpf.o").read_bytes() == f"{arch}-full-object".encode()
+assert (objects / "process-inode-only.bpf.o").read_bytes() == f"{arch}-inode-object".encode()
+if os.environ.get("FIXTURE_WRONG_PAIR"):
+    arch = "aarch64" if arch == "x86_64" else "x86_64"
+output.write_bytes(str(target).encode() + f"{arch}-full-object {arch}-inode-object".encode())
 if os.environ.get("FIXTURE_BAD_OBJECT"):
     output.write_bytes(b"missing embedded objects")
+if os.environ.get("FIXTURE_MUTATE_BUILD_RS"):
+    (source / "build.rs").write_bytes(b"mutated-build")
+if os.environ.get("FIXTURE_MUTATE_PAIR"):
+    (objects / "process.bpf.o").write_bytes(b"aarch64-full-object")
 output.chmod(0o755)
 # A different Cargo invocation replaces the old shared executable before return.
 (root / "target/release/agentsight-enforcer").write_bytes(b"unattested shared replacement")
@@ -199,13 +404,19 @@ if cmp -s "$tmp_dir/fresh-payload/agentsight-enforcer" "$second_bin"; then
     printf 'RPM staging reused a previous build without an explicit handoff\n' >&2
     exit 1
 fi
-for failure in CARGO_BUILD_TARGET=other-target FIXTURE_BAD_OBJECT=1; do
+for failure in CARGO_BUILD_TARGET=other-target ACTPLANE_REBUILD_BPF=1 FIXTURE_BAD_OBJECT=1 \
+    FIXTURE_WRONG_PAIR=1 FIXTURE_MUTATE_BUILD_RS=1 FIXTURE_MUTATE_PAIR=1; do
     if "${fixture_env[@]}" "$failure" "$fixture_root/scripts/build-enforcer.sh" \
         >"$tmp_dir/failed-path" 2>"$tmp_dir/failed-build.err"; then
         printf 'attested build accepted %s\n' "$failure" >&2
         exit 1
     fi
     [[ ! -s "$tmp_dir/failed-path" ]]
+    case "$failure" in
+        FIXTURE_WRONG_PAIR=1) grep -Fq 'BPF object is not embedded' "$tmp_dir/failed-build.err" ;;
+        FIXTURE_MUTATE_BUILD_RS=1) grep -Fq 'sources mutated' "$tmp_dir/failed-build.err" ;;
+        FIXTURE_MUTATE_PAIR=1) grep -Fq 'prebuilt objects mutated' "$tmp_dir/failed-build.err" ;;
+    esac
 done
 
 # Cross builds preserve the same private-output and receipt contract.
@@ -215,6 +426,42 @@ arm_bin="$("${fixture_env[@]}" EXPECTED_TARGET=aarch64-unknown-linux-gnu \
 [[ -x "$arm_bin" && -f "$arm_bin.sha256" && "$arm_bin" != "$first_bin" ]]
 python3 "$repo_root/src/agentsight/scripts/copy-enforcer.py" "$arm_bin" "$tmp_dir/arm-enforcer"
 cmp "$arm_bin" "$tmp_dir/arm-enforcer"
+python3 - "$first_bin" "$arm_bin" <<'PY'
+import pathlib
+import sys
+
+x86, arm = (pathlib.Path(path).read_bytes() for path in sys.argv[1:])
+for variant in ("full", "inode"):
+    assert f"x86_64-{variant}-object".encode() in x86
+    assert f"aarch64-{variant}-object".encode() not in x86
+    assert f"aarch64-{variant}-object".encode() in arm
+    assert f"x86_64-{variant}-object".encode() not in arm
+PY
+if "${fixture_env[@]}" EXPECTED_TARGET=aarch64-unknown-linux-gnu FIXTURE_WRONG_PAIR=1 \
+    "$fixture_root/scripts/build-enforcer.sh" --target aarch64-unknown-linux-gnu \
+    >"$tmp_dir/wrong-arm-path" 2>"$tmp_dir/wrong-arm.err"; then
+    echo 'aarch64 build accepted embedded x86 pair' >&2
+    exit 1
+fi
+[[ ! -s "$tmp_dir/wrong-arm-path" ]]
+grep -Fq 'BPF object is not embedded' "$tmp_dir/wrong-arm.err"
+# Correctly named files containing the opposite pair must fail before Cargo.
+for name in process.bpf.o process-inode-only.bpf.o; do
+    cp "$fixture_root/crates/ebpf-ifc-engine/prebuilt/aarch64/$name" "$tmp_dir/$name"
+    cp "$fixture_root/crates/ebpf-ifc-engine/prebuilt/x86_64/$name" \
+        "$fixture_root/crates/ebpf-ifc-engine/prebuilt/aarch64/$name"
+done
+if "${fixture_env[@]}" EXPECTED_TARGET=aarch64-unknown-linux-gnu \
+    "$fixture_root/scripts/build-enforcer.sh" --target aarch64-unknown-linux-gnu \
+    >"$tmp_dir/wrong-source-path" 2>"$tmp_dir/wrong-source.err"; then
+    echo 'aarch64 source attestation accepted x86 objects' >&2
+    exit 1
+fi
+[[ ! -s "$tmp_dir/wrong-source-path" ]]
+grep -Fq 'failed source attestation' "$tmp_dir/wrong-source.err"
+for name in process.bpf.o process-inode-only.bpf.o; do
+    cp "$tmp_dir/$name" "$fixture_root/crates/ebpf-ifc-engine/prebuilt/aarch64/$name"
+done
 if "${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" --target aarch64-apple-darwin \
     >"$tmp_dir/unsupported-path" 2>"$tmp_dir/unsupported.err"; then
     echo 'unsupported enforcer target was accepted' >&2
@@ -406,5 +653,9 @@ require_in_order src/agentsight/README_zh.md \
 if (( failures > 0 )); then
     exit 1
 fi
+
+# Default mock-feature tests do not compile the topology/activation regressions.
+cargo test --manifest-path "$repo_root/src/agentsight/Cargo.toml" \
+    -p agentsight-enforcer --no-default-features --features actplane,mock-backend --lib
 
 printf 'AgentSight RPM packaging contract passed.\n'

@@ -3234,7 +3234,7 @@ int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry,
 		return -EPERM;
 	}
 	const struct te_policy_domain_val *policy_domain = te_policy_domain(pid);
-	if (enforce_mode && policy_domain) {
+	if (enforce_mode && policy_domain && policy_domain->delete_mask) {
 		struct te_policy_classification classification;
 		te_policy_classify(dir, dentry, true, policy_domain->delete_mask,
 				   policy_domain, &classification);
@@ -3280,7 +3280,7 @@ int BPF_PROG(enforce_path_rmdir, const struct path *dir, struct dentry *dentry,
 		return -EPERM;
 	}
 	const struct te_policy_domain_val *policy_domain = te_policy_domain(pid);
-	if (enforce_mode && policy_domain) {
+	if (enforce_mode && policy_domain && policy_domain->delete_mask) {
 		struct te_policy_classification classification;
 		te_policy_classify(dir, dentry, true, policy_domain->delete_mask,
 				   policy_domain, &classification);
@@ -3417,7 +3417,7 @@ static __always_inline int te_guard_rename(const struct path *old_dir,
 			}
 		}
 		const struct te_policy_domain_val *policy_domain = te_policy_domain(pid);
-		if (policy_domain) {
+		if (policy_domain && policy_domain->delete_mask) {
 			struct inode *new_inode = NULL;
 			struct te_policy_classification old_class, new_class;
 			if (BPF_CORE_READ_INTO(&new_inode, new_dentry, d_inode)) {

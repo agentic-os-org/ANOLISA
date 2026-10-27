@@ -32,6 +32,8 @@ use crate::backend::validate_apply_policy_payload;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+mod file_protection_discovery;
+mod file_protection_manifest;
 mod file_protection_mountinfo;
 mod file_protection_policy;
 mod file_protection_resolver;

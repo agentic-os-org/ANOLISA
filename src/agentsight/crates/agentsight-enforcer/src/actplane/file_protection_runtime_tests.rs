@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
@@ -310,4 +311,80 @@ fn generation_is_stable_nonzero_and_revision_sensitive() {
     assert_eq!(first, repeat);
     assert_ne!(first.get(), 0);
     assert_ne!(first, next);
+}
+
+#[test]
+fn exchanged_directory_aborts_activation_and_drops_inactive_owner() {
+    struct InactiveOwner<'a>(&'a Cell<bool>);
+
+    impl Drop for InactiveOwner<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    let fixture = Fixture::new();
+    let tree = fixture.path("tree");
+    let other = fixture.path("other");
+    let swap = fixture.path("swap");
+    fs::create_dir(&tree).expect("create tree target");
+    fs::create_dir(&other).expect("create exchange partner");
+    let prepared = match prepare(vec![target(
+        tree.clone(),
+        FileProtectionTargetKind::DirectoryTree,
+        Vec::new(),
+    )]) {
+        Ok(prepared) => prepared,
+        Err(BackendError::CompileFailure(message)) if message.contains("lacks openat2") => return,
+        Err(error) => panic!("prepare activation policy: {error}"),
+    };
+    fs::rename(&tree, &swap).expect("move held directory aside");
+    fs::rename(&other, &tree).expect("install exchange partner");
+    fs::rename(&swap, &other).expect("complete directory exchange");
+    let activated = Cell::new(false);
+    let cleaned = Cell::new(false);
+    let owner = InactiveOwner(&cleaned);
+
+    let error = activate_validated(&prepared.topology, || {
+        activated.set(true);
+        drop(owner);
+        Ok(())
+    })
+    .expect_err("replaced pathname must abort before activation");
+
+    assert!(error.to_string().contains("identity changed"));
+    assert!(!activated.get(), "activation callback must never run");
+    assert!(cleaned.get(), "inactive staging owner must be dropped");
+}
+
+#[test]
+fn stable_path_reaches_activation_and_propagates_map_error() {
+    let fixture = Fixture::new();
+    let exact = fixture.path("config.json");
+    fs::write(&exact, b"config").expect("write exact target");
+    let prepared = match prepare(vec![target(
+        exact,
+        FileProtectionTargetKind::ExactFile,
+        Vec::new(),
+    )]) {
+        Ok(prepared) => prepared,
+        Err(BackendError::CompileFailure(message)) if message.contains("lacks openat2") => return,
+        Err(error) => panic!("prepare activation policy: {error}"),
+    };
+    let calls = Cell::new(0);
+    let active = activate_validated(&prepared.topology, || {
+        calls.set(calls.get() + 1);
+        Ok(42)
+    })
+    .expect("activate stable topology");
+    assert_eq!(active, 42);
+    assert_eq!(calls.get(), 1);
+
+    let error = activate_validated(&prepared.topology, || {
+        calls.set(calls.get() + 1);
+        Err::<(), _>(io::Error::other("activation map failed"))
+    })
+    .expect_err("map failure must propagate");
+    assert!(error.to_string().contains("activation map failed"));
+    assert_eq!(calls.get(), 2);
 }
