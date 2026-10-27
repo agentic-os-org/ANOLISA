@@ -60,6 +60,7 @@ def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
         if user_home:
             paths.extend(
                 [
+                    os.path.join(user_home, ".local", "libexec", "tokenless", name),
                     # Anolisa CLI user mode.
                     os.path.join(
                         user_home,
@@ -84,11 +85,13 @@ def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
     paths.append(os.path.join("/usr/local/bin", name))
     if name in _TOKENLESS_HELPER_BINARIES:
         # Anolisa CLI system mode.
+        paths.append(os.path.join("/usr/local/libexec/tokenless", name))
         paths.append(os.path.join("/usr/local/libexec/anolisa/tokenless", name))
     paths.append(os.path.join("/usr/bin", name))
     if name in _TOKENLESS_HELPER_BINARIES:
         paths.extend(
             [
+                os.path.join("/usr/libexec/tokenless", name),
                 # Makefile system mode and RPM.
                 os.path.join("/usr/libexec/anolisa/tokenless", name),
                 # Debian and pre-layout-migration compatibility.

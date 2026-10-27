@@ -1898,7 +1898,7 @@ build_tokenless() {
     cd "$dir"
 
     # rtk setup is handled by Makefile build-tokenless target (just setup-rtk),
-    # but 'just' must be available before make install runs.
+    # but 'just' must be available before make install-legacy runs.
     if ! $DRY_RUN; then
         if ! command -v just &>/dev/null; then
             die "'just' is required for tokenless build (rtk clone+patch orchestration). Install: cargo install just"
@@ -1907,7 +1907,7 @@ build_tokenless() {
         info "DRY-RUN: just setup-rtk would be called by Makefile build-tokenless"
     fi
 
-    info "make install (tokenless workspace) ..."
+    info "make install-legacy (tokenless workspace) ..."
     stage_component_make_install "tokenless" "$dir"
     if $DRY_RUN; then
         ok "tokenless build plan generated"

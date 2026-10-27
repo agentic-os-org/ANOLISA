@@ -994,7 +994,7 @@ jobs:
             src/tokenless/crates/tokenless-stats/src/home.rs
             src/tokenless/crates/tokenless-stats/src/path_policy.rs
             src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs
-          key: tokenless-rtk-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rtk-cache-inputs.outputs.rust }}-${{ steps.rtk-cache-inputs.outputs.glibc }}-${{ hashFiles('src/tokenless/scripts/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/Makefile', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs', 'src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs') }}
+          key: tokenless-rtk-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rtk-cache-inputs.outputs.rust }}-${{ steps.rtk-cache-inputs.outputs.glibc }}-${{ hashFiles('src/tokenless/packaging/build/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/Makefile', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs', 'src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs') }}
 
       - name: Test bundled RTK integration
         env:

@@ -22,7 +22,7 @@ DOC_EN_TROUBLE="$REPO_ROOT/docs/user-guide/en/tokenless/troubleshooting.md"
 DOC_ZH_TROUBLE="$REPO_ROOT/docs/user-guide/zh/tokenless/troubleshooting.md"
 DOC_README_EN="$TOKENLESS_ROOT/README.md"
 DOC_README_ZH="$TOKENLESS_ROOT/README_zh.md"
-PACKAGE_NPM_JS="$TOKENLESS_ROOT/npm/scripts/package-npm.js"
+PACKAGE_NPM_JS="$TOKENLESS_ROOT/packaging/npm/package-npm.js"
 INSTALL_SH="$TOKENLESS_ROOT/scripts/install.sh"
 UNINSTALL_SH="$TOKENLESS_ROOT/scripts/uninstall.sh"
 
@@ -144,7 +144,7 @@ for doc in "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE"; do
 done
 
 # --- component README: the public install routes it advertises are real -------
-# npm/scripts/package-npm.js copies this README straight into the published npm
+# packaging/npm/package-npm.js copies this README straight into the published npm
 # package, so a README that denies the npm route contradicts the installation
 # the reader just completed.
 has "$PACKAGE_NPM_JS" "join(rootPkgDir, 'README.md')" \
@@ -442,7 +442,7 @@ for f in "$MAKEFILE" "$TEST_NPM_POSTINSTALL"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
 has "$MAKEFILE" "test-npm-postinstall-strict" "the Makefile has a strict postinstall test target"
-has "$MAKEFILE" "test-install-script test-install-docs test-npm-postinstall-strict" \
+has "$TOKENLESS_ROOT/packaging/npm.mk" "test-install-script test-install-docs test-npm-postinstall-strict" \
   "npm packaging runs the install-method suite where a usable node is guaranteed"
 has "$TEST_NPM_POSTINSTALL" "TOKENLESS_REQUIRE_NODE" \
   "the postinstall test can require a usable interpreter instead of skipping"

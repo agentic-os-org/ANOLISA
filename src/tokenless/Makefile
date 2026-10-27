@@ -2,23 +2,12 @@
 # Builds tokenless (schema/response compression, TOON encoding via the
 # toon-format library) and rtk (command rewriting)
 
-INSTALL_PROFILE ?= user
-DESTDIR ?=
+# Public entrypoint; implementation modules never select a default goal.
+.DEFAULT_GOAL := all
+include packaging/install.mk
+include packaging/npm.mk
+include packaging/python.mk
 
-ifeq ($(INSTALL_PROFILE),user)
-PREFIX ?= $(HOME)/.local
-COSH_EXTENSION_DIR ?= $(HOME)/.copilot-shell/extensions/tokenless
-else
-PREFIX ?= /usr
-COSH_EXTENSION_DIR ?= $(PREFIX)/share/anolisa/extensions/tokenless
-endif
-
-BINDIR ?= $(PREFIX)/bin
-LIBEXECDIR ?= $(PREFIX)/libexec/anolisa/tokenless
-DATADIR ?= $(PREFIX)/share
-SHARE_DIR ?= $(DATADIR)/anolisa/adapters/tokenless
-BIN_DIR ?= $(BINDIR)
-LIB_DIR ?= $(LIBEXECDIR)
 ADAPTER_SRC_DIR := adapters/tokenless
 OPENCLAW_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/openclaw
 DSH_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/dsh
@@ -35,22 +24,7 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json \
     $(ADAPTER_SRC_DIR)/qwenpaw/plugin.json \
     $(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt
-# Canonical RPM/raw component contract — kept separate from the adapter
-# payload tree and stamped from the workspace version before packaging.
-# Shipped to %{_datadir}/anolisa/components/tokenless/component.toml and
-# embedded in raw archives as .anolisa/component.toml.
-COMPONENT_CONTRACT := .anolisa/component.toml
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-NATIVE_NPM_TARGET := $(shell node -p 'process.platform + "-" + process.arch')
-NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
-PYTHON_RUNTIME_DIR := python/tokenless
-AGENTSCOPE_PACKAGE_DIR := python/agentscope
-PYTHON_WHEEL_DIR := $(CURDIR)/target/wheels
-PYTHON_RTK_PACKAGE_DIR := $(CURDIR)/$(PYTHON_RUNTIME_DIR)/python/anolisa_tokenless/_bin
-PYTHON_RTK_BINARY ?= $(CURDIR)/third_party/rtk/target/release/rtk
-MATURIN ?= uvx --from 'maturin>=1.9,<2.0' maturin
-PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
-
 .PHONY: build build-tokenless build-openclaw-plugin build-dsh-plugin \
         stamp-adapter-templates stamp-python-packages generate-component-contract \
         install uninstall test lint clean package-raw stage-raw \
@@ -93,21 +67,25 @@ build-tokenless:
 	cargo build --release
 	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
-# Generate adapter config files from .in templates (VERSION from Cargo.toml).
-stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
-
-stamp-python-packages: $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml
+# ANOLISA integration metadata is generated only by distribution entrypoints.
+COMPONENT_CONTRACT_TEMPLATE := packaging/anolisa/component.toml.in
+COMPONENT_CONTRACT := target/packaging/anolisa/component.toml
 
 generate-component-contract: $(COMPONENT_CONTRACT)
+
+$(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT_TEMPLATE) Cargo.toml
+	@echo "==> Generating component contract (version=$(VERSION))..."
+	install -d -m 0755 "$(dir $@)"
+	sed 's/@VERSION@/$(VERSION)/g' "$<" > "$@"
+
+# Generate adapter config files from .in templates (VERSION from Cargo.toml).
+stamp-adapter-templates: $(ADAPTER_TEMPLATES)
+
+stamp-python-packages: $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml
 
 $(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
 	@echo "==> Generating manifest.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
-
-$(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
-	@echo "==> Generating component contract (version=$(VERSION))..."
-	sed 's/@VERSION@/$(VERSION)/g' $< > $@
-
 
 $(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.json.in Cargo.toml
 	@echo "==> Generating openclaw/package.json (version=$(VERSION))..."
@@ -200,73 +178,6 @@ build-dsh-plugin: stamp-adapter-templates
 	@test -f $(DSH_PLUGIN_SRC_DIR)/dist/index.js \
 	    || { echo "ERROR: $(DSH_PLUGIN_SRC_DIR)/dist/index.js is missing"; exit 1; }
 	@cd $(DSH_PLUGIN_SRC_DIR) && node --input-type=module -e "import('./dist/index.js').then((plugin) => { if (typeof plugin.apply !== 'function' || plugin.name !== 'anolisa-tokenless') process.exit(1) })"
-
-# Install binaries + adapter resources per FHS spec.
-install: build install-binaries install-helpers install-adapter-resources install-cosh-extension
-
-install-binaries:
-	@echo "==> Installing tokenless to $(DESTDIR)$(BINDIR)..."
-	install -d -m 0755 $(DESTDIR)$(BINDIR)
-	install -p -m 0755 target/release/tokenless $(DESTDIR)$(BINDIR)/
-
-# Cleanup for the standalone toon binary shipped by older releases (TOON is
-# now linked into tokenless via the toon-format library). $(LIBEXECDIR) is a
-# Tokenless-owned directory, so its toon helper is always removed; the
-# $(BINDIR)/toon entry is removed only when it is a symlink pointing into a
-# Tokenless helper layout, so an unrelated user-installed `toon` executable
-# is preserved.
-define clean-stale-toon
-rm -f $(DESTDIR)$(LIBEXECDIR)/toon
-if [ -L "$(DESTDIR)$(BINDIR)/toon" ]; then \
-    case "$$(readlink "$(DESTDIR)$(BINDIR)/toon")" in \
-        */anolisa/tokenless/toon|*/anolisa/libexec/tokenless/toon) \
-            rm -f "$(DESTDIR)$(BINDIR)/toon" ;; \
-    esac; \
-fi
-endef
-
-install-helpers:
-	@echo "==> Installing helpers to $(DESTDIR)$(LIBEXECDIR)..."
-	install -d -m 0755 $(DESTDIR)$(LIBEXECDIR)
-	install -p -m 0755 third_party/rtk/target/release/rtk $(DESTDIR)$(LIBEXECDIR)/
-	ln -sf $(LIBEXECDIR)/rtk $(DESTDIR)$(BINDIR)/rtk
-	$(clean-stale-toon)
-
-install-adapter-resources: build-openclaw-plugin build-dsh-plugin
-	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
-	rm -rf $(DESTDIR)$(SHARE_DIR)
-	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)
-	cp -pr $(ADAPTER_SRC_DIR)/. $(DESTDIR)$(SHARE_DIR)/
-	# Strip build-only artifacts from the installed plugin tree.
-	rm -rf $(DESTDIR)$(SHARE_DIR)/agentscope
-	rm -rf $(DESTDIR)$(SHARE_DIR)/openclaw/node_modules
-	rm -f  $(DESTDIR)$(SHARE_DIR)/openclaw/package-lock.json
-	find $(DESTDIR)$(SHARE_DIR) -name '*.in' -delete
-	find $(DESTDIR)$(SHARE_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
-	@test -f $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js \
-	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js missing after install-adapter-resources"; exit 1; }
-	@test -f $(DESTDIR)$(SHARE_DIR)/dsh/package.json \
-	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/dsh/package.json missing after install-adapter-resources"; exit 1; }
-	@test -f $(DESTDIR)$(SHARE_DIR)/dsh/cordis.patch.yml \
-	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/dsh/cordis.patch.yml missing after install-adapter-resources"; exit 1; }
-	@test -f $(DESTDIR)$(SHARE_DIR)/dsh/dist/index.js \
-	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/dsh/dist/index.js missing after install-adapter-resources"; exit 1; }
-
-install-cosh-extension:
-	@echo "==> Installing tokenless cosh extension to $(DESTDIR)$(COSH_EXTENSION_DIR)..."
-	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
-	install -d -m 0755 $(DESTDIR)$(COSH_EXTENSION_DIR)/hooks $(DESTDIR)$(COSH_EXTENSION_DIR)/commands
-	cp -pr $(ADAPTER_SRC_DIR)/common/hooks/. $(DESTDIR)$(COSH_EXTENSION_DIR)/hooks/
-	cp -pr $(ADAPTER_SRC_DIR)/common/commands/. $(DESTDIR)$(COSH_EXTENSION_DIR)/commands/
-	install -p -m 0644 $(ADAPTER_SRC_DIR)/common/cosh-extension.json $(DESTDIR)$(COSH_EXTENSION_DIR)/
-	find $(DESTDIR)$(COSH_EXTENSION_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
-
-uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/tokenless
-	rm -f $(DESTDIR)$(LIBEXECDIR)/rtk
-	$(clean-stale-toon)
-	rm -rf $(DESTDIR)$(SHARE_DIR)
-	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
 test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
@@ -397,7 +308,7 @@ test-benchmark-rtk-probe:
 # Hook counterfactuals need both real binaries to rule out fail-open success.
 test-rtk-integration: test-benchmark-rtk-probe
 	cargo build --locked -p tokenless-cli
-	bash scripts/setup-rtk.sh
+	bash packaging/build/setup-rtk.sh
 	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
 		python3 tests/test_rtk_integration.py
@@ -418,7 +329,7 @@ test-hook-parity:
 # run-all-tests.sh deliberately drives an installed release binary on PATH, and
 # no CI job installs tokenless.)
 #
-# The npm suite is the sole automated guard on npm/scripts/package-npm.js --
+# The npm suite is the sole automated guard on packaging/npm/package-npm.js --
 # the script that produces the tarballs `make npm-publish` pushes -- covering
 # arch validation of the prebuilt binaries, the GLIBC 2.17 baseline warning,
 # the --target selector aliases, exclusion of legacy agentscope build output,
@@ -468,54 +379,11 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	# Run after npm packaging has restored its stale-version fixture.
 	$(MAKE) test-qwenwork-install
 
-# Build the abi3 extension with unwind semantics so a Rust panic cannot abort
-# the embedding Python interpreter. The wheel remains platform-specific, but
-# one build supports CPython 3.11 and later on that platform.
-python-wheel:
-	@echo "==> Building Tokenless Python wheel..."
-	@if [ "$(PYTHON_RTK_BINARY)" = "$(CURDIR)/third_party/rtk/target/release/rtk" ]; then \
-		just setup-rtk; \
-		cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml; \
-	fi
-	@test -x "$(PYTHON_RTK_BINARY)" || { \
-		echo "RTK binary is missing or not executable: $(PYTHON_RTK_BINARY)" >&2; \
-		exit 1; \
-	}
-	install -d -m 0755 $(PYTHON_WHEEL_DIR)
-	rm -f $(PYTHON_WHEEL_DIR)/anolisa_tokenless-*.whl
-	@set -e; \
-		install -d -m 0755 $(PYTHON_RTK_PACKAGE_DIR); \
-		install -p -m 0755 $(PYTHON_RTK_BINARY) $(PYTHON_RTK_PACKAGE_DIR)/rtk; \
-		trap 'rm -f $(PYTHON_RTK_PACKAGE_DIR)/rtk' EXIT; \
-		cd $(PYTHON_RUNTIME_DIR); \
-		$(MATURIN) build --profile python-release --interpreter python3 \
-			--compatibility pypi --auditwheel check \
-			--out $(PYTHON_WHEEL_DIR)
-
 test-python-runtime: python-wheel
 	@bash tests/test-python-runtime.sh
 
-agentscope-wheel: stamp-python-packages
-	@echo "==> Building Tokenless AgentScope integration wheel..."
-	install -d -m 0755 $(PYTHON_WHEEL_DIR)
-	rm -f $(PYTHON_WHEEL_DIR)/anolisa_tokenless_agentscope-*.whl
-	$(PYPROJECT_BUILD) --wheel --outdir $(PYTHON_WHEEL_DIR) \
-		$(AGENTSCOPE_PACKAGE_DIR)
-
 test-agentscope-integration: python-wheel agentscope-wheel
 	@bash tests/test-agentscope-integration.sh
-
-# These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk} files
-# into the portable raw-package contract maintained by this component.
-package-raw:
-	@$(MAKE) -B stamp-adapter-templates
-	@$(MAKE) build-openclaw-plugin build-dsh-plugin
-	@./packaging/raw/package.sh package
-
-stage-raw:
-	@$(MAKE) -B stamp-adapter-templates
-	@$(MAKE) build-openclaw-plugin build-dsh-plugin
-	@./packaging/raw/package.sh stage
 
 # The second pass publishes a prerelease: that is the only version shape whose
 # release-tag path (raw Cargo 0.9.0-rc.1) and wheel filenames (PEP 440
@@ -527,7 +395,7 @@ test-raw-package:
 	@bash tests/test-package-raw.sh
 	@TOKENLESS_RAW_TEST_VERSION=0.9.0-rc.1 bash tests/test-package-raw.sh
 
-# tests/test-package-npm-prebuilt.sh drives npm/scripts/package-npm.js, whose
+# tests/test-package-npm-prebuilt.sh drives packaging/npm/package-npm.js, whose
 # buildAdapters() recursively runs `make build-openclaw-plugin build-dsh-plugin`.
 # Both are phony and always rebuild, and the openclaw step rewrites
 # adapters/tokenless/openclaw/{node_modules,dist} (`npm ci`, then `npm run clean`
@@ -599,14 +467,24 @@ clean:
 	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 	rm -f  $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml
 
+# Raw and source packaging
+# These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk} files
+# into the portable raw-package contract maintained by this component.
+package-raw:
+	@$(MAKE) -B stamp-adapter-templates generate-component-contract
+	@$(MAKE) build-openclaw-plugin build-dsh-plugin
+	@AWPRJ=anolisa ./packaging/raw/package.sh package
+
+stage-raw:
+	@$(MAKE) -B stamp-adapter-templates generate-component-contract
+	@$(MAKE) build-openclaw-plugin build-dsh-plugin
+	@AWPRJ=anolisa ./packaging/raw/package.sh stage
+
 # Create source tarball (excludes build artifacts).
-# `clean` must finish before the generated contract and adapter manifests
-# are re-stamped: as sibling prerequisites, `make -jN dist` may run the two
-# concurrently and the cleanup can delete the stamped files, shipping an
-# archive without the embedded install contract. Invoke the stamping
-# sequentially from the recipe instead.
+# Finish cleanup before stamping. The source archive carries the contract
+# template and regenerates its target/ output when a distribution builds it.
 dist: clean
-	$(MAKE) stamp-adapter-templates
+	$(MAKE) stamp-adapter-templates generate-component-contract
 	@echo "==> Creating tarball (with pre-patched rtk source)..."
 	just setup-rtk
 	tar czf ../tokenless-$(VERSION).tar.gz \
@@ -615,7 +493,8 @@ dist: clean
 	    -C .. tokenless
 	@tar_list=$$(tar -tzf ../tokenless-$(VERSION).tar.gz); \
 	for required in \
-	    tokenless/.anolisa/component.toml \
+	    tokenless/packaging/anolisa/component.toml.in \
+	    tokenless/Makefile \
 	    tokenless/adapters/tokenless/manifest.json; do \
 		echo "$$tar_list" | grep -q "^$$required$$" || { \
 			echo "ERROR: tokenless-$(VERSION).tar.gz is missing $$required" >&2; \
@@ -771,7 +650,7 @@ qwenpaw-uninstall:
 	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/uninstall.sh
 
 # One-step setup: build + install + all adapters
-setup: install adapter-install
+setup: install-legacy adapter-install
 	@echo ""
 	@echo "============================================"
 	@echo "  Token-Less setup complete!"
@@ -791,61 +670,6 @@ setup: install adapter-install
 	@echo "  rtk --version"
 	@echo "  make adapter-scan"
 
-# --- npm Packaging ---
-# Preserve the convenient native entry point while keeping package-npm.js a
-# pure validator/assembler.
-prepare-npm-native-binaries: build-tokenless
-	@install -d -m 0755 "$(NATIVE_NPM_INPUT_DIR)"
-	@install -p -m 0755 \
-		target/release/tokenless \
-		third_party/rtk/target/release/rtk \
-		"$(NATIVE_NPM_INPUT_DIR)/"
-
-# Build and package the current host.
-# The package this target produces ships scripts/postinstall.js, and in CI
-# `make npm-package` is the step of the tokenless job that runs after
-# actions/setup-node — the one place a supported Node is guaranteed. Gating
-# packaging on the install-method suite is what keeps the postinstall ownership
-# test executing in CI, in strict mode, so an interpreter that cannot load the
-# script fails the build instead of reporting a skip.
-npm-package: prepare-npm-native-binaries \
-	test-install-script test-install-docs test-npm-postinstall-strict
-	@echo "==> Packaging anolisa-tokenless for npm (current platform)..."
-	node npm/scripts/package-npm.js
-
-# Package all five prebuilt target directories from target/npm-prebuilt.
-npm-package-all:
-	@echo "==> Packaging anolisa-tokenless for npm (all platforms)..."
-	node npm/scripts/package-npm.js --all
-
-# Publish all packages to npm registry
-# IMPORTANT: Platform packages must be published BEFORE the root package,
-# because the root package declares them as optionalDependencies.
-# If the root package is published first and a platform package fails,
-# npm will have a package referencing non-existent dependencies.
-#
-# The registry is pinned explicitly: the nested npm/dist/* package roots do
-# NOT inherit npm/.npmrc, so without --registry a user-level registry
-# override could silently win. Already-published name@version pairs are
-# skipped, so a partially failed publish run can simply be re-executed
-# (npm forbids republishing the same version).
-NPM_REGISTRY ?= https://registry.npmjs.org/
-
-npm-publish: npm-package-all
-	@echo "==> Publishing anolisa-tokenless packages to $(NPM_REGISTRY) (platform packages first, root last)..."
-	@set -e; \
-	for pkg in tokenless-linux-x64 tokenless-linux-arm64 tokenless-darwin-x64 tokenless-darwin-arm64 tokenless-win32-x64 tokenless; do \
-		dir=npm/dist/$$pkg; \
-		name=$$(node -p "require('./$$dir/package.json').name"); \
-		ver=$$(node -p "require('./$$dir/package.json').version"); \
-		if npm view "$$name@$$ver" version --registry=$(NPM_REGISTRY) >/dev/null 2>&1; then \
-			echo "  $$name@$$ver already published — skipping"; \
-		else \
-			echo "  publishing $$name@$$ver..."; \
-			(cd $$dir && npm publish --access public --registry=$(NPM_REGISTRY)); \
-		fi; \
-	done
-
 # Help
 help:
 	@echo "Token-Less Build System"
@@ -853,9 +677,14 @@ help:
 	@echo "Targets:"
 	@echo "  build             Build tokenless + rtk + openclaw plugin"
 	@echo "  build-tokenless   Build tokenless + rtk (via justfile)"
+	@echo "  build-core        Build core binaries using build-tokenless"
+	@echo "  build-plugin      Build OpenClaw and DSH plugins"
+	@echo "  layout            Show resolved installation paths"
+	@echo "  test-packaging    Verify delivery layouts with fixtures"
 	@echo "  build-openclaw-plugin  Compile OpenClaw plugin TS -> dist/index.js"
-	@echo "  install           Install binaries + adapter to FHS paths"
-	@echo "  uninstall         Remove installed files"
+	@echo "  install           Copy all prebuilt files; no build or host registration"
+	@echo "  install-legacy    Build and install using the legacy user/system profile"
+	@echo "  uninstall         Remove files from the legacy install profile"
 	@echo "  test              Run all tests"
 	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
 	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
@@ -890,7 +719,7 @@ help:
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  qwenpaw-install   Install QwenPaw plugin via qwenpaw CLI"
 	@echo "  qwenpaw-uninstall Uninstall QwenPaw plugin"
-	@echo "  setup             Full setup: build + install + register adapters"
+	@echo "  setup             Full setup: build + install-legacy + register adapters"
 	@echo "  npm-package       Build and package the current host"
 	@echo "  npm-package-all   Package target/npm-prebuilt target directories"
 	@echo "  npm-publish       Build and publish all npm packages"
@@ -899,14 +728,44 @@ help:
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"
-	@echo "  INSTALL_PROFILE  user or system (default: user)"
-	@echo "  DESTDIR          Staging root for package builds"
-	@echo "  PREFIX           Install prefix (default: ~/.local or /usr)"
+	@echo "  INSTALL_PROFILE  UID selects system/user by default; explicit values override"
+	@echo "  AWPRJ            Optional install namespace (default: empty)"
+	@echo "  DESTDIR          Optional temporary root (default: direct file installation)"
+	@echo "  PREFIX           Install prefix (system: /usr/local; user: owned HOME/.local)"
 	@echo "  BINDIR           Binary install path"
 	@echo "  LIBEXECDIR       Helper binary install path"
-	@echo "  SHARE_DIR        Adapter resources path"
-	@echo "  COSH_EXTENSION_DIR  Cosh extension path"
-	@echo "  BIN_DIR          Directory containing prebuilt tokenless and rtk"
+	@echo "  SHARE_DIR        Legacy adapter resources path (install-legacy)"
+	@echo "  COSH_EXTENSION_DIR  Legacy Cosh extension path (install-legacy)"
+	@echo "  BIN_DIR          Prebuilt tokenless directory (raw packages also require rtk)"
 	@echo "  TARGET_OS        Raw target OS: linux or macos"
 	@echo "  TARGET_ARCH      Raw target arch: x86_64 or aarch64"
 	@echo "  OUTPUT_DIR       Raw artifact output directory (default: target/raw)"
+
+# Public delivery targets share the root entrypoint and keep legacy defaults local.
+.PHONY: build-core build-plugin
+build-core: build-tokenless
+build-plugin: build-openclaw-plugin build-dsh-plugin
+
+DELIVERY_COMPONENT_ROOT := $(abspath $(dir $(firstword $(MAKEFILE_LIST))))
+delivery_quote = '$(subst ','"'"',$(1))'
+# Clear legacy file-origin defaults; the file installer resolves paths once.
+DELIVERY_INPUTS := AWPRJ PREFIX INSTALL_PROFILE BINDIR LIBDIR LIBEXECDIR DATADIR ADAPTERDIR EXTENSIONDIR UNITDIR BIN_DIR RTK_BIN DESTDIR
+DELIVERY_ENV = env $(foreach name,$(DELIVERY_INPUTS) COMPONENT_ROOT,-u $(name)) \
+	$(call delivery_quote,COMPONENT_ROOT=$(DELIVERY_COMPONENT_ROOT)) \
+	$(foreach name,$(DELIVERY_INPUTS),$(if $(filter command line environment,$(origin $(name))),$(call delivery_quote,$(name)=$($(name)))))
+
+.PHONY: layout install install-core install-plugins test-packaging
+layout:
+	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" --print-layout
+
+install:
+	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh"
+
+install-core:
+	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" core
+
+install-plugins:
+	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" plugins
+
+test-packaging:
+	@bash "$(DELIVERY_COMPONENT_ROOT)/tests/test-system-install.sh"

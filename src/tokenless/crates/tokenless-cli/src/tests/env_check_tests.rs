@@ -11,7 +11,10 @@ fn resolves_native_executable_from_path_without_a_shell() {
     let binary = directory.path().join("tokenless-resolver-test.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
     let _guard = EnvGuard::set("PATH", directory.path().to_str().unwrap());
-    assert_eq!(resolve_binary_path("tokenless-resolver-test"), Some(binary.to_string_lossy().into_owned()));
+    assert_eq!(
+        resolve_binary_path("tokenless-resolver-test"),
+        Some(binary.to_string_lossy().into_owned())
+    );
     assert!(resolve_binary_path("tokenless-missing-test").is_none());
 }
 
@@ -22,13 +25,21 @@ fn resolves_and_executes_cmd_shim_from_path() {
     let binary = directory.path().join("tokenless-shim-test.cmd");
     std::fs::write(&binary, "@echo shim-version-1.0\r\n").unwrap();
     let mut guard = EnvGuard::set("PATH", directory.path().to_str().unwrap());
-    guard.previous.push(("PATHEXT", std::env::var_os("PATHEXT")));
+    guard
+        .previous
+        .push(("PATHEXT", std::env::var_os("PATHEXT")));
     unsafe { std::env::set_var("PATHEXT", ".EXE;.CMD") };
     let resolved = resolve_binary_path("tokenless-shim-test").unwrap();
     assert_eq!(std::path::Path::new(&resolved), binary);
-    let output = std::process::Command::new(resolved).arg("--version").output().unwrap();
+    let output = std::process::Command::new(resolved)
+        .arg("--version")
+        .output()
+        .unwrap();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "shim-version-1.0");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "shim-version-1.0"
+    );
     assert!(!windows_binary_paths("tokenless-shim-test", ".EXE").contains(&binary));
 }
 
@@ -231,11 +242,14 @@ fn binary_fallback_paths_cover_supported_installers() {
     let paths = binary_fallback_paths("rtk", "/home/alice");
     let expected = [
         "/home/alice/.local/bin/rtk",
+        "/home/alice/.local/libexec/tokenless/rtk",
         "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
         "/home/alice/.local/libexec/anolisa/tokenless/rtk",
         "/usr/local/bin/rtk",
+        "/usr/local/libexec/tokenless/rtk",
         "/usr/local/libexec/anolisa/tokenless/rtk",
         "/usr/bin/rtk",
+        "/usr/libexec/tokenless/rtk",
         "/usr/libexec/anolisa/tokenless/rtk",
         "/usr/lib/anolisa/tokenless/rtk",
         "/home/alice/.local/share/anolisa/tokenless/rtk",
@@ -467,9 +481,14 @@ fn rtk_resolution_skips_incompatible_path_candidate() {
     chmod_file(&bundled, 0o700);
 
     assert_eq!(
-        select_rtk_candidates(std::iter::once(incompatible)
-            .chain(binary_fallback_paths("rtk", directory.path().to_str().unwrap()))
-            .collect()),
+        select_rtk_candidates(
+            std::iter::once(incompatible)
+                .chain(binary_fallback_paths(
+                    "rtk",
+                    directory.path().to_str().unwrap()
+                ))
+                .collect()
+        ),
         Some(bundled.to_string_lossy().into_owned())
     );
 }
@@ -821,7 +840,10 @@ fn check_tool_partial_recommended_version_low() {
     assert_eq!(result.status, ReadyStatus::Partial);
     // Confirm the dep itself is VersionLow, not Missing
     assert!(
-        matches!(result.recommended_results[0].1, DepStatus::VersionLow { .. }),
+        matches!(
+            result.recommended_results[0].1,
+            DepStatus::VersionLow { .. }
+        ),
         "expected VersionLow for bash>=999.0.0"
     );
 }
@@ -913,6 +935,23 @@ fn check_dep_missing_binary() {
     assert_eq!(check_dep(&dep), DepStatus::Missing);
 }
 
+#[cfg(unix)]
+#[test]
+fn independent_resources_follow_xdg_without_bypassing_trust_checks() {
+    let directory = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set("XDG_DATA_HOME", directory.path().to_str().unwrap());
+    let resource = directory
+        .path()
+        .join("tokenless/adapters/common/tool-ready-spec.json");
+    std::fs::create_dir_all(resource.parent().unwrap()).unwrap();
+    std::fs::write(&resource, "{}").unwrap();
+    assert!(spec_path_candidates().contains(&resource.to_string_lossy().into_owned()));
+    assert!(is_trusted_path(&resource));
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&resource, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(!is_trusted_path(&resource));
+}
+
 #[test]
 fn spec_path_candidates_ordered_correctly() {
     // Pure-function check: no file-system dependency, deterministic.
@@ -920,6 +959,10 @@ fn spec_path_candidates_ordered_correctly() {
     let _guard = EnvGuard::set_spec("/custom/spec.json");
     let c = spec_path_candidates();
     assert_eq!(c[0], "/custom/spec.json");
+    assert!(
+        c.iter()
+            .any(|path| path == "/usr/local/share/tokenless/adapters/common/tool-ready-spec.json")
+    );
 
     // All four /usr/local paths (FHS + legacy) must be present.
     assert!(
@@ -960,8 +1003,8 @@ fn fix_script_candidates_ordered_correctly() {
         "missing /usr/local FHS fix-script path in {c:?}"
     );
     assert!(
-        c.iter().any(|p| p
-            == "/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"),
+        c.iter()
+            .any(|p| p == "/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"),
         "missing /usr/local legacy fix-script path in {c:?}"
     );
 
@@ -995,8 +1038,7 @@ fn load_spec_error_on_nonexistent_file() {
 
 #[test]
 fn load_spec_error_on_invalid_json() {
-    let tmp =
-        std::env::temp_dir().join(format!("tokenless-bad-spec-{}.json", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("tokenless-bad-spec-{}.json", std::process::id()));
     std::fs::write(&tmp, "not json").unwrap();
     let result = load_spec(&tmp);
     assert!(result.is_err());
@@ -1452,7 +1494,10 @@ fn run_fix_skips_recommended_only_missing_deps() {
     }
 
     assert!(result.is_ok());
-    assert!(!marker_path.exists(), "recommended deps must not trigger auto-fix");
+    assert!(
+        !marker_path.exists(),
+        "recommended deps must not trigger auto-fix"
+    );
 }
 
 #[test]
@@ -1655,7 +1700,10 @@ fn check_dep_version_low() {
     dep.version = Some(">=999.0".to_string());
     let status = check_dep(&dep);
     match status {
-        DepStatus::VersionLow { installed, required } => {
+        DepStatus::VersionLow {
+            installed,
+            required,
+        } => {
             assert_eq!(required, "999.0");
             assert!(!installed.is_empty());
         }
@@ -1689,7 +1737,6 @@ fn resolve_package_with_apt_override() {
     // Will resolve based on detected system manager
     assert!(!pkg.is_empty());
 }
-
 
 #[test]
 fn format_dep_status_label_all_variants() {
@@ -1788,7 +1835,13 @@ fn checklist_json_schema_covers_all_categories() {
     // Every tool entry carries the status label plus all five categories.
     for tool in tools {
         assert!(tool["status"].is_string());
-        for category in ["required", "recommended", "config", "permissions", "network"] {
+        for category in [
+            "required",
+            "recommended",
+            "config",
+            "permissions",
+            "network",
+        ] {
             assert!(
                 tool[category].is_array(),
                 "tool {} must serialize category {}",

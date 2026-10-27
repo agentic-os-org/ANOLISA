@@ -1047,13 +1047,14 @@ and makes no cloud requests.
 
 | Target | Description |
 |---|---|
-| `make build` | Build `tokenless` + `rtk` (release mode) |
+| `make build` | Build `tokenless` + `rtk` and OpenClaw/DSH plugins (release mode) |
 | `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
 | `make python-wheel` | Build the native `anolisa-tokenless` wheel |
 | `make agentscope-wheel` | Build the pure-Python AgentScope integration wheel |
 | `make test-python-runtime` | Install and test the wheel in an isolated environment |
 | `make test-agentscope-integration` | Test both wheels with supported AgentScope versions |
-| `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
+| `make install` | Copy all prebuilt files using `PREFIX`, `AWPRJ` and optional `DESTDIR`; no build or activation |
+| `make install-legacy` | Retain the auto-building legacy user/system installation profile |
 | `make test` | Run all tests (Rust + hooks) |
 | `make test-hooks` | Run hook integration tests against the installed `tokenless` binary, whose version must match this checkout (`TOKENLESS_ALLOW_VERSION_SKEW=1` overrides) |
 | `make lint` | Run clippy checks |
@@ -1078,12 +1079,12 @@ and makes no cloud requests.
 | `make opencode-uninstall` | Remove OpenCode local plugin |
 | `make qwenpaw-install` | Install QwenPaw plugin via the qwenpaw CLI |
 | `make qwenpaw-uninstall` | Remove QwenPaw plugin |
-| `make setup` | Full setup: build + install + all adapters |
+| `make setup` | Legacy setup: build + `install-legacy` + register all adapters |
 
 Override install paths:
 
 ```bash
-make install BIN_DIR=/usr/local/bin
+make install PREFIX=/usr/local
 ```
 
 ## Raw Packaging
@@ -1121,7 +1122,7 @@ and `darwin-arm64` binary directories under `target/npm-prebuilt`. The packer
 validates and assembles them:
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 ```
 
 See [npm/README.md](npm/README.md#packaging-for-npm) for the fixed directory

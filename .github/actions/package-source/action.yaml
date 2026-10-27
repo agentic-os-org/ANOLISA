@@ -284,10 +284,17 @@ runs:
       run: |
         set -euo pipefail
         ARCHIVE="/tmp/archives/${ARCHIVE_FILE}"
-        EXPECTED_VERSION=$(grep '^version' "/tmp/build/${ARCHIVE_NAME}/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
-        CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/.anolisa/component.toml" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        EXPECTED_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+        TEMPLATE="${ARCHIVE_NAME}/packaging/anolisa/component.toml.in"
+        MEMBERS=$(tar -tzf "$ARCHIVE")
+        if grep -Fxq "$TEMPLATE" <<< "$MEMBERS"; then
+          CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "$TEMPLATE" | sed "s/@VERSION@/${EXPECTED_VERSION}/g" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        else
+          # Historical sources shipped the generated contract beside the source.
+          CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/.anolisa/component.toml" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        fi
         if [ -z "$CONTRACT_VERSION" ]; then
-          echo "ERROR: .anolisa/component.toml is missing from the archive or has no version"
+          echo "ERROR: ANOLISA contract source is missing from the archive or has no version"
           exit 1
         fi
         if [ "$CONTRACT_VERSION" != "$EXPECTED_VERSION" ]; then

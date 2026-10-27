@@ -2,7 +2,7 @@
 # Fetch and patch the immutable RTK source used by Tokenless builds.
 set -euo pipefail
 
-COMPONENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPONENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RTK_REPOSITORY="https://github.com/rtk-ai/rtk.git"
 RTK_RELEASE="v0.49.0"
 RTK_COMMIT="b1c0dc00649c50fbe8930f849c800d4d6ca12091"

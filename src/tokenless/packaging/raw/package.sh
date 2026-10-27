@@ -135,11 +135,7 @@ stage_payload() {
     install -p -m 0755 "$BIN_DIR/tokenless" "$stage/bin/tokenless"
     install -p -m 0755 "$BIN_DIR/rtk" \
         "$stage/libexec/anolisa/tokenless/"
-    cp -a "$adapters"/. "$stage/adapters"/
-
-    # A checkout upgraded from the former adapter layout can retain formerly
-    # ignored AgentScope build artifacts. They are not part of this payload.
-    rm -rf "$stage/adapters/agentscope"
+    tokenless_copy_adapters "$adapters" "$stage/adapters" raw
 
     # ANOLISA intentionally ignores archive symlinks. The source tree shares
     # these dispatchers by symlink, so raw packages must carry regular files.
@@ -161,25 +157,7 @@ shutil.copytree(
 )
 PY
 
-    install -p -m 0644 \
-        "$adapters/common/cosh-extension.json" \
-        "$adapters/common/tool-ready-spec.json" \
-        "$stage/extensions/tokenless/"
-    install -p -m 0755 "$adapters/common/tokenless-env-fix.sh" \
-        "$stage/extensions/tokenless/"
-    cp -a "$adapters/common/hooks"/. "$stage/extensions/tokenless/hooks"/
-    cp -a "$adapters/common/commands"/. "$stage/extensions/tokenless/commands"/
-
-    # Match the installed adapter payload and exclude build-only inputs.
-    rm -rf "$stage/adapters/openclaw/node_modules"
-    rm -f \
-        "$stage/adapters/openclaw/package-lock.json" \
-        "$stage/adapters/openclaw/index.ts" \
-        "$stage/adapters/openclaw/tsconfig.json"
-    find "$stage/adapters" "$stage/extensions/tokenless" \
-        -type d -name '__pycache__' -prune -exec rm -rf {} +
-    find "$stage/adapters" "$stage/extensions/tokenless" \
-        \( -name '*.in' -o -name '.gitignore' -o -name '*.pyc' -o -name '*.pyo' \) -delete
+    tokenless_copy_extension "$adapters" "$stage/extensions/tokenless" raw
     normalize_modes "$stage"
 
     if [ -n "$(find "$stage" -type l -print -quit)" ]; then
@@ -202,9 +180,13 @@ COMMAND="${1:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/../payload.sh"
 SOURCE_ROOT="${TOKENLESS_SOURCE_DIR:-$DEFAULT_ROOT}"
+# Existing raw manifests describe the ANOLISA profile, not arbitrary layouts.
+AWPRJ="${AWPRJ-anolisa}"
+[ "$AWPRJ" = anolisa ] || die 'raw packages require AWPRJ=anolisa; use make install for independent file installation'
 BIN_DIR="${BIN_DIR:-}"
-CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/.anolisa/component.toml}"
+CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/target/packaging/anolisa/component.toml}"
 TARGET_OS="$(normalize_os "${TARGET_OS:-$(detect_os)}")"
 TARGET_ARCH="$(normalize_arch "${TARGET_ARCH:-$(detect_arch)}")"
 

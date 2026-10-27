@@ -11,7 +11,7 @@ pub(super) fn prepare(repo: &Path, cancel: &AtomicBool) -> Result<tempfile::Temp
             repo,
             "bash",
             &[
-                "src/tokenless/scripts/setup-rtk.sh".into(),
+                "src/tokenless/packaging/build/setup-rtk.sh".into(),
                 root.join("third_party/rtk").display().to_string(),
             ],
             180,
@@ -82,8 +82,8 @@ pub(super) fn stage(
         ),
         (
             "setup-rtk.sh",
-            repo.join("src/tokenless/scripts/setup-rtk.sh"),
-            "src/tokenless/scripts/setup-rtk.sh",
+            repo.join("src/tokenless/packaging/build/setup-rtk.sh"),
+            "src/tokenless/packaging/build/setup-rtk.sh",
         ),
         (
             "rtk-tokenless-stats.patch",

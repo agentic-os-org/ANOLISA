@@ -84,8 +84,8 @@ supported. The Linux CI entry point is described below.
 
 ```powershell
 cd src/tokenless
-./scripts/build-windows.ps1
-node npm/scripts/package-npm.js --target win32-x64
+./packaging/build/build-windows.ps1
+node packaging/npm/package-npm.js --target win32-x64
 $packages = Get-ChildItem npm/dist/tokenless-win32-x64/*.tgz, npm/dist/tokenless/*.tgz
 npm install -g $packages.FullName
 ```

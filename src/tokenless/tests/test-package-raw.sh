@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 SOURCE="$TMP/tokenless"
 ADAPTERS="$SOURCE/adapters/tokenless"
-CONTRACT="$SOURCE/.anolisa/component.toml"
+CONTRACT="$SOURCE/target/packaging/anolisa/component.toml"
 # The version this fixture publishes. `make test-raw-package` runs the suite a
 # second time with a prerelease so the packer is exercised on the one version
 # shape whose two spellings differ (see WHEEL_VERSION below).
@@ -20,7 +20,7 @@ VERSION="${TOKENLESS_RAW_TEST_VERSION:-9.8.7}"
 WHEEL_VERSION="$(python3 "$ROOT/packaging/raw/wheel-version.py" "$VERSION")"
 
 mkdir -p \
-    "$SOURCE/.anolisa" \
+    "$SOURCE/target/packaging/anolisa" \
     "$ADAPTERS/common/hooks/__pycache__" \
     "$ADAPTERS/common/commands" \
     "$ADAPTERS/qwenwork/.qoder-plugin" \
@@ -366,20 +366,20 @@ test "$(stat -c '%a' "$EXTRACTED/adapters/common/hooks/run-hook.sh")" = 755
 test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/plugin.js")" = 644
 test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/scripts/install.sh")" = 755
 
-grep -Fq 'source = "bin/tokenless"' "$ROOT/.anolisa/component.toml.in"
-grep -Fq 'source = "extensions/tokenless"' "$ROOT/.anolisa/component.toml.in"
-test "$(grep -o '@VERSION@' "$ROOT/.anolisa/component.toml.in" | wc -l)" = 1
-grep -Fq 'framework = "opencode"' "$ROOT/.anolisa/component.toml.in"
-OPENCODE_CONTRACT="$(sed -n '/^framework = "opencode"$/,/^\[\[adapters\]\]$/p' "$ROOT/.anolisa/component.toml.in")"
+grep -Fq 'source = "bin/tokenless"' "$ROOT/packaging/anolisa/component.toml.in"
+grep -Fq 'source = "extensions/tokenless"' "$ROOT/packaging/anolisa/component.toml.in"
+test "$(grep -o '@VERSION@' "$ROOT/packaging/anolisa/component.toml.in" | wc -l)" = 1
+grep -Fq 'framework = "opencode"' "$ROOT/packaging/anolisa/component.toml.in"
+OPENCODE_CONTRACT="$(sed -n '/^framework = "opencode"$/,/^\[\[adapters\]\]$/p' "$ROOT/packaging/anolisa/component.toml.in")"
 grep -Fq 'when = "post_enable"' <<< "$OPENCODE_CONTRACT"
 grep -Fq 'when = "post_disable"' <<< "$OPENCODE_CONTRACT"
-grep -Fq 'source = "adapters/manifest.json"' "$ROOT/.anolisa/component.toml.in"
+grep -Fq 'source = "adapters/manifest.json"' "$ROOT/packaging/anolisa/component.toml.in"
 
 # Every adapter target the manifest ships needs a matching [[adapters]] entry,
 # otherwise the raw install silently drops that adapter. verify-release.py
 # enforces this while packaging; assert it on the shipped sources as well.
 python3 - "$ROOT/adapters/tokenless/manifest.json.in" \
-    "$ROOT/.anolisa/component.toml.in" \
+    "$ROOT/packaging/anolisa/component.toml.in" \
     "$ROOT/../../distribution/anolisa/manifests/components/tokenless/component.toml" <<'DRIFT_PY'
 import json
 import re

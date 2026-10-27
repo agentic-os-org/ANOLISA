@@ -332,11 +332,14 @@ class TestBinaryFallbackPaths(unittest.TestCase):
         paths = self._hook_utils()._known_binary_paths("rtk", "/home/alice")
         expected = (
             "/home/alice/.local/bin/rtk",
+            "/home/alice/.local/libexec/tokenless/rtk",
             "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
             "/home/alice/.local/libexec/anolisa/tokenless/rtk",
             "/usr/local/bin/rtk",
+            "/usr/local/libexec/tokenless/rtk",
             "/usr/local/libexec/anolisa/tokenless/rtk",
             "/usr/bin/rtk",
+            "/usr/libexec/tokenless/rtk",
             "/usr/libexec/anolisa/tokenless/rtk",
             "/usr/lib/anolisa/tokenless/rtk",
             "/home/alice/.local/share/anolisa/tokenless/rtk",
@@ -386,7 +389,7 @@ class TestBinaryFallbackPaths(unittest.TestCase):
         hook_utils = self._hook_utils()
         with tempfile.TemporaryDirectory() as home:
             helper_dir = os.path.join(
-                home, ".local", "libexec", "anolisa", "tokenless"
+                home, ".local", "libexec", "tokenless"
             )
             os.makedirs(helper_dir)
             rtk_path = os.path.join(helper_dir, "rtk")

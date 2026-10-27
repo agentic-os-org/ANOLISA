@@ -44,7 +44,7 @@ TOML_CONTRACTS = (
 )
 VERSION_TEMPLATES = (
     ("src/agent-memory/Cargo.toml", "src/agent-memory/.anolisa/component.toml.in"),
-    ("src/tokenless/Cargo.toml", "src/tokenless/.anolisa/component.toml.in"),
+    ("src/tokenless/Cargo.toml", "src/tokenless/packaging/anolisa/component.toml.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/manifest.json.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/openclaw/package.json.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/openclaw/openclaw.plugin.json.in"),
@@ -63,7 +63,7 @@ AGENT_MEMORY_JSON = (
 )
 GENERATED_CONTRACTS = (
     "src/agent-memory/.anolisa/component.toml",
-    "src/tokenless/.anolisa/component.toml",
+    "src/tokenless/target/packaging/anolisa/component.toml",
 )
 
 

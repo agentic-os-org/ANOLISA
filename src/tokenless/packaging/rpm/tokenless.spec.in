@@ -1,5 +1,10 @@
 %define anolis_release 1
 %global debug_package %{nil}
+# Distribution defaults remain compatible; independent builders may override
+# these role directories using the component-owned packaging layout.
+%{!?_libexecdir_tokenless:%global _libexecdir_tokenless %{_libexecdir}/anolisa/tokenless}
+%{!?_adapterdir_tokenless:%global _adapterdir_tokenless %{_datadir}/anolisa/adapters/tokenless}
+%{!?_extensiondir_tokenless:%global _extensiondir_tokenless %{_datadir}/anolisa/extensions/tokenless}
 
 Name:           tokenless
 Version:        @VERSION@
@@ -95,43 +100,43 @@ cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 # Produces adapters/tokenless/openclaw/dist/index.js, which package.json
 # declares as both "main" and openclaw.extensions. Mirroring sec-core's
 # build-openclaw-plugin pattern — never hand-roll tsc/esbuild here.
-make build-openclaw-plugin build-dsh-plugin
+make generate-component-contract build-openclaw-plugin build-dsh-plugin
 
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}%{_bindir}
-mkdir -p %{buildroot}%{_libexecdir}/anolisa/tokenless
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/commands
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/dist
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/hooks
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
-mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
+mkdir -p %{buildroot}%{_libexecdir_tokenless}
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/common/hooks
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/common/commands
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/openclaw/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/openclaw/dist
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/dsh/dist
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/hermes/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qwenpaw/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qoder/.qoder-plugin
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qoder/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qoder/commands
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qoder/hooks
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qwenwork/.qoder-plugin
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qwenwork/hooks/shared
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qwenwork/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/claude-code/.claude-plugin
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/claude-code/hooks
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/claude-code/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/codex/.codex-plugin
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/codex/hooks
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/codex/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/opencode/scripts
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qwencode/hooks
+mkdir -p %{buildroot}%{_adapterdir_tokenless}/qwencode/scripts
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
 # Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/anolisa/tokenless
 install -m 0755 target/release/tokenless %{buildroot}%{_bindir}/tokenless
-install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_libexecdir}/anolisa/tokenless/rtk
+install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_libexecdir_tokenless}/rtk
 
 # Create a symlink so rtk is discoverable via PATH
-ln -sf %{_libexecdir}/anolisa/tokenless/rtk %{buildroot}%{_bindir}/rtk
+ln -sf %{_libexecdir_tokenless}/rtk %{buildroot}%{_bindir}/rtk
 
 # Install documentation. The bilingual user manual moved to the
 # repository-level docs/user-guide tree and is published with the ANOLISA
@@ -140,261 +145,265 @@ install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
 # Install adapter bundle (common hooks/spec + openclaw)
-install -m 0644 adapters/tokenless/manifest.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/
+install -m 0644 adapters/tokenless/manifest.json %{buildroot}%{_adapterdir_tokenless}/
 # Install the tokenless RPM component contract (publishing/plugin metadata)
 # at the component-level path declared by the ANOLISA component-contract
 # model: %{_datadir}/anolisa/components/<component>/component.toml.
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/tokenless
-install -m 0644 .anolisa/component.toml %{buildroot}%{_datadir}/anolisa/components/tokenless/
-install -m 0644 adapters/tokenless/common/tool-ready-spec.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/
-install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/
-install -m 0644 adapters/tokenless/common/cosh-extension.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/
-install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks/
-install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks/
-install -m 0644 adapters/tokenless/common/hooks/tool_categories.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks/
-install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/commands/
-install -m 0755 adapters/tokenless/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
-install -m 0755 adapters/tokenless/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
-install -m 0755 adapters/tokenless/openclaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
+install -m 0644 target/packaging/anolisa/component.toml %{buildroot}%{_datadir}/anolisa/components/tokenless/
+install -m 0644 adapters/tokenless/common/tool-ready-spec.json %{buildroot}%{_adapterdir_tokenless}/common/
+install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh %{buildroot}%{_adapterdir_tokenless}/common/
+install -m 0644 adapters/tokenless/common/cosh-extension.json %{buildroot}%{_adapterdir_tokenless}/common/
+install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_adapterdir_tokenless}/common/hooks/
+install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_adapterdir_tokenless}/common/hooks/
+install -m 0644 adapters/tokenless/common/hooks/tool_categories.json %{buildroot}%{_adapterdir_tokenless}/common/hooks/
+install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildroot}%{_adapterdir_tokenless}/common/commands/
+install -m 0755 adapters/tokenless/openclaw/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/openclaw/scripts/
+install -m 0755 adapters/tokenless/openclaw/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/openclaw/scripts/
+install -m 0755 adapters/tokenless/openclaw/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/openclaw/scripts/
 # Install the compiled dist tree produced by `make build-openclaw-plugin`.
 # package.json declares main/openclaw.extensions = ./dist/index.js; OpenClaw
 # `plugins install` reads from this directory and requires dist/index.js to exist.
-install -m 0644 adapters/tokenless/openclaw/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist/
-install -m 0644 adapters/tokenless/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/
-install -m 0644 adapters/tokenless/openclaw/package.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/
+install -m 0644 adapters/tokenless/openclaw/dist/index.js %{buildroot}%{_adapterdir_tokenless}/openclaw/dist/
+install -m 0644 adapters/tokenless/openclaw/openclaw.plugin.json %{buildroot}%{_adapterdir_tokenless}/openclaw/
+install -m 0644 adapters/tokenless/openclaw/package.json %{buildroot}%{_adapterdir_tokenless}/openclaw/
 
 # Install the native dsh bundle. dsh owns profile mutation; this package only
 # ships the immutable package manifest, Cordis patch, and plugin entry.
-install -m 0644 adapters/tokenless/dsh/package.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/
-install -m 0644 adapters/tokenless/dsh/cordis.patch.yml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/
-install -m 0644 adapters/tokenless/dsh/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/dist/
+install -m 0644 adapters/tokenless/dsh/package.json %{buildroot}%{_adapterdir_tokenless}/dsh/
+install -m 0644 adapters/tokenless/dsh/cordis.patch.yml %{buildroot}%{_adapterdir_tokenless}/dsh/
+install -m 0644 adapters/tokenless/dsh/dist/index.js %{buildroot}%{_adapterdir_tokenless}/dsh/dist/
 
 # Install Hermes Agent plugin (Python hooks + install scripts)
-install -m 0755 adapters/tokenless/hermes/__init__.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/
-install -m 0644 adapters/tokenless/hermes/plugin.yaml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/
-install -m 0755 adapters/tokenless/hermes/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
-install -m 0755 adapters/tokenless/hermes/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
-install -m 0755 adapters/tokenless/hermes/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
+install -m 0755 adapters/tokenless/hermes/__init__.py %{buildroot}%{_adapterdir_tokenless}/hermes/
+install -m 0644 adapters/tokenless/hermes/plugin.yaml %{buildroot}%{_adapterdir_tokenless}/hermes/
+install -m 0755 adapters/tokenless/hermes/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/hermes/scripts/
+install -m 0755 adapters/tokenless/hermes/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/hermes/scripts/
+install -m 0755 adapters/tokenless/hermes/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/hermes/scripts/
 
 # Install QwenPaw plugin (AgentScope middleware + install scripts). The
 # anolisa_tokenless wheel is pulled by QwenPaw from requirements.txt.
-install -m 0755 adapters/tokenless/qwenpaw/plugin.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/
-install -m 0644 adapters/tokenless/qwenpaw/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/
-install -m 0644 adapters/tokenless/qwenpaw/requirements.txt %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/
-install -m 0755 adapters/tokenless/qwenpaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/
-install -m 0755 adapters/tokenless/qwenpaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/
-install -m 0755 adapters/tokenless/qwenpaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/
+install -m 0755 adapters/tokenless/qwenpaw/plugin.py %{buildroot}%{_adapterdir_tokenless}/qwenpaw/
+install -m 0644 adapters/tokenless/qwenpaw/plugin.json %{buildroot}%{_adapterdir_tokenless}/qwenpaw/
+install -m 0644 adapters/tokenless/qwenpaw/requirements.txt %{buildroot}%{_adapterdir_tokenless}/qwenpaw/
+install -m 0755 adapters/tokenless/qwenpaw/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/qwenpaw/scripts/
+install -m 0755 adapters/tokenless/qwenpaw/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/qwenpaw/scripts/
+install -m 0755 adapters/tokenless/qwenpaw/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/qwenpaw/scripts/
 
 # Install the native Qoder CLI plugin. The wrapper resolves implementation
 # scripts from common/hooks/ so the hook logic remains shared.
-install -m 0644 adapters/tokenless/qoder/.qoder-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/
-install -m 0644 adapters/tokenless/qoder/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
-install -m 0755 adapters/tokenless/qoder/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
-install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.md %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
-install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
-install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
-install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
+install -m 0644 adapters/tokenless/qoder/.qoder-plugin/plugin.json %{buildroot}%{_adapterdir_tokenless}/qoder/.qoder-plugin/
+install -m 0644 adapters/tokenless/qoder/hooks/hooks.json %{buildroot}%{_adapterdir_tokenless}/qoder/hooks/
+install -m 0755 adapters/tokenless/qoder/hooks/run-hook.sh %{buildroot}%{_adapterdir_tokenless}/qoder/hooks/
+install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.md %{buildroot}%{_adapterdir_tokenless}/qoder/commands/
+install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/qoder/scripts/
+install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/qoder/scripts/
+install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/qoder/scripts/
 
 # Ship QwenWork resources only; macOS sideloading is an explicit user action.
 # Materialize shared hooks so a copied native plugin has no external symlinks.
-install -m 0644 adapters/tokenless/qwenwork/.qoder-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin/
-install -m 0644 adapters/tokenless/qwenwork/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/
-install -m 0755 adapters/tokenless/qwenwork/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/
-install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/
-install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/
-install -m 0644 adapters/tokenless/common/hooks/*.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/
-install -m 0755 adapters/tokenless/qwenwork/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
-install -m 0755 adapters/tokenless/qwenwork/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
-install -m 0755 adapters/tokenless/qwenwork/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
-install -m 0755 adapters/tokenless/qwenwork/scripts/lifecycle.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
+install -m 0644 adapters/tokenless/qwenwork/.qoder-plugin/plugin.json %{buildroot}%{_adapterdir_tokenless}/qwenwork/.qoder-plugin/
+install -m 0644 adapters/tokenless/qwenwork/hooks/hooks.json %{buildroot}%{_adapterdir_tokenless}/qwenwork/hooks/
+install -m 0755 adapters/tokenless/qwenwork/hooks/run-hook.sh %{buildroot}%{_adapterdir_tokenless}/qwenwork/hooks/
+install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_adapterdir_tokenless}/qwenwork/hooks/shared/
+install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_adapterdir_tokenless}/qwenwork/hooks/shared/
+install -m 0644 adapters/tokenless/common/hooks/*.json %{buildroot}%{_adapterdir_tokenless}/qwenwork/hooks/shared/
+install -m 0755 adapters/tokenless/qwenwork/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/qwenwork/scripts/
+install -m 0755 adapters/tokenless/qwenwork/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/qwenwork/scripts/
+install -m 0755 adapters/tokenless/qwenwork/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/qwenwork/scripts/
+install -m 0755 adapters/tokenless/qwenwork/scripts/lifecycle.py %{buildroot}%{_adapterdir_tokenless}/qwenwork/scripts/
 
 # Install Claude Code plugin (marketplace + plugin manifest + wrapper hook + scripts).
 # plugin.json is stamped from .in by `make stamp-adapter-templates` during %build
 # (transitive dep of build-openclaw-plugin); shipped as a regular file here.
-install -m 0644 adapters/tokenless/claude-code/.claude-plugin/marketplace.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/
-install -m 0644 adapters/tokenless/claude-code/.claude-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/
-install -m 0644 adapters/tokenless/claude-code/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/
-install -m 0755 adapters/tokenless/claude-code/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/
-install -m 0755 adapters/tokenless/claude-code/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/
-install -m 0755 adapters/tokenless/claude-code/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/
-install -m 0755 adapters/tokenless/claude-code/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/
+install -m 0644 adapters/tokenless/claude-code/.claude-plugin/marketplace.json %{buildroot}%{_adapterdir_tokenless}/claude-code/.claude-plugin/
+install -m 0644 adapters/tokenless/claude-code/.claude-plugin/plugin.json %{buildroot}%{_adapterdir_tokenless}/claude-code/.claude-plugin/
+install -m 0644 adapters/tokenless/claude-code/hooks/hooks.json %{buildroot}%{_adapterdir_tokenless}/claude-code/hooks/
+install -m 0755 adapters/tokenless/claude-code/hooks/run-hook.sh %{buildroot}%{_adapterdir_tokenless}/claude-code/hooks/
+install -m 0755 adapters/tokenless/claude-code/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/claude-code/scripts/
+install -m 0755 adapters/tokenless/claude-code/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/claude-code/scripts/
+install -m 0755 adapters/tokenless/claude-code/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/claude-code/scripts/
 
 # Install Codex plugin (manifest + hooks.json + install scripts + Python hooks).
-install -m 0644 adapters/tokenless/codex/.codex-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin/
-install -m 0644 adapters/tokenless/codex/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/hooks/
-install -m 0755 adapters/tokenless/codex/scripts/check-tokenless %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0755 adapters/tokenless/codex/scripts/response-diagnostics %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0755 adapters/tokenless/codex/scripts/rewrite-hook %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0755 adapters/tokenless/codex/scripts/tool-ready %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0755 adapters/tokenless/codex/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0755 adapters/tokenless/codex/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0755 adapters/tokenless/codex/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0644 adapters/tokenless/codex/scripts/_common.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
+install -m 0644 adapters/tokenless/codex/.codex-plugin/plugin.json %{buildroot}%{_adapterdir_tokenless}/codex/.codex-plugin/
+install -m 0644 adapters/tokenless/codex/hooks/hooks.json %{buildroot}%{_adapterdir_tokenless}/codex/hooks/
+install -m 0755 adapters/tokenless/codex/scripts/check-tokenless %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
+install -m 0755 adapters/tokenless/codex/scripts/response-diagnostics %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
+install -m 0755 adapters/tokenless/codex/scripts/rewrite-hook %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
+install -m 0755 adapters/tokenless/codex/scripts/tool-ready %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
+install -m 0755 adapters/tokenless/codex/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
+install -m 0755 adapters/tokenless/codex/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
+install -m 0755 adapters/tokenless/codex/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
+install -m 0644 adapters/tokenless/codex/scripts/_common.sh %{buildroot}%{_adapterdir_tokenless}/codex/scripts/
 
 # Install OpenCode plugin (local JavaScript plugin + lifecycle scripts).
-install -m 0644 adapters/tokenless/opencode/plugin.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/
-install -m 0755 adapters/tokenless/opencode/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
-install -m 0755 adapters/tokenless/opencode/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
-install -m 0755 adapters/tokenless/opencode/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
+install -m 0644 adapters/tokenless/opencode/plugin.js %{buildroot}%{_adapterdir_tokenless}/opencode/
+install -m 0755 adapters/tokenless/opencode/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/opencode/scripts/
+install -m 0755 adapters/tokenless/opencode/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/opencode/scripts/
+install -m 0755 adapters/tokenless/opencode/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/opencode/scripts/
 
 # Install Qwen Code plugin (extension manifest + hooks + scripts).
 # qwen-extension.json is stamped from .in by `make stamp-adapter-templates`
 # during %build (transitive dep of build-openclaw-plugin).
-install -m 0644 adapters/tokenless/qwencode/qwen-extension.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/
-install -m 0755 adapters/tokenless/qwencode/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/hooks/
-install -m 0755 adapters/tokenless/qwencode/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/
-install -m 0755 adapters/tokenless/qwencode/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/
-install -m 0755 adapters/tokenless/qwencode/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/
+install -m 0644 adapters/tokenless/qwencode/qwen-extension.json %{buildroot}%{_adapterdir_tokenless}/qwencode/
+install -m 0755 adapters/tokenless/qwencode/hooks/run-hook.sh %{buildroot}%{_adapterdir_tokenless}/qwencode/hooks/
+install -m 0755 adapters/tokenless/qwencode/scripts/detect.sh %{buildroot}%{_adapterdir_tokenless}/qwencode/scripts/
+install -m 0755 adapters/tokenless/qwencode/scripts/install.sh %{buildroot}%{_adapterdir_tokenless}/qwencode/scripts/
+install -m 0755 adapters/tokenless/qwencode/scripts/uninstall.sh %{buildroot}%{_adapterdir_tokenless}/qwencode/scripts/
 
 # Install cosh extension for auto-discovery at /usr/share/anolisa/extensions/tokenless/
-mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks
-mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands
-install -m 0644 adapters/tokenless/common/cosh-extension.json %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
-install -m 0644 adapters/tokenless/common/tool-ready-spec.json %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
-install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
-install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
-install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
-install -m 0644 adapters/tokenless/common/hooks/tool_categories.json %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
-install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands/
+mkdir -p %{buildroot}%{_extensiondir_tokenless}/hooks
+mkdir -p %{buildroot}%{_extensiondir_tokenless}/commands
+install -m 0644 adapters/tokenless/common/cosh-extension.json %{buildroot}%{_extensiondir_tokenless}/
+install -m 0644 adapters/tokenless/common/tool-ready-spec.json %{buildroot}%{_extensiondir_tokenless}/
+install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh %{buildroot}%{_extensiondir_tokenless}/
+install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_extensiondir_tokenless}/hooks/
+install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_extensiondir_tokenless}/hooks/
+install -m 0644 adapters/tokenless/common/hooks/tool_categories.json %{buildroot}%{_extensiondir_tokenless}/hooks/
+install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildroot}%{_extensiondir_tokenless}/commands/
 
 %files
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) %{_bindir}/tokenless
 %attr(0755,root,root) %{_bindir}/rtk
-%dir %attr(0755,root,root) %{_libexecdir}/anolisa/tokenless
-%attr(0755,root,root) %{_libexecdir}/anolisa/tokenless/rtk
+%dir %attr(0755,root,root) %{_libexecdir_tokenless}
+%attr(0755,root,root) %{_libexecdir_tokenless}/rtk
 %doc %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/components
 %dir %{_datadir}/anolisa/components/tokenless
+%if "%{_adapterdir_tokenless}" == "%{_datadir}/anolisa/adapters/tokenless"
 %dir %{_datadir}/anolisa/adapters
-%dir %{_datadir}/anolisa/adapters/tokenless
-%dir %{_datadir}/anolisa/adapters/tokenless/common
-%dir %{_datadir}/anolisa/adapters/tokenless/common/hooks
-%dir %{_datadir}/anolisa/adapters/tokenless/common/commands
-%dir %{_datadir}/anolisa/adapters/tokenless/openclaw
-%dir %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/openclaw/dist
-%dir %{_datadir}/anolisa/adapters/tokenless/dsh
-%dir %{_datadir}/anolisa/adapters/tokenless/dsh/dist
-%dir %{_datadir}/anolisa/adapters/tokenless/hermes
-%dir %{_datadir}/anolisa/adapters/tokenless/hermes/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/qwenpaw
-%dir %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/qoder
-%dir %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
-%dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/qoder/commands
-%dir %{_datadir}/anolisa/adapters/tokenless/qoder/hooks
-%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork
-%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin
-%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks
-%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared
-%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/claude-code
-%dir %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
-%dir %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
-%dir %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/codex
-%dir %{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin
-%dir %{_datadir}/anolisa/adapters/tokenless/codex/hooks
-%dir %{_datadir}/anolisa/adapters/tokenless/codex/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/opencode
-%dir %{_datadir}/anolisa/adapters/tokenless/opencode/scripts
-%dir %{_datadir}/anolisa/adapters/tokenless/qwencode
-%dir %{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
-%dir %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/manifest.json
+%endif
+%dir %{_adapterdir_tokenless}
+%dir %{_adapterdir_tokenless}/common
+%dir %{_adapterdir_tokenless}/common/hooks
+%dir %{_adapterdir_tokenless}/common/commands
+%dir %{_adapterdir_tokenless}/openclaw
+%dir %{_adapterdir_tokenless}/openclaw/scripts
+%dir %{_adapterdir_tokenless}/openclaw/dist
+%dir %{_adapterdir_tokenless}/dsh
+%dir %{_adapterdir_tokenless}/dsh/dist
+%dir %{_adapterdir_tokenless}/hermes
+%dir %{_adapterdir_tokenless}/hermes/scripts
+%dir %{_adapterdir_tokenless}/qwenpaw
+%dir %{_adapterdir_tokenless}/qwenpaw/scripts
+%dir %{_adapterdir_tokenless}/qoder
+%dir %{_adapterdir_tokenless}/qoder/.qoder-plugin
+%dir %{_adapterdir_tokenless}/qoder/scripts
+%dir %{_adapterdir_tokenless}/qoder/commands
+%dir %{_adapterdir_tokenless}/qoder/hooks
+%dir %{_adapterdir_tokenless}/qwenwork
+%dir %{_adapterdir_tokenless}/qwenwork/.qoder-plugin
+%dir %{_adapterdir_tokenless}/qwenwork/hooks
+%dir %{_adapterdir_tokenless}/qwenwork/hooks/shared
+%dir %{_adapterdir_tokenless}/qwenwork/scripts
+%dir %{_adapterdir_tokenless}/claude-code
+%dir %{_adapterdir_tokenless}/claude-code/.claude-plugin
+%dir %{_adapterdir_tokenless}/claude-code/hooks
+%dir %{_adapterdir_tokenless}/claude-code/scripts
+%dir %{_adapterdir_tokenless}/codex
+%dir %{_adapterdir_tokenless}/codex/.codex-plugin
+%dir %{_adapterdir_tokenless}/codex/hooks
+%dir %{_adapterdir_tokenless}/codex/scripts
+%dir %{_adapterdir_tokenless}/opencode
+%dir %{_adapterdir_tokenless}/opencode/scripts
+%dir %{_adapterdir_tokenless}/qwencode
+%dir %{_adapterdir_tokenless}/qwencode/hooks
+%dir %{_adapterdir_tokenless}/qwencode/scripts
+%attr(0644,root,root) %{_adapterdir_tokenless}/manifest.json
 %attr(0644,root,root) %{_datadir}/anolisa/components/tokenless/component.toml
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/tool-ready-spec.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/cosh-extension.json
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/common/tokenless-env-fix.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/common/hooks/*.py
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/common/hooks/*.sh
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/hooks/tool_categories.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/commands/tokenless-stats.toml
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/uninstall.sh
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/dist/index.js
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/openclaw.plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/package.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/dsh/package.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/dsh/cordis.patch.yml
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/dsh/dist/index.js
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/__init__.py
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/plugin.yaml
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/uninstall.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/plugin.py
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/requirements.txt
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/uninstall.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/common/tool-ready-spec.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/common/cosh-extension.json
+%attr(0755,root,root) %{_adapterdir_tokenless}/common/tokenless-env-fix.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/common/hooks/*.py
+%attr(0755,root,root) %{_adapterdir_tokenless}/common/hooks/*.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/common/hooks/tool_categories.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/common/commands/tokenless-stats.toml
+%attr(0755,root,root) %{_adapterdir_tokenless}/openclaw/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/openclaw/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/openclaw/scripts/uninstall.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/openclaw/dist/index.js
+%attr(0644,root,root) %{_adapterdir_tokenless}/openclaw/openclaw.plugin.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/openclaw/package.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/dsh/package.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/dsh/cordis.patch.yml
+%attr(0644,root,root) %{_adapterdir_tokenless}/dsh/dist/index.js
+%attr(0755,root,root) %{_adapterdir_tokenless}/hermes/__init__.py
+%attr(0644,root,root) %{_adapterdir_tokenless}/hermes/plugin.yaml
+%attr(0755,root,root) %{_adapterdir_tokenless}/hermes/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/hermes/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/hermes/scripts/uninstall.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenpaw/plugin.py
+%attr(0644,root,root) %{_adapterdir_tokenless}/qwenpaw/plugin.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/qwenpaw/requirements.txt
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenpaw/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenpaw/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenpaw/scripts/uninstall.sh
 # Qoder CLI plugin — native hook wrapper resolves scripts from common/hooks/.
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/hooks.json
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/run-hook.sh
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.md
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/qoder/.qoder-plugin/plugin.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/qoder/hooks/hooks.json
+%attr(0755,root,root) %{_adapterdir_tokenless}/qoder/hooks/run-hook.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/qoder/commands/tokenless-stats.md
+%attr(0755,root,root) %{_adapterdir_tokenless}/qoder/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qoder/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qoder/scripts/uninstall.sh
 
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/hooks.json
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/run-hook.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/*.py
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/*.sh
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/*.json
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/lifecycle.py
+%attr(0644,root,root) %{_adapterdir_tokenless}/qwenwork/.qoder-plugin/plugin.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/qwenwork/hooks/hooks.json
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenwork/hooks/run-hook.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenwork/hooks/shared/*.py
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenwork/hooks/shared/*.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/qwenwork/hooks/shared/*.json
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenwork/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenwork/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenwork/scripts/uninstall.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwenwork/scripts/lifecycle.py
 
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/marketplace.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/hooks.json
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/run-hook.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/uninstall.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/claude-code/.claude-plugin/marketplace.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/claude-code/.claude-plugin/plugin.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/claude-code/hooks/hooks.json
+%attr(0755,root,root) %{_adapterdir_tokenless}/claude-code/hooks/run-hook.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/claude-code/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/claude-code/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/claude-code/scripts/uninstall.sh
 # Codex plugin — Python hooks + shell scripts.
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/hooks/hooks.json
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/check-tokenless
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/response-diagnostics
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/rewrite-hook
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/tool-ready
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/uninstall.sh
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/_common.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/codex/.codex-plugin/plugin.json
+%attr(0644,root,root) %{_adapterdir_tokenless}/codex/hooks/hooks.json
+%attr(0755,root,root) %{_adapterdir_tokenless}/codex/scripts/check-tokenless
+%attr(0755,root,root) %{_adapterdir_tokenless}/codex/scripts/response-diagnostics
+%attr(0755,root,root) %{_adapterdir_tokenless}/codex/scripts/rewrite-hook
+%attr(0755,root,root) %{_adapterdir_tokenless}/codex/scripts/tool-ready
+%attr(0755,root,root) %{_adapterdir_tokenless}/codex/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/codex/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/codex/scripts/uninstall.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/codex/scripts/_common.sh
 # OpenCode plugin — local JavaScript plugin + lifecycle scripts.
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/plugin.js
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/uninstall.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/opencode/plugin.js
+%attr(0755,root,root) %{_adapterdir_tokenless}/opencode/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/opencode/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/opencode/scripts/uninstall.sh
 # Qwen Code plugin — extension manifest + hooks + scripts.
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/qwen-extension.json
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/hooks/run-hook.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/detect.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/uninstall.sh
+%attr(0644,root,root) %{_adapterdir_tokenless}/qwencode/qwen-extension.json
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwencode/hooks/run-hook.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwencode/scripts/detect.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwencode/scripts/install.sh
+%attr(0755,root,root) %{_adapterdir_tokenless}/qwencode/scripts/uninstall.sh
 # Cosh extension — auto-discovered from /usr/share/anolisa/extensions/
+%if "%{_extensiondir_tokenless}" == "%{_datadir}/anolisa/extensions/tokenless"
 %dir %{_datadir}/anolisa/extensions
-%dir %{_datadir}/anolisa/extensions/tokenless
-%dir %{_datadir}/anolisa/extensions/tokenless/hooks
-%dir %{_datadir}/anolisa/extensions/tokenless/commands
-%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/cosh-extension.json
-%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/tool-ready-spec.json
-%attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/tokenless-env-fix.sh
-%attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/*.py
-%attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/*.sh
-%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/tool_categories.json
-%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/commands/tokenless-stats.toml
+%endif
+%dir %{_extensiondir_tokenless}
+%dir %{_extensiondir_tokenless}/hooks
+%dir %{_extensiondir_tokenless}/commands
+%attr(0644,root,root) %{_extensiondir_tokenless}/cosh-extension.json
+%attr(0644,root,root) %{_extensiondir_tokenless}/tool-ready-spec.json
+%attr(0755,root,root) %{_extensiondir_tokenless}/tokenless-env-fix.sh
+%attr(0755,root,root) %{_extensiondir_tokenless}/hooks/*.py
+%attr(0755,root,root) %{_extensiondir_tokenless}/hooks/*.sh
+%attr(0644,root,root) %{_extensiondir_tokenless}/hooks/tool_categories.json
+%attr(0644,root,root) %{_extensiondir_tokenless}/commands/tokenless-stats.toml
 
 %post
 # Clean up stale files from old install.sh (pre-FHS refactor).
@@ -452,14 +461,14 @@ hash -r 2>/dev/null || true
 if [ $1 -eq 0 ]; then
     # --- Qoder CLI plugin cleanup ---
     # Let qodercli remove the user-scoped native plugin and its cache.
-    QODER_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh"
+    QODER_SCRIPT="%{_adapterdir_tokenless}/qoder/scripts/uninstall.sh"
     if [ -x "$QODER_SCRIPT" ]; then
         bash "$QODER_SCRIPT" || true
     fi
 
     # --- Codex plugin cleanup ---
     # Remove codex marketplace entry + plugin cache.
-    CODEX_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/codex/scripts/uninstall.sh"
+    CODEX_SCRIPT="%{_adapterdir_tokenless}/codex/scripts/uninstall.sh"
     if [ -x "$CODEX_SCRIPT" ]; then
         bash "$CODEX_SCRIPT" --non-interactive || true
     fi
@@ -472,13 +481,13 @@ if [ $1 -eq 0 ]; then
     done
 
     # --- OpenCode plugin cleanup ---
-    OPENCODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/uninstall.sh"
+    OPENCODE_SCRIPT="%{_adapterdir_tokenless}/opencode/scripts/uninstall.sh"
     if [ -x "$OPENCODE_SCRIPT" ]; then
         bash "$OPENCODE_SCRIPT" || true
     fi
 
     # --- Qwen Code plugin cleanup ---
-    QWENCODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/uninstall.sh"
+    QWENCODE_SCRIPT="%{_adapterdir_tokenless}/qwencode/scripts/uninstall.sh"
     if [ -x "$QWENCODE_SCRIPT" ]; then
         bash "$QWENCODE_SCRIPT" || true
     fi
@@ -507,14 +516,14 @@ if [ $1 -eq 0 ]; then
             "$OPENCLAW_CFG" > "${OPENCLAW_CFG}.tmp" && mv "${OPENCLAW_CFG}.tmp" "$OPENCLAW_CFG"
     fi
     # Uninstall hermes plugin (disable + remove via hermes CLI or manual cleanup)
-    HERMES_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/uninstall.sh"
+    HERMES_SCRIPT="%{_adapterdir_tokenless}/hermes/scripts/uninstall.sh"
     if [ -f "$HERMES_SCRIPT" ]; then
         bash "$HERMES_SCRIPT" || true
     elif [ -d "$HOME/.hermes/plugins/tokenless" ]; then
         rm -rf "$HOME/.hermes/plugins/tokenless" 2>/dev/null || true
     fi
     # Uninstall qwenpaw plugin (via qwenpaw CLI or manual cleanup)
-    QWENPAW_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/uninstall.sh"
+    QWENPAW_SCRIPT="%{_adapterdir_tokenless}/qwenpaw/scripts/uninstall.sh"
     if [ -f "$QWENPAW_SCRIPT" ]; then
         bash "$QWENPAW_SCRIPT" || true
     else
@@ -530,7 +539,7 @@ if [ $1 -eq 0 ]; then
     # Note: %preun runs as root so this only touches root's ~/.claude — per-user
     # configs under non-root home dirs are intentionally left alone. Users who
     # installed claude per-user (npm i -g) must run the cleanup themselves.
-    CLAUDE_CODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/uninstall.sh"
+    CLAUDE_CODE_SCRIPT="%{_adapterdir_tokenless}/claude-code/scripts/uninstall.sh"
     if [ -f "$CLAUDE_CODE_SCRIPT" ]; then
         bash "$CLAUDE_CODE_SCRIPT" || true
         echo "WARN: per-user Claude Code plugin entries are not removed by RPM %preun." >&2

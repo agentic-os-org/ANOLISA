@@ -1,6 +1,6 @@
 # rtk source is downloaded from GitHub via justfile, not tracked in git
 third_party/rtk/
-.anolisa/component.toml
+target/packaging/anolisa/component.toml
 
 # Adapter config files are generated from .in templates (VERSION from Cargo.toml)
 adapters/tokenless/manifest.json

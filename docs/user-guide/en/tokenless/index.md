@@ -344,6 +344,19 @@ cargo build --release --locked -p tokenless-cli
 
 This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](index.md).
 
+## Build and install component files from source
+
+From `src/tokenless` on Linux, build and install the CLI, RTK and framework
+resources for the current user:
+
+```bash
+make build
+make install
+```
+
+Register the desired framework separately with its bundled installer, as the
+framework user.
+
 ## Build the Python SDK from source
 
 CPython applications can use Tokenless in process instead of starting the CLI for every lifecycle

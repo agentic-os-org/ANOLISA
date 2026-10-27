@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native Windows lifecycle and registered PowerShell hook smoke tests.
 
-Run after scripts/build-windows.ps1 and npm/scripts/package-npm.js --target win32-x64.
+Run after packaging/build/build-windows.ps1 and packaging/npm/package-npm.js --target win32-x64.
 """
 
 import importlib.util
@@ -293,7 +293,7 @@ function cargo {
         [IO.File]::WriteAllText((Join-Path $directory "$binary.exe"), "fresh $binary $profile")
     } else { throw "Unexpected Cargo command: $($args[0])" }
 }
-$build = Join-Path $env:TOKENLESS_TEST_COMPONENT 'scripts/build-windows.ps1'
+$build = Join-Path $env:TOKENLESS_TEST_COMPONENT 'packaging/build/build-windows.ps1'
 [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
 try {
     & $build -Debug:($env:TOKENLESS_TEST_DEBUG -eq '1')
@@ -401,7 +401,7 @@ try {
                 path.write_text("# excluded packaging fixture\n", encoding="utf-8")
             (fixture / "keep.py").write_text("# retained packaging fixture\n", encoding="utf-8")
             result = subprocess.run(
-                ["node", "npm/scripts/package-npm.js", "--target", "win32-x64"], cwd=ROOT,
+                ["node", "packaging/npm/package-npm.js", "--target", "win32-x64"], cwd=ROOT,
                 capture_output=True, text=True, encoding="utf-8", timeout=180,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

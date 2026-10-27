@@ -118,7 +118,7 @@ for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
 done
 
 cp "$PREBUILT/linux-x64/"* "$PREBUILT/linux-arm64/"
-if node "$ROOT/npm/scripts/package-npm.js" --target linux-arm64 \
+if node "$ROOT/packaging/npm/package-npm.js" --target linux-arm64 \
     >"$TMP/mismatch.out" 2>&1; then
     echo "ERROR: npm packer accepted mislabeled x86_64 binaries as arm64" >&2
     exit 1
@@ -133,7 +133,7 @@ import sys
 path = pathlib.Path(sys.argv[1])
 path.write_bytes(path.read_bytes().replace(b"GLIBC_2.17", b"GLIBC_2.18"))
 PY
-if ! node "$ROOT/npm/scripts/package-npm.js" --target linux-x64 \
+if ! node "$ROOT/packaging/npm/package-npm.js" --target linux-x64 \
     >"$TMP/glibc.out" 2>&1; then
     echo "ERROR: npm packer rejected a binary above the GLIBC 2.17 baseline" >&2
     exit 1
@@ -144,7 +144,7 @@ make_binaries linux-x64
 check_selector() {
     local selector="$1"
     local expected="$2"
-    node "$ROOT/npm/scripts/package-npm.js" --target "$selector" >"$TMP/selector.out"
+    node "$ROOT/packaging/npm/package-npm.js" --target "$selector" >"$TMP/selector.out"
     grep -Fq "Targets: $expected" "$TMP/selector.out"
 }
 
@@ -159,7 +159,7 @@ if [[ -f "$QWENWORK_PLUGIN" ]]; then
 fi
 STALE_PLUGIN_SEEDED=1
 printf '{"name":"tokenless","version":"0.0.0-stale"}\n' > "$QWENWORK_PLUGIN"
-node "$ROOT/npm/scripts/package-npm.js" --all
+node "$ROOT/packaging/npm/package-npm.js" --all
 test ! -e "$ROOT/npm/dist/tokenless/adapters/tokenless/agentscope"
 
 # Inspect the published tarball: staging can contain working symlinks that
@@ -189,7 +189,7 @@ version = re.search(
 source = root / "adapters/tokenless"
 manifest = json.loads((source / "manifest.json.in").read_text().replace("@VERSION@", version))
 assert "qwenwork" in manifest["targets"]
-contract = (root / ".anolisa/component.toml.in").read_text()
+contract = (root / "packaging/anolisa/component.toml.in").read_text()
 assert set(manifest["targets"]) == set(re.findall(r'^framework\s*=\s*"([^"]+)"', contract, re.M))
 plugin = json.loads(
     (source / "qwenwork/.qoder-plugin/plugin.json.in").read_text().replace("@VERSION@", version)
@@ -281,7 +281,7 @@ JS
 
 if grep -Eq \
     'cargo-zigbuild|cargo zigbuild|cross build|rustup target|SDKROOT|detectBuilder' \
-    "$ROOT/npm/scripts/package-npm.js"; then
+    "$ROOT/packaging/npm/package-npm.js"; then
     echo "ERROR: npm packer still contains cross-compilation logic" >&2
     exit 1
 fi

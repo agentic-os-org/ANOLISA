@@ -336,6 +336,17 @@ cargo build --release --locked -p tokenless-cli
 
 这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](index.md)通过 anolisa CLI、npm、curl 或 Skill 安装。
 
+## 从源码构建并安装组件文件
+
+在 Linux 的 `src/tokenless` 中为当前用户构建并安装 CLI、RTK 和框架资源：
+
+```bash
+make build
+make install
+```
+
+需要接入框架时，再以实际框架用户运行随包的安装脚本进行注册。
+
 ## 从源码构建 Python SDK
 
 CPython 应用可以在进程内使用 Tokenless，无需为每个生命周期操作启动 CLI：

@@ -1,6 +1,6 @@
 param([switch]$Debug)
 $ErrorActionPreference = 'Stop'
-$component = Split-Path $PSScriptRoot -Parent
+$component = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $rtk = Join-Path $component 'third_party/rtk'
 function Get-CargoTargetDirectory([string]$Manifest) {
     # Cargo resolves build.target-dir too; PS 5.1 needs UTF-8 decoding (PS 7 defaults to it).

@@ -533,10 +533,20 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     let home = std::path::Path::new(home);
     let user_home = (!home.as_os_str().is_empty() && home.is_absolute()).then_some(home);
     let mut paths = Vec::new();
+    if binary == "rtk"
+        && let Ok(executable) = std::env::current_exe()
+        && executable
+            .file_name()
+            .is_some_and(|name| name == "tokenless")
+        && let Some(prefix) = executable.parent().and_then(std::path::Path::parent)
+    {
+        paths.push(prefix.join("libexec/tokenless/rtk"));
+    }
     if let Some(home) = user_home {
         paths.push(home.join(".local/bin").join(binary));
         if binary == "rtk" {
             paths.extend([
+                home.join(".local/libexec/tokenless").join(binary),
                 // Anolisa CLI user mode.
                 home.join(".local/lib/anolisa/libexec/tokenless")
                     .join(binary),
@@ -548,11 +558,13 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     paths.push(PathBuf::from("/usr/local/bin").join(binary));
     if binary == "rtk" {
         // Anolisa CLI system mode.
+        paths.push(PathBuf::from("/usr/local/libexec/tokenless").join(binary));
         paths.push(PathBuf::from("/usr/local/libexec/anolisa/tokenless").join(binary));
     }
     paths.push(PathBuf::from("/usr/bin").join(binary));
     if binary == "rtk" {
         paths.extend([
+            PathBuf::from("/usr/libexec/tokenless").join(binary),
             // Makefile system mode and RPM.
             PathBuf::from("/usr/libexec/anolisa/tokenless").join(binary),
             // Debian and pre-layout-migration compatibility.
@@ -1154,6 +1166,24 @@ fn generate_checklist_json(results: &[ToolReadyResult]) -> Value {
     })
 }
 
+fn user_data_resource(home: &str, relative: &str) -> Option<String> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| (!home.is_empty()).then(|| PathBuf::from(home).join(".local/share")))?;
+    if !data.is_absolute()
+        || data.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    Some(data.join(relative).to_string_lossy().into_owned())
+}
+
 /// Build the ordered candidate list for `auto_fix`.
 ///
 /// Order mirrors `spec_path_candidates`: env override → user dot-dir →
@@ -1163,6 +1193,13 @@ fn fix_script_candidates() -> Vec<String> {
     vec![
         std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok(),
         Some(format!("{home}/.tokenless/tokenless-env-fix.sh")),
+        user_data_resource(&home, "tokenless/adapters/common/tokenless-env-fix.sh"),
+        user_data_resource(
+            &home,
+            "anolisa/adapters/tokenless/common/tokenless-env-fix.sh",
+        ),
+        Some("/usr/local/share/tokenless/adapters/common/tokenless-env-fix.sh".into()),
+        Some("/usr/share/tokenless/adapters/common/tokenless-env-fix.sh".into()),
         Some(format!(
             "{home}/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh"
         )),
@@ -1329,6 +1366,13 @@ fn spec_path_candidates() -> Vec<String> {
     vec![
         std::env::var("TOKENLESS_TOOL_READY_SPEC").ok(),
         Some(format!("{home}/.tokenless/tool-ready-spec.json")),
+        user_data_resource(&home, "tokenless/adapters/common/tool-ready-spec.json"),
+        user_data_resource(
+            &home,
+            "anolisa/adapters/tokenless/common/tool-ready-spec.json",
+        ),
+        Some("/usr/local/share/tokenless/adapters/common/tool-ready-spec.json".into()),
+        Some("/usr/share/tokenless/adapters/common/tool-ready-spec.json".into()),
         Some(format!(
             "{home}/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json"
         )),

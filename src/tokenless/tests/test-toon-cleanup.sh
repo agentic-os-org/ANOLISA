@@ -16,7 +16,7 @@ cleanup() {
         rm -f "$RTK_BIN"
         # Take the directories the stub created with it, deepest first. rmdir
         # only removes empty ones, so a real vendored checkout is never
-        # touched. Leaving them behind is not cosmetic: scripts/setup-rtk.sh
+        # touched. Leaving them behind is not cosmetic: packaging/build/setup-rtk.sh
         # refuses to fetch into an existing directory that has no Cargo.toml
         # ("RTK destination is incomplete"), so the residue broke every later
         # `just setup-rtk`, `make build` and `make test-rtk-integration` on a

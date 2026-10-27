@@ -14,9 +14,9 @@
  * compiles native executables.
  *
  * Usage:
- *   node npm/scripts/package-npm.js                     # current platform only
- *   node npm/scripts/package-npm.js --target linux-x64  # one target
- *   node npm/scripts/package-npm.js --all               # all supported targets
+ *   node packaging/npm/package-npm.js                     # current platform only
+ *   node packaging/npm/package-npm.js --target linux-x64  # one target
+ *   node packaging/npm/package-npm.js --all               # all supported targets
  *
  * Prerequisites:
  *   - Prebuilt tokenless and rtk binaries for each selected target
@@ -53,8 +53,8 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const npmDir = join(__dirname, '..');
-const tokenlessRoot = join(npmDir, '..');
+const tokenlessRoot = join(__dirname, '..', '..');
+const npmDir = join(tokenlessRoot, 'npm');
 const distDir = join(npmDir, 'dist');
 const prebuiltRoot = join(tokenlessRoot, 'target', 'npm-prebuilt');
 
@@ -155,9 +155,9 @@ const TARGETS = [
 
 function printUsage() {
   console.log(`Usage:
-  node npm/scripts/package-npm.js
-  node npm/scripts/package-npm.js --target <target>
-  node npm/scripts/package-npm.js --all
+  node packaging/npm/package-npm.js
+  node packaging/npm/package-npm.js --target <target>
+  node packaging/npm/package-npm.js --all
 
 Targets: ${TARGETS.map((target) => target.pkg_suffix).join(', ')}
 

@@ -125,7 +125,7 @@ PINNED_RTK_COMMIT="$(
 )"
 CURRENT_RTK_COMMIT="$(
     sed -n 's/^RTK_COMMIT="\([0-9a-f]\{40\}\)"$/\1/p' \
-        "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh"
+        "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh"
 )"
 [ -n "$PINNED_RTK_COMMIT" ] || {
     printf 'ERROR: historical RTK setup has no pinned 40-character commit\n' >&2
@@ -225,8 +225,8 @@ grep -Fq "does not match pinned commit $PINNED_RTK_COMMIT" \
 
 # Current sources delegate to their component setup and can pin a newer RTK.
 CURRENT_BUILD="$TEMPORARY/current-source"
-install -d -m 0755 "$CURRENT_BUILD/scripts" "$CURRENT_BUILD/third_party/patches"
-cp "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$CURRENT_BUILD/scripts/"
+install -d -m 0755 "$CURRENT_BUILD/packaging/build" "$CURRENT_BUILD/third_party/patches"
+cp "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh" "$CURRENT_BUILD/packaging/build/"
 cp "$REPO_ROOT/src/tokenless/third_party/patches/rtk-tokenless-stats.patch" \
     "$REPO_ROOT/src/tokenless/third_party/patches/rtk-pytest-error-report.patch" \
     "$CURRENT_BUILD/third_party/patches/"
@@ -245,7 +245,7 @@ RTK_DRIFT="$TEMPORARY/rtk-drift"
 install -d -m 0755 "$RTK_DRIFT"
 printf '[package]\nname = "rtk"\nversion = "0.0.0"\n' > "$RTK_DRIFT/Cargo.toml"
 printf '%040d\n' 0 > "$RTK_DRIFT/.anolisa-rtk-commit"
-if bash "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$RTK_DRIFT" \
+if bash "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh" "$RTK_DRIFT" \
     >"$TEMPORARY/rtk-drift.log" 2>&1; then
     printf 'ERROR: mismatched RTK revision marker was accepted\n' >&2
     exit 1
@@ -478,6 +478,7 @@ fi
 
 python3 "$ACTION_DIR/test_verify_wheels.py"
 python3 "$ACTION_DIR/test_windows_package.py"
+python3 "$ACTION_DIR/test_windows_entrypoint.py"
 
 for project in tokenless-fixture rtk-fixture; do
     install -d -m 0755 "$TEMPORARY/$project/src"

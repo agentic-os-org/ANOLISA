@@ -579,7 +579,7 @@ npm 打包同样从 `target/npm-prebuilt` 下读取预构建的 `linux-x64`、
 `linux-arm64`、`darwin-x64`、`darwin-arm64` 四个二进制目录，并负责校验和组装：
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 ```
 
 固定目录结构和单目标接口见 [npm/README.md](npm/README.md#packaging-for-npm)。

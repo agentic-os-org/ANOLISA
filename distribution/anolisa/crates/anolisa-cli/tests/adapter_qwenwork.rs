@@ -74,7 +74,7 @@ impl Fixture {
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(
             manifest,
-            include_str!("../../../../../src/tokenless/.anolisa/component.toml.in")
+            include_str!("../../../../../src/tokenless/packaging/anolisa/component.toml.in")
                 .replace("@VERSION@", "0.1.0"),
         )
         .unwrap();

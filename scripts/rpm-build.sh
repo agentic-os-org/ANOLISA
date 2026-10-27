@@ -558,7 +558,7 @@ build_tokenless() {
     log "Building RPM: tokenless"
     log "=========================================="
 
-    local spec_in="${TOKEN_DIR}/tokenless.spec.in"
+    local spec_in="${TOKEN_DIR}/packaging/rpm/tokenless.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -616,7 +616,7 @@ build_tokenless() {
         --exclude='node_modules' \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
-        --exclude='.anolisa/component.toml' \
+        --exclude='target/packaging/anolisa/component.toml' \
         --exclude='adapters/tokenless/manifest.json' \
         --exclude='adapters/tokenless/openclaw/package.json' \
         --exclude='adapters/tokenless/openclaw/openclaw.plugin.json' \
