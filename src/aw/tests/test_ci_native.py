@@ -509,7 +509,6 @@ class NativeTests(GateFixture):
             "aw-provider-tokenless",
             "aw-provider-sec-core",
             "tokenless",
-            "rtk",
             "policy",
             "agent-sec-cli",
             "agent-sec-daemon",

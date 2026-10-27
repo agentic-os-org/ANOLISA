@@ -33,7 +33,9 @@ use tokenless_bench::rtk_command_samples;
 
 fn bench_rtk(c: &mut Criterion) {
     let Some(bin) = find_rtk_binary() else {
-        eprintln!("[skip] rtk_latency: rtk binary not available (set RTK_BIN or install rtk)");
+        eprintln!(
+            "[skip] rtk_latency: rtk binary not available (set TOKENLESS_BIN or build Tokenless)"
+        );
         return;
     };
 

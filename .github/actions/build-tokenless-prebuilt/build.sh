@@ -142,6 +142,12 @@ SOURCE_VERSION="$(
     bash "$ACTION_DIR/setup-rtk.sh" "$COMPONENT_ROOT"
 )
 RTK_ROOT="$COMPONENT_ROOT/third_party/rtk"
+# Older release refs still package their separately built helper.
+EMBEDDED_RTK=false
+if [ -f "$COMPONENT_ROOT/third_party/patches/rtk-library.patch" ]; then
+    EMBEDDED_RTK=true
+fi
+
 # RTK is excluded from Tokenless's workspace; make its cloned source an explicit
 # workspace root so Cargo never searches the persistent /tmp parent hierarchy.
 printf '\n[workspace]\n' >> "$RTK_ROOT/Cargo.toml"
@@ -159,7 +165,11 @@ SOURCE_DATE_EPOCH="$(git -C "$FIXED_WORKTREE" show -s --format=%ct HEAD)"
 case "$SOURCE_DATE_EPOCH" in
     '' | *[!0-9]*) die 'source commit timestamp is not numeric' ;;
 esac
-export RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
+export ANOLISA_RELEASE_RUST_VERSION=1.93.0
+if [ "$EMBEDDED_RTK" = true ]; then
+    export ANOLISA_RELEASE_RUST_VERSION=1.91.0
+fi
+export RUSTUP_TOOLCHAIN="$ANOLISA_RELEASE_RUST_VERSION-x86_64-unknown-linux-gnu"
 export SOURCE_DATE_EPOCH
 
 if [ "$TARGET_OS" = windows ]; then
@@ -184,6 +194,7 @@ done
         --release \
         --locked \
         --manifest-path src/tokenless/Cargo.toml
+    if [ "$EMBEDDED_RTK" = false ]; then
     python3 "$COMMON_DIR/reproducible-build.py" \
         --source-root "$COMPONENT_ROOT" \
         --source-date-epoch "$SOURCE_DATE_EPOCH" \
@@ -191,20 +202,32 @@ done
         --release \
         --locked \
         --manifest-path src/tokenless/third_party/rtk/Cargo.toml
+    fi
 )
 
 HOST_CARGO="$(command -v cargo)"
 CARGO_SHIM_DIR="$COMPONENT_ROOT/target/maturin-cargo-shim"
 install -d -m 0755 "$CARGO_SHIM_DIR"
 ln -s "$ACTION_DIR/cargo-shim.sh" "$CARGO_SHIM_DIR/cargo"
-PYTHON_RTK_DIR="$COMPONENT_ROOT/python/tokenless/python/anolisa_tokenless/_bin"
+PYTHON_HELPER_DIR="$COMPONENT_ROOT/python/tokenless/python/anolisa_tokenless/_bin"
+HELPER_NAME=tokenless
+HELPER_BINARY="$COMPONENT_ROOT/target/$RUST_TARGET/release/tokenless"
+WHEEL_FLAGS=()
+if [ "$EMBEDDED_RTK" = false ]; then
+    HELPER_NAME=rtk
+    HELPER_BINARY="$RTK_ROOT/target/$RUST_TARGET/release/rtk"
+    WHEEL_FLAGS=(--legacy-rtk)
+fi
 (
     set -e
-    install -d -m 0755 "$PYTHON_RTK_DIR"
+    install -d -m 0755 "$PYTHON_HELPER_DIR"
     install -p -m 0755 \
-        "$RTK_ROOT/target/$RUST_TARGET/release/rtk" \
-        "$PYTHON_RTK_DIR/rtk"
-    trap 'rm -f "$PYTHON_RTK_DIR/rtk"' EXIT
+        "$HELPER_BINARY" \
+        "$PYTHON_HELPER_DIR/$HELPER_NAME"
+    if [ "$EMBEDDED_RTK" = true ]; then
+        bash "$COMPONENT_ROOT/scripts/stage-rtk-notices.sh" "$PYTHON_HELPER_DIR/third_party/rtk"
+    fi
+    trap 'rm -f "$PYTHON_HELPER_DIR/$HELPER_NAME"' EXIT
     cd "$COMPONENT_ROOT/python/tokenless"
     compatibility=(--compatibility pypi)
     if [ "$TARGET_OS" = linux ]; then
@@ -243,17 +266,19 @@ python3 "$ACTION_DIR/verify-wheels.py" \
     --version "$VERSION" \
     --layout flat \
     --os "$TARGET_OS" \
-    --arch "$TARGET_ARCH"
+    --arch "$TARGET_ARCH" "${WHEEL_FLAGS[@]}"
 
 BIN_DIR="$COMPONENT_ROOT/target/raw-prebuilt/$RUST_TARGET"
 install -d -m 0755 "$BIN_DIR"
 install -p -m 0755 \
     "$COMPONENT_ROOT/target/$RUST_TARGET/release/tokenless" \
     "$BIN_DIR/tokenless"
-install -p -m 0755 \
-    "$RTK_ROOT/target/$RUST_TARGET/release/rtk" \
-    "$BIN_DIR/rtk"
-for binary in tokenless rtk; do
+BINARIES=(tokenless)
+if [ "$EMBEDDED_RTK" = false ]; then
+    install -p -m 0755 "$RTK_ROOT/target/$RUST_TARGET/release/rtk" "$BIN_DIR/rtk"
+    BINARIES+=(rtk)
+fi
+for binary in "${BINARIES[@]}"; do
     if [ "$TARGET_OS" = macos ]; then
         python3 "$COMMON_DIR/verify-macho.py" \
             --arch "$TARGET_ARCH" --min 11.0 "$BIN_DIR/$binary"

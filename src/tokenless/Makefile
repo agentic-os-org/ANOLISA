@@ -1,6 +1,6 @@
 # Token-Less Unified Build System
 # Builds tokenless (schema/response compression, TOON encoding via the
-# toon-format library) and rtk (command rewriting)
+# toon-format library), with embedded RTK command rewriting
 
 INSTALL_PROFILE ?= user
 DESTDIR ?=
@@ -46,8 +46,8 @@ NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
 PYTHON_RUNTIME_DIR := python/tokenless
 AGENTSCOPE_PACKAGE_DIR := python/agentscope
 PYTHON_WHEEL_DIR := $(CURDIR)/target/wheels
-PYTHON_RTK_PACKAGE_DIR := $(CURDIR)/$(PYTHON_RUNTIME_DIR)/python/anolisa_tokenless/_bin
-PYTHON_RTK_BINARY ?= $(CURDIR)/third_party/rtk/target/release/rtk
+PYTHON_TOKENLESS_PACKAGE_DIR := $(CURDIR)/$(PYTHON_RUNTIME_DIR)/python/anolisa_tokenless/_bin
+PYTHON_TOKENLESS_BINARY ?= $(CURDIR)/target/release/tokenless
 MATURIN ?= uvx --from 'maturin>=1.9,<2.0' maturin
 PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
 
@@ -84,14 +84,13 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
 # Default target
 all: build
 
-# Build both projects
+# Build the CLI and adapter bundles
 build: build-tokenless build-openclaw-plugin build-dsh-plugin
 
 build-tokenless:
-	@echo "==> Building tokenless + rtk..."
+	@echo "==> Building tokenless with embedded RTK..."
 	just setup-rtk
 	cargo build --release
-	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
@@ -208,6 +207,7 @@ install-binaries:
 	@echo "==> Installing tokenless to $(DESTDIR)$(BINDIR)..."
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -p -m 0755 target/release/tokenless $(DESTDIR)$(BINDIR)/
+	bash scripts/stage-rtk-notices.sh $(DESTDIR)$(PREFIX)/share/doc/tokenless/rtk
 
 # Cleanup for the standalone toon binary shipped by older releases (TOON is
 # now linked into tokenless via the toon-format library). $(LIBEXECDIR) is a
@@ -228,8 +228,8 @@ endef
 install-helpers:
 	@echo "==> Installing helpers to $(DESTDIR)$(LIBEXECDIR)..."
 	install -d -m 0755 $(DESTDIR)$(LIBEXECDIR)
-	install -p -m 0755 third_party/rtk/target/release/rtk $(DESTDIR)$(LIBEXECDIR)/
-	ln -sf $(LIBEXECDIR)/rtk $(DESTDIR)$(BINDIR)/rtk
+	@if [ -L "$(DESTDIR)$(BINDIR)/rtk" ] && [ "$$(readlink "$(DESTDIR)$(BINDIR)/rtk")" = "$(LIBEXECDIR)/rtk" ]; then rm -f "$(DESTDIR)$(BINDIR)/rtk"; fi
+	rm -f "$(DESTDIR)$(LIBEXECDIR)/rtk"
 	$(clean-stale-toon)
 
 install-adapter-resources: build-openclaw-plugin build-dsh-plugin
@@ -262,7 +262,9 @@ install-cosh-extension:
 	find $(DESTDIR)$(COSH_EXTENSION_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
 
 uninstall:
+	rm -rf $(DESTDIR)$(PREFIX)/share/doc/tokenless/rtk
 	rm -f $(DESTDIR)$(BINDIR)/tokenless
+	@if [ -L "$(DESTDIR)$(BINDIR)/rtk" ] && [ "$$(readlink "$(DESTDIR)$(BINDIR)/rtk")" = "$(LIBEXECDIR)/rtk" ]; then rm -f "$(DESTDIR)$(BINDIR)/rtk"; fi
 	rm -f $(DESTDIR)$(LIBEXECDIR)/rtk
 	$(clean-stale-toon)
 	rm -rf $(DESTDIR)$(SHARE_DIR)
@@ -273,7 +275,7 @@ test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-
       test-adapters test-claude-code-detect test-raw-package \
       test-npm-package test-toon-cleanup test-benchmark-rtk-probe
 
-test-tokenless:
+test-tokenless: prepare-rtk
 	@echo "==> Testing tokenless..."
 	cargo test --workspace -- --test-threads=1
 
@@ -394,17 +396,16 @@ test-benchmark-rtk-probe:
 	@echo "==> Testing benchmark RTK version probe..."
 	bash tests/test-benchmark-rtk-version-probe.sh
 
-# Hook counterfactuals need both real binaries to rule out fail-open success.
+# Hook counterfactuals use the real unified CLI to rule out fail-open success.
 test-rtk-integration: test-benchmark-rtk-probe
-	cargo build --locked -p tokenless-cli
 	bash scripts/setup-rtk.sh
-	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
-	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
+	cargo build --locked -p tokenless-cli
+	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/target/debug/tokenless" \
 		python3 tests/test_rtk_integration.py
 
 # Protocol v2 Common Hook parity: replay the contract corpus through the
 # current hooks and real debug binary, then compare with the v2 goldens.
-test-hook-parity:
+test-hook-parity: prepare-rtk
 	@echo "==> Testing hook golden parity (real binary)..."
 	cargo build -p tokenless-cli
 	python3 tests/test_hook_parity.py
@@ -471,22 +472,22 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 # Build the abi3 extension with unwind semantics so a Rust panic cannot abort
 # the embedding Python interpreter. The wheel remains platform-specific, but
 # one build supports CPython 3.11 and later on that platform.
-python-wheel:
+python-wheel: prepare-rtk
 	@echo "==> Building Tokenless Python wheel..."
-	@if [ "$(PYTHON_RTK_BINARY)" = "$(CURDIR)/third_party/rtk/target/release/rtk" ]; then \
-		just setup-rtk; \
-		cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml; \
+	@if [ "$(PYTHON_TOKENLESS_BINARY)" = "$(CURDIR)/target/release/tokenless" ]; then \
+		cargo build --release --locked -p tokenless-cli; \
 	fi
-	@test -x "$(PYTHON_RTK_BINARY)" || { \
-		echo "RTK binary is missing or not executable: $(PYTHON_RTK_BINARY)" >&2; \
+	@test -x "$(PYTHON_TOKENLESS_BINARY)" || { \
+		echo "Tokenless binary is missing or not executable: $(PYTHON_TOKENLESS_BINARY)" >&2; \
 		exit 1; \
 	}
 	install -d -m 0755 $(PYTHON_WHEEL_DIR)
 	rm -f $(PYTHON_WHEEL_DIR)/anolisa_tokenless-*.whl
 	@set -e; \
-		install -d -m 0755 $(PYTHON_RTK_PACKAGE_DIR); \
-		install -p -m 0755 $(PYTHON_RTK_BINARY) $(PYTHON_RTK_PACKAGE_DIR)/rtk; \
-		trap 'rm -f $(PYTHON_RTK_PACKAGE_DIR)/rtk' EXIT; \
+		install -d -m 0755 $(PYTHON_TOKENLESS_PACKAGE_DIR); \
+		install -p -m 0755 $(PYTHON_TOKENLESS_BINARY) $(PYTHON_TOKENLESS_PACKAGE_DIR)/tokenless; \
+		bash scripts/stage-rtk-notices.sh $(PYTHON_TOKENLESS_PACKAGE_DIR)/third_party/rtk; \
+		trap 'rm -f $(PYTHON_TOKENLESS_PACKAGE_DIR)/tokenless' EXIT; \
 		cd $(PYTHON_RUNTIME_DIR); \
 		$(MATURIN) build --profile python-release --interpreter python3 \
 			--compatibility pypi --auditwheel check \
@@ -505,7 +506,7 @@ agentscope-wheel: stamp-python-packages
 test-agentscope-integration: python-wheel agentscope-wheel
 	@bash tests/test-agentscope-integration.sh
 
-# These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk} files
+# These targets only assemble the prebuilt BIN_DIR/tokenless files
 # into the portable raw-package contract maintained by this component.
 package-raw:
 	@$(MAKE) -B stamp-adapter-templates
@@ -580,12 +581,12 @@ test-npm-postinstall-strict:
 	@TOKENLESS_REQUIRE_NODE=1 bash tests/test-npm-postinstall.sh
 
 # Lint (rtk excluded — vendored third-party source)
-lint:
+lint: prepare-rtk
 	@echo "==> Linting tokenless..."
 	cargo clippy --workspace -- -D warnings
 
 # Format
-fmt:
+fmt: prepare-rtk
 	@echo "==> Formatting..."
 	cargo fmt --all
 
@@ -605,7 +606,8 @@ clean:
 # concurrently and the cleanup can delete the stamped files, shipping an
 # archive without the embedded install contract. Invoke the stamping
 # sequentially from the recipe instead.
-dist: clean
+dist: prepare-rtk
+	$(MAKE) clean
 	$(MAKE) stamp-adapter-templates
 	@echo "==> Creating tarball (with pre-patched rtk source)..."
 	just setup-rtk
@@ -778,7 +780,7 @@ setup: install adapter-install
 	@echo "============================================"
 	@echo "  Binaries (FHS):"
 	@echo "    tokenless -> $(BIN_DIR)/tokenless"
-	@echo "    rtk       -> $(LIB_DIR)/rtk"
+	@echo "    RTK       -> tokenless rtk"
 	@echo "  Extension (cosh):"
 	@echo "    $(COSH_EXTENSION_DIR)/"
 	@echo "  Adapter (FHS):"
@@ -788,7 +790,7 @@ setup: install adapter-install
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
-	@echo "  rtk --version"
+	@echo "  tokenless rtk --version"
 	@echo "  make adapter-scan"
 
 # --- npm Packaging ---
@@ -798,7 +800,6 @@ prepare-npm-native-binaries: build-tokenless
 	@install -d -m 0755 "$(NATIVE_NPM_INPUT_DIR)"
 	@install -p -m 0755 \
 		target/release/tokenless \
-		third_party/rtk/target/release/rtk \
 		"$(NATIVE_NPM_INPUT_DIR)/"
 
 # Build and package the current host.
@@ -851,13 +852,13 @@ help:
 	@echo "Token-Less Build System"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build             Build tokenless + rtk + openclaw plugin"
-	@echo "  build-tokenless   Build tokenless + rtk (via justfile)"
+	@echo "  build             Build tokenless with embedded RTK + openclaw plugin"
+	@echo "  build-tokenless   Build tokenless with embedded RTK"
 	@echo "  build-openclaw-plugin  Compile OpenClaw plugin TS -> dist/index.js"
 	@echo "  install           Install binaries + adapter to FHS paths"
 	@echo "  uninstall         Remove installed files"
 	@echo "  test              Run all tests"
-	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
+	@echo "  test-rtk-integration  Test embedded RTK and its Tokenless patches"
 	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
 	@echo "  test-hook-scripts  Test the dependency-free hook bash suites (run in CI)"
 	@echo "  lint              Run clippy checks"
@@ -906,7 +907,11 @@ help:
 	@echo "  LIBEXECDIR       Helper binary install path"
 	@echo "  SHARE_DIR        Adapter resources path"
 	@echo "  COSH_EXTENSION_DIR  Cosh extension path"
-	@echo "  BIN_DIR          Directory containing prebuilt tokenless and rtk"
+	@echo "  BIN_DIR          Directory containing prebuilt tokenless"
 	@echo "  TARGET_OS        Raw target OS: linux or macos"
 	@echo "  TARGET_ARCH      Raw target arch: x86_64 or aarch64"
 	@echo "  OUTPUT_DIR       Raw artifact output directory (default: target/raw)"
+
+.PHONY: prepare-rtk
+prepare-rtk:
+	bash scripts/setup-rtk.sh

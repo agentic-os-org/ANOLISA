@@ -182,8 +182,8 @@ gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
 覆盖 1,280 次长会话、状态回收、资源增长断言、回调排空、session-store 和原生拒绝，
 保留既有生命周期/MCP 场景。model-relay 和 dispatch 合同入口继续由宿主原生任务验证。
 
-镜像只包含明确列出的公开夹具、固定 SDK 依赖和四个候选二进制：`aw`、
-`aw-provider-tokenless`、`tokenless`、`rtk`。混合 Bash/MCP 长会话的 PreTool 需要 RTK。
+镜像只包含明确列出的公开夹具、固定 SDK 依赖和三个候选二进制：`aw`、
+`aw-provider-tokenless`、内置 RTK 的 `tokenless`。混合 Bash/MCP 长会话的 PreTool 需要 RTK。
 Ubuntu、Node 和 uv 镜像通过 manifest digest
 固定；Python/SDK 版本来自原生清单，Pi 使用已提交的 npm lock。构建上下文排除完整
 仓库、部署文件和用户配置。运行使用普通测试用户、合成数据和 loopback 模型夹具，

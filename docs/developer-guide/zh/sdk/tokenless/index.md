@@ -49,8 +49,8 @@ python -m pip install \
 Linux 产物面向兼容 `manylinux_2_17` 的 glibc 发行版，不支持 Alpine Linux 等 musl 发行版。
 Release 同时提供 `SHA256SUMS-python-wheels.txt`，可用于校验下载内容。
 
-Wheel 包含原生 Tokenless Runtime 和匹配的 RTK 可执行文件，不需要 `tokenless` CLI、系统
-RTK 或独立 TOON 可执行文件。
+Wheel 包含原生 Tokenless Runtime 和内置 RTK 的 `_bin/tokenless`（Windows 为
+`_bin/tokenless.exe`），不依赖系统中的 Tokenless、RTK 或独立 TOON 可执行文件。
 
 ### 从源码构建
 

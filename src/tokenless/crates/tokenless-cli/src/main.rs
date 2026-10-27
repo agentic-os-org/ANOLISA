@@ -1,4 +1,5 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
+mod embedded_rtk;
 mod env_check;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -38,6 +39,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Execute the bundled RTK command engine.
+    #[command(disable_help_flag = true, disable_help_subcommand = true)]
+    Rtk {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Run one Protocol v2 lifecycle operation from a JSON request.
     Compress {
         #[arg(short, long)]
@@ -646,6 +653,12 @@ fn run() -> Result<(), (String, i32)> {
 
 fn run_command(command: Commands) -> Result<(), (String, i32)> {
     match command {
+        Commands::Rtk { args } => {
+            let code = embedded_rtk::run(&args).map_err(|error| (error, 1))?;
+            if code != 0 {
+                return Err((String::new(), code));
+            }
+        }
         Commands::Compress { file, stash_db } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             // Undecodable or version-mismatched requests carry no content to
@@ -680,10 +693,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 None
             };
-            let rtk_path = matches!(&request.request, Request::PreTool(_))
-                .then(env_check::resolve_rtk_path)
-                .flatten()
-                .map(PathBuf::from);
+            let tokenless_path = matches!(&request.request, Request::PreTool(_))
+                .then(std::env::current_exe)
+                .transpose()
+                .map_err(|error| (format!("cannot resolve Tokenless executable: {error}"), 1))?;
             let rtk_data_dir = match &request.request {
                 Request::PreTool(_) => Some(
                     database_paths
@@ -717,7 +730,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
                     html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", true),
                     stash_enabled: true,
-                    rtk_path,
+                    tokenless_path,
                     rtk_data_dir,
                 },
                 stash.as_ref(),
@@ -1489,7 +1502,9 @@ fn report_fatal(message: &str) {
 
 fn main() {
     if let Err((msg, code)) = run() {
-        report_fatal(&msg);
+        if !msg.is_empty() {
+            report_fatal(&msg);
+        }
         process::exit(code);
     }
 }

@@ -563,8 +563,22 @@ fn preflight(ctx: &DriverCtx) -> Result<Vec<String>, AdapterError> {
             "Python 3.9+ is required for QwenWork; version probe failed",
         ));
     }
-    if binary("rtk", ctx).is_none() {
-        warnings.push("RTK not found; command rewriting is unavailable, response compression remains available.".to_string());
+    let tokenless = binary("tokenless", ctx)
+        .ok_or_else(|| invalid(&ctx.resource_root, "Tokenless is required for QwenWork"))?;
+    let probe = ctx.ops.run_framework_cli(FrameworkCommand {
+        program: tokenless.to_string_lossy().into_owned(),
+        args: vec!["rtk".to_string(), "--version".to_string()],
+        stdin: None,
+        env_set: Vec::new(),
+        env_remove: Vec::new(),
+        path_prepend: Vec::new(),
+        timeout: Duration::from_secs(5),
+    });
+    if !probe.is_ok_and(|output| output.success()) {
+        warnings.push(
+            "Embedded RTK is unavailable; update Tokenless to enable command rewriting."
+                .to_string(),
+        );
     }
     Ok(warnings)
 }

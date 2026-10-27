@@ -198,15 +198,13 @@ def _dependencies(root: Path) -> None:
     if not tokenless:
         raise LifecycleError("tokenless binary not found; install Tokenless separately, then retry")
     print(f"Tokenless: {tokenless}")
-    rtk = utils.resolve_binary("rtk")
-    if rtk:
-        print(f"RTK: {rtk}")
-    else:
-        print(
-            "WARNING: rtk binary not found; command rewriting is unavailable "
-            "(response hooks remain available).",
-            file=sys.stderr,
-        )
+    try:
+        probe = subprocess.run([tokenless, "rtk", "--version"], capture_output=True, text=True, timeout=5)
+        if probe.returncode != 0 or not probe.stdout.startswith("rtk "):
+            raise LifecycleError("Tokenless has no usable embedded RTK; update Tokenless, then retry")
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise LifecycleError(f"Cannot probe embedded RTK: {error}") from error
+    print(f"Embedded RTK: {probe.stdout.strip()}")
 
 
 def _inventory(root: Path) -> dict:

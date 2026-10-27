@@ -236,12 +236,18 @@ class QwenWorkInstallTests(unittest.TestCase):
         out, _ = self.run_action("detect")
         self.assertIn(str(user_bin), out)
 
-    def test_missing_rtk_warns_but_allows_install(self) -> None:
+    def test_no_separate_rtk_is_needed(self) -> None:
         (self.bin / "rtk").unlink()
         _, error = self.run_action("install")
-        self.assertIn("command rewriting is unavailable", error)
+        self.assertNotIn("unavailable", error)
         self.assertTrue(self.target.is_dir())
         self.assertFalse((self.bin / "request.json").exists(), "detect must not invoke binaries")
+
+    def test_missing_embedded_engine_rejects_install(self) -> None:
+        self.executable("tokenless", "#!/bin/sh\nexit 1\n")
+        _, error = self.run_action("install", success=False)
+        self.assertIn("no usable embedded RTK", error)
+        self.assertFalse(self.target.exists())
 
     def test_unsupported_platform_rejects_install(self) -> None:
         before = snapshot(self.root)
@@ -705,7 +711,7 @@ class QwenWorkInstallTests(unittest.TestCase):
                     output["updatedInput"],
                     {
                         **payload["tool_input"],
-                        "command": "/mock/rtk git status",
+                        "command": "/mock/tokenless rtk git status",
                     },
                 )
                 self.assertTrue(list((self.root / ".tokenless/hook-state").glob("*")))
@@ -789,7 +795,7 @@ class QwenWorkInstallTests(unittest.TestCase):
         result = self.replay("PreToolUse", payload)
         self.assertEqual(
             result["hookSpecificOutput"]["updatedInput"],
-            {"command": "/mock/rtk git status", "description": "keep"},
+            {"command": "/mock/tokenless rtk git status", "description": "keep"},
         )
         requests = [
             json.loads(line) for line in (self.root / "requests.jsonl").read_text().splitlines()

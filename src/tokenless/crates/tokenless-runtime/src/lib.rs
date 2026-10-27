@@ -26,7 +26,9 @@ mod entry;
 mod post_tool;
 mod taxonomy;
 
-pub use entry::{EntryOptions, EntryOutcome, dispatch_with_store, response_operation};
+pub use entry::{
+    EntryOptions, EntryOutcome, dispatch_with_store, render_rtk_command, response_operation,
+};
 use entry::{
     before_model_with_store, post_tool_with_outcomes, pre_tool_with_rtk,
     retrieve_authorized_with_store,
@@ -242,14 +244,14 @@ pub enum RuntimeError {
     /// The PostTool domain compressor failed.
     #[error("{0}")]
     Pipeline(String),
-    /// PreTool was requested without a resolved RTK executable.
-    #[error("RTK executable is unavailable")]
+    /// PreTool was requested without the Tokenless executable containing RTK.
+    #[error("Tokenless executable with embedded RTK is unavailable")]
     RtkUnavailable,
     /// PreTool was requested without the state directory required by RTK.
     #[error("RTK state directory is unavailable")]
     RtkDataDirectoryUnavailable,
     /// RTK could not be started.
-    #[error("failed to start RTK at '{}': {source}", path.display())]
+    #[error("failed to start Tokenless RTK at '{}': {source}", path.display())]
     RtkSpawn {
         /// Executable selected by the caller.
         path: PathBuf,
@@ -420,7 +422,7 @@ impl TokenlessRuntime {
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            tokenless_path: None,
             rtk_data_dir: None,
         };
         let outcome = before_model_with_store(request, &options, self.stash_store.as_ref())?;
@@ -447,9 +449,9 @@ impl TokenlessRuntime {
         &self,
         request: &PreToolRequest,
         attribution: &ProtocolAttribution,
-        rtk_path: &Path,
+        tokenless_path: &Path,
     ) -> Result<PreToolResponse, RuntimeError> {
-        pre_tool_with_rtk(request, attribution, rtk_path, &self.data_dir)
+        pre_tool_with_rtk(request, attribution, tokenless_path, &self.data_dir)
     }
 
     /// Runs PostTool routing and the content-domain pipeline.
@@ -468,7 +470,7 @@ impl TokenlessRuntime {
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            tokenless_path: None,
             rtk_data_dir: Some(self.data_dir.clone()),
         };
         let outcome =
@@ -1873,7 +1875,7 @@ mod tests {
             diff_compression_enabled: config.diff_compression_enabled,
             html_extraction_enabled: config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            tokenless_path: None,
             rtk_data_dir: None,
         }
     }

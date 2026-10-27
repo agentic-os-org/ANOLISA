@@ -44,7 +44,7 @@ fn tokenless_split_and_all_in_one_have_identical_receipts_and_payloads() {
 }
 
 #[test]
-fn tokenless_package_requires_its_rtk_and_preserves_core_on_failure() {
+fn tokenless_package_requires_its_cli_and_preserves_core_on_failure() {
     let f = Fixture::new();
     let tokenless = bundle(&f.root.join("tokenless"), &["aw-provider-tokenless"]);
     install(&f.core, &f.prefix).unwrap();
@@ -53,7 +53,7 @@ fn tokenless_package_requires_its_rtk_and_preserves_core_on_failure() {
     let mut manifest: Manifest = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     manifest.components[0]
         .files
-        .remove("libexec/aw/providers/tokenless/rtk");
+        .remove("libexec/aw/providers/tokenless/tokenless");
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     assert!(install(&tokenless, &f.prefix)
         .unwrap_err()
@@ -61,4 +61,40 @@ fn tokenless_package_requires_its_rtk_and_preserves_core_on_failure() {
         .contains("incomplete component payload"));
     assert_eq!(receipts(&f.prefix).unwrap(), before);
     assert!(!f.prefix.join("libexec").exists());
+}
+
+#[test]
+fn legacy_rtk_receipt_remains_removable_before_installing_the_unified_package() {
+    let f = Fixture::new();
+    let old = bundle(&f.root.join("old"), &["aw-provider-tokenless"]);
+    let name = "libexec/aw/providers/tokenless/rtk";
+    let payload = old.join("payload").join(name);
+    fs::write(&payload, b"previous managed RTK").unwrap();
+    modify_manifest(&old, |manifest| {
+        manifest.components[0].files.insert(
+            name.into(),
+            Payload {
+                sha256: digest(&payload).unwrap(),
+                mode: 0o755,
+            },
+        );
+    });
+    install(&f.core, &f.prefix).unwrap();
+    install(&old, &f.prefix).unwrap();
+    assert!(receipts(&f.prefix).unwrap()["aw-provider-tokenless"]
+        .files
+        .contains_key(name));
+    let unowned = f.prefix.join("bin/rtk");
+    fs::write(&unowned, b"user RTK").unwrap();
+    uninstall(&f.prefix).unwrap();
+    assert!(!f.prefix.join(name).exists());
+    assert_eq!(fs::read(&unowned).unwrap(), b"user RTK");
+
+    let next = bundle(&f.root.join("next"), &["aw-core", "aw-provider-tokenless"]);
+    let prefix = f.root.join("next-prefix");
+    install(&next, &prefix).unwrap();
+    assert!(!receipts(&prefix).unwrap()["aw-provider-tokenless"]
+        .files
+        .contains_key(name));
+    assert!(!prefix.join(name).exists());
 }

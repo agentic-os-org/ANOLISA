@@ -11,7 +11,7 @@ non-string ``command`` only survived through the subprocess call's broad
 ``except``. These tests pin both nested shapes to the silent pass-through,
 and keep the happy path (a dict with a string command) applying the rewrite.
 
-The hook is driven through its real script with an ``rtk`` stub on PATH so
+The hook is driven through its real script with a ``tokenless`` stub on PATH so
 the version gate passes and the payload parsing itself is under test.
 """
 
@@ -36,11 +36,18 @@ REWRITE_HOOK = (
     / "rewrite-hook"
 )
 
-RTK_STUB = (
-    "#!/bin/sh\n"
-    'if [ "$1" = "--version" ]; then echo \'rtk 0.43.0\'; exit 0; fi\n'
-    'if [ "$1" = "rewrite" ]; then echo \'rtk grep --count error log\'; exit 0; fi\n'
-    "exit 1\n"
+TOKENLESS_STUB = (
+    "#!/usr/bin/env python3\n"
+    "import json, sys\n"
+    "if sys.argv[1:] == ['rtk', '--version']:\n"
+    "    print('rtk 0.49.0'); sys.exit(0)\n"
+    "if sys.argv[1:] == ['compress']:\n"
+    "    request = json.load(sys.stdin)\n"
+    "    args = request['input']['arguments']\n"
+    "    args['command'] = 'tokenless rtk grep --count error log'\n"
+    "    print(json.dumps({'result': {'action': 'replace_arguments', 'arguments': args}}))\n"
+    "    sys.exit(0)\n"
+    "sys.exit(1)\n"
 )
 
 
@@ -50,8 +57,8 @@ class CodexRewriteHookTest(unittest.TestCase):
         root = Path(self.tmp.name)
         bin_dir = root / "bin"
         bin_dir.mkdir()
-        rtk = bin_dir / "rtk"
-        rtk.write_text(RTK_STUB)
+        rtk = bin_dir / "tokenless"
+        rtk.write_text(TOKENLESS_STUB)
         rtk.chmod(rtk.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         # Runtime detection and a declared agent id would only change
         # attribution, not the parsing under test; strip them so the runs are
@@ -121,7 +128,7 @@ class CodexRewriteHookTest(unittest.TestCase):
         self.assertEqual(envelope["permissionDecision"], "allow")
         self.assertEqual(
             envelope["updatedInput"],
-            {"command": "rtk grep --count error log", "timeout": 30},
+            {"command": "tokenless rtk grep --count error log", "timeout": 30},
         )
 
     def test_json_encoded_object_tool_input_still_applies_rewrite(self) -> None:
@@ -137,7 +144,7 @@ class CodexRewriteHookTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=f"stderr:\n{proc.stderr}")
         envelope = json.loads(proc.stdout)["hookSpecificOutput"]
         self.assertEqual(
-            envelope["updatedInput"], {"command": "rtk grep --count error log"}
+            envelope["updatedInput"], {"command": "tokenless rtk grep --count error log"}
         )
 
     def test_rtk_no_rewrite_exits_silently(self) -> None:
@@ -146,10 +153,10 @@ class CodexRewriteHookTest(unittest.TestCase):
             {"tool_name": "Bash", "tool_input": {"command": "grep error log"}}
         )
         stub_root = Path(self.tmp.name)
-        rtk = stub_root / "bin" / "rtk"
+        rtk = stub_root / "bin" / "tokenless"
         rtk.write_text(
             "#!/bin/sh\n"
-            'if [ "$1" = "--version" ]; then echo \'rtk 0.43.0\'; exit 0; fi\n'
+            'if [ "$1" = "rtk" ] && [ "$2" = "--version" ]; then echo \'rtk 0.49.0\'; exit 0; fi\n'
             "exit 1\n"
         )
         proc = self.run_hook(payload)

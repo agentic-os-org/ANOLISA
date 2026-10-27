@@ -120,7 +120,7 @@ class TokenlessTests(GateFixture):
 
     def test_consumer_build_and_tests_propagate_failure_and_bind_the_candidate(self):
         aw = self.root / "src/aw"
-        for file in (self.root / "src/tokenless/target/release/tokenless", aw / "target/release/rtk"):
+        for file in (aw / "target/release/tokenless",):
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b"fixture binary")
         for mode in ("pass", "empty", "failure"):

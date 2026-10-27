@@ -160,21 +160,21 @@ pub(crate) fn configure_using(
     }
     let mut value = document(settings)?;
     if let Some(component) = installed.get("aw-provider-tokenless") {
-        let name = "libexec/aw/providers/tokenless/rtk";
+        let name = "libexec/aw/providers/tokenless/tokenless";
         require(
             std::env::join_paths([prefix.join("libexec/aw/providers/tokenless")]).is_ok(),
-            "managed RTK directory cannot be represented in PATH",
+            "managed Tokenless directory cannot be represented in PATH",
         )?;
         let payload = component.files.get(name).ok_or_else(|| {
-            crate::Error::Invalid("installed Tokenless package record lacks managed RTK".into())
+            crate::Error::Invalid(
+                "installed Tokenless package record lacks managed Tokenless".into(),
+            )
         })?;
         value["spec"]["providers"]["tokenless"]["transport"]["argv"]
             .as_array_mut()
             .ok_or_else(|| crate::Error::Invalid("Tokenless argv must be an array".into()))?
             .extend([
-                serde_json::json!("--rtk"),
-                serde_json::json!(prefix.join(name)),
-                serde_json::json!("--rtk-sha256"),
+                serde_json::json!("--cli-sha256"),
                 serde_json::json!(payload.sha256),
             ]);
     }

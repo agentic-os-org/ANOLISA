@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 import time
 import zipfile
@@ -22,10 +23,18 @@ def main() -> None:
     source, output = map(Path, sys.argv[1:3])
     version = sys.argv[3]
     binaries = source / "target/npm-prebuilt/win32-x64"
-    files = {name: binaries / name for name in ("tokenless.exe", "rtk.exe")}
+    files = {name: binaries / name for name in ("tokenless.exe",)}
     for name, path in files.items():
         verifier.verify_pe(path.read_bytes(), name)
     files["LICENSE"] = source / "LICENSE"
+    files["third_party/rtk/LICENSE"] = source / "third_party/rtk/LICENSE"
+    files["third_party/rtk/source-commit"] = source / "third_party/rtk/.anolisa-rtk-commit"
+    files["third_party/rtk/patches-sha256"] = source / "third_party/rtk/.anolisa-rtk-patches"
+    patch_list = re.search(r"^PATCHES=\(([^)]+)\)$", (source / "scripts/setup-rtk.sh").read_text(), re.M)
+    if patch_list is None:
+        raise ValueError("RTK patch list is missing")
+    for patch in patch_list.group(1).split():
+        files[f"third_party/rtk/{patch}"] = source / "third_party/patches" / patch
     for package, tarball in (
         ("tokenless", f"anolisa-tokenless-{version}.tgz"),
         ("tokenless-win32-x64", f"anolisa-tokenless-win32-x64-{version}.tgz"),

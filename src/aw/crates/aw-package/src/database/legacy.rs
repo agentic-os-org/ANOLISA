@@ -136,7 +136,6 @@ pub(crate) fn validate(value: &Component) -> Result<()> {
         "aw-provider-tokenless" => &[
             "libexec/aw/providers/tokenless/aw-provider-tokenless",
             "libexec/aw/providers/tokenless/tokenless",
-            "libexec/aw/providers/tokenless/rtk",
         ],
         _ => return Err(crate::Error::Invalid("unknown legacy package ID".into())),
     };

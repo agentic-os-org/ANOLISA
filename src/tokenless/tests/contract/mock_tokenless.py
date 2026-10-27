@@ -88,7 +88,7 @@ def respond_pre_tool(request: dict, behavior: str) -> int:
         return 3
     if behavior == "applied":
         rewritten = dict(arguments)
-        rewritten[command_field] = f"/mock/rtk {command}"
+        rewritten[command_field] = f"/mock/tokenless rtk {command}"
         envelope(
             request,
             {

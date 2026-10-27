@@ -222,9 +222,12 @@ PY
 
 for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"
+    test ! -e "$package/bin/rtk"
+    test ! -e "$package/bin/rtk.exe"
+    cmp "$ROOT/third_party/rtk/LICENSE" "$package/third_party/rtk/LICENSE"
     test -f "$package/package.json"
     test -f "$package"/*.tgz
-    for binary in tokenless rtk; do
+    for binary in tokenless; do
         if [[ "$target" = win32-x64 ]]; then binary="$binary.exe"; fi
         cmp "$PREBUILT/$target/$binary" "$package/bin/$binary"
         test "$(stat -c '%a' "$package/bin/$binary")" = 755
@@ -232,7 +235,7 @@ for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
 done
 
 # Platform packages must not declare bin entries: they would collide with
-# the root package's tokenless/rtk bins, and npm resolves such
+# the root package's tokenless bins, and npm resolves such
 # collisions by removing every conflicting .bin link, leaving installs
 # without a tokenless executable. The root package's postinstall links its
 # bins to these platform binaries instead (esbuild's platform packages use
@@ -244,7 +247,7 @@ const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (manifest.bin !== undefined) {
   throw new Error(
     `${manifest.name} must not declare bin entries; ` +
-    'the root package owns the tokenless/rtk bin names',
+    'the root package owns the tokenless bin names',
   );
 }
 JS

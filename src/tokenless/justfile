@@ -17,13 +17,12 @@ clean-rtk:
     rm -rf {{rtk_dir}}
     @echo "rtk directory removed. Run 'just setup-rtk' to re-clone."
 
-# Build tokenless (requires setup-rtk for rtk binary)
+# Build tokenless with the prepared RTK library
 build: setup-rtk
     cargo build --release
-    cargo build --release --locked --manifest-path {{rtk_dir}}/Cargo.toml
 
-# Build everything (tokenless + rtk; TOON is linked in via the
-# toon-format library crate)
+# Build the unified CLI (RTK and TOON are linked in via their
+# library crates)
 build-all: build
 
 # Run tokenless crate tests (rtk excluded — vendored third-party)
@@ -39,4 +38,4 @@ verify: build-all
     @echo ""
     @echo "=== Verification ==="
     target/release/tokenless --version || echo "tokenless: FAILED"
-    {{rtk_dir}}/target/release/rtk --version || echo "rtk: FAILED"
+    target/release/tokenless rtk --version || echo "rtk: FAILED"

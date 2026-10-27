@@ -591,9 +591,7 @@ build_tokenless() {
         cd "$TOKEN_DIR"
         # Clone rtk into third_party/ (no submodule — uses justfile setup-rtk)
         # Note: rtk source in tarball is already patched via justfile setup-rtk
-        if [ ! -d "third_party/rtk/.git" ]; then
-            just setup-rtk
-        fi
+        just setup-rtk
     )
 
     log "Step 2/3: Creating source tarball ${tarball_name}..."
@@ -603,7 +601,7 @@ build_tokenless() {
     mkdir -p "$pkg_dir"
 
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
-    # Note: third_party/rtk must be included — it's built separately via --manifest-path
+    # Include third_party/rtk because the CLI links its patched library.
     # Adapter config files (manifest.json, package.json, openclaw.plugin.json, plugin.yaml)
     # and the component contract (component.toml) are excluded because they are
     # generated from .in templates by stamp-adapter-templates during rpmbuild

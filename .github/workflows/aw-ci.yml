@@ -142,6 +142,8 @@ jobs:
             providers/tokenless
             src/tokenless
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Prepare Rust for embedded RTK
+        run: rustup toolchain install 1.91.0 --profile minimal
       - name: Validate real Tokenless and RTK consumer contracts
         id: tokenless
         run: python3 -B src/aw/scripts/check_tokenless.py --output "$AW_TOKENLESS_EVIDENCE"

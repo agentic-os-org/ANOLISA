@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real Tokenless Provider/CLI adoption through Pi; streams, shell tools and RTK are controlled fixtures."""
+"""Real Tokenless Provider/CLI adoption through Pi; streams and shell tools are controlled fixtures."""
 import argparse
 import json
 import os
@@ -55,9 +55,6 @@ for case in ["json-selected-output", "rtk-retry-rescanned-denied", "rtk-retry-al
     assert len(os.fsencode(state / "state/aw.sock")) < 108, "Choose a shorter --root"
     bin_dir = state / "bin"
     bin_dir.mkdir()
-    rtk = bin_dir / "rtk"
-    rtk.write_text("#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'rtk 0.49.0'; elif [ \"$1\" = rewrite ]; then printf 'rtk %s\\n' \"$2\"; else exit 99; fi\n")
-    rtk.chmod(0o700)
     scanner = state / "scanner"
     scanner.write_text(f'''#!{python}
 import json,sys,pathlib,os
@@ -139,7 +136,7 @@ raise SystemExit(result.returncode)
             prefix = "[tokenless:rewrite] Retry this tool with arguments: "
             assert guidance.startswith(prefix), (case, guidance, err)
             retry = json.loads(guidance[len(prefix):])["command"]
-            assert str(rtk) in retry and "TOKENLESS_AGENT_ID=pi" in retry
+            assert cli in retry and " rtk git status" in retry and "TOKENLESS_AGENT_ID=pi" in retry
             scanned = [json.loads(line) for line in (state / "scanned.jsonl").read_text().splitlines()]
             assert scanned == ["git status", retry], scanned
             if case == "rtk-retry-rescanned-denied":

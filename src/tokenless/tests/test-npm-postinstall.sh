@@ -232,7 +232,7 @@ assert_eq "stamps the copied manifest with the package version" \
 assert_eq "marks the tree it placed" "$(cat "$FRESH/.tokenless-owner")" \
   "npm:anolisa-tokenless@$FAKE_VERSION"
 assert_file "links the tokenless launcher" "$PKG/bin/tokenless"
-assert_file "links the rtk launcher" "$PKG/bin/rtk"
+assert_no_file "does not link a separate rtk launcher" "$PKG/bin/rtk"
 
 # =============================================================================
 # 2. An anolisa-managed tree is preserved
@@ -398,7 +398,8 @@ for b in tokenless rtk; do
 done
 run_postinstall dangling-launchers
 assert_eq "postinstall repairs dangling launchers" "$STATUS" "0"
-for b in tokenless rtk; do
+assert_no_file "removes the old owned rtk launcher" "$PKG/bin/rtk"
+for b in tokenless; do
   assert_eq "the $b launcher targets the installed platform package" \
     "$(readlink "$PKG/bin/$b")" "$PKG/node_modules/$PLATFORM_PKG/bin/$b"
   assert_eq "the repaired $b launcher executes" "$("$PKG/bin/$b")" "$b"

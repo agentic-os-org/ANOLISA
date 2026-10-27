@@ -34,7 +34,7 @@ env PATH=/usr/bin:/bin "$TEST_ENV/venv/bin/python" - <<'PY'
 import os
 from importlib.resources import files
 
-rtk = files("anolisa_tokenless").joinpath("_bin", "rtk")
+rtk = files("anolisa_tokenless").joinpath("_bin", "tokenless")
 assert rtk.is_file()
 assert os.access(rtk, os.X_OK)
 PY

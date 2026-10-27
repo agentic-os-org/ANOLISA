@@ -198,7 +198,7 @@ def verify_binary(payload: bytes, target: NativeTarget, member: str) -> None:
         verify_macho(payload, target.architecture, member)
 
 
-def verify_runtime(path: Path, version: str) -> NativeTarget:
+def verify_runtime(path: Path, version: str, *, legacy_rtk: bool = False) -> NativeTarget:
     distribution, filename_version, python_tag, abi_tag, platforms = parse_filename(path)
     if distribution != RUNTIME_FILENAME:
         fail(f"{path.name} is not a {RUNTIME_NAME} wheel")
@@ -227,15 +227,24 @@ def verify_runtime(path: Path, version: str) -> NativeTarget:
         ]
         if len(native_members) != 1:
             fail(f"{path.name} must contain exactly one native extension")
-        rtk_name = "rtk.exe" if target.os_name == "windows" else "rtk"
+        rtk_name = ("rtk" if legacy_rtk else "tokenless") + (".exe" if target.os_name == "windows" else "")
         rtk_members = [
             name for name in archive.namelist() if name == f"anolisa_tokenless/_bin/{rtk_name}"
         ]
         if len(rtk_members) != 1:
             fail(f"{path.name} must contain exactly one embedded {rtk_name} binary")
+        foreign_suffix = "" if target.os_name == "windows" else ".exe"
+        foreign_helper = ("rtk" if legacy_rtk else "tokenless") + foreign_suffix
+        if f"anolisa_tokenless/_bin/{foreign_helper}" in archive.namelist():
+            fail(f"{path.name} contains a CLI binary for another platform")
+        unexpected = "tokenless" if legacy_rtk else "rtk"
+        if any(name in archive.namelist() for name in (
+            f"anolisa_tokenless/_bin/{unexpected}", f"anolisa_tokenless/_bin/{unexpected}.exe"
+        )):
+            fail(f"{path.name} contains an unexpected standalone {unexpected} binary")
         rtk_info = archive.getinfo(rtk_members[0])
         if not ((rtk_info.external_attr >> 16) & 0o111):
-            fail(f"{path.name} embeds a non-executable RTK binary")
+            fail(f"{path.name} embeds a non-executable CLI binary")
         for member in (native_members[0], rtk_members[0]):
             verify_binary(archive.read(member), target, member)
     return target
@@ -322,6 +331,7 @@ def main() -> int:
     parser.add_argument("--os", choices=("linux", "macos", "windows"))
     parser.add_argument("--arch", choices=("x86_64", "aarch64"))
     parser.add_argument("--tokenless-source-root", type=Path)
+    parser.add_argument("--legacy-rtk", action="store_true", help="verify a historical wheel with standalone RTK")
     checksum_group = parser.add_mutually_exclusive_group()
     checksum_group.add_argument("--write-checksums", type=Path)
     checksum_group.add_argument("--checksum-file", type=Path)
@@ -332,6 +342,12 @@ def main() -> int:
         if not args.directory.is_dir():
             fail(f"wheel directory does not exist: {args.directory}")
         targets = expected_targets(args.layout, args.os, args.arch, args.tokenless_source_root)
+        legacy_rtk = args.legacy_rtk
+        if args.tokenless_source_root is not None:
+            library_patch = args.tokenless_source_root / "src/tokenless/third_party/patches/rtk-library.patch"
+            if legacy_rtk and library_patch.is_file():
+                fail("--legacy-rtk conflicts with the selected source's embedded RTK layout")
+            legacy_rtk = not library_patch.is_file()
         wheels = sorted(args.directory.glob("*.whl"))
         expected_count = len(targets) + (1 if ("linux", "x86_64") in targets else 0)
         if len(wheels) != expected_count:
@@ -343,7 +359,7 @@ def main() -> int:
             if wheel.name.startswith(f"{AGENTSCOPE_FILENAME}-"):
                 agentscope_wheels.append(wheel)
                 continue
-            target = verify_runtime(wheel, python_version)
+            target = verify_runtime(wheel, python_version, legacy_rtk=legacy_rtk)
             key = (target.os_name, target.architecture)
             if key in actual_targets:
                 fail(f"duplicate runtime wheel for {target.os_name}/{target.architecture}")

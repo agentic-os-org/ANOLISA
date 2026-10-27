@@ -33,8 +33,7 @@ def check(directory: Path) -> None:
     environment = {
         **os.environ, "TOKENLESS_COMPRESSION_ENABLED": "1",
         "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0",
-        "AW_TOKENLESS_TEST_CLI": str(REPO / "src/tokenless/target/release/tokenless"),
-        "AW_TOKENLESS_TEST_RTK": str(AW / "target/release/rtk"),
+        "AW_TOKENLESS_TEST_CLI": str(AW / "target/release/tokenless"),
     }
     commands = Commands(directory, environment)
     report = {"candidate_sha": expected, "passed": False, "cases": []}
@@ -46,7 +45,7 @@ def check(directory: Path) -> None:
         )
         report["binaries"] = {
             name: hashlib.sha256(Path(environment[key]).read_bytes()).hexdigest()
-            for name, key in (("tokenless", "AW_TOKENLESS_TEST_CLI"), ("rtk", "AW_TOKENLESS_TEST_RTK"))
+            for name, key in (("tokenless", "AW_TOKENLESS_TEST_CLI"),)
         }
         for target, name in CASES.items():
             log = commands.run(

@@ -46,10 +46,20 @@ def main() -> None:
         TOKENLESS_SESSION_ID="cli-smoke",
     )
     cli = root / "tokenless.exe"
+    assert not (root / "rtk.exe").exists()
     assert run(cli, "--version").decode().strip() == f"tokenless {version}"
     run(cli, "invalid-smoke-command", expected=2)
-    assert b"rtk" in run(root / "rtk.exe", "--version")
-    assert b"rtk git status" in run(root / "rtk.exe", "rewrite", "git status", expected=3)
+    assert b"rtk" in run(cli, "rtk", "--version")
+    assert b"tokenless rtk git status" in run(cli, "rtk", "rewrite", "git status", expected=3)
+    fixture = root / "RTK 中文 input.txt"
+    fixture.write_text("TOKENLESS_EMBEDDED_RTK\n", encoding="utf-8")
+    assert b"TOKENLESS_EMBEDDED_RTK" in run(cli, "rtk", "read", str(fixture))
+    assert run(cli, "rtk", "pipe", "--passthrough", payload=b"stdin sentinel\n") == b"stdin sentinel\n"
+    run(cli, "rtk", "proxy", "cmd.exe", "/d", "/c", "exit 7", expected=7)
+    for name in ("init", "hook", "hook-audit", "gain", "cc-economics", "discover",
+                 "session", "telemetry", "learn", "config", "trust", "untrust", "verify"):
+        run(cli, "rtk", name, expected=2)
+    print("PASS: embedded RTK file paths, stdin, exit status and management boundary")
     description = "中文 C:\\space path\\file.txt\r\n" + "schema details " * 500
     attribution = {"agent_id": "windows-ci", "session_id": "cli-smoke", "tool_use_id": "schema"}
 
@@ -99,7 +109,7 @@ def main() -> None:
         manifest = json.load(package.extractfile("package/package.json"))
         assert manifest["version"] == version
         assert manifest["os"] == ["win32"] and manifest["cpu"] == ["x64"]
-        for binary in ("tokenless", "rtk"):
+        for binary in ("tokenless",):
             payload = package.extractfile(f"package/bin/{binary}.exe").read()
             assert payload == (root / f"{binary}.exe").read_bytes()
     with tarfile.open(root / "npm" / f"anolisa-tokenless-{version}.tgz") as package:
@@ -114,14 +124,14 @@ def main() -> None:
         package.extractall(site)
     sys.path.insert(0, str(site))
     asyncio.run(sdk_smoke(root, description, args.powershell))
-    print("PASS: Windows Python ABI3 SDK, packaged RTK, Stash, authorization and statistics")
+    print("PASS: Windows Python ABI3 SDK, embedded RTK, Stash, authorization and statistics")
 
 
 async def sdk_smoke(root: Path, description: str, powershell: Path | None) -> None:
     import anolisa_tokenless as sdk_api
 
     sdk = sdk_api.TokenlessSdk(sdk_api.TokenlessConfig(data_dir=root / "sdk-state"))
-    assert sdk._rtk_path.name == "rtk.exe", sdk._rtk_path
+    assert sdk._tokenless_path.name == "tokenless.exe", sdk._tokenless_path
     attribution = sdk_api.Attribution("windows-ci", "sdk-smoke", "sdk-call")
     rewritten = await sdk.pre_tool(
         sdk_api.PreToolRequest(

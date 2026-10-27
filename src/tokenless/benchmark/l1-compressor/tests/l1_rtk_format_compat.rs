@@ -14,7 +14,7 @@
 
 //! RTK binary & rewrite exit-code/output protocol tests.
 //!
-//! tokenless does not link rtk; adapters shell out to `rtk rewrite <cmd>` and
+//! Tokenless links RTK; adapters invoke `tokenless rtk rewrite <cmd>` and
 //! rely on its exit-code protocol:
 //!   0 = rewrite available (Allow)   1 = no equivalent (passthrough)
 //!   2 = deny rule matched           3 = Ask/Default (rewrite available)
@@ -32,11 +32,15 @@ use tokenless_bench::metrics::find_rtk_binary as find_rtk;
 /// Documented rtk-rewrite exit codes.
 const PROTOCOL_CODES: [i32; 4] = [0, 1, 2, 3];
 
-/// Run `rtk rewrite <cmd>`, returning (exit_code, stdout). `None` if rtk is
+/// Run `tokenless rtk rewrite <cmd>`, returning (exit_code, stdout). `None` if rtk is
 /// unavailable (caller should skip).
 fn rtk_rewrite(cmd: &str) -> Option<(i32, String)> {
     let bin = find_rtk()?;
-    let out = Command::new(&bin).arg("rewrite").arg(cmd).output().ok()?;
+    let out = Command::new(&bin)
+        .args(["rtk", "rewrite"])
+        .arg(cmd)
+        .output()
+        .ok()?;
     let code = out.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Some((code, stdout))
@@ -47,7 +51,7 @@ fn skip_if_no_rtk(test: &str) -> bool {
     if find_rtk().is_none() {
         eprintln!(
             "[SKIPPED] {test}: RTK binary not found \
-             (set RTK_BIN or install rtk >= 0.35.0)"
+             (set TOKENLESS_BIN or build Tokenless)"
         );
         return true;
     }
@@ -60,8 +64,14 @@ fn rtk_binary_is_runnable() {
         return;
     }
     let bin = find_rtk().unwrap();
-    let out = Command::new(&bin).arg("--version").output().unwrap();
-    assert!(out.status.success(), "rtk --version should succeed");
+    let out = Command::new(&bin)
+        .args(["rtk", "--version"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "tokenless rtk --version should succeed"
+    );
     let v = String::from_utf8_lossy(&out.stdout);
     assert!(v.to_lowercase().contains("rtk") || v.chars().any(|c| c.is_ascii_digit()));
 }
@@ -72,7 +82,10 @@ fn rtk_version_meets_minimum() {
         return;
     }
     let bin = find_rtk().unwrap();
-    let out = Command::new(&bin).arg("--version").output().unwrap();
+    let out = Command::new(&bin)
+        .args(["rtk", "--version"])
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     // Extract the first dotted version triple and require >= 0.35.0.
     let ver: Vec<u32> = text
@@ -87,7 +100,7 @@ fn rtk_version_meets_minimum() {
         .unwrap_or_default();
     if ver.len() >= 2 {
         let ok = ver[0] > 0 || (ver[0] == 0 && ver[1] >= 35);
-        assert!(ok, "rtk version {ver:?} must be >= 0.35.0");
+        assert!(ok, "tokenless rtk version {ver:?} must be >= 0.35.0");
     }
 }
 
@@ -170,9 +183,9 @@ fn rewrite_empty_command_is_safe() {
     // unconstrained — an earlier revision accepted "any protocol code or any
     // other value", which was a near-tautological predicate.
     let bin = find_rtk().unwrap();
-    let out = Command::new(&bin).arg("rewrite").arg("").output();
+    let out = Command::new(&bin).args(["rtk", "rewrite"]).arg("").output();
     assert!(
         out.is_ok(),
-        "rtk must handle an empty command without failing to run"
+        "tokenless rtk must handle an empty command without failing to run"
     );
 }

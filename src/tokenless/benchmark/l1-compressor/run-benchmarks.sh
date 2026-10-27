@@ -50,11 +50,11 @@ else
 fi
 LOCK_SHA=$(sha256_of "$SCRIPT_DIR/Cargo.lock" || echo "unknown")
 FIXTURES_SHA=$(cat "$SCRIPT_DIR"/fixtures/*.json 2>/dev/null | sha256_of /dev/stdin || echo "unknown")
-RTK_BIN_PATH="${RTK_BIN:-$SCRIPT_DIR/../../third_party/rtk/target/release/rtk}"
+RTK_BIN_PATH="${TOKENLESS_BIN:-$SCRIPT_DIR/../../target/release/tokenless}"
 
 # Resolve an rtk reference to a concrete executable path, mirroring the Rust
-# `find_rtk_binary` convention. `$RTK_BIN` may be a bare command name
-# (`RTK_BIN=rtk`), which the shell would exec through `PATH` — so testing `-x`
+# `find_rtk_binary` convention. `$TOKENLESS_BIN` may be a bare command name
+# (`TOKENLESS_BIN=tokenless`), which the shell would exec through `PATH` — so testing `-x`
 # on the raw reference only inspects the CWD and would report a perfectly
 # usable `PATH` rtk as "unavailable" while the Rust side still finds and runs
 # it. Paths containing a slash are checked as given.
@@ -125,7 +125,7 @@ rtk_version_probe() {
     # `pipefail`, mask the probe's own status.
     local bin="$1" out="" status=0
     # shellcheck disable=SC2086 # RTK_TIMEOUT_PREFIX is an intentional flag list.
-    out="$($RTK_TIMEOUT_PREFIX "$bin" --version 2>/dev/null)" || status=$?
+    out="$($RTK_TIMEOUT_PREFIX "$bin" rtk --version 2>/dev/null)" || status=$?
     [[ "$status" -eq 0 ]] || out=""
     printf '%s' "${out%%$'\n'*}"
 }
@@ -151,6 +151,8 @@ cat > "$IDENTITY_FILE" <<EOF
 }
 EOF
 echo "==> Source identity recorded: $IDENTITY_FILE"
+
+bash "$SCRIPT_DIR/../../scripts/setup-rtk.sh"
 
 echo "==> Building benchmark suite (release)"
 cargo build --release

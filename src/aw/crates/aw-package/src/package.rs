@@ -164,7 +164,6 @@ impl Selection {
                 repo.join("providers/tokenless"),
                 vec!["aw-provider-tokenless"],
             ));
-            builds.push((repo.join("src/tokenless"), vec!["tokenless-cli"]));
         }
         builds
     }
@@ -215,17 +214,18 @@ pub fn build(
     };
     let rtk_source = rtk.as_ref().map(|root| root.path().join("third_party/rtk"));
     let mut builds = selection.builds(repo);
-    if let Some(directory) = &rtk_source {
-        builds.push((directory.clone(), vec!["rtk"]));
+    if let Some(directory) = &rtk {
+        builds.push((directory.path().into(), vec!["tokenless-cli"]));
     }
     for (directory, packages) in builds {
-        let target = if rtk_source.as_ref() == Some(&directory) {
+        let embeds_rtk = rtk.as_ref().is_some_and(|root| root.path() == directory);
+        let target = if embeds_rtk {
             repo.join("src/aw/target")
         } else {
             directory.join("target")
         };
         let mut args: Vec<String> = [
-            "+1.97.1",
+            if embeds_rtk { "+1.91.0" } else { "+1.97.1" },
             "build",
             "--release",
             "--locked",
@@ -316,8 +316,7 @@ fn stage(
                     "aw-provider-tokenless",
                     repo.join("providers/tokenless/target/release"),
                 ),
-                ("tokenless", repo.join("src/tokenless/target/release")),
-                ("rtk", aw.clone()),
+                ("tokenless", aw.clone()),
             ] {
                 add(
                     &root,

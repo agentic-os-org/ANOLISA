@@ -81,8 +81,8 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// Locate the rtk binary: `$RTK_BIN`, the vendored release build next to this
-/// crate, or `rtk` on `PATH`. Shared by the in-crate reports and the
+/// Locate the Tokenless binary: `$TOKENLESS_BIN`, the Tokenless release build next to this
+/// crate, or `tokenless` on `PATH`. Shared by the in-crate reports and the
 /// `l1_rtk_format_compat` integration tests so discovery never drifts between
 /// the two. Returns `None` when none is runnable.
 ///
@@ -90,20 +90,23 @@ fn is_executable(p: &Path) -> bool {
 /// workspaces are independent, so changing the discovery order here means
 /// changing it there too.
 pub fn find_rtk_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("RTK_BIN") {
+    if let Ok(p) = std::env::var("TOKENLESS_BIN") {
         let pb = PathBuf::from(p);
         if is_executable(&pb) {
             return Some(pb);
         }
     }
-    let vendored =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/rtk/target/release/rtk");
+    let vendored = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/tokenless");
     if is_executable(&vendored) {
         return Some(vendored);
     }
     // Fall back to PATH: only accept it if `--version` actually runs.
-    if Command::new("rtk").arg("--version").output().is_ok() {
-        return Some(PathBuf::from("rtk"));
+    if Command::new("tokenless")
+        .args(["rtk", "--version"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return Some(PathBuf::from("tokenless"));
     }
     None
 }
@@ -124,7 +127,7 @@ pub enum TimedRun {
     TimedOutKillFailed,
 }
 
-/// Runs `<bin> rewrite <cmd>` with a hard per-invocation timeout.
+/// Runs `<bin> rtk rewrite <cmd>` with a hard per-invocation timeout.
 ///
 /// Waits on a helper thread and SIGKILLs the child when the deadline
 /// elapses, so a hung rtk can never block the caller (report loop or
@@ -132,7 +135,7 @@ pub enum TimedRun {
 /// `benches/l1_rtk_latency.rs` so both paths get identical hang protection.
 pub fn run_rewrite_with_timeout(bin: &Path, cmd: &str, timeout: Duration) -> TimedRun {
     let child = match Command::new(bin)
-        .arg("rewrite")
+        .args(["rtk", "rewrite"])
         .arg(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -194,7 +197,7 @@ pub fn rtk_report() -> Value {
 
     // Best-effort version string for the report header.
     let version = Command::new(&bin)
-        .arg("--version")
+        .args(["rtk", "--version"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())

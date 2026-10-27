@@ -229,7 +229,7 @@ drain, session-store reuse and native denial, alongside all earlier lifecycle/MC
 cases. Model-relay and dispatch contract entrypoints remain in the host native lane.
 
 The image contains only allowlisted public fixtures, pinned SDK dependencies and
-four candidate binaries: `aw`, `aw-provider-tokenless`, `tokenless`, and `rtk`.
+three candidate binaries: `aw`, `aw-provider-tokenless`, and `tokenless` with embedded RTK.
 RTK is required by PreTool in the mixed Bash/MCP long-session suite. Ubuntu,
 Node and uv images use manifest digests; Python and SDK versions come from the
 native inventory, and Pi uses its committed npm lock. The build context excludes

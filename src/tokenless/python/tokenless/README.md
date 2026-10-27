@@ -4,8 +4,7 @@ Self-contained CPython SDK for the BeforeModel, PreTool, PostTool, and marker-au
 lifecycle operations.
 
 The package is built from the ANOLISA monorepo and supports CPython 3.11 or later on the platform
-targeted by its wheel. The pinned RTK executable is included in the wheel; no Tokenless binary is
-required on `PATH`. See the
+targeted by its wheel. The wheel carries `_bin/tokenless` (or `_bin/tokenless.exe`) with pinned RTK linked in; no helper executable is required on `PATH`. See the
 [Tokenless Python SDK guide](https://github.com/alibaba/anolisa/blob/main/docs/developer-guide/en/sdk/tokenless/index.md)
 for source-build prerequisites, lifecycle contracts, configuration, and runnable examples. This
 package is the framework-neutral SDK layer. The same-version `anolisa-tokenless-agentscope` package

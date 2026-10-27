@@ -102,7 +102,7 @@ class ResidentContainerTests(GateFixture):
         stage(AW, binaries, context, "a" * 40, self.manifest)
         self.assertEqual(
             {p.name for p in (context / "payload").iterdir()},
-            {"aw", "aw-provider-tokenless", "tokenless", "rtk", "SHA256SUMS", "source-sha.txt"},
+            {"aw", "aw-provider-tokenless", "tokenless", "SHA256SUMS", "source-sha.txt"},
         )
         verify_bundle(context / "payload", "a" * 40, BINARIES)
         for path in context.rglob("*"):
@@ -111,6 +111,49 @@ class ResidentContainerTests(GateFixture):
         self.assertTrue(
             all("target" not in path.relative_to(AW).parts for path in source_files(AW))
         )
+
+    def test_preview_payload_passes_native_and_resident_admission(self):
+        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        step = workflow.split("      - name: Stage the same build for native acceptance\n", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - ", 1)[0])
+        binaries = {
+            "aw": "src/aw/target/release/aw",
+            "tokenless": "src/aw/target/release/tokenless",
+            "policy": "src/aw/target/release/examples/policy",
+            "aw-provider-sec-core": "providers/agent-sec-core/target/release/aw-provider-sec-core",
+            "aw-provider-tokenless": "providers/tokenless/target/release/aw-provider-tokenless",
+            "agent-sec-cli": "src/agent-sec-core/v2/target/release/agent-sec-cli",
+            "agent-sec-daemon": "src/agent-sec-core/v2/target/release/agent-sec-daemon",
+        }
+        for name, relative in binaries.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+            path.chmod(0o700)
+        tools = self.root / "tools"
+        tools.mkdir()
+        for name, body in (("git", "echo " + "a" * 40), ("cargo", "echo '{}'"), ("rustc", "echo fixture")):
+            path = tools / name
+            path.write_text("#!/bin/sh\n" + body + "\n")
+            path.chmod(0o700)
+        preview = self.root / "preview"
+        subprocess.run(
+            ["bash", "-eu", "-c", script], cwd=self.root,
+            env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                 "AW_PREVIEW_DIR": str(preview), "CANDIDATE_SHA": "a" * 40},
+            capture_output=True, text=True, check=True, timeout=15,
+        )
+        payload = preview / "native"
+        verify_bundle(payload, "a" * 40)
+        self.assertEqual(
+            {line.split("  ", 1)[1] for line in (payload / "SHA256SUMS").read_text().splitlines()},
+            set(binaries),
+        )
+        context = self.root / "resident"
+        context.mkdir()
+        stage(AW, payload, context, "a" * 40, self.manifest)
+        verify_bundle(context / "payload", "a" * 40, BINARIES)
+        self.assertFalse((context / "payload/rtk").exists())
 
     def test_result_requires_every_shard_actual_reports_versions_and_cleanup(self):
         reports = self.reports()

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! rtk binary discovery, shared by the L2 harness (`l2::rtk_side`) so it
-//! reuses the same `$RTK_BIN` → vendored release build → `PATH` order as the
+//! reuses the same `$TOKENLESS_BIN` → vendored release build → `PATH` order as the
 //! L1 suite, keeping discovery consistent across layers.
 
 use std::path::{Path, PathBuf};
@@ -34,28 +34,31 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// Locate the rtk binary: `$RTK_BIN`, the vendored release build next to this
-/// crate, or `rtk` on `PATH`. Returns `None` when none is runnable.
+/// Locate the Tokenless binary: `$TOKENLESS_BIN`, the Tokenless release build next to this
+/// crate, or `tokenless` on `PATH`. Returns `None` when none is runnable.
 ///
 /// Kept byte-identical to `l1-compressor/src/metrics.rs::find_rtk_binary` so
 /// the two suites agree on where `rtk` comes from. The workspaces are
 /// independent, so this is a manual sync obligation, not a shared function:
 /// change one side and you must change the other.
 pub fn find_rtk_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("RTK_BIN") {
+    if let Ok(p) = std::env::var("TOKENLESS_BIN") {
         let pb = PathBuf::from(p);
         if is_executable(&pb) {
             return Some(pb);
         }
     }
-    let vendored =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/rtk/target/release/rtk");
+    let vendored = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/tokenless");
     if is_executable(&vendored) {
         return Some(vendored);
     }
     // Fall back to PATH: only accept it if `--version` actually runs.
-    if Command::new("rtk").arg("--version").output().is_ok() {
-        return Some(PathBuf::from("rtk"));
+    if Command::new("tokenless")
+        .args(["rtk", "--version"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return Some(PathBuf::from("tokenless"));
     }
     None
 }

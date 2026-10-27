@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Tokenless patches through the built RTK executable."""
+"""Verify embedded RTK patches, receipts and statistics through the unified CLI."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from test_hermes_lifecycle import _load_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
 RTK = Path(
-    os.environ.get("TOKENLESS_TEST_RTK_BINARY", ROOT / "third_party/rtk/target/release/rtk")
+    os.environ.get("TOKENLESS_TEST_RTK_BINARY", ROOT / "target/debug/tokenless")
 ).resolve()
 TOKENLESS = Path(
     os.environ.get("TOKENLESS_TEST_TOKENLESS_BINARY", ROOT / "target/debug/tokenless")
@@ -48,7 +48,7 @@ class RtkIntegrationTest(unittest.TestCase):
 
     def run_rtk(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(RTK), *args],
+            [str(RTK), "rtk", *args],
             cwd=self.root,
             env=self.env,
             capture_output=True,
@@ -80,8 +80,8 @@ class RtkIntegrationTest(unittest.TestCase):
         return json.loads(result.stdout)["result"]
 
     def rewrite_command(self, command: str, tracked: bool = True) -> str:
-        if not (self.bin_dir / "rtk").exists():
-            (self.bin_dir / "rtk").symlink_to(RTK)
+        if not (self.bin_dir / "tokenless").exists():
+            (self.bin_dir / "tokenless").symlink_to(RTK)
         rewritten = self.protocol("pre_tool", {
             "tool_name": "Bash", "arguments": {"command": command}, "command_field": "command",
             "capabilities": {"replace_arguments": True, "block_and_suggest": False},
@@ -128,7 +128,7 @@ class RtkIntegrationTest(unittest.TestCase):
         (self.root / "empty.txt").write_text("")
         old_command = self.rewrite_command("cat clean.txt")
         self.execute(old_command)
-        command = self.rewrite_command("rtk read -l minimal filtered.js && cat empty.txt", tracked=False)
+        command = self.rewrite_command("tokenless rtk read -l minimal filtered.js && cat empty.txt", tracked=False)
         # A delayed producer from the previous attempt cannot recreate its receipt.
         self.execute(old_command)
         output = self.execute(command)
@@ -142,7 +142,7 @@ class RtkIntegrationTest(unittest.TestCase):
         content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
         (self.root / "filtered.js").write_text("// stripped by RTK\n" + content)
         (self.root / "empty.txt").write_text("")
-        for retry in ["cat filtered.js", "rtk read -l minimal filtered.js && cat empty.txt"]:
+        for retry in ["cat filtered.js", "tokenless rtk read -l minimal filtered.js && cat empty.txt"]:
             with self.subTest(retry=retry):
                 self.execute_rewrite("cat clean.txt")
                 database = sqlite3.connect(self.root / "tokenless/rtk-outcomes.db")
@@ -174,7 +174,7 @@ class RtkIntegrationTest(unittest.TestCase):
 
     def test_hermes_recognizes_real_tracked_wrappers(self) -> None:
         plugin = _load_plugin(str(ROOT / "adapters/tokenless/hermes/__init__.py"), "hermes_real_rtk")
-        (self.bin_dir / "rtk").symlink_to(RTK)
+        (self.bin_dir / "tokenless").symlink_to(RTK)
         self.env["TOKENLESS_HTML_EXTRACTION_ENABLED"] = "1"
         html = "<html><body><main>" + "<p>Editable source markup.</p>" * 100 + "</main></body></html>"
         data = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
@@ -301,10 +301,9 @@ class RtkIntegrationTest(unittest.TestCase):
     def test_rewrite_returns_command_without_executing_it(self) -> None:
         result = self.run_rtk("rewrite", "git status")
         self.assertIn(result.returncode, (0, 3), result.stderr)
-        self.assertEqual(result.stdout.strip(), "rtk git status")
+        self.assertEqual(result.stdout.strip(), "tokenless rtk git status")
 
     def test_native_find_hooks_keep_paths_when_pinned_rtk_would_rewrite(self) -> None:
-        (self.bin_dir / "rtk").symlink_to(RTK)
         (self.bin_dir / "tokenless").symlink_to(TOKENLESS)
         self.env["TOKENLESS_AGENT_ID"] = "qwenwork"
         self.env["HOME"] = str(self.root / "home")
@@ -461,6 +460,15 @@ class RtkIntegrationTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][:3], ("rtk-integration", "session-49", "tool-49"))
         self.assertGreater(rows[0][3], rows[0][4])
+        summary = subprocess.run(
+            [str(TOKENLESS), "stats", "summary", "--json"],
+            env=self.env, text=True, capture_output=True, timeout=15,
+        )
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        report = json.loads(summary.stdout)
+        self.assertEqual(report["total"]["records"], 1)
+        self.assertEqual(report["by_operation"]["rewrite-command"]["records"], 1)
+        self.assertEqual(report["total"]["tokens_saved"], rows[0][3] - rows[0][4])
 
 
 if __name__ == "__main__":

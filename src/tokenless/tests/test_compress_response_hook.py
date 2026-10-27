@@ -58,6 +58,9 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
     prologue = textwrap.dedent("""\
         #!/usr/bin/env python3
         import json, os, sys
+        if sys.argv[1:] == ["rtk", "--version"]:
+            print("rtk 0.49.0")
+            sys.exit(0)
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "spawn_log"), "a") as log:
             log.write(" ".join(sys.argv[1:]) + "\\n")
@@ -329,18 +332,11 @@ class TestBinaryFallbackPaths(unittest.TestCase):
         return module
 
     def test_supported_install_layouts_are_covered(self) -> None:
-        paths = self._hook_utils()._known_binary_paths("rtk", "/home/alice")
+        paths = self._hook_utils()._known_binary_paths("tokenless", "/home/alice")
         expected = (
-            "/home/alice/.local/bin/rtk",
-            "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
-            "/home/alice/.local/libexec/anolisa/tokenless/rtk",
-            "/usr/local/bin/rtk",
-            "/usr/local/libexec/anolisa/tokenless/rtk",
-            "/usr/bin/rtk",
-            "/usr/libexec/anolisa/tokenless/rtk",
-            "/usr/lib/anolisa/tokenless/rtk",
-            "/home/alice/.local/share/anolisa/tokenless/rtk",
-            "/home/alice/.local/lib/anolisa/tokenless/rtk",
+            "/home/alice/.local/bin/tokenless",
+            "/usr/local/bin/tokenless",
+            "/usr/bin/tokenless",
         )
         self.assertEqual(paths, expected)
 
@@ -382,7 +378,7 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                     ("/usr/local/bin/tokenless", "/usr/bin/tokenless"),
                 )
 
-    def test_resolver_finds_makefile_user_helper_without_path(self) -> None:
+    def test_legacy_rtk_helper_is_not_an_install_layout_fallback(self) -> None:
         hook_utils = self._hook_utils()
         with tempfile.TemporaryDirectory() as home:
             helper_dir = os.path.join(
@@ -399,7 +395,7 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                 mock.patch.dict(os.environ, {"HOME": home}),
                 mock.patch.object(hook_utils.shutil, "which", return_value=None),
             ):
-                self.assertEqual(hook_utils.resolve_binary("rtk"), rtk_path)
+                self.assertIsNone(hook_utils.resolve_binary("rtk"))
             hook_utils._resolved_cache.clear()
 
     def test_resolver_prefers_user_layout_to_explicit_legacy_fallback(self) -> None:

@@ -30,15 +30,15 @@ that invocation without requiring another dispatcher.
 
 PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`, and
 `mcp__qw-builtin__mcp_workspace_bash`; RTK decides whether to rewrite each command.
-PowerShell calls bind the native RTK executable and scope attribution variables
+PowerShell calls bind the native Tokenless executable and scope attribution variables
 to that invocation. PostTool classifies PowerShell output as command output,
 retains file-content protection, and avoids compressing RTK output twice.
 Unsupported commands pass through.
 
-The PowerShell wrapper uses a child-scope `rtk` alias. In a rewritten compound
-command, this also binds any pre-existing bare `rtk` invocation to the managed
-binary; POSIX binding only changes calls inserted by the rewrite. Explicit
-executable paths are unaffected. The wrapper preserves `$?` and `$LASTEXITCODE`
+The PowerShell wrapper uses a child-scope forwarding function and local alias for `tokenless`.
+Confirmed inserted calls use `tokenless -- rtk ...` so native flags bypass the function's parameter
+binding. The function forwards pipeline input and restores the caller's alias/function scope.
+Explicit executable paths are unaffected. The wrapper preserves `$?` and `$LASTEXITCODE`
 after restoring attribution variables, including nonzero native exits, without
 adding stderr output or entries to `$Error`.
 When this wrapper is the final command passed to `powershell -Command` or
@@ -67,7 +67,7 @@ that separately in a QwenWork local session.
 Native binary discovery uses the executable's sibling directory and absolute
 PATH entries. Unlike Unix, Windows discovery does not check file or directory
 ACLs, ownership, or reparse points: configured installation and PATH directories
-are trusted. RTK resolution accepts only `.exe`; general dependency discovery
+are trusted. The runtime invokes its own `.exe` for RTK; general dependency discovery
 also accepts `.com`, `.bat`, and `.cmd` entries from `PATHEXT`.
 
 Windows support covers the native CLI and QwenWork adapter. npm copies other
@@ -76,8 +76,8 @@ validated. Security-workspace/VM sessions and Windows ARM64 are unsupported.
 
 ## Build and test on Windows
 
-Build this component from native PowerShell with Git, Rust's
-`x86_64-pc-windows-msvc` toolchain, and Visual Studio C++ Build Tools (including
+Build this component from native PowerShell with Git, the
+Rust 1.91.0 `x86_64-pc-windows-msvc` toolchain, and Visual Studio C++ Build Tools (including
 the Windows SDK). Packaging requires Node.js/npm and Python 3.10+; the
 QwenWork adapter also uses Python. No Git Bash, WSL, or `make` is required. Windows ARM64 is not
 supported. The Linux CI entry point is described below.
@@ -90,7 +90,7 @@ $packages = Get-ChildItem npm/dist/tokenless-win32-x64/*.tgz, npm/dist/tokenless
 npm install -g $packages.FullName
 ```
 
-The build script fetches and patches the pinned RTK revision and writes both
+The build script fetches and patches the pinned RTK revision and writes the unified
 executables to `target/npm-prebuilt/win32-x64`. Add `-Debug` for a development
 build. The npm packages are local artifacts; this command does not publish them.
 
@@ -142,7 +142,9 @@ image ID: `sha256:1392a2684a4853a3da0219caef07c4b47f8833775b1559f18d54cd656abefb
 Both fixed identifiers refer to the same verified builder.
 The action checks that identity and the image's SDK inventory before building;
 it does not build or pull the image. Provision it before enabling the job.
-The frozen image contains Rust 1.93.0, cargo-xwin 0.23.1, maturin 1.15.0,
+The action installs Rust 1.91.0 and the Windows target on the host, then mounts
+that compiler into the frozen container to build Tokenless. The SDK inventory
+check still verifies the original image, which contains Rust 1.93.0, cargo-xwin 0.23.1, maturin 1.15.0,
 LLVM 18.1.3, Wine 9.0 and Windows Python 3.11.9 with its import libraries.
 The host needs the existing release-runner tools, including Docker,
 Node.js/npm and cargo-sbom 0.10.0. Source, Cargo downloads, build output and Wine
@@ -154,6 +156,7 @@ directories. It builds the checked-out commit, or the exact `--tag` when supplie
 
 ```bash
 root="$PWD"
+rustup toolchain install 1.91.0 --profile minimal --target x86_64-pc-windows-msvc
 mkdir -p /tmp/tokenless-windows-release
 RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
 TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
@@ -165,10 +168,10 @@ TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
     --profile windows-msvc-x86_64
 ```
 
-The Windows ZIP contains `tokenless.exe`, `rtk.exe`, `LICENSE` and two npm
+The Windows ZIP contains `tokenless.exe`, RTK source/license notices, `LICENSE` and two npm
 tarballs under `npm/` (the Windows-targeted root package and `win32-x64` platform
 package). It has SHA-256 and CycloneDX sidecars like the other release archives.
-CLI and RTK use a static CRT, with an import check rejecting external VC++ runtime
+The unified CLI uses a static CRT, with an import check rejecting external VC++ runtime
 DLLs. The separate Python wheel uses `cp311-abi3-win_amd64` and the runtime supplied
 with Windows Python. The release workflow uploads
 these assets to GitHub; it does not publish to npm or PyPI. Use all five platform

@@ -1,10 +1,10 @@
-//! Reproduce Tokenless's pinned RTK source layout and receipt its build inputs.
+//! Build Tokenless from tracked sources with a fresh pinned RTK dependency.
 
 use super::{add, command, copy};
 use crate::{digest, Error, Payload, Result};
 use std::{collections::BTreeMap, fs, path::Path, sync::atomic::AtomicBool};
 
-/// Fetch and patch an independent RTK source tree without reusing local edits.
+/// Copy tracked Tokenless sources and prepare RTK without reusing local edits.
 pub(super) fn prepare(repo: &Path, cancel: &AtomicBool) -> Result<tempfile::TempDir> {
     prepare_using(repo, cancel, |root| {
         command(
@@ -31,16 +31,34 @@ pub(super) fn prepare_using(
     let root = tempfile::Builder::new()
         .prefix("aw-rtk-source-")
         .tempdir()?;
-    let shared = root.path().join("crates/tokenless-stats/src");
-    fs::create_dir_all(&shared)?;
-    for name in ["home.rs", "path_policy.rs", "rtk_outcome.rs"] {
-        copy(
-            &repo
-                .join("src/tokenless/crates/tokenless-stats/src")
-                .join(name),
-            &shared.join(name),
-            cancel,
+    let tracked = command(
+        repo,
+        "git",
+        &["ls-files".into(), "-z".into(), "src/tokenless".into()],
+        10,
+        cancel,
+    )?;
+    for name in tracked
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let name = std::str::from_utf8(name).map_err(|error| Error::Invalid(error.to_string()))?;
+        let relative = Path::new(name)
+            .strip_prefix("src/tokenless")
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        let destination = root.path().join(relative);
+        fs::create_dir_all(
+            destination
+                .parent()
+                .ok_or_else(|| Error::Invalid("source has no parent".into()))?,
         )?;
+        let source = repo.join(name);
+        if source.symlink_metadata()?.file_type().is_symlink() {
+            // Adapter directory links must retain their relative targets in the snapshot.
+            std::os::unix::fs::symlink(fs::read_link(&source)?, &destination)?;
+        } else {
+            copy(&source, &destination, cancel)?;
+        }
     }
     setup(root.path())?;
     Ok(root)
@@ -86,14 +104,9 @@ pub(super) fn stage(
             "src/tokenless/scripts/setup-rtk.sh",
         ),
         (
-            "rtk-tokenless-stats.patch",
-            repo.join("src/tokenless/third_party/patches/rtk-tokenless-stats.patch"),
-            "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
-        ),
-        (
-            "rtk-pytest-error-report.patch",
-            repo.join("src/tokenless/third_party/patches/rtk-pytest-error-report.patch"),
-            "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+            "patches-sha256",
+            rtk.join(".anolisa-rtk-patches"),
+            "setup-rtk.sh:.anolisa-rtk-patches",
         ),
     ] {
         add(
@@ -105,6 +118,30 @@ pub(super) fn stage(
             cancel,
         )?;
         inputs.push(serde_json::json!({"source":origin,"payload":name,"sha256":digest(&source)?}));
+    }
+    let setup = fs::read_to_string(repo.join("src/tokenless/scripts/setup-rtk.sh"))?;
+    let patches = setup
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("PATCHES=(")
+                .and_then(|line| line.strip_suffix(')'))
+        })
+        .filter(|list| !list.trim().is_empty())
+        .ok_or_else(|| Error::Invalid("RTK patch list is missing".into()))?;
+    for name in patches.split_whitespace() {
+        let source = repo.join("src/tokenless/third_party/patches").join(name);
+        add(
+            root,
+            &format!("{directory}/{name}"),
+            &source,
+            false,
+            files,
+            cancel,
+        )?;
+        inputs.push(serde_json::json!({
+            "source":format!("src/tokenless/third_party/patches/{name}"),
+            "payload":name,"sha256":digest(&source)?
+        }));
     }
     let provenance = root.join("rtk-provenance.json");
     fs::write(

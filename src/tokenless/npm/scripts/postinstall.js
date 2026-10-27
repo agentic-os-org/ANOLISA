@@ -17,8 +17,8 @@
  * Platform packages follow the naming convention:
  *   @anolisa/tokenless-{os}-{arch}
  *
- * Each platform package ships two native binaries:
- *   bin/tokenless, bin/rtk
+ * Each platform package ships one native binary:
+ *   bin/tokenless
  *
  * Exit codes: on a supported platform, a missing platform package or a
  * missing binary is a hard failure (non-zero exit) so `npm install` fails
@@ -51,7 +51,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = join(__dirname, '..');
 const binDir = join(packageRoot, 'bin');
 
-const BINARIES = ['tokenless', 'rtk'];
+const BINARIES = ['tokenless'];
 
 // Ownership marker inside the shared adapter directory. Content cannot prove
 // ownership — every copy of the same release is byte-identical — so whoever
@@ -219,6 +219,12 @@ function main() {
   }
 
   const missing = [];
+  // These launchers live inside this npm package's owned directory. Global
+  // or user-installed RTK executables are outside the cleanup boundary.
+  for (const legacy of ['rtk', 'rtk.exe']) {
+    try { unlinkSync(join(binDir, legacy)); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   for (const binary of BINARIES) {
     const nativeBinary = join(pkgDir, 'bin', binary + (platform() === 'win32' ? '.exe' : ''));
     if (!existsSync(nativeBinary)) {

@@ -80,7 +80,7 @@ attach them to the PR as CI artifacts.
 - `rtk` binary for `l1_rtk_format_compat.rs` (optional — tests skip if missing).
   Build it from the tokenless tree: `just setup-rtk && cargo build --release
   --manifest-path third_party/rtk/Cargo.toml`, then point tests at it with
-  `RTK_BIN=/path/to/rtk` or place it at `../../third_party/rtk/target/release/rtk`.
+  `TOKENLESS_BIN=/path/to/tokenless` or place it at `../../target/release/tokenless`.
 - Python 3.11+ for fixture regeneration only — `gen_fixtures.py` uses the
   standard library exclusively, no third-party packages
   (fixtures are committed; Python is NOT required for benchmarks or tests).
@@ -147,7 +147,7 @@ stacking report) is computed in Rust in-process.
    Production adapters may use different configurations with different results.
 6. **RTK version metadata**: `benchmark_identity.json` records `rtk_version` as a
    best-effort traceability field. A version is recorded only when the rtk
-   reference (`$RTK_BIN` — a path or a bare command name resolved through
+   reference (`$TOKENLESS_BIN` — a path or a bare command name resolved through
    `PATH` — or the vendored release build) points at an executable *and*
    `<rtk> --version` exits 0 within `RTK_VERSION_TIMEOUT_SECS` (default 5).
    Every other outcome records `"unavailable"`: unresolvable or non-executable

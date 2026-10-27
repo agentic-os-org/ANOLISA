@@ -28,7 +28,7 @@ if r['operation'] == 'pre_tool':
     args = r['input']['arguments'].copy()
     args['command'] = ('env TOKENLESS_AGENT_ID=' + r['attribution']['agent_id']
         + ' TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=blocked-call TOKENLESS_DATA_DIR='
-        + os.environ['TOKENLESS_DATA_DIR'] + ' /opt/tokenless/rtk git status')
+        + os.environ['TOKENLESS_DATA_DIR'] + ' /opt/tokenless/tokenless rtk git status')
     action, optimization = 'block_and_suggest', 'rtk'
     if mode == 'direct': action = 'replace_arguments'
     if mode == 'other_field': args['cwd'] = '/changed'
@@ -275,7 +275,7 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
     );
     environment.insert("TOKENLESS_STATS_ENABLED".into(), "0".into());
     environment.insert("TOKENLESS_SLS_ENABLED".into(), "0".into());
-    environment.insert("AW_TOKENLESS_REAL_CLI".into(), cli.into_os_string());
+    environment.insert("AW_TOKENLESS_REAL_CLI".into(), cli.clone().into_os_string());
     environment.insert(
         "AW_TOKENLESS_SMOKE_STDERR".into(),
         diagnostics.clone().into_os_string(),
@@ -362,7 +362,10 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
                 });
             serde_json::from_slice(&output.stdout).unwrap()
         };
-        for original in ["git status", "rg 'foo|bar' src", "sudo git status"] {
+        let mut privileged = f.request("hermes");
+        privileged["event"]["tool"]["input"]["command"] = json!("sudo git status");
+        assert_eq!(invoke(privileged)["effects"], json!([]));
+        for original in ["git status", "rg 'foo|bar' src"] {
             let mut before = f.request("hermes");
             before["event"]["tool"]["input"]["command"] = json!(original);
             before["budget_ms"] = json!(5000);
@@ -379,7 +382,7 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
             assert!(retry["command"]
                 .as_str()
                 .unwrap()
-                .contains(rtk.to_str().unwrap()));
+                .contains(cli.canonicalize().unwrap().to_str().unwrap()));
             before["event"]["tool"]["input"] = retry;
             before["event"]["tool"]["call_id"] = json!("fresh-retry");
             assert_eq!(invoke(before.clone())["effects"], json!([]));

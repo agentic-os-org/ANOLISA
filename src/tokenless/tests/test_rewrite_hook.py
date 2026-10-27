@@ -61,9 +61,9 @@ class PreToolContractTest(unittest.TestCase):
             {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "tool_input": {"command": "/mock/rtk grep error log"},
+                    "tool_input": {"command": "/mock/tokenless rtk grep error log"},
                     "updatedInput": {
-                        "command": "/mock/rtk grep error log",
+                        "command": "/mock/tokenless rtk grep error log",
                         "timeout": 30,
                     },
                 }
@@ -215,7 +215,7 @@ class HookLifecycleStateTest(unittest.TestCase):
         )
         self.assertEqual(
             rewritten["hookSpecificOutput"]["updatedInput"],
-            {"command": "/mock/rtk grep error log", "timeout": 30},
+            {"command": "/mock/tokenless rtk grep error log", "timeout": 30},
         )
         output = self.run_hook(
             RESPONSE_HOOK, post_tool_payload("call-1"), "--agent-id", "qwenwork"
@@ -300,7 +300,8 @@ class RealCorePreToolTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             output = json.loads(proc.stdout)["hookSpecificOutput"]
             command = output["tool_input"]["command"]
-            self.assertIn(f" {rtk} grep --count error log", command)
+            self.assertIn(f" {os.path.realpath(corpus.DEBUG_TOKENLESS_BIN)} rtk grep error log", command)
+            self.assertNotIn(str(rtk), command)
             self.assertIn("TOKENLESS_AGENT_ID=qoder-cli", command)
             self.assertEqual(output["updatedInput"]["timeout"], 30)
 

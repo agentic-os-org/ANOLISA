@@ -60,7 +60,7 @@ class HermesLifecycleTest(unittest.TestCase):
         rewritten = (
             "env TOKENLESS_AGENT_ID=hermes-agent TOKENLESS_SESSION_ID=session-1 "
             "TOKENLESS_TOOL_USE_ID=call-1 TOKENLESS_DATA_DIR=/tmp/tokenless "
-            "/mock/rtk git status"
+            "/mock/tokenless rtk git status"
         )
         self.response = {
             "arguments": {"command": rewritten},
@@ -398,7 +398,7 @@ class HermesLifecycleTest(unittest.TestCase):
         attributed = (
             "env TOKENLESS_AGENT_ID=hermes-agent TOKENLESS_SESSION_ID=session-1 "
             "TOKENLESS_TOOL_USE_ID=call-1 TOKENLESS_DATA_DIR=/tmp/tokenless "
-            "/usr/libexec/anolisa/tokenless/rtk git status"
+            "/usr/bin/tokenless rtk git status"
         )
 
         self.plugin.on_transform_tool_result(
@@ -420,7 +420,7 @@ class HermesLifecycleTest(unittest.TestCase):
 
         self.plugin.on_transform_tool_result(
             tool_name="terminal",
-            args={"command": "/mock/rtk git status"},
+            args={"command": "/mock/tokenless rtk git status"},
             result="manual rtk output",
             status="ok",
         )
@@ -431,7 +431,7 @@ class HermesLifecycleTest(unittest.TestCase):
             args={
                 "command": (
                     "env TOKENLESS_AGENT_ID=hermes-agent "
-                    "TOKENLESS_DATA_DIR=/tmp/tokenless /mock/rtk git status"
+                    "TOKENLESS_DATA_DIR=/tmp/tokenless /mock/tokenless rtk git status"
                 )
             },
             result="partial wrapper output",

@@ -37,8 +37,8 @@
 # compares those, and leaves alone anything a newer installation has taken over.
 #
 # Installation methods and what each one produces:
-#   npm     prebuilt `tokenless` + `rtk` binaries and the bundled Agent adapters
-#   source  the `tokenless` CLI only — no `rtk`, no adapters (CLI-only install)
+#   npm     prebuilt `tokenless` with RTK and the bundled Agent adapters
+#   source  the `tokenless` CLI with RTK, without adapters
 #
 # The npm route is transactional: everything it replaces is snapshotted first,
 # and a failure after `npm install -g` puts the global package, the launcher
@@ -1374,6 +1374,14 @@ try_npm_install() {
   INSTALLED_TARGETS=()
   local bin link_target link_path resolved
   for bin in tokenless rtk; do
+    # Only older published packages ship this helper. Never adopt a system RTK.
+    if [ "$bin" = "rtk" ]; then
+      resolved=$(resolve_path "${npm_bin}/${bin}" 2>/dev/null || true)
+      case "$resolved" in
+        "${npm_prefix}/lib/node_modules/${NPM_PACKAGE}/"*) ;;
+        *) continue ;;
+      esac
+    fi
     if [ ! -f "${npm_bin}/${bin}" ] && [ ! -L "${npm_bin}/${bin}" ]; then
       continue
     fi
@@ -1619,7 +1627,7 @@ try_source_build() {
   [ -n "$src_dir" ] || die "Could not find tokenless source (src/tokenless/Cargo.toml) in tarball"
 
   info "Building (this may take a few minutes)..."
-  (cd "$src_dir" && cargo build --release --locked -p tokenless-cli 2>&1) || die "Build failed"
+  (cd "$src_dir" && { [ ! -f scripts/setup-rtk.sh ] || bash scripts/setup-rtk.sh; } && cargo build --release --locked -p tokenless-cli 2>&1) || die "Build failed"
 
   # `install(1)` must be checked by hand: errexit is off here, so a failed
   # write (ENOSPC, EACCES, a read-only mount) would otherwise still be reported
@@ -1639,6 +1647,17 @@ try_source_build() {
   # A source build writes a regular file, so the recorded link target is empty —
   # which is itself evidence: a symlink at that path belongs to somebody else.
   INSTALLED_TARGETS=("")
+  if [ -f "${src_dir}/scripts/stage-rtk-notices.sh" ]; then
+    local notices_dir="${DEFAULT_DATA_DIR}/tokenless/third_party/rtk" notice
+    if ! bash "${src_dir}/scripts/stage-rtk-notices.sh" "$notices_dir"; then
+      err "Cannot install RTK license and source notices at ${notices_dir}"
+      return 1
+    fi
+    for notice in "$notices_dir"/*; do
+      INSTALLED_FILES+=("$notice")
+      INSTALLED_TARGETS+=("")
+    done
+  fi
   NPM_PREFIX_USED=""
   NPM_PKG_OWNER=""
   ADAPTERS_DIR_USED=""
@@ -1649,7 +1668,7 @@ try_source_build() {
   fi
 
   info "Installed tokenless to ${install_dir}/tokenless"
-  warn "Source build installs the tokenless CLI only: no rtk and no Agent adapters."
+  warn "Source build installs the CLI only, with embedded RTK and without Agent adapters."
   warn "Adapter enablement therefore does not apply to this install method — see the"
   warn "'Install Tokenless' table in the Quick Start for the path that matches it."
 

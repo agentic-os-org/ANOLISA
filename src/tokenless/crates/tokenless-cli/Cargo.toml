@@ -2,6 +2,7 @@
 name = "tokenless-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "CLI tool for LLM schema and response compression"
 
@@ -10,6 +11,7 @@ name = "tokenless"
 path = "src/main.rs"
 
 [dependencies]
+rtk.workspace = true
 tokenless-protocol = { path = "../tokenless-protocol" }
 tokenless-schema = { path = "../tokenless-schema" }
 tokenless-stats = { path = "../tokenless-stats", features = ["query-server"] }

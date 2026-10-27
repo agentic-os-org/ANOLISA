@@ -5,7 +5,7 @@
 ## Purpose
 
 `anolisa-tokenless` is the framework-neutral, in-process Tokenless SDK. A platform wheel contains
-the PyO3 runtime and the pinned RTK executable, so Python applications do not require `tokenless`
+the PyO3 runtime and a Tokenless executable containing pinned RTK, so Python applications do not require `tokenless`
 or `rtk` on `PATH`.
 
 The public `TokenlessSdk` maps four host lifecycle boundaries to Tokenless behavior:
@@ -217,9 +217,9 @@ settings.
 
 ## Packaging and validation
 
-`make python-wheel` builds the pinned RTK version, stages it as
-`anolisa_tokenless/_bin/rtk`, and creates a CPython 3.11 stable-ABI platform wheel. Cross-platform
-builders may set `PYTHON_RTK_BINARY` to the RTK executable built for the same wheel target.
+`make python-wheel` builds Tokenless with pinned RTK, stages the executable as
+`anolisa_tokenless/_bin/tokenless`, and creates a CPython 3.11 stable-ABI platform wheel. Cross-platform
+builders may set `PYTHON_TOKENLESS_BINARY` to the Tokenless executable built for the same wheel target.
 `make test-python-runtime` installs the wheel in a fresh environment and exercises all four
 lifecycles plus statistics queries without relying on a system RTK binary.
 

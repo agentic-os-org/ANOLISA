@@ -5,7 +5,7 @@
 LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
 
 随包提供的 RTK 0.49.0 保留原生 `grep -l` / `-m` 语义，保守处理 Pipeline 重写，
-并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
+并让 `sudo` 命令保持原样。RTK 恢复提示使用 `tokenless rtk recall`，保留的输出以宿主 OS 用户为作用域，
 不按 Tokenless 租户或 Session 隔离。
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/tokenless/cli-reference.md#随包提供的-rtk-命令)。
@@ -132,7 +132,7 @@ PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Cont
 首选 ANOLISA CLI 安装已发布的组件。
 
 安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`
-和 `rtk` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
+也在这个目录，RTK 通过 `tokenless rtk` 调用。如果当前 Shell 还找不到命令，先把该目录加入
 `PATH`。
 
 ```bash
@@ -156,7 +156,7 @@ sudo anolisa --install-mode system adopt tokenless
 直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
 
 另外两条公开安装路径可以独立安装 CLI，但不会写入 anolisa 组件记录。npm 路径
-提供预编译的 `tokenless` 和 `rtk` 二进制以及随包分发的 Agent adapter，需要
+提供内置 RTK 的预编译 `tokenless` 二进制以及随包分发的 Agent adapter，需要
 Node.js 16.7+（`fs.cpSync` 自该版本起提供，也是包的 postinstall 所需版本）。
 curl 路径是独立安装脚本，优先使用 npm，失败时回退到源码构建：
 
@@ -170,8 +170,7 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 `~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
 下对应框架的脚本启用。curl 安装脚本会把它创建的内容记录到
 `~/.local/share/tokenless/install-receipt`，`scripts/uninstall.sh` 依据该
-回执只删除这些路径；其源码构建路径是 CLI-only（没有 `rtk`，也没有
-adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
+回执只删除这些路径；其源码构建路径是 CLI-only（内置 RTK，不含 adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
 完整的方式对照见 `docs/user-guide/zh/tokenless/index.md`。
 
 `~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
@@ -277,8 +276,8 @@ cd Token-Less
 make setup
 ```
 
-源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 辅助
-二进制也位于同一个目录，并部署开发所需的全部 adapter。
+源码安装会把内置 RTK 的 `tokenless` 放在 `~/.local/bin`，并部署开发所需的全部 adapter。
+Linux 源码构建需要 Rust 1.91 或更高版本。
 
 ### 构建 Python SDK
 
@@ -358,7 +357,7 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 
 ### 千问办公插件（Windows x64 本地模式）
 
-Windows x64 支持原生 `tokenless.exe`、`rtk.exe`、npm 启动器和千问办公 PowerShell
+Windows x64 支持原生 内置 RTK 的 `tokenless.exe`、npm 启动器和千问办公 PowerShell
 Hook，不支持 Windows ARM64。Windows 软件包尚未发布，请按
 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并打包，
 不需要 Git Bash 或 WSL。
@@ -545,7 +544,7 @@ Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值�
 
 ## Raw 打包
 
-Raw 打包接收同一目录中已经构建好的 `tokenless` 和 `rtk`，并按照
+Raw 打包接收同一目录中已经构建好的 内置 RTK 的 `tokenless`，并按照
 组件维护的稳定目录结构生成制品：
 
 ```bash

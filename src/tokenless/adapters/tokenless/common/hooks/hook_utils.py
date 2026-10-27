@@ -39,68 +39,13 @@ def _user_path(*parts: str) -> str:
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
 _TOKENLESS_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "tokenless")
 _TOKENLESS_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "tokenless")
-_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "rtk")
-_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
-
-_TOKENLESS_HELPER_BINARIES = frozenset({"rtk"})
-
-
 def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
     """Return install-layout fallbacks for a binary outside ``PATH``."""
     if not name or os.path.basename(name) != name or name in {".", ".."}:
         return ()
     home = os.path.expanduser("~") if home is None else home
-    user_home = home if home and os.path.isabs(home) else None
-    paths = []
-    if user_home:
-        paths.append(os.path.join(user_home, ".local", "bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        if user_home:
-            paths.extend(
-                [
-                    # Anolisa CLI user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "lib",
-                        "anolisa",
-                        "libexec",
-                        "tokenless",
-                        name,
-                    ),
-                    # Makefile user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "libexec",
-                        "anolisa",
-                        "tokenless",
-                        name,
-                    ),
-                ]
-            )
-    paths.append(os.path.join("/usr/local/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        # Anolisa CLI system mode.
-        paths.append(os.path.join("/usr/local/libexec/anolisa/tokenless", name))
-    paths.append(os.path.join("/usr/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        paths.extend(
-            [
-                # Makefile system mode and RPM.
-                os.path.join("/usr/libexec/anolisa/tokenless", name),
-                # Debian and pre-layout-migration compatibility.
-                os.path.join("/usr/lib/anolisa/tokenless", name),
-            ]
-        )
-        if user_home:
-            paths.extend(
-                [
-                    os.path.join(user_home, ".local", "share", "anolisa", "tokenless", name),
-                    os.path.join(user_home, ".local", "lib", "anolisa", "tokenless", name),
-                ]
-            )
+    paths = [os.path.join(home, ".local", "bin", name)] if home and os.path.isabs(home) else []
+    paths.extend((os.path.join("/usr/local/bin", name), os.path.join("/usr/bin", name)))
     return tuple(paths)
 
 

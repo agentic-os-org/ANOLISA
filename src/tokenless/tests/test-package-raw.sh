@@ -8,6 +8,12 @@ trap 'rm -rf "$TMP"' EXIT
 
 SOURCE="$TMP/tokenless"
 ADAPTERS="$SOURCE/adapters/tokenless"
+mkdir -p "$SOURCE/scripts" "$SOURCE/third_party/rtk" "$SOURCE/third_party/patches"
+cp "$ROOT/scripts/stage-rtk-notices.sh" "$ROOT/scripts/setup-rtk.sh" "$SOURCE/scripts/"
+cp "$ROOT/third_party/patches/"*.patch "$SOURCE/third_party/patches/"
+printf 'RTK fixture license\n' > "$SOURCE/third_party/rtk/LICENSE"
+printf '0123456789012345678901234567890123456789\n' > "$SOURCE/third_party/rtk/.anolisa-rtk-commit"
+printf 'fixture patch digest\n' > "$SOURCE/third_party/rtk/.anolisa-rtk-patches"
 CONTRACT="$SOURCE/.anolisa/component.toml"
 # The version this fixture publishes. `make test-raw-package` runs the suite a
 # second time with a prerelease so the packer is exercised on the one version
@@ -279,7 +285,10 @@ mkdir -p "$EXTRACTED"
 tar -xzf "$OUT_ONE/$LINUX_ARTIFACT" -C "$EXTRACTED"
 cmp "$CONTRACT" "$EXTRACTED/.anolisa/component.toml"
 cmp "$LINUX_X64/tokenless" "$EXTRACTED/bin/tokenless"
-cmp "$LINUX_X64/rtk" "$EXTRACTED/libexec/anolisa/tokenless/rtk"
+test ! -e "$EXTRACTED/libexec/anolisa/tokenless/rtk"
+test ! -e "$EXTRACTED/bin/rtk"
+cmp "$SOURCE/third_party/rtk/LICENSE" "$EXTRACTED/third_party/rtk/LICENSE"
+cmp "$SOURCE/third_party/patches/rtk-library.patch" "$EXTRACTED/third_party/rtk/rtk-library.patch"
 
 # The archived QwenPaw pin keeps both spellings of the one version it was
 # stamped from: the raw workspace version in the release-tag path (the tag the
@@ -413,5 +422,40 @@ for path in (contract_path, seed_path):
         match = re.search(r'^' + key + r'\s*=\s*"([^"]+)"$', matches[0], re.M)
         assert match and match.group(1) == value, (path, key)
 DRIFT_PY
+
+# Run the real RPM legacy cleanup block against isolated homes, including dangling links.
+python3 - "$ROOT/tokenless.spec.in" "$TMP" <<'RPM_PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+script = Path(sys.argv[1]).read_text().split("%post\n", 1)[1].split("# Remove stale user-level", 1)[0]
+for kind in ("owned", "dangling", "relative", "foreign-link", "foreign-file"):
+    home = Path(sys.argv[2]) / ("rpm home " + kind)
+    binary = home / ".local/bin"
+    helper = home / ".local/lib/anolisa/tokenless/rtk"
+    binary.mkdir(parents=True)
+    helper.parent.mkdir(parents=True)
+    if kind != "dangling":
+        helper.write_text("old managed helper")
+    foreign = home / "user-rtk"
+    foreign.write_text("user owned")
+    for name in ("rtk", "rtk.bak"):
+        link = binary / name
+        if kind == "foreign-file":
+            link.write_text("user owned")
+        else:
+            target = foreign if kind == "foreign-link" else helper
+            link.symlink_to(os.path.relpath(target, binary) if kind == "relative" else target)
+    subprocess.run(["bash", "-eu", "-c", script], env={**os.environ, "HOME": str(home)}, check=True)
+    for name in ("rtk", "rtk.bak"):
+        link = binary / name
+        if kind.startswith("foreign"):
+            assert link.read_text() == "user owned", (kind, name)
+        else:
+            assert not os.path.lexists(link), (kind, name)
+    assert foreign.read_text() == "user owned"
+RPM_PY
 
 echo "tokenless component-owned raw package tests passed"

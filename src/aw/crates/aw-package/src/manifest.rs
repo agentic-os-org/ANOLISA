@@ -112,7 +112,6 @@ pub fn inspect(bundle: &Path) -> Result<Manifest> {
             vec![
                 "libexec/aw/providers/tokenless/aw-provider-tokenless",
                 "libexec/aw/providers/tokenless/tokenless",
-                "libexec/aw/providers/tokenless/rtk",
             ]
         } else {
             require(

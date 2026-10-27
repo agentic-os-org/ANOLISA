@@ -306,8 +306,8 @@ grep -qF "claude-code: ready" <<<"$out" \
 # not any runner-installed binaries.
 grep -qF "present ($FAKE_BIN/tokenless)" <<<"$out" \
     || fail "detect.sh should resolve the isolated tokenless stub, not a host binary" "$out"
-grep -qF "present ($FAKE_BIN/rtk)" <<<"$out" \
-    || fail "detect.sh should resolve the isolated rtk stub, not a host binary" "$out"
+grep -qF "embedded" <<<"$out" \
+    || fail "detect.sh should report the RTK engine in the isolated tokenless stub" "$out"
 # The $HOME/.claude half of the reported race: the config dir is still
 # invisible at probe time. detect.sh must report it as missing without
 # letting that affect readiness (the probe is informational only).

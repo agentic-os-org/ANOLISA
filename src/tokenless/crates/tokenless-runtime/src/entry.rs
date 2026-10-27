@@ -45,8 +45,8 @@ pub struct EntryOptions {
     pub html_extraction_enabled: bool,
     /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,
-    /// Resolved RTK executable for PreTool.
-    pub rtk_path: Option<PathBuf>,
+    /// Tokenless executable containing the RTK engine for PreTool.
+    pub tokenless_path: Option<PathBuf>,
     /// Resolved state directory propagated to RTK commands.
     pub rtk_data_dir: Option<PathBuf>,
 }
@@ -108,7 +108,7 @@ pub fn dispatch_with_store(
                 Response::PreTool(pre_tool_with_optional_rtk(
                     request,
                     &envelope.attribution,
-                    options.rtk_path.as_deref(),
+                    options.tokenless_path.as_deref(),
                     options.rtk_data_dir.as_deref(),
                     RTK_TIMEOUT,
                 )?),
@@ -317,13 +317,13 @@ fn collect_markers(value: &Value, recovery: &RecoveryMethod, markers: &mut BTree
 pub(crate) fn pre_tool_with_rtk(
     request: &PreToolRequest,
     attribution: &Attribution,
-    rtk_path: &Path,
+    tokenless_path: &Path,
     data_dir: &Path,
 ) -> Result<PreToolResponse, RuntimeError> {
     pre_tool_with_optional_rtk(
         request,
         attribution,
-        Some(rtk_path),
+        Some(tokenless_path),
         Some(data_dir),
         RTK_TIMEOUT,
     )
@@ -332,7 +332,7 @@ pub(crate) fn pre_tool_with_rtk(
 fn pre_tool_with_optional_rtk(
     request: &PreToolRequest,
     attribution: &Attribution,
-    rtk_path: Option<&Path>,
+    tokenless_path: Option<&Path>,
     data_dir: Option<&Path>,
     timeout: Duration,
 ) -> Result<PreToolResponse, RuntimeError> {
@@ -352,11 +352,12 @@ fn pre_tool_with_optional_rtk(
     if is_post_tool_owned_command(command) {
         return Ok(pre_tool_passthrough(request));
     }
-    let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
+    let tokenless_path = tokenless_path.ok_or(RuntimeError::RtkUnavailable)?;
     let data_dir = data_dir.ok_or(RuntimeError::RtkDataDirectoryUnavailable)?;
 
-    let mut child = Command::new(rtk_path);
+    let mut child = Command::new(tokenless_path);
     child
+        .arg("rtk")
         .arg("rewrite")
         .arg(command)
         .env("TOKENLESS_AGENT_ID", &attribution.agent_id)
@@ -369,7 +370,7 @@ fn pre_tool_with_optional_rtk(
     if let Some(tool_use_id) = &attribution.tool_use_id {
         child.env("TOKENLESS_TOOL_USE_ID", tool_use_id);
     }
-    let (status, stdout) = rtk::run(child, rtk_path, timeout)?;
+    let (status, stdout) = rtk::run(child, tokenless_path, timeout)?;
     let code = status.code().ok_or(RuntimeError::RtkTerminated)?;
     if matches!(code, 1 | 2) {
         return Ok(pre_tool_passthrough(request));
@@ -382,45 +383,15 @@ fn pre_tool_with_optional_rtk(
         return Ok(pre_tool_passthrough(request));
     }
     let anchored = if request.tool_name.eq_ignore_ascii_case("PowerShell") {
-        anchor_powershell_rtk(rewritten, rtk_path, attribution, data_dir)
+        anchor_powershell_rtk(command, rewritten, tokenless_path, attribution, data_dir)
     } else {
         anchor_rtk_prefix_with_outcomes(
             command,
             rewritten,
-            rtk_path,
+            tokenless_path,
             attribution,
             data_dir,
-            |expected, render| {
-                if attribution
-                    .session_id
-                    .as_deref()
-                    .unwrap_or_default()
-                    .is_empty()
-                    || attribution
-                        .tool_use_id
-                        .as_deref()
-                        .unwrap_or_default()
-                        .is_empty()
-                {
-                    return None;
-                }
-                match OutcomeStore::open(data_dir, true).and_then(|mut store| {
-                    store.begin(
-                        &attribution.agent_id,
-                        attribution.session_id.as_deref().unwrap_or_default(),
-                        attribution.tool_use_id.as_deref().unwrap_or_default(),
-                        expected,
-                        command,
-                        render,
-                    )
-                }) {
-                    Ok(command) => command,
-                    Err(error) => {
-                        warn_rtk_outcome(&error);
-                        None
-                    }
-                }
-            },
+            |expected, render| begin_rtk_outcome(command, attribution, data_dir, expected, render),
         )
     };
     let mut rewritten_arguments = arguments.clone();
@@ -641,11 +612,71 @@ fn is_python_pytest(arguments: &[String], start: usize) -> bool {
     )
 }
 
-fn anchor_powershell_rtk(
-    rewritten: &str,
-    rtk_path: &Path,
+fn begin_rtk_outcome(
+    original: &str,
     attribution: &Attribution,
     data_dir: &Path,
+    expected: usize,
+    render: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let session = attribution.session_id.as_deref().unwrap_or_default();
+    let tool = attribution.tool_use_id.as_deref().unwrap_or_default();
+    if session.is_empty() || tool.is_empty() {
+        return None;
+    }
+    match OutcomeStore::open(data_dir, true).and_then(|mut store| {
+        store.begin(
+            &attribution.agent_id,
+            session,
+            tool,
+            expected,
+            original,
+            render,
+        )
+    }) {
+        Ok(command) => command,
+        Err(error) => {
+            warn_rtk_outcome(&error);
+            None
+        }
+    }
+}
+
+fn anchor_powershell_rtk(
+    original: &str,
+    rewritten: &str,
+    tokenless_path: &Path,
+    attribution: &Attribution,
+    data_dir: &Path,
+) -> String {
+    let (offsets, all_tracked) = inserted_wrappers(original, rewritten, "tokenless rtk");
+    let render = |run: Option<&str>| {
+        render_powershell_rtk(
+            original,
+            rewritten,
+            tokenless_path,
+            attribution,
+            data_dir,
+            run,
+        )
+    };
+    begin_rtk_outcome(
+        original,
+        attribution,
+        data_dir,
+        if all_tracked { offsets.len() } else { 0 },
+        &|run| render(Some(run)),
+    )
+    .unwrap_or_else(|| render(None))
+}
+
+fn render_powershell_rtk(
+    original: &str,
+    rewritten: &str,
+    tokenless_path: &Path,
+    attribution: &Attribution,
+    data_dir: &Path,
+    run: Option<&str>,
 ) -> String {
     let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
     let values = [
@@ -659,12 +690,14 @@ fn anchor_powershell_rtk(
             attribution.tool_use_id.as_deref().unwrap_or_default(),
         ),
         ("TOKENLESS_DATA_DIR", &data_dir.to_string_lossy()),
+        ("TOKENLESS_RTK_RUN_ID", run.unwrap_or_default()),
+        ("TOKENLESS_RTK_ORDINAL", ""),
     ];
-    // A child scope's alias binds native RTK calls without parsing or translating
+    // A child scope's function binds Tokenless calls without parsing or translating
     // RTK's script. Its pipelines, conditions, arguments and quoting stay intact.
+    let executable = quote(&tokenless_path.to_string_lossy());
     let mut script = format!(
-        "& {{ [CmdletBinding()] param(); Set-Alias -Name rtk -Value {} -Scope Local; ",
-        quote(&rtk_path.to_string_lossy())
+        "& {{ [CmdletBinding()] param(); function Invoke-TokenlessRtk {{ [CmdletBinding(PositionalBinding=$false)] param([int]$TokenlessOrdinal=-1, [Parameter(ValueFromRemainingArguments=$true)][object[]]$ForwardArgs, [Parameter(ValueFromPipeline=$true)][object]$PipelineValue); end {{ if ($TokenlessOrdinal -ge 0) {{ $env:TOKENLESS_RTK_ORDINAL = [string]$TokenlessOrdinal }}; if ($MyInvocation.ExpectingInput) {{ $input | & {executable} @ForwardArgs }} else {{ & {executable} @ForwardArgs }}; $tokenlessNativeOk = $?; $global:LASTEXITCODE = $LASTEXITCODE; if (-not $tokenlessNativeOk) {{ $ErrorActionPreference = 'Ignore'; $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([Exception]::new('Command failed'), 'TokenlessCommandFailed', [System.Management.Automation.ErrorCategory]::NotSpecified, $null)) }} }} }}; Set-Alias -Scope Local tokenless Invoke-TokenlessRtk; "
     );
     for (index, (name, _)) in values.iter().enumerate() {
         script.push_str(&format!(
@@ -675,7 +708,20 @@ fn anchor_powershell_rtk(
     for (name, value) in values {
         script.push_str(&format!("$env:{name} = {}; ", quote(value)));
     }
-    script.push_str(rewritten);
+    // Stop PowerShell's function binder consuming native flags such as -Verbose
+    // or -ErrorAction. An original -- remains part of the forwarded argument list.
+    let (offsets, _) = inserted_wrappers(original, rewritten, "tokenless rtk");
+    let mut copied = 0;
+    for (ordinal, offset) in offsets.into_iter().enumerate() {
+        script.push_str(&rewritten[copied..offset]);
+        if run.is_some() {
+            script.push_str(&format!("tokenless -TokenlessOrdinal {ordinal} -- rtk"));
+        } else {
+            script.push_str("tokenless -- rtk");
+        }
+        copied = offset + "tokenless rtk".len();
+    }
+    script.push_str(&rewritten[copied..]);
     script.push_str("\n} finally { $tokenlessOk = $?; $tokenlessExit = $LASTEXITCODE; ");
     for (index, (name, _)) in values.iter().enumerate() {
         script.push_str(&format!(
@@ -692,14 +738,14 @@ fn anchor_powershell_rtk(
 fn anchor_rtk_prefix(
     original: &str,
     rewritten: &str,
-    rtk_path: &Path,
+    tokenless_path: &Path,
     attribution: &Attribution,
     data_dir: &Path,
 ) -> String {
     anchor_rtk_prefix_with_outcomes(
         original,
-        rewritten,
-        rtk_path,
+        &render_rtk_command(original, rewritten),
+        tokenless_path,
         attribution,
         data_dir,
         |_, _| None,
@@ -709,12 +755,12 @@ fn anchor_rtk_prefix(
 fn anchor_rtk_prefix_with_outcomes(
     original: &str,
     rewritten: &str,
-    rtk_path: &Path,
+    tokenless_path: &Path,
     attribution: &Attribution,
     data_dir: &Path,
     begin: impl FnOnce(usize, &dyn Fn(&str) -> String) -> Option<String>,
 ) -> String {
-    let quoted_path = shell_quote(&rtk_path.to_string_lossy());
+    let quoted_path = shell_quote(&tokenless_path.to_string_lossy());
     let prefix = format!(
         "env TOKENLESS_AGENT_ID={} TOKENLESS_SESSION_ID={} TOKENLESS_TOOL_USE_ID={} TOKENLESS_DATA_DIR={} ",
         shell_quote(&attribution.agent_id),
@@ -727,8 +773,37 @@ fn anchor_rtk_prefix_with_outcomes(
     // inserted wrapper without replacing `rtk` arguments in that prefix.
     // Backtick and double-quoted command substitutions are left untouched
     // because they require the host parser.
-    let original_segments = bare_rtk_offsets_by_segment(original);
-    let rewritten_segments = bare_rtk_offsets_by_segment(rewritten);
+    let wrapper = "tokenless rtk";
+    let (replacements, all_tracked) = inserted_wrappers(original, rewritten, wrapper);
+    let render = |run: Option<&str>| {
+        let mut anchored =
+            String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
+        let mut copied_until = 0;
+        for (ordinal, offset) in replacements.iter().copied().enumerate() {
+            anchored.push_str(&rewritten[copied_until..offset]);
+            anchored.push_str(&prefix);
+            if let Some(run) = run {
+                anchored.push_str(&format!(
+                    "TOKENLESS_RTK_RUN_ID={} TOKENLESS_RTK_ORDINAL={ordinal} ",
+                    shell_quote(run)
+                ));
+            }
+            anchored.push_str(&quoted_path);
+            anchored.push_str(" rtk");
+            copied_until = offset + wrapper.len();
+        }
+        anchored.push_str(&rewritten[copied_until..]);
+        anchored
+    };
+    begin(if all_tracked { replacements.len() } else { 0 }, &|run| {
+        render(Some(run))
+    })
+    .unwrap_or_else(|| render(None))
+}
+
+fn inserted_wrappers(original: &str, rewritten: &str, wrapper: &str) -> (Vec<usize>, bool) {
+    let original_segments = wrapper_offsets_by_segment(original, wrapper);
+    let rewritten_segments = wrapper_offsets_by_segment(rewritten, wrapper);
     let mut replacements = Vec::new();
     for (segment_index, (rewritten_start, tokens)) in rewritten_segments.iter().enumerate() {
         let original_segment = original_segments.get(segment_index);
@@ -751,7 +826,7 @@ fn anchor_rtk_prefix_with_outcomes(
                 tokens
                     .iter()
                     .copied()
-                    .find(|offset| *offset + 3 > insertion_floor),
+                    .find(|offset| *offset + wrapper.len() > insertion_floor),
             );
         }
     }
@@ -768,32 +843,27 @@ fn anchor_rtk_prefix_with_outcomes(
             .map(|(_, tokens)| tokens.len())
             .sum::<usize>()
             == replacements.len();
-    let render = |run: Option<&str>| {
-        let mut anchored =
-            String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
-        let mut copied_until = 0;
-        for (ordinal, offset) in replacements.iter().copied().enumerate() {
-            anchored.push_str(&rewritten[copied_until..offset]);
-            anchored.push_str(&prefix);
-            if let Some(run) = run {
-                anchored.push_str(&format!(
-                    "TOKENLESS_RTK_RUN_ID={} TOKENLESS_RTK_ORDINAL={ordinal} ",
-                    shell_quote(run)
-                ));
-            }
-            anchored.push_str(&quoted_path);
-            copied_until = offset + 3;
-        }
-        anchored.push_str(&rewritten[copied_until..]);
-        anchored
-    };
-    begin(if all_tracked { replacements.len() } else { 0 }, &|run| {
-        render(Some(run))
-    })
-    .unwrap_or_else(|| render(None))
+    (replacements, all_tracked)
 }
 
-fn bare_rtk_offsets_by_segment(command: &str) -> Vec<(usize, Vec<usize>)> {
+/// Renders newly inserted RTK wrappers through the unified executable.
+///
+/// Quoted data and existing wrapper references are preserved; only inserted
+/// command tokens are changed, using the same boundaries as runtime attribution.
+pub fn render_rtk_command(original: &str, rewritten: &str) -> String {
+    let (offsets, _) = inserted_wrappers(original, rewritten, "rtk");
+    let mut result = String::with_capacity(rewritten.len() + offsets.len() * 10);
+    let mut cursor = 0;
+    for offset in offsets {
+        result.push_str(&rewritten[cursor..offset]);
+        result.push_str("tokenless rtk");
+        cursor = offset + 3;
+    }
+    result.push_str(&rewritten[cursor..]);
+    result
+}
+
+fn wrapper_offsets_by_segment(command: &str, wrapper: &str) -> Vec<(usize, Vec<usize>)> {
     let mut segments = Vec::new();
     let mut segment_start = 0;
     let mut current_offsets = Vec::new();
@@ -850,13 +920,13 @@ fn bare_rtk_offsets_by_segment(command: &str) -> Vec<(usize, Vec<usize>)> {
             index += width;
             continue;
         }
-        if word_start && command[index..].starts_with("rtk") {
-            let next = command[index + 3..].chars().next();
+        if word_start && command[index..].starts_with(wrapper) {
+            let next = command[index + wrapper.len()..].chars().next();
             if next.is_none_or(|value| {
                 value.is_whitespace() || matches!(value, '&' | '|' | ';' | '(' | ')')
             }) {
                 current_offsets.push(index);
-                index += 3;
+                index += wrapper.len();
                 word_start = false;
                 continue;
             }
@@ -1220,34 +1290,35 @@ mod tests {
             std::env::var("TOKENLESS_TEST_POWERSHELL").unwrap_or_else(|_| "powershell.exe".into());
         for (command, status, last_exit, process_exit) in [
             (
-                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'",
+                "tokenless -- /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'",
                 "False",
                 7,
                 1,
             ),
             (
-                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 0'",
+                "tokenless -- /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 0'",
                 "True",
                 0,
                 0,
             ),
             (
-                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'; Write-Output 'done'",
+                "tokenless -- /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'; Write-Output 'done'",
                 "True",
                 7,
                 0,
             ),
         ] {
             let script = super::anchor_powershell_rtk(
+                "",
                 command,
                 &path,
                 &attribution,
                 std::path::Path::new("C:/data with spaces"),
             );
-            let preamble = "$env:TOKENLESS_AGENT_ID='before'; Set-Alias rtk Write-Output; $ErrorActionPreference='Stop'; $Error.Clear();";
+            let preamble = "$env:TOKENLESS_AGENT_ID='before'; Set-Alias tokenless Write-Output; $ErrorActionPreference='Stop'; $Error.Clear();";
             let output = std::process::Command::new(&shell)
                 .args(["-NoProfile", "-NonInteractive", "-Command", &format!(
-                    "{preamble} {script}; [Console]::Write(\"ok=$?;exit=$LASTEXITCODE;env=$env:TOKENLESS_AGENT_ID;alias=$((Get-Alias rtk).Definition);errors=$($Error.Count);preference=$ErrorActionPreference\")")])
+                    "{preamble} {script}; [Console]::Write(\"ok=$?;exit=$LASTEXITCODE;env=$env:TOKENLESS_AGENT_ID;alias=$((Get-Alias tokenless).Definition);errors=$($Error.Count);preference=$ErrorActionPreference\")")])
                 .output().unwrap();
             assert!(output.status.success());
             assert!(output.stderr.is_empty(), "{:?}", output.stderr);
@@ -1273,8 +1344,9 @@ mod tests {
     #[test]
     fn powershell_binding_restores_environment_on_throw() {
         let script = super::anchor_powershell_rtk(
+            "",
             "throw 'expected-error'",
-            std::path::Path::new("C:/unused/rtk.exe"),
+            std::path::Path::new("C:/unused/tokenless.exe"),
             &tokenless_protocol::Attribution::new("test-agent"),
             std::path::Path::new("C:/data"),
         );
@@ -1314,7 +1386,7 @@ mod tests {
             diff_compression_enabled: false,
             html_extraction_enabled: false,
             stash_enabled: true,
-            rtk_path: None,
+            tokenless_path: None,
             rtk_data_dir: Some(PathBuf::from("/tmp/tokenless-test")),
         }
     }
@@ -1597,7 +1669,10 @@ mod tests {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("fake rtk");
-        write_executable(&rtk, "#!/bin/sh\nprintf 'rtk grep --count error log'\n");
+        write_executable(
+            &rtk,
+            "#!/bin/sh\nprintf 'tokenless rtk grep --count error log'\n",
+        );
         let response = pre_tool_with_rtk(
             &PreToolRequest {
                 tool_name: "Bash".into(),
@@ -1876,7 +1951,10 @@ mod tests {
     fn pre_tool_build_log_owner_behind_env_flag_beats_rtk_rewriting() {
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("fake rtk");
-        write_executable(&rtk, "#!/bin/sh\nprintf 'rtk env -i cargo test'\n");
+        write_executable(
+            &rtk,
+            "#!/bin/sh\nprintf 'tokenless rtk env -i cargo test'\n",
+        );
         let response = pre_tool_with_rtk(
             &PreToolRequest {
                 tool_name: "Bash".into(),
@@ -1926,14 +2004,14 @@ mod tests {
 
     #[test]
     fn pre_tool_anchor_preserves_quoted_arguments_and_handles_subshells() {
-        let path = Path::new("/opt/tokenless/rtk");
+        let path = Path::new("/opt/tokenless/tokenless");
         let data_dir = Path::new("/tenant/tokenless");
         let attribution = Attribution {
             agent_id: "agent".into(),
             session_id: Some("session".into()),
             tool_use_id: Some("call".into()),
         };
-        let prefix = "env TOKENLESS_AGENT_ID=agent TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=call TOKENLESS_DATA_DIR=/tenant/tokenless /opt/tokenless/rtk";
+        let prefix = "env TOKENLESS_AGENT_ID=agent TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=call TOKENLESS_DATA_DIR=/tenant/tokenless /opt/tokenless/tokenless rtk";
         assert_eq!(
             anchor_rtk_prefix(
                 "grep -E 'foo | rtk bar' src && git status",
@@ -2033,10 +2111,10 @@ mod tests {
     #[test]
     fn rtk_receipts_cover_all_wrappers_or_keep_conservative_ownership() {
         let attribution = Attribution::new("test");
-        let path = Path::new("/opt/tokenless/rtk");
+        let path = Path::new("/opt/tokenless/tokenless");
         let anchored = anchor_rtk_prefix_with_outcomes(
             "git log && git show",
-            "rtk git log && rtk git show",
+            "tokenless rtk git log && tokenless rtk git show",
             path,
             &attribution,
             Path::new("/tmp/state"),
@@ -2055,7 +2133,7 @@ mod tests {
         ] {
             anchor_rtk_prefix_with_outcomes(
                 original,
-                &original.replace("git show", "rtk git show"),
+                &original.replace("git show", "tokenless rtk git show"),
                 path,
                 &attribution,
                 Path::new("/tmp/state"),
@@ -2269,7 +2347,7 @@ mod tests {
             write_executable(
                 &rtk,
                 &format!(
-                    "#!/bin/sh\nsleep 2 &\nprintf '%s' \"$!\" > '{}'\nprintf 'rtk git status'\n{parent}\n",
+                    "#!/bin/sh\nsleep 2 &\nprintf '%s' \"$!\" > '{}'\nprintf 'tokenless rtk git status'\n{parent}\n",
                     pid_file.display()
                 ),
             );
@@ -3381,3 +3459,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "entry/powershell_tests.rs"]
+mod powershell_tests;

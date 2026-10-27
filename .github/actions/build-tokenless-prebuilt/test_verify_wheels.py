@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -84,7 +87,7 @@ def create_runtime(
         )
         extension = "_native.pyd" if os_name == "windows" else "_native.abi3.so"
         add_member(archive, f"anolisa_tokenless/{extension}", payload, 0o100755)
-        rtk_name = rtk_name or ("rtk.exe" if os_name == "windows" else "rtk")
+        rtk_name = rtk_name or ("tokenless.exe" if os_name == "windows" else "tokenless")
         add_member(archive, f"anolisa_tokenless/_bin/{rtk_name}", payload, 0o100755)
     return path
 
@@ -150,6 +153,20 @@ def populate_aggregate(directory: Path) -> None:
     for os_name, architecture in PLATFORMS:
         create_runtime(directory, os_name, architecture)
     create_agentscope(directory)
+
+
+def verify_preview(directory: Path, source: Path, *, expect_success: bool = True) -> None:
+    workflow = (ACTION_DIR.parents[1] / "workflows/release-preview.yaml").read_text()
+    step = workflow.split("      - name: Verify Tokenless Python wheels\n", 1)[1]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - ", 1)[0])
+    script = script.replace("/tmp/python-wheels-preview", shlex.quote(str(directory)))
+    result = subprocess.run(
+        ["bash", "-eu", "-c", script],
+        cwd=ACTION_DIR.parents[2],
+        env={**os.environ, "VERSION": VERSION, "TOKENLESS_SOURCE_ROOT": str(source)},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert (result.returncode == 0) == expect_success, result.stdout + result.stderr
 
 
 def main() -> int:
@@ -227,19 +244,30 @@ def main() -> int:
         source_manifest = historical_source / "src/tokenless/Cargo.toml"
         source_manifest.parent.mkdir(parents=True)
         source_manifest.touch()
-        run_verifier(
-            missing_intel,
-            "--layout",
-            "aggregate",
-            "--tokenless-source-root",
-            str(historical_source),
-        )
+        # The selected historical source controls both the matrix and helper layout.
+        historical = root / "historical wheels"
+        historical.mkdir()
+        for os_name, architecture in (("linux", "x86_64"), ("linux", "aarch64"), ("macos", "aarch64")):
+            create_runtime(historical, os_name, architecture, rtk_name="rtk")
+        create_agentscope(historical)
+        verify_preview(historical, historical_source)
+        verify_preview(missing_intel, historical_source, expect_success=False)
+        source_targets = historical_source / ".github/actions/prebuilt-rust-common/targets.py"
+        source_targets.parent.mkdir(parents=True)
+        shutil.copyfile(ACTION_DIR.parent / "prebuilt-rust-common/targets.py", source_targets)
+        for os_name, architecture in (("macos", "x86_64"), ("windows", "x86_64")):
+            create_runtime(historical, os_name, architecture, rtk_name="rtk.exe" if os_name == "windows" else "rtk")
+        verify_preview(historical, historical_source)
+        verify_preview(aggregate, historical_source, expect_success=False)
+        verify_preview(aggregate, ACTION_DIR.parents[2])
+        verify_preview(historical, ACTION_DIR.parents[2], expect_success=False)
         run_verifier(
             aggregate,
             "--layout",
             "aggregate",
             "--tokenless-source-root",
-            str(historical_source),
+            str(ACTION_DIR.parents[2]),
+            "--legacy-rtk",
             expect_success=False,
         )
 
@@ -277,12 +305,20 @@ def main() -> int:
                 expect_success=False,
             )
 
+        mixed_platform = root / "mixed-platform-helpers"
+        mixed_platform.mkdir()
+        create_runtime(mixed_platform, "windows", "x86_64")
+        wheel = next(mixed_platform.glob("*.whl"))
+        with zipfile.ZipFile(wheel, "a") as archive:
+            add_member(archive, "anolisa_tokenless/_bin/tokenless", binary_payload("linux", "x86_64"), 0o100755)
+        run_verifier(mixed_platform, "--layout", "flat", "--os", "windows", "--arch", "x86_64", expect_success=False)
+
         bad_windows = root / "bad-windows"
         bad_windows.mkdir()
         create_runtime(bad_windows, "windows", "x86_64", binary_architecture="aarch64")
         run_verifier(bad_windows, "--layout", "flat", "--os", "windows", "--arch", "x86_64", expect_success=False)
 
-        for os_name, wrong_name in (("windows", "rtk"), ("macos", "rtk.exe")):
+        for os_name, wrong_name in (("windows", "tokenless"), ("macos", "tokenless.exe")):
             wrong_rtk_name = root / f"wrong-rtk-name-{os_name}"
             wrong_rtk_name.mkdir()
             create_runtime(wrong_rtk_name, os_name, "x86_64", rtk_name=wrong_name)

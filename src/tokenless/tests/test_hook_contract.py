@@ -91,8 +91,8 @@ class PreToolHookContract(unittest.TestCase):
         expected = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "tool_input": {"command": "/mock/rtk grep error log"},
-                "updatedInput": {"command": "/mock/rtk grep error log"},
+                "tool_input": {"command": "/mock/tokenless rtk grep error log"},
+                "updatedInput": {"command": "/mock/tokenless rtk grep error log"},
             }
         }
         for agent in PRE_TOOL_AGENTS:

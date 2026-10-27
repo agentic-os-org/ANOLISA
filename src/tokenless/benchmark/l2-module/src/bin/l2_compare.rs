@@ -352,10 +352,8 @@ fn main() -> Result<()> {
         .as_ref()
         .map(|w| w.provenance().clone())
         .unwrap_or_default();
-    // rtk provenance: the binary lives at <rtk>/target/release/rtk, so its
-    // source tree is three levels up. Recorded because that tree is a pinned
-    // clone kept out of version control — without it a run reads no rtk revision
-    // at all.
+    // Resolve the pinned RTK source next to a locally built Tokenless workspace.
+    // An installed executable without source evidence leaves this unknown.
     let (rtk_revision, rtk_dirty) = match rtk_bin.as_deref() {
         Some(bin) => rtk_provenance(bin),
         None => (None, None),
@@ -989,8 +987,8 @@ fn untracked_build_inputs(repo_root: &Path) -> Option<usize> {
 /// Revision and tracked-dirty state of the rtk source tree a binary was built
 /// from, or `(None, None)` when it cannot be resolved.
 ///
-/// Resolves `<rtk>/target/release/rtk` back to `<rtk>` (three parents) and
-/// queries git there. A `$RTK_BIN` pointing somewhere else, or a `PATH` rtk,
+/// Resolves `<tokenless>/target/release/tokenless` to its pinned RTK source
+/// and queries Git there. A `$TOKENLESS_BIN` elsewhere, or a PATH binary,
 /// yields `None` rather than a wrong attribution. `safe.directory` is passed
 /// per-invocation because the tree is rsynced in and owned by another uid.
 fn rtk_provenance(rtk_bin: &Path) -> (Option<String>, Option<bool>) {
@@ -1001,6 +999,7 @@ fn rtk_provenance(rtk_bin: &Path) -> (Option<String>, Option<bool>) {
     else {
         return (None, None);
     };
+    let src = src.join("third_party/rtk");
     if !src.join(".git").exists() {
         return (None, None);
     }
@@ -1009,7 +1008,7 @@ fn rtk_provenance(rtk_bin: &Path) -> (Option<String>, Option<bool>) {
             .arg("-c")
             .arg(format!("safe.directory={}", src.display()))
             .args(args)
-            .current_dir(src)
+            .current_dir(&src)
             .output()
             .ok()
             .filter(|o| o.status.success())

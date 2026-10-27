@@ -1,4 +1,4 @@
-//! Package-owned RTK selection never discovers an unrelated user executable.
+//! Verify the single package-owned CLI without discovering unrelated executables.
 
 use aw_exec::{CommandSpec, Limits};
 use aw_provider::{Protocol, VERSION};
@@ -23,10 +23,6 @@ impl Fixture {
         let root = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
         let fixture = Self { root };
         fixture.script(
-            "managed/rtk",
-            "#!/bin/sh\ntouch \"$AW_MANAGED_MARKER\"\necho 'rtk 0.49.0'\n",
-        );
-        fixture.script(
             "foreign/rtk",
             "#!/bin/sh\ntouch \"$AW_FOREIGN_MARKER\"\necho 'rtk 0.49.0'\n",
         );
@@ -38,15 +34,19 @@ impl Fixture {
             "foreign/sh",
             "#!/bin/sh\ntouch \"$AW_FOREIGN_MARKER\"\nexit 1\n",
         );
-        fixture.script("tokenless", r#"#!/usr/bin/python3
+        fixture.script("managed/tokenless", r#"#!/usr/bin/python3
 import json, os, pathlib, sys
+if sys.argv[1:] == ['rtk', '--version']:
+    pathlib.Path(os.environ['AW_MANAGED_MARKER']).touch()
+    print('rtk 0.49.0')
+    sys.exit(0)
 r = json.load(sys.stdin)
 pathlib.Path(__file__).with_suffix('.seen').write_text(os.environ['PATH'])
 if r['operation'] == 'pre_tool':
-    expected = str(pathlib.Path(__file__).parent / 'managed')
+    expected = str(pathlib.Path(__file__).parent)
     assert os.environ['PATH'] == expected + ':/usr/bin:/bin'
     args = r['input']['arguments'].copy()
-    args['command'] = expected + '/rtk git status'
+    args['command'] = expected + '/tokenless rtk git status'
     result = {'action':'block_and_suggest','arguments':args,'output_optimization':'rtk'}
 else:
     result = {'disposition':'passthrough','output':r['input']['content']}
@@ -78,7 +78,7 @@ print(json.dumps({'protocol_version':2,'operation':r['operation'],'attribution':
         }
         value
     }
-    fn command(&self, cli: &Path, rtk: &Path, checksum: &str) -> CommandSpec {
+    fn command(&self, cli: &Path, checksum: &str) -> CommandSpec {
         let mut environment: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
         environment.insert("PATH".into(), self.path("foreign").into_os_string());
         environment.insert("HOME".into(), self.path("home").into_os_string());
@@ -100,9 +100,7 @@ print(json.dumps({'protocol_version':2,'operation':r['operation'],'attribution':
                 cli.into(),
                 "--data-dir".into(),
                 self.path("state").into(),
-                "--rtk".into(),
-                rtk.into(),
-                "--rtk-sha256".into(),
+                "--cli-sha256".into(),
                 checksum.into(),
             ],
             cwd: self.root.path().into(),
@@ -149,12 +147,12 @@ fn managed_path_is_child_only_and_rejects_missing_corrupt_or_unusable_payloads()
         "execution-failure",
     ] {
         let f = Fixture::new();
-        let rtk = f.path("managed/rtk");
+        let rtk = f.path("managed/tokenless");
         if mode == "wrong-version" {
-            f.script("managed/rtk", "#!/bin/sh\necho 'rtk 9.99.0'\n");
+            f.script("managed/tokenless", "#!/bin/sh\necho 'rtk 9.99.0'\n");
         }
         if mode == "execution-failure" {
-            f.script("managed/rtk", "#!/bin/sh\nexit 1\n");
+            f.script("managed/tokenless", "#!/bin/sh\nexit 1\n");
         }
         let checksum = format!("{:x}", Sha256::digest(fs::read(&rtk).unwrap()));
         match mode {
@@ -187,7 +185,7 @@ fn managed_path_is_child_only_and_rejects_missing_corrupt_or_unusable_payloads()
             }
             _ => {}
         }
-        let command = f.command(&f.path("tokenless"), &rtk, &checksum);
+        let command = f.command(&rtk, &checksum);
         let reply = f.invoke(&command, f.request(true));
         if matches!(
             mode,
@@ -200,10 +198,10 @@ fn managed_path_is_child_only_and_rejects_missing_corrupt_or_unusable_payloads()
                 .contains(rtk.to_str().unwrap()));
         } else {
             assert_eq!(
-                reply["error_code"], "managed_rtk_unavailable",
+                reply["error_code"], "managed_cli_unavailable",
                 "{mode}: {reply}"
             );
-            assert!(!f.path("tokenless.seen").exists());
+            assert!(!f.path("managed/tokenless.seen").exists());
             if matches!(
                 mode,
                 "world-writable-file" | "world-writable-directory" | "symlink-directory"
@@ -219,17 +217,21 @@ fn managed_path_is_child_only_and_rejects_missing_corrupt_or_unusable_payloads()
                 .unwrap(),
             f.path("foreign").as_os_str()
         );
-        assert_eq!(
-            f.invoke(&command, f.request(false))["effects"],
-            json!([]),
-            "{mode}"
-        );
+        let after = f.invoke(&command, f.request(false));
+        if matches!(
+            mode,
+            "valid" | "group-writable-file" | "group-writable-directory"
+        ) {
+            assert_eq!(after["effects"], json!([]), "{mode}");
+        } else {
+            assert_eq!(after["error_code"], "managed_cli_unavailable", "{mode}");
+        }
         assert!(!f.path("foreign.seen").exists());
     }
 }
 
 #[test]
-#[ignore = "requires the package-built Tokenless CLI and pinned patched RTK"]
+#[ignore = "requires the package-built Tokenless CLI with embedded RTK"]
 fn real_managed_rtk_rewrites_executes_and_preserves_attributed_after() {
     for adapter in ["qoder", "claude-sdk"] {
         exercise_real_managed_rtk(adapter);
@@ -241,21 +243,19 @@ fn exercise_real_managed_rtk(adapter: &str) {
     let cli = PathBuf::from(
         std::env::var_os("AW_TOKENLESS_TEST_CLI").expect("set AW_TOKENLESS_TEST_CLI"),
     );
-    let source = PathBuf::from(
-        std::env::var_os("AW_TOKENLESS_TEST_RTK").expect("set AW_TOKENLESS_TEST_RTK"),
-    );
+    let source = cli.clone();
     assert!(
         cli.is_file(),
         "AW_TOKENLESS_TEST_CLI is not a file: {}",
         cli.display()
     );
-    let rtk = f.path("managed/rtk");
+    let rtk = f.path("managed/tokenless");
     fs::copy(&source, &rtk).unwrap();
     // Model installation: Cargo's artifact mode depends on its build umask,
     // whereas aw-package sets installed executables to the manifest's 0755.
     fs::set_permissions(&rtk, fs::Permissions::from_mode(0o755)).unwrap();
     let checksum = format!("{:x}", Sha256::digest(fs::read(&rtk).unwrap()));
-    let mut command = f.command(&cli, &rtk, &checksum);
+    let mut command = f.command(&rtk, &checksum);
     // Native commands retain their normal PATH; only the Provider's CLI child
     // receives the managed dependency directory ahead of system executables.
     command.environment.insert(
@@ -291,6 +291,7 @@ fn exercise_real_managed_rtk(adapter: &str) {
         );
         let mut retry = command.clone();
         retry.args[1] = wrapper.into_os_string();
+        retry.args.truncate(4);
         let retry_reply = f.invoke(&retry, before.clone());
         let mut stderr = Vec::new();
         if let Ok(file) = fs::File::open(&stderr_path) {
@@ -310,7 +311,7 @@ fn exercise_real_managed_rtk(adapter: &str) {
         let version = aw_exec::run(
             &CommandSpec {
                 program: rtk.clone(),
-                args: vec!["--version".into()],
+                args: vec!["rtk".into(), "--version".into()],
                 cwd: command.cwd.clone(),
                 environment: command.environment.clone(),
             },

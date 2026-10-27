@@ -58,6 +58,15 @@ runs:
         TOKENLESS_PROFILE: ${{ inputs.profile }}
         TOKENLESS_TAG: ${{ inputs.tag }}
       run: |
+        case "$TOKENLESS_PROFILE" in
+          gnu2.17-x86_64) target=x86_64-unknown-linux-gnu ;;
+          gnu2.17-aarch64) target=aarch64-unknown-linux-gnu ;;
+          darwin11-aarch64) target=aarch64-apple-darwin ;;
+          darwin11-x86_64) target=x86_64-apple-darwin ;;
+          windows-msvc-x86_64) target=x86_64-pc-windows-msvc ;;
+          *) echo 'Unsupported Tokenless build profile' >&2; exit 2 ;;
+        esac
+        rustup toolchain install 1.91.0 --profile minimal --target "$target"
         "$GITHUB_ACTION_PATH/build.sh" \
           --source-repo "$GITHUB_WORKSPACE" \
           --output-dir "$TOKENLESS_OUTPUT_DIR" \

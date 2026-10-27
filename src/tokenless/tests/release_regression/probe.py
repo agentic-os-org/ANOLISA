@@ -487,8 +487,7 @@ def main() -> None:
     os.environ["PATH"] = f'{prefix / "bin"}:{os.environ["PATH"]}'
     binary = Path(shutil.which("tokenless")).resolve()
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == MANIFEST["expected_binary_sha256"]
-    rtk = Path(shutil.which("rtk")).resolve()
-    assert hashlib.sha256(rtk.read_bytes()).hexdigest() == MANIFEST["expected_rtk_sha256"]
+    assert not (prefix / "bin/rtk").exists(), "package must not install standalone RTK"
     adapters = prefix / "share/anolisa/adapters/tokenless"
     assert (adapters / "manifest.json").is_file()
     for bundled_agent in ("claude-code", "qwencode"):
@@ -500,7 +499,7 @@ def main() -> None:
         "binary": str(binary),
         "sha256": MANIFEST["expected_binary_sha256"],
         "version": run(["tokenless", "--version"]).stdout.decode().strip(),
-        "rtk_version": run(["rtk", "--version"]).stdout.decode().strip(),
+        "rtk_version": run(["tokenless", "rtk", "--version"]).stdout.decode().strip(),
         "agent_version": run(["claude" if agent == "claude-code" else agent, "--version"])
         .stdout.decode()
         .strip(),

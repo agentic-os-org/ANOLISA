@@ -360,12 +360,11 @@ else
     note_prereq_missing "tokenless binary"
 fi
 
-rtk_bin="$(command -v rtk 2>/dev/null || true)"
-if [ -n "$rtk_bin" ]; then
-    field "rtk binary"        "present (${rtk_bin})"
+if [ -n "$runtime_bin" ] && "$runtime_bin" rtk --version >/dev/null 2>&1; then
+    field "embedded RTK" "available"
 else
-    field "rtk binary"        "missing"
-    note_prereq_missing "rtk binary"
+    field "embedded RTK" "unavailable; update Tokenless"
+    note_prereq_missing "embedded RTK"
 fi
 
 # Shared hook scripts live under FHS; warn when missing so user knows to run

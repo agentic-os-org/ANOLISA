@@ -67,7 +67,7 @@ Extra arguments to `remote_run.sh` are forwarded to `l2_compare`:
 | `HEADROOM_SRC` | remote_sync | local headroom checkout, default `~/git_repo/headroom` |
 | `DASHSCOPE_API_KEY` | l2_compare | enables the semantic probe; unset ⇒ all S = None |
 | `HEADROOM_PYTHON` | l2_compare | python that can `import headroom`, default `python3` |
-| `RTK_BIN` | l2_compare | rtk binary; default discovery: vendored release build, then `PATH` |
+| `TOKENLESS_BIN` | l2_compare | Tokenless binary invoked with `rtk`; default discovery: Tokenless release build, then `PATH` |
 
 ## Degradation matrix
 

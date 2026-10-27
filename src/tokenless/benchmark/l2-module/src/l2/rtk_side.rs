@@ -59,7 +59,7 @@ impl PairedRun {
 }
 
 /// Locates the rtk binary, reusing the L0/L1 discovery order
-/// (`$RTK_BIN` → vendored release build → `PATH`).
+/// (`$TOKENLESS_BIN` → vendored release build → `PATH`).
 ///
 /// # Errors
 ///
@@ -67,7 +67,9 @@ impl PairedRun {
 /// callers degrade the command/grep/diff categories rather than abort.
 pub fn locate_rtk() -> Result<PathBuf, L2Error> {
     find_rtk_binary().ok_or_else(|| {
-        L2Error::RtkUnavailable("no rtk binary via $RTK_BIN, vendored build, or PATH".to_string())
+        L2Error::RtkUnavailable(
+            "no rtk binary via $TOKENLESS_BIN, vendored build, or PATH".to_string(),
+        )
     })
 }
 
@@ -122,6 +124,7 @@ pub fn run_paired(
 
     let start = Instant::now();
     let wrapped = Command::new(rtk_bin)
+        .arg("rtk")
         .args(rtk_argv)
         .current_dir(cwd)
         .output()

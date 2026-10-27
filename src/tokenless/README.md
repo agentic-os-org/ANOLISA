@@ -12,7 +12,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
 The bundled RTK 0.49.0 preserves native `grep -l` / `-m` semantics, rewrites pipelines
-conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rtk recall`; retained output is scoped to the host OS user,
+conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `tokenless rtk recall`; retained output is scoped to the host OS user,
 not isolated by Tokenless tenant or session.
 See [bundled RTK commands](../../docs/user-guide/en/tokenless/cli-reference.md#bundled-rtk-commands)
 for flag migration, pipeline behavior, and output recovery.
@@ -157,7 +157,7 @@ Token-Less/
 Install the published component with the ANOLISA CLI:
 
 The install script places `anolisa` in `~/.local/bin`, and a user-mode
-Tokenless installation places `tokenless` and `rtk` in that same
+Tokenless installation places `tokenless` with embedded RTK in that same
 directory. Export it once if the current shell has not picked it up yet.
 
 ```bash
@@ -182,7 +182,7 @@ system path. `adopt` then records the directly installed RPM in system state so
 adapter commands can use its component contract.
 
 Two further public routes install the CLI on their own, without an anolisa
-component record. The npm route ships the prebuilt `tokenless` and `rtk`
+component record. The npm route ships the prebuilt `tokenless` with embedded RTK
 binaries plus the bundled Agent adapters and needs Node.js 16.7+, the release
 `fs.cpSync` arrived in and the one the package postinstall requires. The curl route
 is a standalone installer that prefers npm and builds from source instead. The
@@ -203,7 +203,7 @@ apply to them; enable a framework with its bundled script under
 instead. The curl installer records what it created in
 `~/.local/share/tokenless/install-receipt`, which `scripts/uninstall.sh`
 consumes to remove exactly those paths; its source-build path is CLI-only
-(no `rtk`, no adapters). Agent frameworks can run the same steps through the
+(embedded RTK included, no adapters). Agent frameworks can run the same steps through the
 `install-tokenless` OS Skill. The full method matrix lives in
 `docs/user-guide/en/tokenless/index.md`.
 
@@ -260,8 +260,7 @@ cd Token-Less
 make setup
 ```
 
-The source setup installs `tokenless` to `~/.local/bin`, places the `rtk`
-helper alongside it, and deploys all adapters for development.
+The source setup installs `tokenless` with embedded RTK to `~/.local/bin` and deploys all adapters for development. Builds require Rust 1.91 or later on Linux.
 
 ### Build the Python SDK
 
@@ -282,8 +281,8 @@ plain workspace-default Cargo commands exclude the Python extension.
 
 The `anolisa_tokenless` module supports CPython 3.11 and later on the platform
 where its native wheel was built. It exposes the four Tokenless lifecycle
-methods and bundles the matching RTK executable; TOON is linked into the native
-runtime. It does not require the Tokenless CLI or system helper binaries. The
+methods and bundles the matching Tokenless executable with embedded RTK; TOON is linked into the native
+runtime. It does not require system helper binaries. The
 package is built and tested in this repository but is not yet published to
 PyPI. See the [Python SDK guide](../../docs/developer-guide/en/sdk/tokenless/index.md) for
 runnable lifecycle and Stats examples, the
@@ -567,13 +566,7 @@ bypass does not read this file:
     "required": [
       { "binary": "jq", "package": "jq", "manager": "apt" }
     ],
-    "recommended": [
-      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
-        "fallback": [
-          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
-        ]
-      }
-    ]
+    "recommended": []
   }
 }
 ```
@@ -700,7 +693,7 @@ make qoder-install
 
 ## QwenWork Plugin (Windows x64 Local Mode)
 
-Windows x64 supports native `tokenless.exe` and `rtk.exe`, npm launchers, and
+Windows x64 supports native `tokenless.exe` with embedded RTK, npm launchers, and
 QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. The Windows package
 is not yet published; build and package it using the
 [Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
@@ -1042,8 +1035,8 @@ and makes no cloud requests.
 
 | Target | Description |
 |---|---|
-| `make build` | Build `tokenless` + `rtk` (release mode) |
-| `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
+| `make build` | Build `tokenless` with embedded RTK (release mode) |
+| `make build-tokenless` | Build `tokenless` with embedded RTK (via justfile) |
 | `make python-wheel` | Build the native `anolisa-tokenless` wheel |
 | `make agentscope-wheel` | Build the pure-Python AgentScope integration wheel |
 | `make test-python-runtime` | Install and test the wheel in an isolated environment |
@@ -1083,7 +1076,7 @@ make install BIN_DIR=/usr/local/bin
 
 ## Raw Packaging
 
-Raw packaging accepts already-built `tokenless` and `rtk`
+Raw packaging accepts already-built `tokenless` with embedded RTK
 executables in one directory and applies the stable component payload layout:
 
 ```bash
@@ -1147,7 +1140,7 @@ layout and single-target interface.
 
 ## Prerequisites
 
-- **Rust** toolchain >= 1.89 — required by rtk (edition 2024). Install via [rustup](https://rustup.rs)
+- **Rust** toolchain >= 1.91 — required by embedded RTK (edition 2024). Install via [rustup](https://rustup.rs)
 - **just** — build runner for rtk setup (clone + patch orchestration)
 - **Git** — for rtk source download via justfile
 - **CPython 3.11+ development environment and uv** — only for the Python wheel

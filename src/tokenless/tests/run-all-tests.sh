@@ -96,12 +96,12 @@ test_command_rewriting() {
     log_section "Test 3: Command Rewriting (RTK)"
 
     log_info "Test 3.1: RTK availability"
-    if command -v rtk &> /dev/null; then
-        log_pass "RTK available: $(rtk --version)"
-    else log_fail "RTK not found"; fi
+    if tokenless rtk --version &> /dev/null; then
+        log_pass "RTK available: $(tokenless rtk --version)"
+    else log_fail "Embedded RTK unavailable"; fi
 
     log_info "Test 3.2: RTK rewrite"
-    local rewritten=$(rtk rewrite "ls -la" 2>/dev/null || echo "ls -la")
+    local rewritten=$(tokenless rtk rewrite "ls -la" 2>/dev/null || echo "ls -la")
     if [ -n "$rewritten" ]; then log_pass "RTK rewrite works: $rewritten"
     else log_fail "RTK rewrite failed"; fi
 
@@ -109,7 +109,7 @@ test_command_rewriting() {
     local cmds=("git status" "cargo build" "npm install")
     local ok=0
     for cmd in "${cmds[@]}"; do
-        local r=$(rtk rewrite "$cmd" 2>/dev/null || echo "")
+        local r=$(tokenless rtk rewrite "$cmd" 2>/dev/null || echo "")
         [ -n "$r" ] && ((ok++)) || true
     done
     log_pass "RTK processed $ok/${#cmds[@]} commands"
@@ -414,11 +414,11 @@ test_tool_ready() {
     assert_contains "$fix_tool" "already available" "env-fix fix-tool reports available deps"
 
     # ==========================================
-    # 6.16 env-fix script: fallback chain (rtk)
+    # 6.16 env-fix script: fallback chain (tokenless)
     # ==========================================
-    log_info "Test 6.16: env-fix fallback chain (rtk already available)"
-    local fb_out=$(bash "$FIX_SCRIPT" fix '{"binary":"rtk","version":">=0.35","package":"tokenless","manager":"rpm","fallback":[{"method":"symlink","binary":"rtk","source":"/usr/libexec/anolisa/tokenless/rtk"},{"method":"cargo","binary":"rtk","package":"rtk"}]}' 2>&1)
-    assert_contains "$fb_out" "already available" "env-fix fallback: rtk already available via rpm"
+    log_info "Test 6.16: env-fix fallback chain (tokenless already available)"
+    local fb_out=$(bash "$FIX_SCRIPT" fix '{"binary":"tokenless","version":">=0.9","package":"tokenless","manager":"rpm","fallback":[{"method":"npm","binary":"tokenless","package":"anolisa-tokenless"}]}' 2>&1)
+    assert_contains "$fb_out" "already available" "env-fix fallback: tokenless already available"
 
     # ==========================================
     # 6.17 env-fix script: docker fallback (docker-ce → docker)

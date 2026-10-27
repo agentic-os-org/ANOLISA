@@ -19,7 +19,7 @@
  *   node npm/scripts/package-npm.js --all               # all supported targets
  *
  * Prerequisites:
- *   - Prebuilt tokenless and rtk binaries for each selected target
+ *   - Prebuilt tokenless binary for each selected target
  *   - npm (the architecture-independent OpenClaw adapter is built here)
  *
  * Output:
@@ -60,7 +60,7 @@ const prebuiltRoot = join(tokenlessRoot, 'target', 'npm-prebuilt');
 
 // Read version from workspace Cargo.toml
 const cargoToml = readFileSync(join(tokenlessRoot, 'Cargo.toml'), 'utf-8');
-const versionMatch = cargoToml.match(/\[workspace\.package\][\s\S]*?version\s*=\s*"([^"]+)"/);
+const versionMatch = cargoToml.match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
 const version = versionMatch ? versionMatch[1] : cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 if (!version) {
   console.error('Error: Could not parse version from Cargo.toml');
@@ -98,7 +98,7 @@ function wheelFilenameVersion() {
   return normalized;
 }
 
-const BINARIES = ['tokenless', 'rtk'];
+const BINARIES = ['tokenless'];
 
 // npm registry every generated manifest and publish command is pinned to.
 // The nested dist/* package roots do NOT inherit npm/.npmrc, so without an
@@ -165,7 +165,7 @@ Target selectors also accept an OS, npm CPU, architecture, or Rust target
 triple and may select more than one matching target.
 
 Prebuilt binaries are read from:
-  target/npm-prebuilt/<target>/{tokenless,rtk}`);
+  target/npm-prebuilt/<target>/tokenless`);
 }
 
 function optionValue(args, index, option) {
@@ -348,6 +348,21 @@ function collectPrebuiltBinaries(target, binDir) {
   return binaryPaths;
 }
 
+function stageRtkNotices(pkgDir) {
+  const patchList = readFileSync(join(tokenlessRoot, 'scripts/setup-rtk.sh'), 'utf8').match(/^PATCHES=\(([^)]+)\)$/m);
+  if (!patchList) throw new Error('RTK patch list is missing');
+  const directory = join(pkgDir, 'third_party', 'rtk');
+  mkdirSync(directory, { recursive: true });
+  for (const [source, name] of [
+    ['third_party/rtk/LICENSE', 'LICENSE'],
+    ['third_party/rtk/.anolisa-rtk-commit', 'source-commit'],
+    ['third_party/rtk/.anolisa-rtk-patches', 'patches-sha256'],
+    ...patchList[1].trim().split(/\s+/)
+      .map(name => [`third_party/patches/${name}`, name]),
+  ]) copyFileSync(join(tokenlessRoot, source), join(directory, name));
+  writeFileSync(join(directory, 'SOURCE'), 'RTK v0.49.0\nUpstream: https://github.com/rtk-ai/rtk\nModified by ANOLISA; patches and pinned revision accompany this notice.\n');
+}
+
 function packagePlatform(target, binaryPaths) {
   const pkgName = `@anolisa/tokenless-${target.pkg_suffix}`;
   const pkgDir = join(distDir, `tokenless-${target.pkg_suffix}`);
@@ -365,10 +380,12 @@ function packagePlatform(target, binaryPaths) {
     chmodSync(destination, 0o755);
   }
 
+  stageRtkNotices(pkgDir);
+
   // Write package.json
   //
   // Deliberately declare NO `bin` entries here: the platform packages would
-  // otherwise claim the same `tokenless`/`rtk` bin names as the root
+  // otherwise claim the same `tokenless` bin name as the root
   // package. When multiple packages in a tree claim the same bin, npm's
   // reify removes every conflicting `.bin` link instead of picking a
   // winner, leaving installs without a `tokenless` executable. esbuild ships
@@ -391,7 +408,7 @@ function packagePlatform(target, binaryPaths) {
     // Binaries target *-unknown-linux-gnu — keep musl (Alpine) installs from
     // matching a package whose ELF they cannot run.
     ...(target.npm_os === 'linux' ? { libc: ['glibc'] } : {}),
-    files: ['bin/'],
+    files: ['bin/', 'third_party/'],
     preferUnplugged: true,
     publishConfig: PUBLISH_CONFIG,
   };
@@ -571,6 +588,7 @@ process.exit(1);
   const readmeSrc = join(tokenlessRoot, 'README.md');
   if (existsSync(readmeSrc)) copyFileSync(readmeSrc, join(rootPkgDir, 'README.md'));
 
+  stageRtkNotices(rootPkgDir);
   const licenseSrc = join(tokenlessRoot, 'LICENSE');
   if (existsSync(licenseSrc)) copyFileSync(licenseSrc, join(rootPkgDir, 'LICENSE'));
 
@@ -607,7 +625,7 @@ process.exit(1);
     homepage: 'https://github.com/alibaba/anolisa/tree/main/src/tokenless',
     keywords: ['anolisa', 'tokenless', 'llm', 'token-optimization', 'compression', 'cli'],
     bin: binMap,
-    files: ['bin/', 'scripts/', 'adapters/', 'README.md', 'LICENSE'],
+    files: ['bin/', 'scripts/', 'adapters/', 'README.md', 'LICENSE', 'third_party/'],
     scripts: { postinstall: 'node scripts/postinstall.js' },
     // 16.7.0, not 16.0.0: scripts/postinstall.js imports fs.cpSync, which only
     // exists from 16.7.0. A lower floor lets npm install the package on a node

@@ -2,8 +2,9 @@
 # Run one Cargo command with a prepared ANOLISA release Cross profile.
 set -euo pipefail
 
-RUST_VERSION=1.93.0
-RUST_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
+RUST_VERSION="${ANOLISA_RELEASE_RUST_VERSION:-1.93.0}"
+case "$RUST_VERSION" in 1.91.0|1.93.0) ;; *) printf 'Unsupported release Rust version: %s\n' "$RUST_VERSION" >&2; exit 2 ;; esac
+RUST_TOOLCHAIN="$RUST_VERSION-x86_64-unknown-linux-gnu"
 SCCACHE_VERSION=0.17.0
 SCCACHE_CACHE_SIZE=20G
 GNU217_X86_BASE="docker.io/dockcross/manylinux2014-x64@sha256:ab5968050aa67592ef8fde28f3d304881bf2a394f160010d0bb13e98b4ed1b3b"

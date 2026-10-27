@@ -5,7 +5,7 @@
 ## 目标
 
 `anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含 PyO3
-Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk`
+Runtime 和内置固定版本 RTK 的 Tokenless 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk`
 出现在 `PATH` 中。
 
 公开的 `TokenlessSdk` 把宿主框架的四个生命周期映射为 Tokenless 行为：
@@ -182,9 +182,9 @@ Session；客户端不会推断或强制这两种模式。Python API 不清空�
 
 ## 打包与验证
 
-`make python-wheel` 会构建固定版本 RTK，把它暂存为
-`anolisa_tokenless/_bin/rtk`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
-可以通过 `PYTHON_RTK_BINARY` 指定为同一 Wheel 目标构建的 RTK 文件。
+`make python-wheel` 会构建内置固定版本 RTK 的 Tokenless，把可执行文件暂存为
+`anolisa_tokenless/_bin/tokenless`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
+可以通过 `PYTHON_TOKENLESS_BINARY` 指定为同一 Wheel 目标构建的 Tokenless 文件。
 `make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 RTK 的条件下验证
 四个生命周期和 Stats 查询。
 

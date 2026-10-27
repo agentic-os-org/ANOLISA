@@ -83,8 +83,7 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         ("aw", "src/aw"),
         ("aw-provider-sec-core", "providers/agent-sec-core"),
         ("aw-provider-tokenless", "providers/tokenless"),
-        ("tokenless", "src/tokenless"),
-        ("rtk", "src/aw"),
+        ("tokenless", "src/aw"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
         ("agent-sec-daemon-health", "src/agent-sec-core/v2"),
@@ -106,12 +105,15 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         "NOTICE",
         "src/tokenless/third_party/rtk/LICENSE",
         "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
+        "src/tokenless/third_party/rtk/.anolisa-rtk-patches",
         "src/tokenless/crates/tokenless-stats/src/home.rs",
         "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
         "src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs",
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+        "src/tokenless/third_party/patches/rtk-library.patch",
+        "src/tokenless/third_party/patches/future-fix.patch",
         "docs/user-guide/en/aw/installation.md",
         "docs/user-guide/zh/aw/installation.md",
     ] {
@@ -119,6 +121,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "fixture").unwrap();
     }
+    fs::write(repo.join("src/tokenless/scripts/setup-rtk.sh"),
+        "PATCHES=(rtk-tokenless-stats.patch rtk-pytest-error-report.patch rtk-library.patch future-fix.patch)\n").unwrap();
     let output = repo.join("output");
     fs::create_dir(&output).unwrap();
     let cancel = AtomicBool::new(false);
@@ -452,8 +456,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     for (name, source) in [
         ("aw", "src/aw"),
         ("aw-provider-tokenless", "providers/tokenless"),
-        ("tokenless", "src/tokenless"),
-        ("rtk", "src/aw"),
+        ("tokenless", "src/aw"),
     ] {
         let path = repo.join(source).join("target/release").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -464,12 +467,15 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         "NOTICE",
         "src/tokenless/third_party/rtk/LICENSE",
         "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
+        "src/tokenless/third_party/rtk/.anolisa-rtk-patches",
         "src/tokenless/crates/tokenless-stats/src/home.rs",
         "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
         "src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs",
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+        "src/tokenless/third_party/patches/rtk-library.patch",
+        "src/tokenless/third_party/patches/future-fix.patch",
         "docs/user-guide/en/aw/installation.md",
         "docs/user-guide/zh/aw/installation.md",
     ] {
@@ -477,6 +483,8 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "fixture").unwrap();
     }
+    fs::write(repo.join("src/tokenless/scripts/setup-rtk.sh"),
+        "PATCHES=(rtk-tokenless-stats.patch rtk-pytest-error-report.patch rtk-library.patch future-fix.patch)\n").unwrap();
     let output = repo.join("output");
     fs::create_dir(&output).unwrap();
     let archives = stage(
@@ -502,11 +510,29 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     let manifest = crate::inspect(&package).unwrap();
     assert_eq!(manifest.components.len(), 1);
     assert_eq!(manifest.components[0].component, "aw-provider-tokenless");
+    assert!(!manifest.components[0]
+        .files
+        .contains_key("libexec/aw/providers/tokenless/rtk"));
+    assert!(manifest.components[0]
+        .files
+        .contains_key("libexec/aw/providers/tokenless/tokenless"));
     let provenance_path = "share/doc/aw-provider-tokenless/rtk/provenance.json";
     let provenance: serde_json::Value =
         serde_json::from_slice(&fs::read(package.join("payload").join(provenance_path)).unwrap())
             .unwrap();
     assert_eq!(provenance["anolisa_source_commit"], "a".repeat(40));
+    assert!(provenance["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|input| input["payload"] == "future-fix.patch"));
+    assert_eq!(
+        fs::read_to_string(
+            package.join("payload/share/doc/aw-provider-tokenless/rtk/future-fix.patch")
+        )
+        .unwrap(),
+        "fixture"
+    );
     assert!(provenance["shared_sources_reason"]
         .as_str()
         .unwrap()
@@ -549,6 +575,19 @@ fn rtk_preparation_uses_fresh_owned_source_and_preserves_cached_edits() {
     fs::write(modules.join("home.rs"), "trusted home module").unwrap();
     fs::write(modules.join("path_policy.rs"), "shared state path module").unwrap();
     fs::write(modules.join("rtk_outcome.rs"), "call-scoped receipt module").unwrap();
+    std::os::unix::fs::symlink("src", modules.parent().unwrap().join("shared")).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["add", "src/tokenless/crates"])
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success());
     let source = rtk::prepare_using(repo, &AtomicBool::new(false), |root| {
         let destination = root.join("third_party/rtk");
         assert!(!destination.exists());
@@ -565,6 +604,14 @@ fn rtk_preparation_uses_fresh_owned_source_and_preserves_cached_edits() {
     })
     .unwrap();
     let owned = source.path().to_path_buf();
+    assert_eq!(
+        fs::read_link(owned.join("crates/tokenless-stats/shared")).unwrap(),
+        Path::new("src")
+    );
+    assert_eq!(
+        digest(&owned.join("crates/tokenless-stats/shared/home.rs")).unwrap(),
+        digest(&modules.join("home.rs")).unwrap()
+    );
     assert!(
         !owned.starts_with(repo),
         "upstream source must escape the AW workspace"

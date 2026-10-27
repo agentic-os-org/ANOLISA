@@ -88,7 +88,7 @@ class BundleCommandTests(GateFixture):
                 if "tokenless" in parts:
                     payload = prefix / "libexec/aw/providers/tokenless"
                     payload.mkdir(parents=True, exist_ok=True)
-                    for name in ("tokenless", "rtk"):
+                    for name in ("tokenless",):
                         (payload / name).write_text("fixture")
             elif args[:2] == ["config", "init"]:
                 config = Path(option("--config"))

@@ -13,7 +13,7 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 
 # Build dependencies
-# Tokenless uses Rust 1.89; the separately built RTK requires Rust 1.91.
+# Tokenless links RTK and requires Rust 1.91.
 # Vendored RTK source is included in the tarball.
 # Workspace deps (including the toon-format library) come from crates.io, so
 # RPM build environments must configure a crates.io mirror (e.g. sparse+https://mirrors.aliyun.com/crates.io-index/).
@@ -53,7 +53,7 @@ Core Features:
 The package includes:
 - tokenless: CLI tool for schema/response compression and TOON encoding
   (TOON is linked in via the crates.io toon-format library)
-- rtk: High-performance CLI proxy for command rewriting (vendored source, Apache-2.0, excluded from workspace)
+- tokenless rtk: Embedded command rewriting and output compression (Apache-2.0)
 
 Note: OpenClaw plugin is available under /usr/share/anolisa/adapters/tokenless/openclaw/.
 Native DeepSeek Harness (dsh) plugin bundle is available under
@@ -80,16 +80,15 @@ Register it by running the install script: opencode/scripts/install.sh
 %prep
 %setup -q -n %{name}-%{version}
 
-# rtk source in tarball is already patched (rtk-tokenless-stats.patch
-# applied during tarball creation via justfile setup-rtk).
+# RTK source in the tarball includes all pinned integration patches, applied
+# during tarball creation via justfile setup-rtk.
 
 # Clean any stale build artifacts from the tarball
 cargo clean --release
 
 %build
-# Build tokenless (rtk excluded from workspace — built separately)
+# Build Tokenless with the linked RTK library
 cargo build --release
-cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
 # Compile the OpenClaw TS plugin via the project Makefile.
 # Produces adapters/tokenless/openclaw/dist/index.js, which package.json
@@ -100,7 +99,6 @@ make build-openclaw-plugin build-dsh-plugin
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}%{_bindir}
-mkdir -p %{buildroot}%{_libexecdir}/anolisa/tokenless
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/commands
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
@@ -126,18 +124,16 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
-# Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/anolisa/tokenless
+# Install the unified user-facing executable.
 install -m 0755 target/release/tokenless %{buildroot}%{_bindir}/tokenless
-install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_libexecdir}/anolisa/tokenless/rtk
 
-# Create a symlink so rtk is discoverable via PATH
-ln -sf %{_libexecdir}/anolisa/tokenless/rtk %{buildroot}%{_bindir}/rtk
 
 # Install documentation. The bilingual user manual moved to the
 # repository-level docs/user-guide tree and is published with the ANOLISA
 # documentation, not packaged per-component.
 install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
+bash scripts/stage-rtk-notices.sh %{buildroot}%{_docdir}/tokenless/rtk
 
 # Install adapter bundle (common hooks/spec + openclaw)
 install -m 0644 adapters/tokenless/manifest.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/
@@ -260,10 +256,8 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %files
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) %{_bindir}/tokenless
-%attr(0755,root,root) %{_bindir}/rtk
-%dir %attr(0755,root,root) %{_libexecdir}/anolisa/tokenless
-%attr(0755,root,root) %{_libexecdir}/anolisa/tokenless/rtk
 %doc %{_docdir}/tokenless/LICENSE
+%doc %{_docdir}/tokenless/rtk
 %doc %{_docdir}/tokenless/response-compression.md
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/components
@@ -398,8 +392,16 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 
 %post
 # Clean up stale files from old install.sh (pre-FHS refactor).
-for stale_bin in "$HOME/.local/bin/tokenless" "$HOME/.local/bin/rtk" "$HOME/.local/bin/rtk.bak" "$HOME/.local/bin/toon"; do
+for stale_bin in "$HOME/.local/bin/tokenless" "$HOME/.local/bin/toon"; do
     rm -f "$stale_bin" 2>/dev/null || true
+done
+# Retire only links into the old Tokenless helper directory, never foreign binaries.
+for legacy_link in "$HOME/.local/bin/rtk" "$HOME/.local/bin/rtk.bak"; do
+    if [ -L "$legacy_link" ]; then
+        case "$(readlink -m -- "$legacy_link")" in
+            "$HOME/.local/lib/anolisa/tokenless/"*) rm -f -- "$legacy_link" ;;
+        esac
+    fi
 done
 rm -f "$HOME/.local/lib/anolisa/tokenless/rtk" 2>/dev/null || true
 rm -f "$HOME/.local/lib/anolisa/tokenless/toon" 2>/dev/null || true

@@ -25,7 +25,7 @@ fn tokenless(fixture: &Fixture) -> PathBuf {
     let core = &manifest.components[0];
     let bundle = fixture.root.join("tokenless-bundle");
     let mut files = BTreeMap::new();
-    for program in ["aw-provider-tokenless", "tokenless", "rtk"] {
+    for program in ["aw-provider-tokenless", "tokenless"] {
         let name = format!("libexec/aw/providers/tokenless/{program}");
         let path = bundle.join("payload").join(&name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -106,13 +106,13 @@ fn split_core_extension_and_uninstall_require_consistent_explicit_scope() {
     );
     assert!(!fixture
         .prefix
-        .join("libexec/aw/providers/tokenless/rtk")
+        .join("libexec/aw/providers/tokenless/tokenless")
         .exists());
     report(&mut append("user"), 0);
     assert!(fixture.prefix.join("bin/aw").is_file());
     assert!(fixture
         .prefix
-        .join("libexec/aw/providers/tokenless/rtk")
+        .join("libexec/aw/providers/tokenless/tokenless")
         .is_file());
     let removal = |scope: &str| {
         let mut command = fixture.command();
@@ -127,12 +127,12 @@ fn split_core_extension_and_uninstall_require_consistent_explicit_scope() {
     assert!(fixture.prefix.join("bin/aw").is_file());
     assert!(fixture
         .prefix
-        .join("libexec/aw/providers/tokenless/rtk")
+        .join("libexec/aw/providers/tokenless/tokenless")
         .is_file());
     report(&mut removal("user"), 0);
     assert!(!fixture.prefix.join("bin/aw").exists());
     assert!(!fixture
         .prefix
-        .join("libexec/aw/providers/tokenless/rtk")
+        .join("libexec/aw/providers/tokenless/tokenless")
         .exists());
 }

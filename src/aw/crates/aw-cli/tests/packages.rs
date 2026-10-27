@@ -124,7 +124,7 @@ fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
     success(f.install().output().unwrap());
     let bundle = f.root.join("provider bundle");
     let mut files = BTreeMap::new();
-    for binary in ["aw-provider-tokenless", "tokenless", "rtk"] {
+    for binary in ["aw-provider-tokenless", "tokenless"] {
         let relative = format!("libexec/aw/providers/tokenless/{binary}");
         let path = bundle.join("payload").join(&relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -191,7 +191,10 @@ fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
             .unwrap(),
     );
     assert!(!f.prefix.join("bin/aw").exists());
-    assert!(!f.prefix.join("libexec/aw/providers/tokenless/rtk").exists());
+    assert!(!f
+        .prefix
+        .join("libexec/aw/providers/tokenless/tokenless")
+        .exists());
 }
 
 #[test]

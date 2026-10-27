@@ -66,7 +66,7 @@ record, so `anolisa adapter enable` does not apply to them.
 
 #### Method B: npm
 
-Requires Node.js 16.7+ — that is the release `fs.cpSync` arrived in, and the package postinstall uses it to place the adapter resources. Automatically installs the prebuilt binaries (`tokenless`, `rtk`) and the framework adapter resources for your platform:
+Requires Node.js 16.7+ — that is the release `fs.cpSync` arrived in, and the package postinstall uses it to place the adapter resources. Automatically installs the prebuilt `tokenless` binary with embedded RTK and the framework adapter resources for your platform:
 
 ```bash
 npm install -g anolisa-tokenless
@@ -114,8 +114,8 @@ Prerequisites depend on which path the script takes:
 
 | Path | Taken when | Requires | Installs |
 |------|-----------|----------|----------|
-| npm | npm is present and the platform is glibc Linux or macOS | `curl`, `tar`, Node.js 16.7+ with `npm` | `tokenless`, `rtk`, and the adapter resources |
-| Source build (Linux only) | chosen **before** npm runs: npm is missing, the platform is musl Linux, or `TOKENLESS_FORCE_BUILD=1`. Not selected automatically once `npm install` has been invoked — see the failure note above | `curl`, `tar`, a Rust toolchain (`cargo`) | the `tokenless` CLI only — no `rtk` and no adapters |
+| npm | npm is present and the platform is glibc Linux or macOS | `curl`, `tar`, Node.js 16.7+ with `npm` | `tokenless` with embedded RTK and the adapter resources |
+| Source build (Linux only) | chosen **before** npm runs: npm is missing, the platform is musl Linux, or `TOKENLESS_FORCE_BUILD=1`. Not selected automatically once `npm install` has been invoked — see the failure note above | `curl`, `tar`, a Rust toolchain (`cargo`) | the `tokenless` CLI with embedded RTK, without adapters |
 
 The script supports Linux and macOS only; on Windows it exits with an error, so use WSL2 there. Its source-build path is Linux-only as well: on macOS the installer either takes the npm path or exits with an error, and never invokes `cargo`.
 
@@ -338,11 +338,12 @@ Source builds are intended for development and debugging. The project currently 
 ```bash
 git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/tokenless
+bash scripts/setup-rtk.sh
 cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](index.md).
+This path produces only the standalone `tokenless` CLI. It includes RTK through `tokenless rtk` but does not install the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](index.md).
 
 ## Build the Python SDK from source
 
@@ -372,7 +373,7 @@ the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for b
 | Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
 | Search path sharing | Shares consecutive paths in numbered API search records, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
-| Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
+| Command rewriting | Calls `tokenless rtk rewrite` and submits the rewritten shell input when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
 | Stash | Stores content removed by string, array, depth, or schema-description truncation, complete arrays behind record reduction, omitted Build Log progress intervals | One-hour TTL and 10,000 live entries by default; JSON field names and empty values alone do not trigger Stash writes |
 
@@ -560,7 +561,7 @@ JSON response compression retains diagnostic-named fields, `null`, and empty val
 
 ### Processing errors usually fail open
 
-Compression and rewrite hooks normally return no modification when `tokenless` or `rtk` is missing
+Compression and rewrite hooks normally return no modification when `tokenless` is missing
 or compression provides no savings. For Protocol v2 `compress`, normal non-application outcomes
 return a result with exit code `0`; malformed transport exits `2`, while RTK timeout, unauthorized
 Retrieve, Stash failure, and Pipeline failure exit `1` without response JSON. Tool Ready is

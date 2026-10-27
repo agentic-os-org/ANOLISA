@@ -19,6 +19,11 @@ if [[ "$actual" != "$IMAGE_ID" && "$actual" != "$MANIFEST_ID" ]]; then
     exit 1
 fi
 
+TOOLCHAIN_ROOT="$(rustup run 1.91.0 rustc --print sysroot)"
+if [ ! -d "$TOOLCHAIN_ROOT/lib/rustlib/x86_64-pc-windows-msvc/lib" ]; then
+    printf 'ERROR: install x86_64-pc-windows-msvc for Rust 1.91.0 before building\n' >&2
+    exit 1
+fi
 CACHE="${TOKENLESS_WINDOWS_CACHE:-${HOME}/.cache/tokenless-windows/${IMAGE_ID#sha256:}}"
 IMAGE_ID="$actual"
 WORK="${OUTPUT}.build"
@@ -28,9 +33,11 @@ container=(docker run --rm --init --user "$(id -u):$(id -g)"
     --entrypoint /bin/bash
     --env "BUILDER_IMAGE_ID=$IMAGE_ID" --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
     --env HOME=/wine/home --env CARGO_BUILD_JOBS=8
+    --env CARGO_NET_OFFLINE
     --env HTTP_PROXY --env HTTPS_PROXY --env ALL_PROXY --env NO_PROXY
     --env http_proxy --env https_proxy --env all_proxy --env no_proxy
     --volume "$SOURCE:/source"
+    --volume "$TOOLCHAIN_ROOT:/tokenless-rust:ro"
     --volume "$ACTION_DIR:/action:ro" --volume "$COMMON_DIR:/common:ro"
     --volume "$CACHE:/cache" --volume "$WORK/out:/out" --volume "$WORK/wine:/wine"
     --volume "$OUTPUT:/artifacts" --volume "$WHEELS:/wheels")
@@ -38,7 +45,7 @@ container=(docker run --rm --init --user "$(id -u):$(id -g)"
     2>&1 | tee "$WORK/out/build.log"
 
 mkdir -p "$SOURCE/target/npm-prebuilt/win32-x64"
-cp "$WORK/out/build/x86_64-pc-windows-msvc/release/"{tokenless,rtk}.exe \
+cp "$WORK/out/build/x86_64-pc-windows-msvc/release/"tokenless.exe \
     "$SOURCE/target/npm-prebuilt/win32-x64/"
 node "$SOURCE/npm/scripts/package-npm.js" --target win32-x64
 python3 "$ACTION_DIR/package-windows.py" "$SOURCE" "$OUTPUT" "$VERSION"
@@ -59,4 +66,4 @@ python3 "$COMMON_DIR/generate-sbom.py" \
     --source-date-epoch "$SOURCE_DATE_EPOCH" >/dev/null
 python3 "$COMMON_DIR/verify-artifacts.py" --directory "$OUTPUT" \
     --component tokenless --version "$VERSION" --layout flat --os windows --arch x86_64
-printf 'Windows ZIP (CLI, RTK, npm packages), ABI3 wheel and Wine smoke passed; image=%s\n' "$IMAGE_ID"
+printf 'Windows ZIP (CLI with embedded RTK, npm packages), ABI3 wheel and Wine smoke passed; image=%s\n' "$IMAGE_ID"

@@ -350,15 +350,11 @@ fn tokenless_templates_require_its_package_and_keep_security_before_compression(
     );
     let provider = &document["spec"]["providers"]["tokenless"];
     let argv = provider["transport"]["argv"].as_array().unwrap();
-    assert_eq!(argv[5], "--rtk");
+    assert_eq!(argv[5], "--cli-sha256");
+    assert_eq!(argv.len(), 7);
     assert_eq!(
         argv[6],
-        serde_json::json!(f.prefix.join("libexec/aw/providers/tokenless/rtk"))
-    );
-    assert_eq!(argv[7], "--rtk-sha256");
-    assert_eq!(
-        argv[8],
-        crate::digest(&f.prefix.join("libexec/aw/providers/tokenless/rtk")).unwrap()
+        crate::digest(&f.prefix.join("libexec/aw/providers/tokenless/tokenless")).unwrap()
     );
     let mut expected = argv[..5].to_vec();
     expected.insert(1, serde_json::json!("--view"));
@@ -472,7 +468,7 @@ fn managed_tokenless_configuration_rejects_path_delimiters_before_publication() 
     assert!(crate::configure(&settings)
         .unwrap_err()
         .to_string()
-        .contains("managed RTK directory cannot be represented in PATH"));
+        .contains("managed Tokenless directory cannot be represented in PATH"));
     assert!(!config.exists() && !state.exists());
     settings.policy = crate::Policy::None;
     crate::configure(&settings).unwrap();

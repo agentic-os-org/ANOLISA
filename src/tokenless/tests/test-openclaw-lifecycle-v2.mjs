@@ -45,7 +45,7 @@ writeFileSync(
     '    result = { arguments: request.input.arguments, action: "passthrough", output_optimization: "none" };',
     "  } else {",
     "    result = {",
-    "      arguments: { ...request.input.arguments, [request.input.command_field]: `/mock/rtk ${command}` },",
+    "      arguments: { ...request.input.arguments, [request.input.command_field]: `/mock/tokenless rtk ${command}` },",
     '      action: "replace_arguments",',
     '      output_optimization: "rtk",',
     "    };",
@@ -420,7 +420,7 @@ test("PreTool sends one Protocol v2 operation and applies all returned arguments
 
   assert.deepEqual(result, {
     params: {
-      command: "/mock/rtk git status",
+      command: "/mock/tokenless rtk git status",
       cwd: "/workspace",
       env: { KEEP: "yes" },
     },
@@ -533,7 +533,7 @@ test("resumed sessions retain PreTool identity when PostTool only has a session 
   assert.equal(request.attribution.session_id, "session-existing");
   assert.equal(request.input.output_optimization, "rtk");
   // The recorded line is the one that ran, not the one the model wrote.
-  assert.equal(request.input.command, "/mock/rtk resumed");
+  assert.equal(request.input.command, "/mock/tokenless rtk resumed");
 });
 
 test("PostTool maps API and file origins without authorized recovery", () => {

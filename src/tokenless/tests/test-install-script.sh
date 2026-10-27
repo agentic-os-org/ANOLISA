@@ -214,13 +214,24 @@ case "$1" in
     # so a sibling scope in a test fixture means a standalone global install the
     # user made themselves. This stub used to model the sibling layout instead,
     # which is how "clean up the platform package" came to look necessary.
+    bins=(tokenless)
+    if [ "${NPM_STUB_EMBEDDED:-0}" != "1" ]; then
+      bins+=(rtk)
+    else
+      # Model npm replacing the old package, including its former bin export.
+      old_rtk="$prefix/lib/node_modules/anolisa-tokenless/bin/rtk"
+      if [ -L "$prefix/bin/rtk" ] && [ "$(readlink "$prefix/bin/rtk")" = "$old_rtk" ]; then
+        rm -f "$prefix/bin/rtk"
+      fi
+      rm -f "$old_rtk"
+    fi
     plat="${NPM_STUB_PLATFORM_KEY:-linux-x64}"
     platdir="$prefix/lib/node_modules/anolisa-tokenless/node_modules/@anolisa/tokenless-$plat"
     if [ "${NPM_STUB_PLATFORM_PKG:-0}" = "1" ]; then
       mkdir -p "$platdir/bin"
-      for b in tokenless rtk; do write_bin "$platdir/bin/$b" "$b"; done
+      for b in "${bins[@]}"; do write_bin "$platdir/bin/$b" "$b"; done
     fi
-    for b in tokenless rtk; do
+    for b in "${bins[@]}"; do
       # Faithful to real npm by default: a global install keeps the payload in the
       # module directory and links it into <prefix>/bin. Modelling those bin
       # entries as regular files instead produced a layout npm never creates, and
@@ -3385,5 +3396,29 @@ for listing_style in qualified bare; do
   assert_eq "refusal still targets the full id (${listing_style})" \
     "$(cat "$S60_STATE/plugin_remove_calls")" "tokenless@anolisa-tokenless"
 done
+
+# Current packages retire only a receipt-owned helper from historical versions.
+run_script "$INSTALL_SH" embedded-upgrade "TOKENLESS_VERSION=$FAKE_VERSION"
+assert_eq "legacy install before embedded upgrade succeeds" "$RUN_STATUS" "0"
+S61_DIR="$TEST_DIR/embedded-upgrade/home/.local/bin"
+assert_file "legacy fixture owns an rtk launcher" "$S61_DIR/rtk"
+run_script "$INSTALL_SH" embedded-upgrade "TOKENLESS_VERSION=$FAKE_VERSION" "NPM_STUB_EMBEDDED=1"
+assert_eq "embedded upgrade succeeds" "$RUN_STATUS" "0"
+assert_no_file "embedded upgrade retires owned RTK" "$S61_DIR/rtk"
+assert_eq "embedded receipt lists one executable" "$(receipt_files embedded-upgrade)" "$S61_DIR/tokenless"
+run_script "$UNINSTALL_SH" embedded-upgrade
+assert_eq "embedded uninstall succeeds" "$RUN_STATUS" "0"
+assert_no_file "embedded uninstall removes tokenless" "$S61_DIR/tokenless"
+
+S62_DIR="$TEST_DIR/embedded-foreign/home/.local/bin"
+mkdir -p "$S62_DIR"
+printf '#!/bin/sh\necho foreign-rtk\n' > "$S62_DIR/rtk"
+chmod +x "$S62_DIR/rtk"
+run_script "$INSTALL_SH" embedded-foreign "TOKENLESS_VERSION=$FAKE_VERSION" "NPM_STUB_EMBEDDED=1"
+assert_eq "embedded install beside foreign RTK succeeds" "$RUN_STATUS" "0"
+assert_eq "foreign RTK survives install" "$("$S62_DIR/rtk")" "foreign-rtk"
+run_script "$UNINSTALL_SH" embedded-foreign
+assert_eq "embedded uninstall beside foreign RTK succeeds" "$RUN_STATUS" "0"
+assert_eq "foreign RTK survives uninstall" "$("$S62_DIR/rtk")" "foreign-rtk"
 
 echo "install-script test passed"

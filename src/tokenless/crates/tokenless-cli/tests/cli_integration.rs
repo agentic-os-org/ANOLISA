@@ -2649,16 +2649,17 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 
 #[test]
 #[cfg(unix)]
-fn compress_pre_tool_resolves_the_independent_rtk_binary() {
+fn compress_pre_tool_uses_itself_and_never_discovers_external_rtk() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
     let bin_dir = tempfile::tempdir().unwrap();
     let rtk = bin_dir.path().join("rtk");
+    let marker = bin_dir.path().join("external-rtk-called");
     std::fs::write(
         &rtk,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'rtk 0.43.0'; exit 0; fi\nprintf 'rtk grep --count error log'\n",
+        format!("#!/bin/sh\ntouch '{}'\nexit 99\n", marker.display()),
     )
     .unwrap();
     #[cfg(unix)]
@@ -2700,6 +2701,14 @@ fn compress_pre_tool_resolves_the_independent_rtk_binary() {
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["action"], "replace_arguments");
     assert_eq!(response["result"]["output_optimization"], "rtk");
+    assert!(!marker.exists());
+    let rewritten = response["result"]["arguments"]["command"].as_str().unwrap();
+    let executable = std::fs::canonicalize(env!("CARGO_BIN_EXE_tokenless")).unwrap();
+    assert!(
+        rewritten.contains(executable.to_str().unwrap()),
+        "{rewritten}"
+    );
+    assert!(rewritten.contains(" rtk grep"), "{rewritten}");
 }
 
 #[test]

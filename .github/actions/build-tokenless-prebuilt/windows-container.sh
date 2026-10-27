@@ -10,18 +10,19 @@ target=x86_64-pc-windows-msvc
 case "$1" in
     build)
         bash /opt/builder/container.sh check
+        # Keep the frozen SDK/tooling while compiling the unified CLI with its pinned Rust.
+        export PATH="/tokenless-rust/bin:$PATH"
+        rustc --version | tee /out/tokenless-rust-version.txt
+        grep -q '^rustc 1.91.0 ' /out/tokenless-rust-version.txt
         cd /source
         cargo fetch --locked --target "$target"
-        cargo fetch --locked --target "$target" --manifest-path third_party/rtk/Cargo.toml
         export CARGO_NET_OFFLINE=true
         # Portable CLI archives must not depend on a separately installed VC++ runtime.
         export RUSTFLAGS='-C link-arg=/Brepro -C target-feature=+crt-static'
         reproducible=(python3 /common/reproducible-build.py
             --source-root /source --source-date-epoch "$SOURCE_DATE_EPOCH" --)
         "${reproducible[@]}" cargo xwin build --locked --release --target "$target" -p tokenless-cli
-        "${reproducible[@]}" cargo xwin build --locked --release --target "$target" \
-            --manifest-path third_party/rtk/Cargo.toml
-        for binary in tokenless rtk; do
+        for binary in tokenless; do
             llvm-readobj --coff-imports "$CARGO_TARGET_DIR/$target/release/$binary.exe" \
                 > "/out/$binary-imports.txt"
             if grep -Eiq 'Name: (vcruntime|msvcp|msvcr)[0-9]' "/out/$binary-imports.txt"; then
@@ -31,11 +32,12 @@ case "$1" in
         done
         # The extension uses the CRT supplied with Windows Python.
         export RUSTFLAGS='-C link-arg=/Brepro'
-        # PowerShell requires the executable suffix when resolving the SDK's RTK alias.
-        rtk_dir=/source/python/tokenless/python/anolisa_tokenless/_bin
-        mkdir -p "$rtk_dir"
-        install -m 0755 "$CARGO_TARGET_DIR/$target/release/rtk.exe" "$rtk_dir/rtk.exe"
-        trap 'rm -f "$rtk_dir/rtk.exe"' EXIT
+        # PowerShell requires the executable suffix when resolving the SDK's CLI function.
+        cli_dir=/source/python/tokenless/python/anolisa_tokenless/_bin
+        mkdir -p "$cli_dir"
+        install -m 0755 "$CARGO_TARGET_DIR/$target/release/tokenless.exe" "$cli_dir/tokenless.exe"
+        bash /source/scripts/stage-rtk-notices.sh "$cli_dir/third_party/rtk"
+        trap 'rm -f "$cli_dir/tokenless.exe"' EXIT
         cd /source/python/tokenless
         "${reproducible[@]}" maturin build --locked --target "$target" \
             --profile python-release --out /wheels

@@ -9,9 +9,9 @@
 # --version probe and the identity writer intact while dropping cargo work.
 #
 # Covered:
-#   1. a bare command name ($RTK_BIN=rtk) is resolved through PATH, matching
+#   1. a bare command name ($TOKENLESS_BIN=rtk) is resolved through PATH, matching
 #      the Rust find_rtk_binary convention
-#   2. an explicit path ($RTK_BIN=/abs/rtk) still resolves
+#   2. an explicit path ($TOKENLESS_BIN=/abs/rtk) still resolves
 #   3. missing / non-executable / unknown-on-PATH / silent rtk records
 #      "unavailable"
 #   4. the probe is bounded by RTK_VERSION_TIMEOUT_SECS and its child reaped —
@@ -175,18 +175,18 @@ fi
 #    the case the Rust discovery still resolves and runs.
 make_stub "$BIN_DIR/rtk" 'echo "rtk 0.1-test"'
 check "bare command name resolved through PATH" \
-    "$(probe RTK_BIN=rtk "PATH=$BIN_DIR:$PATH")" "rtk 0.1-test"
+    "$(probe TOKENLESS_BIN=rtk "PATH=$BIN_DIR:$PATH")" "rtk 0.1-test"
 
 # 7a. Same binary, no timeout(1) helper available.
 CURRENT_RUNNER="$L1_DIR/prelude-no-helper.sh"
 check "PATH resolution without a timeout(1) helper" \
-    "$(probe RTK_BIN=rtk "PATH=$BIN_DIR:$PATH")" "rtk 0.1-test"
+    "$(probe TOKENLESS_BIN=rtk "PATH=$BIN_DIR:$PATH")" "rtk 0.1-test"
 CURRENT_RUNNER="$L1_DIR/prelude.sh"
 
 # 2. Explicit absolute path.
 make_stub "$BIN_DIR/rtk-abs" 'echo "rtk 0.2-abs"'
 check "absolute RTK_BIN path" \
-    "$(probe "RTK_BIN=$BIN_DIR/rtk-abs")" "rtk 0.2-abs"
+    "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-abs")" "rtk 0.2-abs"
 
 # 3a. Default vendored location absent.
 check "missing vendored rtk" "$(probe)" "unavailable"
@@ -199,11 +199,11 @@ printf '#!/usr/bin/env bash\necho "rtk 0.3-noexec"\n' \
 chmod 0644 "$WORK/third_party/rtk/target/release/rtk"
 check "non-executable vendored rtk" "$(probe)" "unavailable"
 check "bare command name absent from PATH" \
-    "$(probe RTK_BIN=rtk-not-installed "PATH=$BIN_DIR:$PATH")" "unavailable"
+    "$(probe TOKENLESS_BIN=rtk-not-installed "PATH=$BIN_DIR:$PATH")" "unavailable"
 
 # 3c. Executable but silent on stdout.
 make_stub "$BIN_DIR/rtk-silent" 'exit 0'
-check "empty --version output" "$(probe "RTK_BIN=$BIN_DIR/rtk-silent")" "unavailable"
+check "empty --version output" "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-silent")" "unavailable"
 
 if [ "$HAVE_TIMEOUT_HELPER" -eq 1 ]; then
     # 4a. Hanging binary that dies on SIGTERM: bounded by the deadline, reaped.
@@ -211,7 +211,7 @@ if [ "$HAVE_TIMEOUT_HELPER" -eq 1 ]; then
     make_stub "$BIN_DIR/rtk-hang" 'echo $$ > "$RTK_HANG_PID_FILE"; exec sleep 30'
     START=$(date +%s)
     check "hanging rtk bounded by RTK_VERSION_TIMEOUT_SECS" \
-        "$(probe "RTK_BIN=$BIN_DIR/rtk-hang" RTK_VERSION_TIMEOUT_SECS=1 "RTK_HANG_PID_FILE=$HANG_PID_FILE")" \
+        "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-hang" RTK_VERSION_TIMEOUT_SECS=1 "RTK_HANG_PID_FILE=$HANG_PID_FILE")" \
         "unavailable"
     check_elapsed "deadline honoured (SIGTERM-responsive rtk)" \
         "$(( $(date +%s) - START ))" 1 5
@@ -224,7 +224,7 @@ if [ "$HAVE_TIMEOUT_HELPER" -eq 1 ]; then
         'echo $$ > "$RTK_IGNORE_PID_FILE"; trap "" TERM; exec sleep 30'
     START=$(date +%s)
     check "SIGTERM-ignoring rtk still bounded" \
-        "$(probe "RTK_BIN=$BIN_DIR/rtk-ignore-term" RTK_VERSION_TIMEOUT_SECS=1 "RTK_IGNORE_PID_FILE=$IGN_PID_FILE")" \
+        "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-ignore-term" RTK_VERSION_TIMEOUT_SECS=1 "RTK_IGNORE_PID_FILE=$IGN_PID_FILE")" \
         "unavailable"
     check_elapsed "deadline honoured (SIGTERM-ignoring rtk)" \
         "$(( $(date +%s) - START ))" 1 5
@@ -236,7 +236,7 @@ if [ "$HAVE_TIMEOUT_HELPER" -eq 1 ]; then
     make_stub "$BIN_DIR/rtk-partial" \
         'echo $$ > "$RTK_PARTIAL_PID_FILE"; echo "rtk partial"; exec sleep 30'
     check "partial output dropped when the probe times out" \
-        "$(probe "RTK_BIN=$BIN_DIR/rtk-partial" RTK_VERSION_TIMEOUT_SECS=1 "RTK_PARTIAL_PID_FILE=$PART_PID_FILE")" \
+        "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-partial" RTK_VERSION_TIMEOUT_SECS=1 "RTK_PARTIAL_PID_FILE=$PART_PID_FILE")" \
         "unavailable"
     check_reaped "partially-printing probe child was reaped" "$PART_PID_FILE"
 else
@@ -257,16 +257,16 @@ fi
 # 6. Multi-line output from a successful probe: first line only.
 make_stub "$BIN_DIR/rtk-multi" 'echo "rtk 0.4-multi"; echo "build abc123"'
 check "only the first --version line recorded" \
-    "$(probe "RTK_BIN=$BIN_DIR/rtk-multi")" "rtk 0.4-multi"
+    "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-multi")" "rtk 0.4-multi"
 
 # 5b. Non-zero exit is a failed probe, so its stdout is not a trustworthy
 #     version — recorded as "unavailable" (with and without a helper).
 make_stub "$BIN_DIR/rtk-nonzero" 'echo "rtk 0.5-nonzero"; exit 3'
 check "non-zero --version exit degrades to unavailable" \
-    "$(probe "RTK_BIN=$BIN_DIR/rtk-nonzero")" "unavailable"
+    "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-nonzero")" "unavailable"
 CURRENT_RUNNER="$L1_DIR/prelude-no-helper.sh"
 check "non-zero exit degrades without a timeout(1) helper" \
-    "$(probe "RTK_BIN=$BIN_DIR/rtk-nonzero")" "unavailable"
+    "$(probe "TOKENLESS_BIN=$BIN_DIR/rtk-nonzero")" "unavailable"
 CURRENT_RUNNER="$L1_DIR/prelude.sh"
 if command -v python3 > /dev/null 2>&1; then
     python3 -m json.tool "$IDENTITY_FILE" > /dev/null

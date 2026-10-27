@@ -44,24 +44,24 @@ pub fn run(
     data_dir: &Path,
     timeout: Duration,
 ) -> Result<(), Error> {
-    run_with_rtk(input, output, cli, data_dir, timeout, None)
+    run_with_verified_cli(input, output, cli, data_dir, timeout, None)
 }
 
-/// Process a request with an optional package-owned RTK path and SHA-256.
+/// Process a request with an optional package-owned Tokenless SHA-256.
 ///
-/// Only PreTool validates and exposes RTK to the Tokenless child. Missing or
-/// modified payloads return a correlated error without discovering another RTK;
-/// PostTool remains usable. Suggested retries carry the absolute managed path.
+/// Verify the CLI and its embedded RTK before executing package-owned code.
+/// Missing or modified payloads return a correlated error without discovering
+/// another executable. Suggested retries carry the absolute managed CLI path.
 ///
 /// # Errors
 /// Returns the same stdio and protocol failures as [`run`].
-pub fn run_with_rtk(
+pub fn run_with_verified_cli(
     input: &mut impl Read,
     output: &mut impl Write,
     cli: &Path,
     data_dir: &Path,
     timeout: Duration,
-    managed_rtk: Option<(&Path, &str)>,
+    cli_sha256: Option<&str>,
 ) -> Result<(), Error> {
     let started = Instant::now();
     let mut bytes = Vec::new();
@@ -72,7 +72,7 @@ pub fn run_with_rtk(
     let request = protocol.parse_request(&bytes)?;
     let value = request.as_value();
     let mut reply = json!({"api_version":VERSION,"request_id":value["request_id"],"status":"ok"});
-    match dispatch(&request, cli, data_dir, timeout, started, managed_rtk) {
+    match dispatch(&request, cli, data_dir, timeout, started, cli_sha256) {
         Ok(fields) => reply
             .as_object_mut()
             .ok_or(Error::Internal)?
@@ -99,7 +99,7 @@ fn dispatch(
     data_dir: &Path,
     timeout: Duration,
     started: Instant,
-    managed_rtk: Option<(&Path, &str)>,
+    cli_sha256: Option<&str>,
 ) -> Result<Value, &'static str> {
     let value = request.as_value();
     if value["method"] == "describe" {
@@ -164,58 +164,55 @@ fn dispatch(
     let deadline = Instant::now() + remaining;
     let mut environment: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
     environment.insert("TOKENLESS_DATA_DIR".into(), data_dir.as_os_str().into());
-    if before {
-        if let Some((rtk, checksum)) = managed_rtk {
-            let metadata = rtk
-                .symlink_metadata()
-                .map_err(|_| "managed_rtk_unavailable")?;
-            let directory = rtk.parent().ok_or("managed_rtk_unavailable")?;
-            let parent = directory
-                .symlink_metadata()
-                .map_err(|_| "managed_rtk_unavailable")?;
-            // SAFETY: getuid has no arguments or side effects. Match Tokenless's
-            // real-UID trust check before it can discover a fallback executable.
-            let uid = unsafe { libc::getuid() };
-            if !rtk.is_absolute()
-                || rtk.file_name().is_none_or(|name| name != "rtk")
-                || !metadata.is_file()
-                || !parent.is_dir()
-                || [&metadata, &parent]
-                    .iter()
-                    .any(|meta| (meta.uid() != uid && meta.uid() != 0) || meta.mode() & 0o002 != 0)
-                || metadata.permissions().mode() & 0o111 == 0
-                || rtk_digest(rtk, deadline)? != checksum
-            {
-                return Err("managed_rtk_unavailable");
-            }
-            // Tokenless resolves `sh` and RTK through PATH. Limit this child to
-            // the verified package directory and standard system dependencies.
-            let path = std::env::join_paths([directory, Path::new("/usr/bin"), Path::new("/bin")])
-                .map_err(|_| "managed_rtk_unavailable")?;
-            environment.insert("PATH".into(), path);
-            // Resolve-time failure must not let Tokenless discover a HOME fallback.
-            let probe = aw_exec::run(
-                &CommandSpec {
-                    program: rtk.into(),
-                    args: vec!["--version".into()],
-                    cwd: std::env::current_dir().map_err(|_| "cli_context_error")?,
-                    environment: environment.clone(),
-                },
-                b"",
-                Limits {
-                    input_bytes: 0,
-                    stdout_bytes: 4096,
-                    stderr_bytes: 4096,
-                },
-                deadline,
-                &AtomicBool::new(false),
-            )
-            .map_err(|_| "managed_rtk_unavailable")?;
-            if !probe.status.success()
-                || String::from_utf8_lossy(&probe.stdout).trim() != "rtk 0.49.0"
-            {
-                return Err("managed_rtk_unavailable");
-            }
+    if let Some(checksum) = cli_sha256 {
+        let metadata = cli
+            .symlink_metadata()
+            .map_err(|_| "managed_cli_unavailable")?;
+        let directory = cli.parent().ok_or("managed_cli_unavailable")?;
+        let parent = directory
+            .symlink_metadata()
+            .map_err(|_| "managed_cli_unavailable")?;
+        // SAFETY: getuid has no arguments or side effects. Match Tokenless's
+        // real-UID trust check before it can discover a fallback executable.
+        let uid = unsafe { libc::getuid() };
+        if !cli.is_absolute()
+            || cli.file_name().is_none_or(|name| name != "tokenless")
+            || !metadata.is_file()
+            || !parent.is_dir()
+            || [&metadata, &parent]
+                .iter()
+                .any(|meta| (meta.uid() != uid && meta.uid() != 0) || meta.mode() & 0o002 != 0)
+            || metadata.permissions().mode() & 0o111 == 0
+            || cli_digest(cli, deadline)? != checksum
+        {
+            return Err("managed_cli_unavailable");
+        }
+        // Keep shell dependencies within the verified package directory and
+        // standard system paths; RTK executes through this same CLI.
+        let path = std::env::join_paths([directory, Path::new("/usr/bin"), Path::new("/bin")])
+            .map_err(|_| "managed_cli_unavailable")?;
+        environment.insert("PATH".into(), path);
+        // Probe the embedded engine within the same overall request deadline.
+        let probe = aw_exec::run(
+            &CommandSpec {
+                program: cli.into(),
+                args: vec!["rtk".into(), "--version".into()],
+                cwd: std::env::current_dir().map_err(|_| "cli_context_error")?,
+                environment: environment.clone(),
+            },
+            b"",
+            Limits {
+                input_bytes: 0,
+                stdout_bytes: 4096,
+                stderr_bytes: 4096,
+            },
+            deadline,
+            &AtomicBool::new(false),
+        )
+        .map_err(|_| "managed_cli_unavailable")?;
+        if !probe.status.success() || String::from_utf8_lossy(&probe.stdout).trim() != "rtk 0.49.0"
+        {
+            return Err("managed_cli_unavailable");
         }
     }
     let command = CommandSpec {
@@ -299,9 +296,9 @@ pub enum Error {
     Internal,
 }
 
-fn rtk_digest(path: &Path, deadline: Instant) -> Result<String, &'static str> {
+fn cli_digest(path: &Path, deadline: Instant) -> Result<String, &'static str> {
     use sha2::{Digest, Sha256};
-    let mut source = std::fs::File::open(path).map_err(|_| "managed_rtk_unavailable")?;
+    let mut source = std::fs::File::open(path).map_err(|_| "managed_cli_unavailable")?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
     loop {
@@ -310,7 +307,7 @@ fn rtk_digest(path: &Path, deadline: Instant) -> Result<String, &'static str> {
         }
         let count = source
             .read(&mut buffer)
-            .map_err(|_| "managed_rtk_unavailable")?;
+            .map_err(|_| "managed_cli_unavailable")?;
         if count == 0 {
             return Ok(format!("{:x}", hash.finalize()));
         }
