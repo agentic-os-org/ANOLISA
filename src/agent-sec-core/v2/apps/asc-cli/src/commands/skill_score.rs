@@ -1,10 +1,8 @@
-//! Local assessment dispatch into the scoring runtime shipped with this installation.
+//! Explicit local native assessment; only dynamic execution uses the optional worker.
 
 use std::ffi::OsString;
 use std::io;
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use clap::{Args, Subcommand};
 
@@ -37,60 +35,282 @@ enum ScoreAction {
 }
 
 impl SkillScoreCommand {
-    /// Replaces this process with the private scoring runtime, preserving its process group and I/O.
-    ///
-    /// Success never returns. Signals and exit status remain owned by the scoring process.
-    ///
-    /// # Errors
-    /// Returns the executable-location or exec error, including a missing scoring payload.
-    pub fn exec(&self) -> io::Result<std::convert::Infallible> {
-        let executable = std::env::current_exe()?;
-        let prefix = executable.parent().and_then(Path::parent).ok_or_else(|| {
-            io::Error::other("cannot locate the AgentSecCore installation prefix")
-        })?;
-        let private_cli = prefix.join("lib/anolisa/sec-core/skill-score/cli/bin/agent-sec-cli");
-        let error = Command::new(&private_cli).args(self.arguments()).exec();
-        Err(io::Error::new(
-            error.kind(),
-            format!(
-                "cannot execute Skill scoring runtime at {}: {error}; install a sec-core package containing the scoring payload",
-                private_cli.display()
-            ),
-        ))
+    /// Execute the explicitly requested native local assessment without a daemon fallback.
+    pub fn execute(&self) -> u8 {
+        match self.run_native() {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("skill-score: {error}");
+                if matches!(
+                    error,
+                    asc_skill_score::Error::Contract(_) | asc_skill_score::Error::Json(_)
+                ) {
+                    2
+                } else {
+                    1
+                }
+            }
+        }
     }
 
-    fn arguments(&self) -> Vec<OsString> {
-        let mut arguments = vec![OsString::from("skill-score")];
-        let input = match &self.action {
+    fn input(
+        &self,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> asc_skill_score::Result<Input<'_>> {
+        use std::io::Read as _;
+        let (task, skill, output_file, evidence_dir) = match &self.action {
             ScoreAction::Plan {
                 skill_dir,
                 output_file,
-            } => {
-                arguments.push("plan".into());
-                append_path(&mut arguments, "--output-file=", output_file.as_deref());
-                skill_dir.as_os_str()
-            }
+            } => (
+                None,
+                skill_dir.canonicalize().map_err(|_| {
+                    asc_skill_score::Error::Contract("Skill directory is unavailable".into())
+                })?,
+                output_file.as_deref(),
+                None,
+            ),
             ScoreAction::Run {
                 task_input,
                 output_file,
                 evidence_dir,
             } => {
-                arguments.push("run".into());
-                append_path(&mut arguments, "--output-file=", output_file.as_deref());
-                append_path(&mut arguments, "--evidence-dir=", evidence_dir.as_deref());
-                task_input.as_os_str()
+                let input = task_input.to_str().ok_or_else(|| {
+                    asc_skill_score::Error::Contract("task input must be UTF-8".into())
+                })?;
+                let mut bytes = Vec::new();
+                let base = if input == "-" {
+                    bytes = read_stdin(cancelled)?;
+                    std::env::current_dir()?
+                } else if input.trim_start().starts_with('{') {
+                    bytes.extend_from_slice(input.as_bytes());
+                    std::env::current_dir()?
+                } else {
+                    let path = Path::new(input).canonicalize()?;
+                    std::fs::File::open(&path)?
+                        .take(16_777_217)
+                        .read_to_end(&mut bytes)?;
+                    path.parent()
+                        .ok_or_else(|| {
+                            asc_skill_score::Error::Contract("task path lacks parent".into())
+                        })?
+                        .to_path_buf()
+                };
+                if bytes.len() > 16_777_216 {
+                    return Err(asc_skill_score::Error::Contract(
+                        "task exceeds 16 MiB".into(),
+                    ));
+                }
+                let task = asc_skill_score::parse_task(serde_json::from_slice(&bytes)?, &base)?;
+                let skill = PathBuf::from(task["skill_path"].as_str().ok_or_else(|| {
+                    asc_skill_score::Error::Contract("skill_path missing".into())
+                })?);
+                (
+                    Some(task),
+                    skill,
+                    output_file.as_deref(),
+                    evidence_dir.as_deref(),
+                )
             }
         };
-        // Keep leading hyphens and inline JSON as positional data in the Python parser.
-        arguments.extend([OsString::from("--"), input.to_owned()]);
-        arguments
+        Ok(Input {
+            task,
+            skill,
+            output_file,
+            evidence_dir,
+        })
+    }
+
+    fn run_native(&self) -> asc_skill_score::Result<u8> {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let term = signal_hook::flag::register(signal_hook::consts::SIGTERM, cancelled.clone())?;
+        let interrupt =
+            signal_hook::flag::register(signal_hook::consts::SIGINT, cancelled.clone())?;
+        let result = (|| {
+            let Input {
+                task,
+                skill,
+                output_file,
+                evidence_dir,
+            } = self.input(&cancelled)?;
+            if !skill.join("SKILL.md").is_file() {
+                return Err(asc_skill_score::Error::Contract(
+                    "Skill directory must contain SKILL.md".into(),
+                ));
+            }
+            check_targets(&skill, output_file, evidence_dir)?;
+            let temporary = tempfile::Builder::new()
+                .prefix("asc-skill-score-")
+                .tempdir()?;
+            let evidence = if let Some(path) = evidence_dir {
+                std::fs::create_dir_all(path)?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+                path.canonicalize()?
+            } else {
+                temporary.path().to_path_buf()
+            };
+            let (mut value, code) = if let Some(task) = task {
+                let executable = std::env::current_exe()?;
+                let prefix = executable.parent().and_then(Path::parent).ok_or_else(|| {
+                    asc_skill_score::Error::Runtime("cannot locate ASC installation".into())
+                })?;
+                let outcome = asc_skill_score::run(&task, &evidence, prefix, cancelled.clone())?;
+                (outcome.report, outcome.exit_code)
+            } else {
+                (asc_skill_score::plan(&skill, cancelled.clone())?, 0)
+            };
+            if evidence_dir.is_some() {
+                value["evidence_dir"] = evidence.to_string_lossy().into_owned().into();
+            }
+            let encoded = serde_json::to_string_pretty(&value)? + "\n";
+            if let Some(path) = output_file {
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)?;
+                output.write_all(encoded.as_bytes())?;
+            }
+            std::io::stdout().lock().write_all(encoded.as_bytes())?;
+            Ok(code)
+        })();
+        signal_hook::low_level::unregister(term);
+        signal_hook::low_level::unregister(interrupt);
+        result
     }
 }
 
-fn append_path(arguments: &mut Vec<OsString>, option: &str, path: Option<&Path>) {
-    if let Some(path) = path {
-        let mut value = OsString::from(option);
-        value.push(path);
-        arguments.push(value);
+struct Input<'a> {
+    task: Option<serde_json::Value>,
+    skill: PathBuf,
+    output_file: Option<&'a Path>,
+    evidence_dir: Option<&'a Path>,
+}
+
+fn resolved_output(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(
+            ancestor
+                .file_name()
+                .ok_or_else(|| io::Error::other("invalid output path"))?,
+        );
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| io::Error::other("invalid output ancestor"))?;
+    }
+    let mut result = ancestor.canonicalize()?;
+    for name in suffix.iter().rev() {
+        for component in Path::new(name).components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    result.pop();
+                }
+                std::path::Component::Normal(name) => result.push(name),
+                std::path::Component::CurDir => {}
+                _ => return Err(io::Error::other("invalid output component")),
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn check_targets(
+    skill: &Path,
+    output: Option<&Path>,
+    evidence: Option<&Path>,
+) -> asc_skill_score::Result<()> {
+    for path in [output, evidence].into_iter().flatten() {
+        if resolved_output(path)?.starts_with(skill) {
+            return Err(asc_skill_score::Error::Contract(
+                "outputs must be outside the evaluated Skill".into(),
+            ));
+        }
+    }
+    if output.is_some_and(|p| std::fs::symlink_metadata(p).is_ok()) {
+        return Err(asc_skill_score::Error::Contract(
+            "output file already exists".into(),
+        ));
+    }
+    if let Some(path) = evidence {
+        if let Ok(metadata) = std::fs::symlink_metadata(path)
+            && (metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || std::fs::read_dir(path)?.next().is_some())
+        {
+            return Err(asc_skill_score::Error::Contract(
+                "evidence directory must be absent or empty and not a symlink".into(),
+            ));
+        }
+        if let Some(output) = output {
+            let output = resolved_output(output)?;
+            let evidence = resolved_output(path)?;
+            if evidence.starts_with(&output) {
+                return Err(asc_skill_score::Error::Contract(
+                    "output file cannot be the evidence directory or its ancestor".into(),
+                ));
+            }
+            if let Ok(relative) = output.strip_prefix(evidence) {
+                let first = relative
+                    .components()
+                    .next()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .unwrap_or_default();
+                if [
+                    "probes",
+                    "task",
+                    "environment",
+                    "runtime-signals",
+                    "source-redaction",
+                    "evidence-catalog",
+                    "judge-catalog",
+                    "adjudication",
+                    "critical",
+                    "internal-report",
+                    "events",
+                ]
+                .contains(&first.split('.').next().unwrap_or_default())
+                {
+                    return Err(asc_skill_score::Error::Contract(
+                        "output conflicts with internal evidence paths".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_stdin(cancelled: &std::sync::atomic::AtomicBool) -> asc_skill_score::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = std::io::stdin()
+            .take(16_777_217)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    loop {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(asc_skill_score::Error::Cancelled);
+        }
+        match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(result) => return Ok(result?),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(asc_skill_score::Error::Runtime(
+                    "stdin reader stopped unexpectedly".into(),
+                ));
+            }
+        }
     }
 }

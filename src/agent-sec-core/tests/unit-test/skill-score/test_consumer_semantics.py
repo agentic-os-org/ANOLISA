@@ -9,7 +9,6 @@ import tarfile
 from pathlib import Path
 
 import pytest
-
 from agent_sec_cli.skill_score.contracts import ContractError, Fixture
 from agent_sec_cli.skill_score.fixture_formats import build_deb
 from agent_sec_cli.skill_score.probes import validate_deb_fixture
@@ -26,24 +25,38 @@ def test_literal_shell_argument_is_data_not_shell_source(tmp_path: Path) -> None
     )
     assert result.stdout == payload and not (tmp_path / "marker").exists()
     subprocess.run(
-        ["sh", "-c", f'printf "%s" "{payload}"'], cwd=tmp_path, capture_output=True, check=True
+        ["sh", "-c", f'printf "%s" "{payload}"'],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
     )
     assert (tmp_path / "marker").exists()
 
 
-def test_validator_python_source_interpolation_differs_from_shell_and_argv(tmp_path: Path) -> None:
+def test_validator_python_source_interpolation_differs_from_shell_and_argv(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "safe.json").write_text("{}")
     path = "safe.json', 'r') as f:\n    pass\nfrom pathlib import Path\nPath('marker').write_text('observed')\nwith open('safe.json"
     source = f"import json\nwith open('{path}', 'r') as f:\n    data = json.load(f)\nprint(data)\n"
     result = subprocess.run(
-        [sys.executable, "-c", source], cwd=tmp_path, capture_output=True, text=True, check=False
+        [sys.executable, "-c", source],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0 and (tmp_path / "marker").read_text() == "observed"
     (tmp_path / "marker").unlink()
     # The argv control opens the literal filename; even a valid file with that name is data.
     (tmp_path / path).write_text("{}")
     result = subprocess.run(
-        [sys.executable, "-c", "import json,sys; print(json.load(open(sys.argv[1])))", path],
+        [
+            sys.executable,
+            "-c",
+            "import json,sys; print(json.load(open(sys.argv[1])))",
+            path,
+        ],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -101,7 +114,10 @@ def deb_fixture(traversal: bool = False) -> bytes:
             stream.addfile(member, io.BytesIO(value))
         members[name] = buffer.getvalue()
     for name, value in members.items():
-        archive += f"{name:<16}{0:<12}{0:<6}{0:<6}{100644:<8}{len(value):<10}`\n".encode() + value
+        archive += (
+            f"{name:<16}{0:<12}{0:<6}{0:<6}{100644:<8}{len(value):<10}`\n".encode()
+            + value
+        )
         if len(value) % 2:
             archive += b"\n"
     return archive
@@ -121,7 +137,9 @@ def test_binary_probe_checks_format_not_safety(traversal: bool, tmp_path: Path) 
             validate_deb_fixture(broken)
 
 
-@pytest.mark.parametrize("member", ["usr/share/example.txt", "../../../guard/protected.txt"])
+@pytest.mark.parametrize(
+    "member", ["usr/share/example.txt", "../../../guard/protected.txt"]
+)
 def test_deb_recipe_is_valid_deterministic_and_preserves_member(member: str) -> None:
     specification = json.dumps(
         {
@@ -161,6 +179,8 @@ def test_deb_recipe_is_valid_deterministic_and_preserves_member(member: str) -> 
         '{"package":"bad name","files":{"x":"ok"}}',
     ],
 )
-def test_deb_recipe_rejects_invalid_or_executable_preparation(specification: str) -> None:
+def test_deb_recipe_rejects_invalid_or_executable_preparation(
+    specification: str,
+) -> None:
     with pytest.raises(ValueError):
         build_deb(specification)

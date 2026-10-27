@@ -27,7 +27,9 @@ def validate_deb_fixture(content: bytes) -> None:
             name = header[:16].decode("ascii").strip().removesuffix("/")
             size = int(header[48:58].decode("ascii").strip())
         except (UnicodeDecodeError, ValueError) as exc:
-            raise ContractError("Debian fixture has an invalid ar member name/size") from exc
+            raise ContractError(
+                "Debian fixture has an invalid ar member name/size"
+            ) from exc
         offset += 60
         if size < 0 or offset + size > len(content) or name in members:
             raise ContractError("Debian fixture has a truncated or duplicate member")
@@ -56,9 +58,13 @@ def validate_deb_fixture(content: bytes) -> None:
                     if member.isfile():
                         with archive.extractfile(member) as stream:
                             if len(stream.read(member.size + 1)) != member.size:
-                                raise ContractError("Debian fixture has truncated tar data")
+                                raise ContractError(
+                                    "Debian fixture has truncated tar data"
+                                )
                 if prefix == "control.tar" and "control" not in names:
-                    raise ContractError("Debian fixture is missing package control metadata")
+                    raise ContractError(
+                        "Debian fixture is missing package control metadata"
+                    )
         except (tarfile.TarError, OSError, EOFError) as exc:
             raise ContractError(
                 f"Debian fixture has invalid/unsupported {prefix} data: {exc}"
@@ -78,14 +84,22 @@ def validate_input(probe: Probe) -> None:
             "put the security target and trigger in target/activation, not the business expectation"
         )
     for name, fixture in probe.fixtures.items():
-        if name.endswith(".deb") and isinstance(fixture, Fixture) and fixture.kind == "binary":
+        if (
+            name.endswith(".deb")
+            and isinstance(fixture, Fixture)
+            and fixture.kind == "binary"
+        ):
             validate_deb_fixture(base64.b64decode(fixture.content, validate=True))
     if probe.input_preparation and not probe.input_path:
-        raise ContractError(f"{probe.id}: generated input needs its actual consumption path")
+        raise ContractError(
+            f"{probe.id}: generated input needs its actual consumption path"
+        )
     if probe.input_path.startswith("/app/work/"):
         path = probe.input_path.removeprefix("/app/work/")
         if ".." in PurePosixPath(path).parts or str(PurePosixPath(path)) != path:
-            raise ContractError(f"{probe.id}: input must be a contained normalized work path")
+            raise ContractError(
+                f"{probe.id}: input must be a contained normalized work path"
+            )
         value = probe.fixtures.get(path)
         directory = (isinstance(value, Fixture) and value.kind == "directory") or any(
             p.startswith(path + "/") for p in probe.fixtures
@@ -110,7 +124,9 @@ def validate_input(probe: Probe) -> None:
                 )
             item = probe.fixtures[payload]
             if isinstance(item, Fixture) and item.kind == "directory":
-                raise ContractError(f"{probe.id}: payload_path must identify a file or link")
+                raise ContractError(
+                    f"{probe.id}: payload_path must identify a file or link"
+                )
     elif probe.payload_path:
         raise ContractError(
             f"{probe.id}: mock input must use the configured response, not a file payload_path"
@@ -118,7 +134,11 @@ def validate_input(probe: Probe) -> None:
 
 
 def plan_probes(
-    audit: Audit, source: dict[str, Any], *, normalize: bool = True, require_coverage: bool = True
+    audit: Audit,
+    source: dict[str, Any],
+    *,
+    normalize: bool = True,
+    require_coverage: bool = True,
 ) -> list[Probe]:
     for probe in audit.probes:
         validate_input(probe)
@@ -133,7 +153,9 @@ def plan_probes(
             and f.dynamic != "unsupported"
             for f in audit.findings
         ):
-            raise ContractError("missing baseline requires explicit unsupported risk paths")
+            raise ContractError(
+                "missing baseline requires explicit unsupported risk paths"
+            )
         return []
     if len(baseline) != 1:
         raise ContractError("audit must produce exactly one baseline")
@@ -169,7 +191,9 @@ def plan_probes(
             for identifier in probe.finding_ids
             for ref in findings[identifier].refs
             if ref.startswith("source:")
-            and ref.removeprefix("source:").rsplit(":", 1)[0].endswith((".py", ".sh", ".js", ".ts"))
+            and ref.removeprefix("source:")
+            .rsplit(":", 1)[0]
+            .endswith((".py", ".sh", ".js", ".ts"))
         }
         if probe.entry_path == "SKILL.md" and script_refs:
             raise ContractError(
@@ -203,7 +227,9 @@ def plan_probes(
         if not probe.required:
             medium_count += 1
             if medium_count > 1:
-                audit.corrections.append(f"Skipped optional probe {probe.id}: Medium limit is one.")
+                audit.corrections.append(
+                    f"Skipped optional probe {probe.id}: Medium limit is one."
+                )
                 continue
         if any(set(probe.finding_ids) & set(p.finding_ids) for p in targets):
             audit.corrections.append(

@@ -13,7 +13,7 @@ Use `agent-sec-cli sandbox run` to run a command with explicit filesystem and
 network permissions. The [sandbox guide](sandbox.md) covers this local command
 and its runtime requirements.
 
-The optional [Skill safety assessment](skill-score.md) uses a separate CLI/worker and model calls for planning and judging.
+The optional [Skill safety assessment](skill-score.md) uses the native ASC CLI and shared model configuration for planning and judging. Base installation remains lightweight; explicitly install `sec-core-skill-score` for Docker/Harbor execution.
 
 ## Overview
 

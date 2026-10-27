@@ -73,7 +73,13 @@ class DataExfiltrationRule(SecurityRule):
             if re.search(r"curl|wget", line, re.IGNORECASE):
                 if re.search(r"-d|--data|--post", line, re.IGNORECASE):
                     # 检查是否发送敏感文件
-                    if re.search(r"@.*\.ssh|@.*\.env|@.*credential|@.*secret", line, re.IGNORECASE):
-                        matches.append(Match(line=i, pattern=line.strip(), confidence=0.95))
+                    if re.search(
+                        r"@.*\.ssh|@.*\.env|@.*credential|@.*secret",
+                        line,
+                        re.IGNORECASE,
+                    ):
+                        matches.append(
+                            Match(line=i, pattern=line.strip(), confidence=0.95)
+                        )
 
         return matches

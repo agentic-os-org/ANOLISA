@@ -67,7 +67,7 @@ rust-lint: ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
 test-python: ## Run Python unit and integration tests
 	@echo "🧪 Running Python tests..."
 	cd agent-sec-cli && uv sync
-	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ --ignore=tests/v2 -v
+	uv run --project agent-sec-cli pytest -o "pythonpath=$(CURDIR)/skill-score-runtime/src" tests/ --ignore=tests/e2e/ --ignore=tests/v2 -v
 	uv run --project agent-sec-cli pytest tests/e2e/cli -v
 	uv run --project agent-sec-cli pytest tests/e2e/daemon -v
 	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner -v
@@ -155,7 +155,7 @@ test-e2e-source-build: test-e2e-source-build-v2 ## Run V2 E2E tests against sour
 test-python-coverage: ## Run Python tests with coverage report
 	@echo "🧪 Running Python tests with coverage..."
 	cd agent-sec-cli && uv sync
-	uv run --project agent-sec-cli pytest tests/ \
+	uv run --project agent-sec-cli pytest -o "pythonpath=$(CURDIR)/skill-score-runtime/src" tests/ \
 		--ignore=tests/e2e/linux-sandbox \
 		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/skill-signing \
@@ -185,11 +185,11 @@ test-rust-v2: ## Run V2 Rust tests and verify daemon server identity separately
 	cd v2 && cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent -- --exact
 
 .PHONY: test-rust-v2-sandbox-coverage
-test-rust-v2-sandbox-coverage: ## Cover V2 sandbox contracts, execution and CLI tests
+test-rust-v2-sandbox-coverage: ## Cover V2 sandbox, Skill Score, remote model and CLI contracts
 	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo llvm-cov --locked --no-fail-fast \
 		--cobertura --output-path ../rust-v2-coverage.xml \
 		--features asc-daemon-client/testing \
-		-p asc-os-permission-types -p asc-sandbox-types -p asc-pep-runtime -p asc-cli
+		-p asc-os-permission-types -p asc-sandbox-types -p asc-pep-runtime -p asc-cli -p asc-skill-score -p asc-model-client
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.

@@ -2,6 +2,8 @@
 
 [中文版](skill-score-runtime_zh.md)
 
+> Historical Python preview design, retained as the migration oracle baseline. Native Rust scoring and the separate optional installation supersede the delivery described here; see the [native design](skill-score-native-design.md) and [current user guide](../../../../docs/user-guide/en/agent-sec-core/skill-score.md).
+
 This change adds the standalone score source to ANOLISA baseline `5351c892f2e89d6be799ebdbeea948c173d3d7c2`. The import is bound to the source attachment in `packaging/skill-score/source-import.json`; a release tag's base commit is not treated as the complete source. Runtime image and package acceptance is separate from unit testing.
 
 The assessment CLI owns planning, source hash validation, evidence interpretation and report versioning. The Python 3.12 worker owns the existing Docker/Harbor execution. The preview standard raw package adds private runtimes under `/usr/local/lib/anolisa/sec-core/skill-score/{cli,runtime}` and exposes `agent-sec-cli skillsec score plan/run` in the V2 CLI. Its explicit local dispatch uses Unix exec before observability initialization, retaining the PID, process group, standard streams and Python exit status. It does not connect to the daemon or inherit its request timeout. The existing `skill-ledger` spelling remains an alias for `skillsec`. The CLI uses the current native prompt backend and rejects scanner error/degraded/truncated outcomes instead of treating them as clean scans.

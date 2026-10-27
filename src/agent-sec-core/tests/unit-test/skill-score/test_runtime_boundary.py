@@ -3,12 +3,11 @@
 from pathlib import Path
 
 import pytest
-from test_two_stage import baseline
-
 from agent_sec_cli.skill_score import runtime
 from agent_sec_cli.skill_score.config import ScoreConfig
 from agent_sec_cli.skill_score.contracts import ContractError, Probe
 from agent_sec_cli.skill_score.io import read, save
+from test_two_stage import baseline
 
 
 def test_worker_resolves_from_raw_install_prefix(tmp_path: Path) -> None:
@@ -25,7 +24,9 @@ def test_subprocess_protocol_has_no_key_or_audit_answers(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "WORKER_PYTHON", worker)
     key = "sk-" + "abcd1234" * 4
     monkeypatch.setenv("ANTHROPIC_API_KEY", key)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
     monkeypatch.setenv("UNRELATED_TOKEN", "not-for-worker")
     calls = []
 
@@ -62,7 +63,9 @@ def test_worker_failure_is_not_silently_complete(tmp_path, monkeypatch):
     worker.touch()
     monkeypatch.setattr(runtime, "WORKER_PYTHON", worker)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-" + "abcd1234" * 4)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
 
     class Process:
         returncode = 1
@@ -75,4 +78,6 @@ def test_worker_failure_is_not_silently_complete(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runtime.subprocess, "Popen", Process)
     with pytest.raises(ContractError, match="local image"):
-        runtime.Runtime(ScoreConfig())._invoke({"operation": "environment"}, tmp_path, 10)
+        runtime.Runtime(ScoreConfig())._invoke(
+            {"operation": "environment"}, tmp_path, 10
+        )

@@ -17,7 +17,10 @@ def check_validator(script: Path, root: Path, use_jq: bool, malicious: bool) -> 
     project = work / "project"
     project.mkdir()
     (project / "file").write_text("ordinary input\n")
-    config = {"checks": [{"pattern": "file", "type": "file", "min": 1}], "executable": []}
+    config = {
+        "checks": [{"pattern": "file", "type": "file", "min": 1}],
+        "executable": [],
+    }
     (work / "safe.json").write_text(json.dumps(config))
     filename = "safe.json"
     if malicious:
@@ -87,7 +90,10 @@ def check_tar_default(root: Path) -> dict:
 def main() -> None:
     if os.environ.get("ANTHROPIC_API_KEY"):
         raise RuntimeError("Consumer contrasts must not receive a real model key")
-    script = Path(sys.argv[1]) / "project-structure-validator/scripts/validate_project_structure.sh"
+    script = (
+        Path(sys.argv[1])
+        / "project-structure-validator/scripts/validate_project_structure.sh"
+    )
     with tempfile.TemporaryDirectory(prefix="score-consumer-") as directory:
         root = Path(directory)
         print(
@@ -95,7 +101,11 @@ def main() -> None:
                 {
                     "validator": [
                         check_validator(script, root, jq, malicious)
-                        for jq, malicious in [(False, True), (True, True), (False, False)]
+                        for jq, malicious in [
+                            (False, True),
+                            (True, True),
+                            (False, False),
+                        ]
                     ],
                     "deb_api": check_tar_default(root),
                 },

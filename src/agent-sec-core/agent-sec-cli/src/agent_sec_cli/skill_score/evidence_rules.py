@@ -5,7 +5,9 @@ from typing import Any
 from agent_sec_cli.skill_score.contracts import Adjudication, Finding, Probe
 
 
-def apply_dynamic(findings: list[Finding], probes: list[Probe], evidence: list[dict]) -> None:
+def apply_dynamic(
+    findings: list[Finding], probes: list[Probe], evidence: list[dict]
+) -> None:
     for finding in findings:
         # Never accept a model-authored Gate or positive dynamic claim without observations.
         finding.critical_confirmed = False
@@ -13,18 +15,21 @@ def apply_dynamic(findings: list[Finding], probes: list[Probe], evidence: list[d
             item
             for item in evidence
             if any(
-                item["probe_id"] == probe.id and finding.id in probe.finding_ids for probe in probes
+                item["probe_id"] == probe.id and finding.id in probe.finding_ids
+                for probe in probes
             )
         ]
         positives = [
             item
             for item in relevant
-            if item.get("positive_refs") and finding.id in item.get("matched_finding_ids", [])
+            if item.get("positive_refs")
+            and finding.id in item.get("matched_finding_ids", [])
         ]
         attempts = [
             item
             for item in relevant
-            if item.get("attempt_refs") and finding.id in item.get("matched_finding_ids", [])
+            if item.get("attempt_refs")
+            and finding.id in item.get("matched_finding_ids", [])
         ]
         # New findings require an exact effect reference/target AND source or ATIF attribution.
         extra_refs = [
@@ -56,7 +61,8 @@ def apply_dynamic(findings: list[Finding], probes: list[Probe], evidence: list[d
             finding.status = "material_risk"
             finding.refs = list(
                 dict.fromkeys(
-                    finding.refs + [ref for item in attempts for ref in item["attempt_refs"]]
+                    finding.refs
+                    + [ref for item in attempts for ref in item["attempt_refs"]]
                 )
             )
         elif finding.scope == "environment":
@@ -69,8 +75,13 @@ def apply_dynamic(findings: list[Finding], probes: list[Probe], evidence: list[d
                 and any(
                     item.get("complete")
                     and item.get("entry_activated")
-                    and bool(set(finding.control_test_refs) & set(item.get("input_refs", [])))
-                    and bool(set(finding.control_test_refs) & set(item.get("tool_result_refs", [])))
+                    and bool(
+                        set(finding.control_test_refs) & set(item.get("input_refs", []))
+                    )
+                    and bool(
+                        set(finding.control_test_refs)
+                        & set(item.get("tool_result_refs", []))
+                    )
                     and all(
                         ref.removeprefix("source:").rsplit(":", 1)[0]
                         in item.get("control_source_paths", [])
@@ -108,7 +119,8 @@ def canary_findings(evidence: list[dict]) -> list[Finding]:
             critical_confirmed=True,
         )
         for item in evidence
-        if item.get("critical_canary") and (item.get("critical_refs") or item.get("positive_refs"))
+        if item.get("critical_canary")
+        and (item.get("critical_refs") or item.get("positive_refs"))
     ][:1]
 
 
@@ -135,7 +147,13 @@ def merge_attempts(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     result["attempts"] = [
         {
             k: item.get(k)
-            for k in ("complete", "error", "elapsed_seconds", "usage", "collection_errors")
+            for k in (
+                "complete",
+                "error",
+                "elapsed_seconds",
+                "usage",
+                "collection_errors",
+            )
         }
         for item in attempts
     ]
@@ -150,17 +168,25 @@ def baseline_eligibility(
     valid = bool(refs) and refs <= catalog.keys()
     observed = evidence.get("complete") and evidence.get("skill_loaded")
     if not valid or not observed:
-        return False, "baseline references, Skill loading or required observations are missing"
+        return (
+            False,
+            "baseline references, Skill loading or required observations are missing",
+        )
     if final.baseline_completed:
         if final.baseline_failure not in {"none", "unknown"}:
-            return False, "task completion conflicts with the reported failure classification"
+            return (
+                False,
+                "task completion conflicts with the reported failure classification",
+            )
         if (
             probe.entry_path == "SKILL.md"
             or (
                 evidence.get("entry_started")
                 and (not probe.input_path or evidence.get("input_observed"))
             )
-        ) and any(ref.startswith(("atif:baseline:", "event:baseline:")) for ref in refs):
+        ) and any(
+            ref.startswith(("atif:baseline:", "event:baseline:")) for ref in refs
+        ):
             return True, "normal task result supported by execution evidence"
         return False, "original baseline entry was not observed"
     if final.baseline_failure != "skill_failure":
@@ -177,7 +203,10 @@ def baseline_eligibility(
         and any(ref.startswith(f"source:{probe.entry_path}:") for ref in refs)
         and final.baseline_reason.strip()
     ):
-        return True, "original-code failure is evidenced; functional completion remains false"
+        return (
+            True,
+            "original-code failure is evidenced; functional completion remains false",
+        )
     return (
         False,
         "functional failure lacks matching original entry, input, exit, source or tool evidence",

@@ -2,26 +2,55 @@
 
 [中文版](../../zh/agent-sec-core/skill-score.md)
 
-The optional assessment component plans probes for one Skill, executes them in Docker, and produces an evidence-qualified safety score. Planning and judging call a supported Bailian Anthropic-compatible model endpoint and consume tokens. The preview uses the standard `sec-core` raw package and preserves its V2 host CLI and daemon.
+Skill Score plans tasks for one Skill, executes them in controlled Docker environments, and produces an evidence-qualified safety score. The standard ASC CLI provides native Rust planning, judging and scoring. Dynamic execution is an explicit optional installation. Model-assisted stages consume tokens.
 
-## Install the optional component
+## Install
 
-On Ubuntu and compatible Linux x86_64 distributions, download a validated fixed fork release and check artifact sizes and SHA-256 values against its trusted manifest. Place `index-v2.toml`, `index.toml`, `components-v2.toml` and the raw package in a local `v1/` directory, then use the existing ANOLISA installer:
+The first native preview uses a matched fork release with two raw components, one separate image archive and an installer supporting candidate preparation. The formal default channel may not contain this preview. Use the installer included in the trusted release (version 0.3.20 or newer), and verify every artifact against its release-v3 manifest before executing it. SkillEval's bundle script prepares the local repository automatically.
+
+After arranging the verified raw packages and indexes under a local `v1/` repository, install the base component:
 
 ```sh
 sudo anolisa --install-mode system install sec-core --backend raw \
   --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
 ```
 
-Use the version from a successful `sec-core` preview release. The official installer appends `/v1` when the repository root does not end with it, so the flat GitHub Release asset URL cannot be used directly as the repository root. The SkillEval bundle script prepares this local v1 layout automatically. The official default channel does not yet contain this optional assessment. The standard raw package contains the V2 binaries and an isolated scoring CLI/worker with pinned Python dependencies. The public entry point is `/usr/local/bin/agent-sec-cli skillsec score plan/run`. The Rust CLI directly replaces its process with the private Python scoring runtime; the scoring logic is unchanged. The old preview launcher `agent-sec-skill-score` is not installed. Private scoring runtimes reside under `/usr/local/lib/anolisa/sec-core/skill-score/{cli,runtime}`. No additional scoring daemon is required. Match the target CPU and glibc baseline before installing.
+Base install, update and repair do not download Python, Harbor, Docker or images for scoring. `plan` needs only the base CLI and model configuration. Existing Python dependencies for other ASC adapters are separate.
 
-The same release provides `release-manifest.json` (`agent-sec-skill-score/release-v2`), the raw repository indexes, `skill-score-images.tar.gz`, `images.json`, tool inventory and source archive. Verify all lengths and SHA-256 values against a manifest obtained from the trusted release channel. The manifest must declare `cli: "agent-sec-cli"` and `command_prefix: ["skillsec", "score"]`; consumers reject older preview command contracts. Container images are separate from the raw package. During a clean template build, load the matching archive with `docker load -i skill-score-images.tar.gz` and verify image IDs against `images.json`.
+For dynamic execution, first provide a Linux x86_64 host with a local Docker daemon, Compose, usable network namespaces, firewall/conntrack support and ptrace/strace. Reserve memory for the controller and sidecar in addition to the work container's 4096 MiB allocation. Then explicitly install the optional component at the same version:
 
-Both the work image and the ASC egress sidecar are required; runtime startup does not build or pull missing images. A Linux x86_64 host, Docker Compose, usable network namespaces, the packaged firewall/conntrack rules, and ptrace/strace support are required. Reserve memory outside the inner container's 4096 MiB allocation for Docker, the CLI, worker and sidecar. An image build alone is not runtime acceptance.
+```sh
+sudo anolisa --install-mode system install sec-core-skill-score --backend raw \
+  --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
+```
+
+This small raw package contains ASC's worker, shared contracts, dependency locks and installation helper. Installation obtains the locked Python 3.12/Harbor dependencies from their upstream distribution sources. It verifies the separate `skill-score-images.tar.gz` archive before loading it, then checks both immutable image IDs and their platform. Neither raw package embeds the container images. The work image and ASC network sidecar are both required; there is one network implementation for standalone Linux and FC.
+
+`run` checks readiness and fails with an installation or repair suggestion when dependencies are absent or inconsistent. It never downloads, builds or pulls dependencies. There is no `prepare` command. Updating the base does not automatically update or install the optional component; install/update both to compatible versions explicitly. `install --all` explicitly selects all indexed components, including the optional one.
+
+To remove dynamic execution dependencies, use `sudo anolisa --install-mode system uninstall sec-core-skill-score`. The hook removes owned inactive private environments, including environments retained by repair, while keeping the base component. Active runs or unresolved cleanup records block removal with a recovery message. Do not delete those records merely to bypass the check; first verify recovery of the exact request resources. Shared dependency caches and Docker images are not pruned by uninstall.
+
+## Configure the model service
+
+Place this secret-free configuration in `/etc/agent-sec/model-service.json`, or select another file with `AGENT_SEC_MODEL_CONFIG`:
+
+```json
+{
+  "schemaVersion": 1,
+  "remote": {
+    "provider": "bailian-payg-anthropic",
+    "baseUrl": "https://dashscope.aliyuncs.com/apps/anthropic",
+    "defaultModel": "qwen3.8-max",
+    "apiKeyEnv": "AGENT_SEC_MODEL_API_KEY"
+  }
+}
+```
+
+Inject `AGENT_SEC_MODEL_API_KEY` through the invoking environment or platform secret management. Never put its value in arguments, task JSON, templates or release manifests. The Judge and evaluated Agent share the resolved provider configuration; the worker receives only the necessary Agent model credentials. Existing local/Ollama scanner defaults are unchanged.
+
+An existing but invalid configuration fails. If no configuration file exists, the migration path accepts the legacy `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` pair and emits a deprecation notice. Both legacy variables are required.
 
 ## Plan and execute
-
-Provide `ANTHROPIC_API_KEY` and, when needed, `ANTHROPIC_BASE_URL` through the process environment or your platform's secret injection. Do not put credentials into command arguments, task JSON, templates or release manifests.
 
 ```sh
 agent-sec-cli skillsec score plan \
@@ -32,48 +61,40 @@ agent-sec-cli skillsec score run \
   --evidence-dir /work/output/evidence
 ```
 
-`plan` accepts one directory containing `SKILL.md`. Its task uses `agent-sec-skill-score/task-v1`, records the resolved Skill path and content hash, and carries the audit and probes. Keep the exact content and absolute path available to `run`. `run` rejects content drift before invoking the worker. A task can also be read from stdin with `run -`.
+`plan` accepts a directory containing `SKILL.md` and creates `agent-sec-skill-score/task-v1`. The content hash covers the complete execution input, including binary files, dependency directories, paths and executable permissions. Symlinks, special files and inputs exceeding the supported bounds are rejected. The model's text coverage is recorded separately. `run` creates and verifies a fresh private snapshot before executing it. Old preview tasks using the partial digest must be replanned; they are not silently upgraded. Preserve the Skill path and content between stages.
 
-Output files must not already exist. Evidence directories must be absent or empty. Outputs must be outside the evaluated Skill, and may not conflict with internal evidence paths. Prefer new output directories for every attempt. Standard output also contains the public JSON; file transfer is recommended when a platform limits command output.
+`run -` reads stdin. Output files must not exist; evidence directories must be absent or empty. Outputs belong outside the Skill and cannot overlap internal evidence files. Standard output contains one public JSON result, while progress goes to stderr. Use files when a platform truncates command output.
 
-Scoring runs locally and does not use the daemon. Explicit `--socket`, `--timeout-ms`, `--otel-context` and `--trace-context` options are rejected for scoring. The caller controls the evaluation deadline and cancellation. `skill-ledger` remains a compatibility alias for `skillsec`; a package without the optional scoring payload reports an installation error when executing a scoring stage.
+Scoring is explicitly local and independent of the ASC daemon; it does not certify Ledger state. Explicit `--socket`, `--timeout-ms`, `--otel-context` and `--trace-context` options are rejected. `skill-ledger` remains an alias for `skillsec`.
 
-## Interpret results
+## Read results
 
 | Exit | Meaning |
-|---|---|
-| `0` | The requested stage completed without a reported execution/persistence failure. Validate the report's coverage as well. |
-| `1` | Dependency, execution, model or persistence failure. A partial report may exist and should be retained. |
-| `2` | Invalid input or contract, including content drift. |
+| --- | --- |
+| `0` | The requested stage completed; `run` completed execution, adjudication and resource cleanup. A risk finding may still block the Skill. |
+| `1` | Dependency, execution, model, evidence, cancellation or cleanup failure. Retain any partial report. |
+| `2` | Invalid input, schema or content binding, including a changed Skill or old digest. |
 
-A public report uses `agent-sec-skill-score/report-v1` and binds `content_hash` to the task. `score` and `decision` describe the safety assessment; they do not establish dynamic completeness. Verify that `execution` accounts for every planned probe and each entry is `completed: true`; nonempty `limitations` means incomplete coverage. Missing evidence or an unsupported environment must remain visible. A high score with incomplete execution is not a passed dynamic assessment.
+Report-v1 binds `content_hash` to the task and separates `decision`/`score` from `execution_status`, `dynamic_complete` and `cleanup_status`. Consumers require complete execution and cleanup; a score alone is insufficient. `execution[].completed` describes task completion, which differs from complete observation, probe activation and risk confirmation. An evidenced failure in the original Skill can be assessable even when its business task failed. An early Critical stop leaves unexecuted probes explicitly incomplete.
 
-The optional `planning_notes` string array preserves non-blocking caveats from the task's `audit.limitations`, such as an absent category of input. Display these as unverified planning context; they neither establish nor prevent dynamic completion. Actual planning errors, unavailable environments, timeouts, missing observations and failed adjudication remain incomplete conditions. `planning_notes` is also retained in `internal-report.json`; the task format is unchanged.
+`planning_notes` preserves unverified, non-blocking planning context. Runtime limitations, missing evidence and unsupported environments remain visible. Do not infer success by filtering limitation text. Preserve the task, report, `internal-report.json`, `evidence-catalog.json` and collected artifacts together. Evidence is bounded and read without following links; collection hashes establish integrity after collection, not independent authenticity of files writable by the evaluated container. The deployment owner controls artifact access and retention.
 
-Retain the public task/report and evidence directory together, including `environment.json`, `internal-report.json` and `evidence-catalog.json`. Collect partial evidence before deleting a failed sandbox. Evidence may contain sensitive Skill content; the platform controls access and retention.
+Each `execution` item separates `execution_complete` (execution and evidence are complete) from `completed` (the business task succeeded). An Agent refusal or a Skill error can be fully assessed without making the business task successful.
 
-## Runtime ownership
+## Platform integration and release migration
 
-Harbor 0.22.0 is consumed without editing its source. ASC supplies a task Compose definition and its own sidecar image through the public environment API. The sidecar enforces a static model-host TCP allowlist; local destinations and ICMP remain direct, and other traffic is rejected. This is not a general-purpose domain firewall or Harbor phase-dependent policy implementation.
+ASC uses unmodified Harbor 0.22.0 through its public task Compose API. The work container shares the ASC sidecar's network namespace without Docker socket or network-management capabilities. The sidecar uses a fixed model-host TCP policy, preserves direct local/ICMP behavior, and rejects other traffic. This is not a general-purpose domain firewall. It uses an independent read-only hostname mapping; changing the work container's hosts file does not redirect the proxy. IPv6 needs separate acceptance.
 
-The sidecar's read-only policy holds the allowlist and resolved IPv4 addresses. GOST uses that mapping and an explicit empty fallback resolver, so changes to the work container's shared `/etc/hosts` cannot redirect the proxy. A differently cased TLS name that misses the mapping fails closed. Proxy failure leaves filtering rules installed; startup failure prevents the work container from starting. IPv6 acceptance requires a separate IPv6-enabled test environment.
+SkillEval owns FC templates, outer instance lifetime, credential injection, transfers, cancellation and operations. Template construction explicitly installs the matched base and optional components, and loads the verified archive once. Restored instances execute the same ASC CLI as a standalone host. ASC owns only the inner request's Docker resources and reports their cleanup separately from SkillEval's outer FC cleanup.
 
-A deployment platform creates the outer sandbox, uploads an immutable Skill snapshot, invokes these commands, downloads bounded artifacts and deletes the exact sandbox. ASC does not receive cloud credentials or implement FC lifecycle APIs. For FC, install the standard raw package, Docker and the images inside the FC template; SkillEval only orchestrates them. Artifact downloads and image loading occur during template construction, not for every evaluation.
+Skill dependencies must be available inside the ASC work image. Installing a document library or office tool only in the outer FC template does not make it available to the evaluated Skill. A deployment can reuse a pinned functionality-image Dockerfile to build its business dependencies, then add the ASC Agent and observation layer. Record the recipe commit and checksum, upstream base digest, actual installed versions and resulting image identities. Rebuilding a recipe does not establish that the result is identical to an existing published image. The resulting ASC image is distributed through the same verified archive and used by both standalone and FC execution.
+
+After the feature joins mainline and passes the same acceptance gates, switch the trusted release/index origin from the fork to the formal release channel. Keep the CLI, component names, model configuration and task/report contracts. OCI distribution is a future optimization, not a prerequisite for the first or formal release.
 
 ## Build and verify
 
-Developers build on Linux x86_64 with Rust 1.93.1, uv, native compiler dependencies, Docker and Compose. The `CI / Skill score raw preview` workflow builds and installs the complete raw package on Ubuntu, checks the installed CLI/worker and Docker network behavior, and publishes a fork prerelease only after those checks pass. The workflow does not publish an FC template or prove real-model scoring acceptance.
+Develop on Linux using the pinned Rust toolchain and Docker/Compose. `packaging/skill-score/build-preview.sh` builds the native base, optional raw component, image archive, matched installer and release-v3 metadata. Source and artifact identities bind the release. The former `RAW_SKILL_SCORE_PAYLOAD` mechanism is rejected; scoring Python 3.11 is not included. The retained Python scorer serves as a differential test oracle.
 
-The preview build uses `packaging/skill-score/build-payload.sh` and `RAW_SKILL_SCORE_PAYLOAD` to opt into assessment content in the standard `make package-raw` build. `RAW_PREVIEW_VERSION` sets the staged preview version without changing the source product version. The default raw build remains V2-only. Preview releases require a clean source commit and include fixed artifact hashes; `build-rpms.sh` remains a separate maintainer path for RPM delivery.
+For a prepared business base, set `ASC_WORK_BASE_IMAGE` to a registry reference pinned by digest or a local immutable Docker image ID. A local image also requires `ASC_WORK_BASE_RECIPE`, pointing to JSON with `source_repository`, `source_commit`, `dockerfile_path`, `dockerfile_sha256` and `upstream_base_image` (`reference`, `image_id`, `platform`). The build verifies the upstream reference and platform against Docker, records the recipe in the work-base metadata, and appends `.base.<12-character-image-ID>` to the preview version. Custom-base packages therefore do not share the automatic default preview's package names or release tag. These are maintainer build inputs, not options required for end users to run a Skill. A Docker image ID may identify its configuration or manifest depending on the storage backend; it is not an archive checksum or an invented registry digest.
 
-Run the Linux egress regression against the installed worker and freshly built images:
-
-```sh
-PYTHONPATH=src/agent-sec-core/agent-sec-cli/src:src/agent-sec-core/skill-score-runtime/src \
-python src/agent-sec-core/tests/integration-test/skill-score/validate_egress.py \
-  --output /absolute/new/egress-validation
-```
-
-This network regression does not call a real model and does not replace full `plan → run → report` acceptance with normal, violating, environment-failure and timeout samples.
-
-If the builder cannot reach package sources through its Docker bridge, explicitly set `ASC_IMAGE_BUILD_NETWORK=host` for the build command. This changes only trusted Docker build steps; assessment containers retain their independent network policy.
+The preview workflow checks installed package behavior and network controls before publication. Independent Linux CLI and FC SkillEval model runs remain distinct acceptance surfaces. Freeze labels and report normal/violating samples, activation, incomplete runs and cleanup separately; a small zero-false-positive sample is not a population-wide error-rate claim. See the [native design](../../../../src/agent-sec-core/docs/design/skill-score-native-design.md) for rollback and acceptance requirements.

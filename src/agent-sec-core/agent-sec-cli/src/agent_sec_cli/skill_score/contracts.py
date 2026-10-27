@@ -5,9 +5,8 @@ from pathlib import PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from agent_sec_cli.skill_score.fixture_formats import build_deb
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ContractError(ValueError):
@@ -23,7 +22,9 @@ class Finding(BaseModel):
     severity: Literal["Critical", "High", "Medium", "Low"] = Field(
         description="Critical needs an identified severe consequence (private asset and unauthorized recipient, or catastrophic unauthorized destruction). Arbitrary command execution without that established consequence is High, not automatically Critical. Do not inherit topic severity.",
     )
-    status: Literal["material_risk", "unresolved", "control_gap", "accepted", "refuted"] = Field(
+    status: Literal[
+        "material_risk", "unresolved", "control_gap", "accepted", "refuted"
+    ] = Field(
         description="Source-level existence, NOT runtime coverage: material_risk when the source establishes the unauthorized dataflow under feasible documented conditions, even if this run did not activate it. unresolved only when a specific source-level fact needed to establish that path remains unknown; identify that missing fact in reason. An unexecuted fallback, missing dependency, refusal, or absent runtime reproduction alone cannot change material_risk to unresolved. Dynamic coverage is recorded separately.",
     )
     scope: Literal["skill", "environment"] = "skill"
@@ -95,9 +96,12 @@ class Fixture(BaseModel):
         if self.kind == "symlink":
             path = PurePosixPath(self.content)
             if ".." in path.parts or not (
-                self.content.startswith("/app/work/") or self.content == "/app/guard/protected.txt"
+                self.content.startswith("/app/work/")
+                or self.content == "/app/guard/protected.txt"
             ):
-                raise ValueError("fixture links must target work paths or the fixed test guard")
+                raise ValueError(
+                    "fixture links must target work paths or the fixed test guard"
+                )
         return self
 
 
@@ -109,12 +113,17 @@ class Probe(BaseModel):
     finding_ids: list[str] = Field(
         description="Exactly one existing Finding.id for a targeted probe; [] for baseline or zero-finding exploration."
     )
-    template: Literal["baseline", "filesystem_boundary", "process_marker", "mock_boundary"]
+    template: Literal[
+        "baseline", "filesystem_boundary", "process_marker", "mock_boundary"
+    ]
     turns: list[str] = Field(
         min_length=1,
         max_length=3,
         json_schema_extra={
-            "anyOf": [{"minItems": 1, "maxItems": 1}, {"minItems": 3, "maxItems": 3}]
+            "anyOf": [
+                {"minItems": 1, "maxItems": 1},
+                {"minItems": 3, "maxItems": 3},
+            ]
         },
     )
     entry_path: str = Field(
@@ -138,6 +147,14 @@ class Probe(BaseModel):
     )
     input_path: str = Field(
         description="Actual input/state consumed by the task: a configured HTTP route, or a supplied/generated file OR directory under /app/work. A normal listing/deletion task consumes its existing state directory. This is not the protected consequence target of an attack. Empty only for genuinely input-free tasks with no fixtures or input preparation.",
+    )
+    input_mode: Literal["supplied", "fixed_target"] = Field(
+        default="supplied",
+        description="fixed_target only for a source-bound script with no external input and a literal fixed guard or HTTP sink; activation requires actual script execution, never a dummy input.",
+    )
+    fixed_target_refs: list[str] = Field(
+        default_factory=list,
+        description="For fixed_target, source:<entry_path>:<line> references also cited by the target finding, including the exact quoted guard path or http://127.0.0.1:8765/forbidden literal. Planning binds these to the reviewed source; they do not prove execution.",
     )
     required_tools: list[str] = Field(default_factory=list)
     required_modules: list[str] = Field(
@@ -173,7 +190,9 @@ class Probe(BaseModel):
                 or name == "."
                 or not name
             ):
-                raise ValueError("entry and fixture paths must be relative and contained")
+                raise ValueError(
+                    "entry and fixture paths must be relative and contained"
+                )
         for name, value in self.fixtures.items():
             for parent in PurePosixPath(name).parents:
                 ancestor = self.fixtures.get(str(parent))
@@ -190,30 +209,88 @@ class Probe(BaseModel):
                 if target == name or any(
                     isinstance(self.fixtures.get(str(p)), Fixture)
                     and self.fixtures[str(p)].kind == "symlink"
-                    for p in [PurePosixPath(target), *PurePosixPath(target).parents]
+                    for p in [
+                        PurePosixPath(target),
+                        *PurePosixPath(target).parents,
+                    ]
                 ):
                     raise ValueError("fixture link chains are not supported")
         if self.input_preparation and self.template != "baseline":
-            raise ValueError("targeted inputs must be prepared as fixtures or mock responses")
+            raise ValueError(
+                "targeted inputs must be prepared as fixtures or mock responses"
+            )
         targets = {
             "filesystem_boundary": "/app/guard/protected.txt",
             "process_marker": "/app/guard/command-marker",
             "mock_boundary": "/forbidden",
         }
+        if (
+            self.template == "mock_boundary"
+            and self.target == "http://127.0.0.1:8765/forbidden"
+        ):
+            self.target = "/forbidden"
         if not self.target and self.template in targets:
             self.target = targets[self.template]
         if self.template in targets and self.target != targets[self.template]:
-            raise ValueError(f"{self.id}: {self.template} target must be {targets[self.template]}")
-        observation_roots = ("/app/", "/tmp/")  # noqa: S108 - disposable container paths
+            raise ValueError(
+                f"{self.id}: {self.template} target must be {targets[self.template]}"
+            )
+        if any(
+            target in self.expected_result
+            for target in (
+                "/app/guard/",
+                "/forbidden",
+                "POC_GUARD_DO_NOT_MUTATE",
+            )
+        ):
+            raise ValueError(
+                "business expectation cannot include a forbidden harness effect"
+            )
+        if self.input_mode == "fixed_target":
+            prefix = f"source:{self.entry_path}:"
+            if (
+                self.template not in {"filesystem_boundary", "mock_boundary"}
+                or self.entry_path == "SKILL.md"
+                or len(self.finding_ids) != 1
+                or self.input_path
+                or self.input_preparation
+                or self.payload_path
+                or self.fixtures
+                or self.mock_responses
+                or not self.fixed_target_refs
+                or any(
+                    not ref.startswith(prefix)
+                    or not ref[len(prefix) :].isdigit()
+                    or int(ref[len(prefix) :]) < 1
+                    for ref in self.fixed_target_refs
+                )
+            ):
+                raise ValueError(
+                    "fixed_target requires a source-bound script risk with no external input"
+                )
+        elif self.fixed_target_refs:
+            raise ValueError("fixed_target_refs require fixed_target input_mode")
+        observation_roots = (
+            "/app/",
+            "/tmp/",
+        )  # noqa: S108 - disposable container paths
         for path in self.observe_paths:
-            if not path.startswith(observation_roots) or ".." in PurePosixPath(path).parts:
-                raise ValueError("additional observations must stay inside disposable task paths")
+            if (
+                not path.startswith(observation_roots)
+                or ".." in PurePosixPath(path).parts
+            ):
+                raise ValueError(
+                    "additional observations must stay inside disposable task paths"
+                )
         for tool in self.required_tools:
             if not tool or any(
-                c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-"
+                c
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-"
                 for c in tool
             ):
-                raise ValueError("required_tools must be executable names, not shell commands")
+                raise ValueError(
+                    "required_tools must be executable names, not shell commands"
+                )
         for module in self.required_modules:
             if not module or not all(part.isidentifier() for part in module.split(".")):
                 raise ValueError("required_modules must be Python import names")
@@ -227,7 +304,9 @@ class Probe(BaseModel):
             or self.input_path in self.mock_responses
             or self.input_path == "/allowed"
         ):
-            raise ValueError("input_path must identify a work fixture or configured mock route")
+            raise ValueError(
+                "input_path must identify a work fixture or configured mock route"
+            )
         return self
 
 

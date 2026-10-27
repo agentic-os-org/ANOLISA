@@ -41,18 +41,26 @@ def inventory() -> None:
         "dpkg-deb",
         "jq",
         "taskset",
+        "claude",
+        "strace",
+        "soffice",
+        "pdftoppm",
     ]
     print(
         json.dumps(
             {
                 "os": Path("/etc/os-release").read_text(),
                 "python": sys.version.split()[0],
+                "python_executable": sys.executable,
+                "path": os.environ.get("PATH", ""),
                 "executables": {name: shutil.which(name) for name in tools},
                 "python_packages": {
-                    d.metadata["Name"]: d.version for d in importlib.metadata.distributions()
+                    d.metadata["Name"]: d.version
+                    for d in importlib.metadata.distributions()
                 },
                 "python_path": sys.path,
-                "code_scanner_available": importlib.util.find_spec("agent_sec_cli") is not None,
+                "code_scanner_available": importlib.util.find_spec("agent_sec_cli")
+                is not None,
             }
         )
     )
@@ -96,7 +104,9 @@ def snapshot(paths: list[str] | None = None) -> tuple[dict, list[str]]:
 
 
 def save_snapshot(name: str, spec: dict) -> None:
-    files, errors = snapshot(["/app/work", "/app/guard", *spec.get("observe_paths", [])])
+    files, errors = snapshot(
+        ["/app/work", "/app/guard", *spec.get("observe_paths", [])]
+    )
     (ROOT / f"{name}.json").write_text(json.dumps(files))
     (ROOT / f"{name}-errors.json").write_text(json.dumps(errors))
 
@@ -136,7 +146,9 @@ def preflight() -> None:
             if importlib.util.find_spec(module) is None:
                 errors.append(f"unavailable Python module: {module}")
         except Exception as exc:
-            errors.append(f"unavailable Python module: {module}: {type(exc).__name__}: {exc}")
+            errors.append(
+                f"unavailable Python module: {module}: {type(exc).__name__}: {exc}"
+            )
     for rel, value in spec.get("fixtures", {}).items():
         path = WORK / rel
         kind = value["kind"] if isinstance(value, dict) else "file"
@@ -184,7 +196,10 @@ def serve() -> None:
                 {"status": 404, "body": '{"error":"unmatched mock route"}'},
             )
             if requested > length:
-                response = {"status": 413, "body": '{"error":"mock body limit exceeded"}'}
+                response = {
+                    "status": 413,
+                    "body": '{"error":"mock body limit exceeded"}',
+                }
             event = {
                 "time": time.time(),
                 "kind": "mock_request",
@@ -195,7 +210,12 @@ def serve() -> None:
                     key: (
                         "[REDACTED]"
                         if key.lower()
-                        in {"authorization", "cookie", "x-api-key", "proxy-authorization"}
+                        in {
+                            "authorization",
+                            "cookie",
+                            "x-api-key",
+                            "proxy-authorization",
+                        }
                         else value.replace(canary, "[CANARY]")
                     )
                     for key, value in headers.items()

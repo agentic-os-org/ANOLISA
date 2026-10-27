@@ -10,7 +10,7 @@ from typing import Any
 
 from agent_sec_cli.skill_score.contracts import ContractError
 
-REDACTION_VERSION = "hybrid-redaction/v3"
+REDACTION_VERSION = "hybrid-redaction/v5"
 _REDACTED = "[REDACTED]"
 _MAX_ENCODED_DEPTH = 4
 _MAX_ENCODED_BYTES = 1024 * 1024
@@ -58,7 +58,7 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "credential_assignment",
         _compile(
-            r"(?P<assignment>(?<![A-Za-z0-9_])[\"']?(?:anthropic_api_key|anthropic_auth_token|"
+            r"(?P<assignment>(?<![A-Za-z0-9_])[\"']?(?:agent_sec_model_api_key|anthropic_api_key|anthropic_auth_token|"
             r"openai_api_key|api[_-]?(?:key|token)|"
             r"access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|"
             r"authorization|proxy[_-]?authorization|cookie|set[_-]?cookie|token|secret|"
@@ -66,7 +66,7 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"[^\S\r\n\x1c-\x1e\x85\u2028\u2029]*[:=]"
             r"[^\S\r\n\x1c-\x1e\x85\u2028\u2029]*)"
             r"(?![\"']?\[REDACTED\])"
-            r"(?P<quote>[\"']?)[^\s,;\"'}]{4,}",
+            r"(?P<quote>[\"']?)(?P<value>[^\s,;\"'}]{4,})",
             re.IGNORECASE,
         ),
     ),
@@ -84,6 +84,7 @@ _SENSITIVE_KEY_NAMES = frozenset(
         "setcookie",
         "apikey",
         "apitoken",
+        "agentsecmodelapikey",
         "anthropicapikey",
         "anthropicauthtoken",
         "openaiapikey",
@@ -100,6 +101,7 @@ _SENSITIVE_KEY_NAMES = frozenset(
     }
 )
 _SECRET_ENV_NAMES = (
+    "AGENT_SEC_MODEL_API_KEY",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY",
@@ -112,12 +114,32 @@ def _canonical_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]", "", key.lower())
 
 
+def _literal_assignment(match: re.Match[str]) -> bool:
+    """A credential variable name is not evidence that its source expression is a secret."""
+    if match["quote"]:
+        return True
+    value = match["value"]
+    if any(character in value for character in "()[]"):
+        return False
+    if "." in value and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", value):
+        return False
+    # Bare values also occur in dotenv files and runtime logs; do not assume they are variables.
+    return True
+
+
 def find_secret_markers(text: str) -> list[str]:
     """Return secret-shape labels without returning the matched secret text."""
 
     if not isinstance(text, str):
         raise ContractError("secret scan input must be text")
-    markers = [name for name, pattern in _SECRET_PATTERNS if pattern.search(text)]
+    markers = [
+        name
+        for name, pattern in _SECRET_PATTERNS
+        if any(
+            name != "credential_assignment" or _literal_assignment(match)
+            for match in pattern.finditer(text)
+        )
+    ]
     for variable in _SECRET_ENV_NAMES:
         value = os.environ.get(variable)
         if value and len(value) >= 4 and value in text:
@@ -139,11 +161,15 @@ def redact_text(text: str) -> str:
         if name == "credential_assignment":
             # Persisted task fixtures must remain parseable after removing the secret value.
             redacted = pattern.sub(
-                lambda match: match["assignment"]
-                + (
-                    match["quote"] + _REDACTED
-                    if match["quote"]
-                    else json.dumps(_REDACTED)
+                lambda match: (
+                    match.group(0)
+                    if not _literal_assignment(match)
+                    else match["assignment"]
+                    + (
+                        match["quote"] + _REDACTED
+                        if match["quote"]
+                        else json.dumps(_REDACTED)
+                    )
                 ),
                 redacted,
             )

@@ -10,21 +10,34 @@ import tarfile
 def build_deb(specification: str) -> bytes:
     """Encode small text members as a valid Debian package, including adversarial member names."""
     value = json.loads(specification)
-    if not isinstance(value, dict) or set(value) - {"package", "version", "architecture", "files"}:
+    if not isinstance(value, dict) or set(value) - {
+        "package",
+        "version",
+        "architecture",
+        "files",
+    }:
         raise ValueError(
             "deb content must be JSON with package, version, architecture and files only"
         )
     version, architecture = value.get("version"), value.get("architecture")
-    if not isinstance(version, str) or not re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]{0,63}", version):
+    if not isinstance(version, str) or not re.fullmatch(
+        r"[0-9][A-Za-z0-9.+:~\-]{0,63}", version
+    ):
         raise ValueError(
             "deb fixture requires an explicit version; use that value in task expectations"
         )
-    if not isinstance(architecture, str) or architecture not in {"all", "amd64", "arm64"}:
+    if not isinstance(architecture, str) or architecture not in {
+        "all",
+        "amd64",
+        "arm64",
+    }:
         raise ValueError(
             "deb fixture requires explicit architecture=all/amd64/arm64; derive output from that input"
         )
     package, files = value.get("package", "score-fixture"), value.get("files", {})
-    if not isinstance(package, str) or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]{1,63}", package):
+    if not isinstance(package, str) or not re.fullmatch(
+        r"[a-z0-9][a-z0-9+.-]{1,63}", package
+    ):
         raise ValueError("deb package needs a valid lowercase package name")
     if not isinstance(files, dict) or not 1 <= len(files) <= 128:
         raise ValueError("deb files must contain 1-128 text members")
@@ -58,7 +71,9 @@ def build_deb(specification: str) -> bytes:
         ("control.tar.gz", archive({"control": control})),
         ("data.tar.gz", archive(files)),
     ):
-        result.extend(f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{100644:<8}{len(data):<10}`\n".encode())
+        result.extend(
+            f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{100644:<8}{len(data):<10}`\n".encode()
+        )
         result.extend(data)
         if len(data) % 2:
             result.extend(b"\n")

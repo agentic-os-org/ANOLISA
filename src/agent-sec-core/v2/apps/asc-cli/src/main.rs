@@ -118,13 +118,7 @@ fn main() -> ExitCode {
 }
 
 fn exec_score(command: &asc_cli::SkillScoreCommand) -> ExitCode {
-    match command.exec() {
-        Ok(never) => match never {},
-        Err(error) => {
-            eprintln!("agent-sec-cli: {error}");
-            ExitCode::FAILURE
-        }
-    }
+    ExitCode::from(command.execute())
 }
 
 fn run(cli: &Cli) -> Result<u8, RunError> {

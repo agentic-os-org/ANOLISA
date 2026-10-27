@@ -1,179 +1,138 @@
 #!/usr/bin/env python3
-"""Check the installed raw preview and Docker resource identity without inference."""
+"""Verify the native base and explicitly installed optional worker without a model."""
 
 import argparse
 import hashlib
 import json
 import os
-import signal
 import subprocess
-import sys
 import tempfile
-import time
 import tomllib
 from pathlib import Path
 
 
-def run(*arguments: str) -> str:
-    return subprocess.run(arguments, check=True, capture_output=True, text=True, timeout=60).stdout
-
-
-def check_public_score() -> dict:
-    """Exercise the installed dispatch without a daemon or provider credentials."""
-    command = ["/usr/local/bin/agent-sec-cli", "skillsec", "score"]
-    environment = os.environ.copy()
-    environment["AGENT_SEC_DAEMON_SOCKET"] = "relative-invalid-socket"
-    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
-        environment.pop(name, None)
-    checks = {}
-    assert not Path("/usr/local/bin/agent-sec-skill-score").exists()
-    checks["no_standalone_score_launcher"] = True
-    for stage in ("plan", "run"):
-        subprocess.run(
-            [*command, stage, "--help"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=environment,
-        )
-        checks[f"score_{stage}_help"] = True
-    invalid = subprocess.run(
-        [*command, "run", "-"],
-        input="{}",
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=environment,
+def run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        arguments, check=False, capture_output=True, text=True, timeout=180, **kwargs
     )
-    assert invalid.returncode == 2 and "invalid input:" in invalid.stderr, invalid.stderr
-    checks["stdin_invalid_task_exit"] = invalid.returncode
-    with tempfile.TemporaryDirectory(prefix="score-install-check-") as directory:
-        skill = Path(directory) / "harmless skill"
-        skill.mkdir()
-        source = (
-            "---\nname: harmless\ndescription: Harmless installation check\n---\nPrint hello.\n"
-        )
-        (skill / "SKILL.md").write_text(source)
-        result = subprocess.run(
-            [*command, "plan", str(skill)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=environment,
-        )
-        assert result.returncode == 1, result.stderr
-        for expected in (
-            "[skill-score] static scan",
-            "[skill-score] semantic audit",
-            "Bailian pay-as-you-go credentials require both",
-        ):
-            assert expected in result.stderr, result.stderr
-        checks["public_plan_native_scan_without_daemon"] = True
-        checks["plan_stops_before_model_dispatch"] = True
-        checks["plan_source_sha256"] = hashlib.sha256(source.encode()).hexdigest()
-    # Match SkillEval's process-group termination while the real Python entrypoint
-    # waits for stdin; this does not claim cancellation during a model-backed run.
-    with subprocess.Popen(
-        [*command, "run", "-"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-        start_new_session=True,
-    ) as process:
-        try:
-            expected_exe = Path(
-                "/usr/local/lib/anolisa/sec-core/skill-score/cli/bin/python3.11"
-            ).resolve()
-            deadline = time.monotonic() + 10
-            waiting_for_stdin = False
-            while process.poll() is None and time.monotonic() < deadline:
-                if (
-                    Path(f"/proc/{process.pid}/exe").resolve() == expected_exe
-                    and Path(f"/proc/{process.pid}/wchan").read_text().strip() == "pipe_read"
-                ):
-                    waiting_for_stdin = True
-                    break
-                time.sleep(0.02)
-            assert waiting_for_stdin, "installed score did not reach its stdin read"
-            assert os.getpgid(process.pid) == process.pid
-            os.killpg(process.pid, signal.SIGTERM)
-            process.communicate(timeout=10)
-            assert process.returncode == -signal.SIGTERM, process.returncode
-            checks["exec_preserves_pid_and_process_group"] = True
-            checks["stdin_wait_process_group_sigterm"] = True
-        finally:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=10)
-    return checks
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("release", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--prefix", type=Path, default=Path("/usr/local"))
+    parser.add_argument("--base-only", action="store_true")
     args = parser.parse_args()
-    manifest = json.loads((args.release / "release-manifest.json").read_text())
-    assert manifest["cli"] == "agent-sec-cli"
-    assert manifest["command_prefix"] == ["skillsec", "score"]
-    for artifact in manifest["artifacts"]:
+    release = json.loads((args.release / "release-manifest.json").read_text())
+    assert release["schema_version"] == "agent-sec-skill-score/release-v3"
+    for artifact in release["artifacts"]:
         path = args.release / artifact["file"]
         with path.open("rb") as stream:
-            assert hashlib.file_digest(stream, "sha256").hexdigest() == artifact["sha256"], path
-        assert path.stat().st_size == artifact["bytes"], path
+            assert (
+                hashlib.file_digest(stream, "sha256").hexdigest() == artifact["sha256"]
+            )
+        assert path.stat().st_size == artifact["bytes"]
     contract = tomllib.loads(
-        Path("/usr/local/share/anolisa/components/sec-core/component.toml").read_text()
+        (args.prefix / "share/anolisa/components/sec-core/component.toml").read_text()
     )
-    assert contract["component"]["version"] == manifest["version"]
-    checks = {"artifact_hashes": True, "installed_version": manifest["version"]}
-    for name in ("agent-sec-cli", "agent-sec-daemon", "linux-sandbox"):
-        with Path(f"/usr/local/bin/{name}").open("rb") as stream:
-            assert stream.read(4) == b"\x7fELF", name
-        run(f"/usr/local/bin/{name}", "--help")
-        checks[name] = True
-    run(
-        sys.executable,
-        "-I",
-        "-c",
-        'import importlib.util; assert importlib.util.find_spec("agent_sec_cli") is None',
-    )
-    checks["no_global_python_cli"] = True
-    checks.update(check_public_score())
-    prefix = "/usr/local/lib/anolisa/sec-core/skill-score"
-    run(
-        f"{prefix}/cli/bin/python3.11",
-        "-I",
-        "-c",
-        'from agent_sec_cli import _native; import json; assert json.loads(_native.scan_prompt_json("A harmless test", mode="fast"))["degraded"] is False',
-    )
-    checks["native_scanner"] = True
-    versions = json.loads(
-        run(
-            f"{prefix}/runtime/bin/python3.12",
-            "-I",
-            "-c",
-            'import importlib.metadata,json,platform; from agent_sec_skill_score_runtime.worker import main; print(json.dumps([platform.python_version(),importlib.metadata.version("harbor")]))',
+    assert contract["component"]["version"] == release["version"]
+    assert not (args.prefix / "lib/anolisa/sec-core/skill-score").exists()
+    assert not (args.prefix / "bin/agent-sec-skill-score").exists()
+    cli = args.prefix / "bin/agent-sec-cli"
+    assert cli.read_bytes()[:4] == b"\x7fELF"
+    checks = {
+        "artifact_hashes": True,
+        "native_cli": True,
+        "base_has_no_score_python": True,
+    }
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("ANTHROPIC_", "AGENT_SEC_MODEL_"))
+    }
+    with tempfile.TemporaryDirectory(prefix="asc-native-install-check-") as directory:
+        environment["AGENT_SEC_MODEL_CONFIG"] = str(
+            Path(directory) / "absent-model-config.json"
         )
-    )
-    assert versions == [manifest["python_worker"], manifest["harbor"]]
-    checks["worker_versions"] = versions
-    for image in manifest["images"]["image_details"]:
+        for stage in ("plan", "run"):
+            result = run(
+                [str(cli), "skillsec", "score", stage, "--help"], env=environment
+            )
+            assert result.returncode == 0, result.stderr
+        invalid = run(
+            [str(cli), "skillsec", "score", "run", "-"], input="{}", env=environment
+        )
+        assert invalid.returncode == 2, invalid.stderr
+        skill = Path(directory) / "harmless skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            "---\nname: harmless\ndescription: Installation check\n---\nPrint hello.\n"
+        )
+        planned = run(
+            [str(cli), "skillsec", "score", "plan", str(skill)], env=environment
+        )
         assert (
-            run("docker", "image", "inspect", "--format", "{{.Id}}", image["name"]).strip()
-            == image["id"]
+            planned.returncode != 0 and "model" in planned.stderr.lower()
+        ), planned.stderr
+        assert "install sec-core-skill-score" not in planned.stderr, planned.stderr
+        checks["native_plan_reaches_shared_model_configuration"] = True
+        checks["invalid_task_exit_2"] = True
+    root = args.prefix / "lib/anolisa/sec-core-skill-score"
+    if args.base_only:
+        assert not root.exists()
+        checks["optional_not_implicitly_installed"] = True
+    else:
+        manifest_path = root / "runtime-manifest.json"
+        data = manifest_path.read_bytes()
+        assert data == (args.release / release["runtime_manifest"]).read_bytes()
+        runtime = json.loads(data)
+        identity = hashlib.sha256(data).hexdigest()
+        ready = json.loads(
+            (root / "environments" / identity / "ready.json").read_text()
         )
-    checks["loaded_image_ids"] = True
-    checks["model_calls"] = 0
+        assert ready["manifest_sha256"] == identity
+        assert ready["version"] == release["version"]
+        assert ready["images"] == runtime["images"]
+        lock = root / ".lifecycle.lock"
+        assert lock.is_file() and not lock.is_symlink() and lock.stat().st_nlink == 1
+        requests = root / "requests"
+        assert requests.is_dir() and not requests.is_symlink()
+        assert requests.stat().st_mode & 0o7777 == 0o1777
+        assert not list(requests.iterdir()), "unconfirmed worker cleanup remains"
+        generated = json.loads(
+            (root / "environments" / identity / ".generated.json").read_text()
+        )
+        assert generated == {
+            "schema": "agent-sec-skill-score/generated-v1",
+            "component": "sec-core-skill-score",
+            "manifest_sha256": identity,
+        }
+        result = run(
+            [
+                "python3",
+                str(root / "install.py"),
+                "--check",
+                "--prefix",
+                str(args.prefix),
+            ]
+        )
+        assert result.returncode == 0, result.stderr
+        readiness = json.loads(result.stdout)
+        assert readiness["status"] == "ready"
+        actual = readiness["actual_image_ids"]
+        assert set(actual) == {"work", "egress"}
+        assert all(
+            actual[item["role"]] in (item["id"], item["manifest_id"])
+            for item in runtime["images"]
+        )
+        checks["actual_image_ids"] = actual
+        checks["optional_readiness_and_cleanup"] = True
+        checks["optional_lifecycle_ready"] = True
+        checks["runtime_manifest_sha256"] = identity
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
-        json.dumps(
-            {"status": "PASS", "source_commit": manifest["source_commit"], "checks": checks},
-            indent=2,
-        )
-        + "\n"
+        json.dumps({"status": "PASS", "checks": checks}, indent=2) + "\n"
     )
 
 

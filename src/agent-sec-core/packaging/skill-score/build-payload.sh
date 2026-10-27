@@ -35,7 +35,7 @@ rm -f "$score_cli/bin/agent-sec-daemon"
 bash "$score_component/skill-score-runtime/prepare-runtime.sh" "$score_runtime"
 PYTHONPATH="$score_component/skill-score-runtime/src" "$score_python" \
     "$score_component/skill-score-runtime/image/build.py" "$score_output" \
-    --build-network "${ASC_IMAGE_BUILD_NETWORK:-default}"
+    --build-network "${ASC_IMAGE_BUILD_NETWORK:-default}" --version "${ASC_IMAGE_VERSION:-1}"
 gzip -n "$score_output/skill-score-images.tar"
 install -m 0644 "$score_output/tool-inventory.json" \
     "$score_cli/lib/python3.11/site-packages/agent_sec_cli/skill_score/tool-inventory.json"

@@ -33,7 +33,9 @@ class SecurityRule(ABC):
         self.description = config["description"]
 
         # 编译正则表达式
-        self.compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.patterns]
+        self.compiled_patterns = [
+            re.compile(pattern, re.IGNORECASE) for pattern in self.patterns
+        ]
 
     @abstractmethod
     def match(self, content: str) -> List[Match]:
@@ -65,7 +67,9 @@ class SecurityRule(ABC):
             for pattern in self.compiled_patterns:
                 if pattern.search(line):
                     confidence = self._calculate_confidence(line)
-                    matches.append(Match(line=i, pattern=line.strip(), confidence=confidence))
+                    matches.append(
+                        Match(line=i, pattern=line.strip(), confidence=confidence)
+                    )
                     break  # 一个行只匹配一次
 
         return matches

@@ -6,16 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_two_stage import (
-    FakeJudge,
-    FakeRuntime,
-    baseline,
-    make_task,
-    risk,
-    scan,
-    targeted,
-)
-
 from agent_sec_cli.skill_score import audit, pipeline
 from agent_sec_cli.skill_score.audit import Judge
 from agent_sec_cli.skill_score.config import ScoreConfig
@@ -42,6 +32,15 @@ from agent_sec_cli.skill_score.probes import plan_probes, validate_input
 from agent_sec_cli.skill_score.risk_catalog import CATALOG
 from agent_sec_cli.skill_score.score.engine import score_findings
 from agent_sec_cli.skill_score.task import parse_task, task_json, validate_task
+from test_two_stage import (
+    FakeJudge,
+    FakeRuntime,
+    baseline,
+    make_task,
+    risk,
+    scan,
+    targeted,
+)
 
 
 @pytest.fixture
@@ -85,7 +84,9 @@ def test_runtime_scanners_skip_metadata_without_discarding_observations() -> Non
         "event:p:file",
         "event:p:exit",
     }
-    assert next(i for i in items if i["ref"].startswith("atif:"))["language"] == "python"
+    assert (
+        next(i for i in items if i["ref"].startswith("atif:"))["language"] == "python"
+    )
     assert catalog == original and json.loads(catalog["event:p:file"])["matched"]
 
 
@@ -123,7 +124,9 @@ def test_baseline_cannot_hide_a_supplied_input_by_omitting_its_path() -> None:
     validate_input(probe)
 
 
-def test_independent_installer_assets_accumulate_but_repeated_evidence_does_not() -> None:
+def test_independent_installer_assets_accumulate_but_repeated_evidence_does_not() -> (
+    None
+):
     first = gap("DI001").model_copy(
         update={"operation": "execute installer https://uv.example/install"}
     )
@@ -138,13 +141,22 @@ def test_independent_installer_assets_accumulate_but_repeated_evidence_does_not(
     assert score_findings([], control_gaps=[first, second])["score"] == 95.5
 
 
-def test_gap_only_route_scores_the_gap_until_matched_impact_establishes_a_risk() -> None:
-    finding = Finding.model_validate(dict(risk(), status="control_gap", control_gap_id="gap1"))
+def test_gap_only_route_scores_the_gap_until_matched_impact_establishes_a_risk() -> (
+    None
+):
+    finding = Finding.model_validate(
+        dict(risk(), status="control_gap", control_gap_id="gap1")
+    )
     control_gap = gap("DI001")
     final = Adjudication(
-        findings=[finding], control_gaps=[control_gap], baseline_completed=False, baseline_refs=[]
+        findings=[finding],
+        control_gaps=[control_gap],
+        baseline_completed=False,
+        baseline_refs=[],
     )
-    catalog = dict.fromkeys(finding.refs + control_gap.refs + control_gap.control_refs, "source")
+    catalog = dict.fromkeys(
+        finding.refs + control_gap.refs + control_gap.control_refs, "source"
+    )
     Judge.validate(
         "final",
         final,
@@ -172,7 +184,11 @@ def test_gap_only_route_scores_the_gap_until_matched_impact_establishes_a_risk()
         Judge.validate(
             "final",
             final,
-            {"catalog": catalog, "audit": {"findings": [], "probes": []}, "coverage": []},
+            {
+                "catalog": catalog,
+                "audit": {"findings": [], "probes": []},
+                "coverage": [],
+            },
         )
 
 
@@ -188,7 +204,9 @@ def test_gap_validation_feedback_names_the_actual_repair_target() -> None:
 
 def test_provider_schema_exposes_exact_rule_ids_and_turn_counts() -> None:
     schema = audit.response_schema(Audit)
-    assert set(schema["$defs"]["ControlGap"]["properties"]["rule_id"]["enum"]) == set(RULES)
+    assert set(schema["$defs"]["ControlGap"]["properties"]["rule_id"]["enum"]) == set(
+        RULES
+    )
     assert schema["$defs"]["Probe"]["properties"]["turns"]["anyOf"] == [
         {"minItems": 1, "maxItems": 1},
         {"minItems": 3, "maxItems": 3},
@@ -197,7 +215,9 @@ def test_provider_schema_exposes_exact_rule_ids_and_turn_counts() -> None:
 
 @pytest.mark.parametrize("model", [Audit, Adjudication])
 def test_provider_schema_exposes_risk_topics_separately_from_hygiene(model) -> None:
-    patterns = audit.response_schema(model)["$defs"]["Finding"]["properties"]["pattern_ids"]
+    patterns = audit.response_schema(model)["$defs"]["Finding"]["properties"][
+        "pattern_ids"
+    ]
     assert set(patterns["items"]["enum"]) == set(CATALOG)
     assert not set(patterns["items"]["enum"]) & set(RULES)
     assert all(topic["name"] in patterns["description"] for topic in CATALOG.values())
@@ -229,7 +249,10 @@ def test_completion_is_derived_from_exact_result_comparison(status: str) -> None
         },
     )
     payload = dict(
-        catalog={"atif:baseline:1": "removed other.txt", "atif:baseline:2": "current.txt exists"},
+        catalog={
+            "atif:baseline:1": "removed other.txt",
+            "atif:baseline:2": "current.txt exists",
+        },
         audit={"probes": [dict(baseline(), expected_result=expected)]},
         coverage=[dict(probe_id="baseline", complete=True, skill_loaded=True)],
     )
@@ -287,7 +310,11 @@ def test_single_whole_task_check_reuses_the_plan_without_retyping_expectation() 
         baseline_refs=[],
         task_checks={
             "baseline": [
-                {"status": "unmet", "observed": "Different output", "refs": ["atif:baseline:1"]}
+                {
+                    "status": "unmet",
+                    "observed": "Different output",
+                    "refs": ["atif:baseline:1"],
+                }
             ]
         },
     )
@@ -324,9 +351,13 @@ def test_successful_exit_does_not_hide_evidenced_original_functional_failure() -
         entry_failure_refs=[],
         tool_result_refs=[refs[2]],
     )
-    assert baseline_eligibility(final, probe, evidence, dict.fromkeys(refs, "evidence"))[0]
+    assert baseline_eligibility(
+        final, probe, evidence, dict.fromkeys(refs, "evidence")
+    )[0]
     evidence["entry_exit_refs"] = []
-    assert not baseline_eligibility(final, probe, evidence, dict.fromkeys(refs, "evidence"))[0]
+    assert not baseline_eligibility(
+        final, probe, evidence, dict.fromkeys(refs, "evidence")
+    )[0]
 
 
 def test_hygiene_review_cannot_silently_omit_an_applicable_rule() -> None:
@@ -340,14 +371,21 @@ def test_hygiene_review_cannot_silently_omit_an_applicable_rule() -> None:
     )
     with pytest.raises(ContractError, match="valid references"):
         validate_review(review, {})
-    validate_review(review, {"source:SKILL.md:1": "curl https://example.test/install | sh"})
+    validate_review(
+        review, {"source:SKILL.md:1": "curl https://example.test/install | sh"}
+    )
     del review["LP002"]
     with pytest.raises(ContractError, match="all 23"):
         validate_review(review, {})
 
 
-def test_final_control_review_can_use_runtime_source_inspection_but_plan_cannot() -> None:
-    review = {rule: PatternCheck(status="not_applicable", reason="No operation") for rule in RULES}
+def test_final_control_review_can_use_runtime_source_inspection_but_plan_cannot() -> (
+    None
+):
+    review = {
+        rule: PatternCheck(status="not_applicable", reason="No operation")
+        for rule in RULES
+    }
     review["UI004"] = PatternCheck(
         status="checked",
         reason="Observed the actual parser implementation",
@@ -362,12 +400,18 @@ def test_final_control_review_can_use_runtime_source_inspection_but_plan_cannot(
 @pytest.mark.parametrize("rule_id", RULES)
 @pytest.mark.parametrize(
     "status,example",
-    [("confirmed", "gap_example"), ("accepted", "safe_example"), ("refuted", "not_applicable")],
+    [
+        ("confirmed", "gap_example"),
+        ("accepted", "safe_example"),
+        ("refuted", "not_applicable"),
+    ],
 )
 def test_each_hygiene_rule_has_applicability_controls_and_fixed_weight(
     rule_id: str, status: str, example: str
 ) -> None:
-    item = gap(rule_id).model_copy(update={"status": status, "reason": RULES[rule_id][example]})
+    item = gap(rule_id).model_copy(
+        update={"status": status, "reason": RULES[rule_id][example]}
+    )
     catalog = {
         "source:SKILL.md:1": RULES[rule_id][example],
         "source:SKILL.md:2": RULES[rule_id]["control"],
@@ -375,7 +419,9 @@ def test_each_hygiene_rule_has_applicability_controls_and_fixed_weight(
     validate_gaps([item], catalog, source_only=True)
     assert RULES[rule_id]["topic"] in CATALOG
     result = score_findings([], control_gaps=[item])
-    assert result["score"] == 100 - (RULES[rule_id]["weight"] if status == "confirmed" else 0)
+    assert result["score"] == 100 - (
+        RULES[rule_id]["weight"] if status == "confirmed" else 0
+    )
 
 
 @pytest.mark.parametrize("rule_id", RULES)
@@ -390,13 +436,16 @@ def test_hygiene_dedup_decay_caps_uncertainty_and_replay() -> None:
     same = [item.model_copy(update={"id": f"g{i}"}) for i in range(100)]
     assert score_findings([], control_gaps=same)["score"] == 98.0
     independent = [
-        item.model_copy(update={"id": f"g{i}", "boundary": f"resource {i}"}) for i in range(100)
+        item.model_copy(update={"id": f"g{i}", "boundary": f"resource {i}"})
+        for i in range(100)
     ]
     result = score_findings([], control_gaps=independent)
     assert result["score"] == 95.0
     assert score_findings([], control_gaps=independent[:2])["score"] == 97.0
     assert (
-        score_findings([], control_gaps=[item.model_copy(update={"status": "uncertain"})])["score"]
+        score_findings(
+            [], control_gaps=[item.model_copy(update={"status": "uncertain"})]
+        )["score"]
         == 99.0
     )
     all_rules = [
@@ -406,10 +455,13 @@ def test_hygiene_dedup_decay_caps_uncertainty_and_replay() -> None:
     ]
     capped = score_findings([], control_gaps=all_rules)
     assert capped["score"] == 75.0
-    assert sum(c["deduction"] for c in capped["hygiene"]["contributions"]) == pytest.approx(25)
+    assert sum(
+        c["deduction"] for c in capped["hygiene"]["contributions"]
+    ) == pytest.approx(25)
     assert (
         score_findings(
-            [], control_gaps=[ControlGap.model_validate(g.model_dump()) for g in all_rules]
+            [],
+            control_gaps=[ControlGap.model_validate(g.model_dump()) for g in all_rules],
         )
         == capped
     )
@@ -423,17 +475,25 @@ def test_hygiene_dedup_decay_caps_uncertainty_and_replay() -> None:
             "input_preparation": "Build a valid small package with dpkg-deb before analyzing it.",
             "required_tools": ["dpkg-deb"],
         },
-        {"input_path": "/app/work/project", "fixtures": {"project/main.py": "print(1)"}},
+        {
+            "input_path": "/app/work/project",
+            "fixtures": {"project/main.py": "print(1)"},
+        },
         {"input_path": "/app/work/empty", "fixtures": {"empty": {"kind": "directory"}}},
         {
             "input_path": "/app/work/input.bin",
             "fixtures": {
-                "input.bin": {"kind": "binary", "content": base64.b64encode(b"\x00\xff").decode()}
+                "input.bin": {
+                    "kind": "binary",
+                    "content": base64.b64encode(b"\x00\xff").decode(),
+                }
             },
         },
     ],
 )
-def test_same_plan_is_valid_run_input(subject: Path, tmp_path: Path, changes: dict) -> None:
+def test_same_plan_is_valid_run_input(
+    subject: Path, tmp_path: Path, changes: dict
+) -> None:
     task = make_task(subject, tmp_path, FakeJudge(tasks=[dict(baseline(), **changes)]))
     source = load_source(subject)
     validate_task(task, source, source_catalog(source))
@@ -467,7 +527,9 @@ def test_story_real_link_layout_and_unrelated_comment(subject: Path) -> None:
         targeted(),
         input_path="/app/work/history",
         payload_path="/app/work/history/old.md",
-        fixtures={"history/old.md": {"kind": "symlink", "content": "/app/guard/protected.txt"}},
+        fixtures={
+            "history/old.md": {"kind": "symlink", "content": "/app/guard/protected.txt"}
+        },
         turns=["List stories", "Select old.md", "Confirm deletion of old.md"],
     )
     value = Audit(
@@ -493,7 +555,9 @@ def audit_result(probes: list[dict]) -> dict:
     }
 
 
-def test_targeted_business_workflow_is_not_replaced_by_unrelated_baseline(subject: Path) -> None:
+def test_targeted_business_workflow_is_not_replaced_by_unrelated_baseline(
+    subject: Path,
+) -> None:
     normal = baseline()
     normal["turns"] = ["Save a new record"]
     target = targeted()
@@ -502,7 +566,9 @@ def test_targeted_business_workflow_is_not_replaced_by_unrelated_baseline(subjec
     assert plan_probes(value, load_source(subject))[1].turns == target["turns"]
 
 
-def test_payload_basename_is_only_an_alias_for_the_exact_supplied_input(subject: Path) -> None:
+def test_payload_basename_is_only_an_alias_for_the_exact_supplied_input(
+    subject: Path,
+) -> None:
     target = dict(
         targeted(),
         input_path="/app/work/history/input.txt",
@@ -510,29 +576,47 @@ def test_payload_basename_is_only_an_alias_for_the_exact_supplied_input(subject:
         fixtures={"history/input.txt": "untrusted data"},
     )
     value = Audit.model_validate(audit_result([baseline(), target]))
-    assert plan_probes(value, load_source(subject))[1].payload_path == "/app/work/history/input.txt"
+    assert (
+        plan_probes(value, load_source(subject))[1].payload_path
+        == "/app/work/history/input.txt"
+    )
     target["payload_path"] = "elsewhere.txt"
     with pytest.raises(ContractError, match="not a supplied input"):
-        plan_probes(Audit.model_validate(audit_result([baseline(), target])), load_source(subject))
+        plan_probes(
+            Audit.model_validate(audit_result([baseline(), target])),
+            load_source(subject),
+        )
 
 
 def test_baseline_repair_replaces_the_original_noncanonical_id(
     subject: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    initial = dict(baseline(), id="normal-business-task", fixtures={"input.txt": "data"})
-    repaired = dict(baseline(), input_path="/app/work/input.txt", fixtures={"input.txt": "data"})
+    initial = dict(
+        baseline(), id="normal-business-task", fixtures={"input.txt": "data"}
+    )
+    repaired = dict(
+        baseline(), input_path="/app/work/input.txt", fixtures={"input.txt": "data"}
+    )
     answers = [dict(audit_result([initial]), findings=[]), {"probes": [repaired]}]
     calls = []
 
     def respond(**kwargs: Any) -> dict:
         calls.append(kwargs)
-        return {"text": json.dumps(answers[len(calls) - 1]), "usage": {"total_tokens": 1}}
+        return {
+            "text": json.dumps(answers[len(calls) - 1]),
+            "usage": {"total_tokens": 1},
+        }
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-only-placeholder")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
     monkeypatch.setattr(audit, "call_messages_result", respond)
     result = Judge(ScoreConfig()).call(
-        "audit", {"catalog": source_catalog(load_source(subject))}, Audit, tmp_path / "audit.json"
+        "audit",
+        {"catalog": source_catalog(load_source(subject))},
+        Audit,
+        tmp_path / "audit.json",
     )
     assert len(calls) == 2
     assert [p["id"] for p in result["probes"]] == ["baseline"]
@@ -558,7 +642,10 @@ def test_final_reassesses_labels_without_losing_claims_or_mutating_input(
     }
     payload["catalog"].update(dict.fromkeys(gap().refs + gap().control_refs, "source"))
     response = Adjudication(
-        findings=[finding], control_gaps=[gap()], baseline_completed=False, baseline_refs=[]
+        findings=[finding],
+        control_gaps=[gap()],
+        baseline_completed=False,
+        baseline_refs=[],
     )
     calls = []
 
@@ -571,21 +658,27 @@ def test_final_reassesses_labels_without_losing_claims_or_mutating_input(
         assert not {"advisory", "corrections", "limitations"} & supplied["audit"].keys()
         assert "title" not in hypothesis and "scope" not in hypothesis
         assert "status" not in supplied["audit"]["control_gaps"][0]
-        assert hypothesis["id"] == finding["id"] and hypothesis["refs"] == finding["refs"]
+        assert (
+            hypothesis["id"] == finding["id"] and hypothesis["refs"] == finding["refs"]
+        )
         calls.append(supplied)
         if len(calls) == 1:
             return {"text": "invalid JSON", "usage": {"total_tokens": 1}}
         return {"text": response.model_dump_json(), "usage": {"total_tokens": 1}}
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-only-placeholder")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
     monkeypatch.setattr(audit, "call_messages_result", respond)
     Judge(ScoreConfig()).call("final", payload, Adjudication, tmp_path / "final.json")
     assert payload["audit"]["findings"][0]["status"] == "material_risk"
     assert len(calls) == 2 and "hygiene_review" in payload["audit"]
 
 
-def test_final_timeout_reuses_work_item_with_medium_reasoning(tmp_path, monkeypatch) -> None:
+def test_final_timeout_reuses_work_item_with_medium_reasoning(
+    tmp_path, monkeypatch
+) -> None:
     efforts = []
     final = Adjudication(findings=[], baseline_completed=False, baseline_refs=[])
 
@@ -596,7 +689,9 @@ def test_final_timeout_reuses_work_item_with_medium_reasoning(tmp_path, monkeypa
         return {"text": final.model_dump_json(), "usage": {"total_tokens": 1}}
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-only-placeholder")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
     monkeypatch.setattr(audit, "call_messages_result", respond)
     monkeypatch.setattr(audit.time, "sleep", lambda _: None)
     Judge(ScoreConfig()).call(
@@ -626,10 +721,15 @@ def test_probe_retry_keeps_audit_and_normal_task(
         assert kwargs["reasoning"] is True
         assert kwargs["reasoning_effort"] == "medium"
         messages.append(kwargs["user_message"])
-        return {"text": json.dumps(answers[len(messages) - 1]), "usage": {"total_tokens": 1}}
+        return {
+            "text": json.dumps(answers[len(messages) - 1]),
+            "usage": {"total_tokens": 1},
+        }
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-only-placeholder")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
     monkeypatch.setattr(audit, "call_messages_result", respond)
     judge = Judge(ScoreConfig())
     result = Audit.model_validate(
@@ -643,12 +743,16 @@ def test_probe_retry_keeps_audit_and_normal_task(
     assert result.findings[0].id == "r1" and result.probes[0].id == "baseline"
     assert len(messages) == (2 if repair_ok else 4)
     assert "failed_probes" in messages[1] and "pattern_checks" not in messages[1]
-    assert [p.id for p in result.probes] == (["baseline", "target"] if repair_ok else ["baseline"])
+    assert [p.id for p in result.probes] == (
+        ["baseline", "target"] if repair_ok else ["baseline"]
+    )
     if not repair_ok:
         assert result.planning_errors and result.findings[0].dynamic == "unsupported"
     value = task_json(subject, "a" * 64, result)
     validate_task(
-        parse_task(value, tmp_path), load_source(subject), source_catalog(load_source(subject))
+        parse_task(value, tmp_path),
+        load_source(subject),
+        source_catalog(load_source(subject)),
     )
 
 
@@ -668,7 +772,9 @@ def test_exhausted_baseline_keeps_only_valid_source_audit(
         return {"text": json.dumps(value), "usage": {"total_tokens": 1}}
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-only-placeholder")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
     monkeypatch.setattr(audit, "call_messages_result", respond)
     judge = Judge(ScoreConfig())
     payload = {"catalog": source_catalog(load_source(subject))}
@@ -676,7 +782,9 @@ def test_exhausted_baseline_keeps_only_valid_source_audit(
         with pytest.raises(ValueError):
             judge.call("audit", payload, Audit, tmp_path / "audit.json")
     else:
-        result = Audit.model_validate(judge.call("audit", payload, Audit, tmp_path / "audit.json"))
+        result = Audit.model_validate(
+            judge.call("audit", payload, Audit, tmp_path / "audit.json")
+        )
         assert not result.probes and result.planning_errors["baseline"]
         assert result.findings[0].dynamic == "unsupported"
         validate_task(
@@ -697,18 +805,33 @@ def test_source_retries_do_not_spend_probe_repair_budget_and_keep_entry_context(
     good = dict(targeted(), entry_path="consumer.py")
     source = audit_result([baseline(), invalid])
     source["findings"][0]["refs"] = ["source:consumer.py:1"]
-    answers = [{}, {}, source, {"probes": [invalid]}, {"probes": [invalid]}, {"probes": [good]}]
+    answers = [
+        {},
+        {},
+        source,
+        {"probes": [invalid]},
+        {"probes": [invalid]},
+        {"probes": [good]},
+    ]
     messages = []
 
     def respond(**kwargs: Any) -> dict:
         messages.append(kwargs["user_message"])
-        return {"text": json.dumps(answers[len(messages) - 1]), "usage": {"total_tokens": 1}}
+        return {
+            "text": json.dumps(answers[len(messages) - 1]),
+            "usage": {"total_tokens": 1},
+        }
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-only-placeholder")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
+    )
     monkeypatch.setattr(audit, "call_messages_result", respond)
     result = Judge(ScoreConfig()).call(
-        "audit", {"catalog": source_catalog(load_source(subject))}, Audit, tmp_path / "audit.json"
+        "audit",
+        {"catalog": source_catalog(load_source(subject))},
+        Audit,
+        tmp_path / "audit.json",
     )
     assert len(messages) == 6
     assert not result["planning_errors"]
@@ -746,7 +869,9 @@ def test_partial_source_context_survives_handoff_and_blocks_empty_100(
     assert task.audit.omitted_sources == ["engine.bin (binary)"]
 
 
-def test_generic_caveats_cannot_veto_instruction_only_skill(subject: Path, tmp_path: Path) -> None:
+def test_generic_caveats_cannot_veto_instruction_only_skill(
+    subject: Path, tmp_path: Path
+) -> None:
     task = make_task(subject, tmp_path)
     task.audit.limitations = [
         "Instruction-only execution depends on the Agent",
@@ -795,25 +920,33 @@ def test_planning_notes_do_not_hide_dynamic_incompleteness(
     assert internal["limitations"] == report["limitations"]
 
 
-def test_planning_notes_do_not_hide_failed_probe_planning(subject: Path, tmp_path: Path) -> None:
+def test_planning_notes_do_not_hide_failed_probe_planning(
+    subject: Path, tmp_path: Path
+) -> None:
     task = make_task(subject, tmp_path)
     task.audit.limitations = ["This Skill is small"]
     task.audit.probes = []
     task.audit.planning_errors = {"baseline": "No valid baseline could be planned"}
     report = run(task, tmp_path / "run")
     assert report["planning_notes"] == task.audit.limitations
-    assert "planning/baseline: No valid baseline could be planned" in report["limitations"]
+    assert (
+        "planning/baseline: No valid baseline could be planned" in report["limitations"]
+    )
     assert not report["execution"]
 
 
-def test_missing_implementation_requires_actual_source_basis(subject: Path, tmp_path: Path) -> None:
+def test_missing_implementation_requires_actual_source_basis(
+    subject: Path, tmp_path: Path
+) -> None:
     task = make_task(subject, tmp_path)
     task.audit.missing_implementation = {"invented.py": ["source:SKILL.md:1"]}
     with pytest.raises(ContractError, match="actually name"):
         validate_task(task, load_source(subject), source_catalog(load_source(subject)))
 
 
-def test_topic_uncertainty_is_not_a_missing_implementation(subject: Path, tmp_path: Path) -> None:
+def test_topic_uncertainty_is_not_a_missing_implementation(
+    subject: Path, tmp_path: Path
+) -> None:
     task = make_task(subject, tmp_path)
     task.audit.pattern_checks = {
         "P1": PatternCheck(
@@ -832,13 +965,17 @@ def test_topic_uncertainty_is_not_a_missing_implementation(subject: Path, tmp_pa
 def test_noncompletion_retains_static_risk_and_does_not_add_deductions(
     subject: Path, tmp_path: Path, failure: str
 ) -> None:
-    task = make_task(subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")]))
+    task = make_task(
+        subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")])
+    )
 
     class RefusingJudge(FakeJudge):
         def call(self, stage: str, payload: dict, model: Any, path: Path) -> dict:
             result = super().call(stage, payload, model, path)
             result.update(
-                baseline_completed=False, baseline_failure=failure, baseline_reason=failure
+                baseline_completed=False,
+                baseline_failure=failure,
+                baseline_reason=failure,
             )
             return result
 

@@ -62,7 +62,10 @@ def runtime_scan_items(catalog: dict[str, str]) -> list[dict[str, str]]:
                 event = json.loads(text)
             except ValueError:
                 event = None
-            if isinstance(event, dict) and event.get("kind") in {"file", "process_exit"}:
+            if isinstance(event, dict) and event.get("kind") in {
+                "file",
+                "process_exit",
+            }:
                 # Paths/modes/exit status still feed activation, effect matching and the Judge;
                 # unlike ATIF, commands and network/mock payloads, they are not file contents.
                 continue
@@ -71,7 +74,9 @@ def runtime_scan_items(catalog: dict[str, str]) -> list[dict[str, str]]:
                 "ref": ref,
                 "text": text,
                 "language": (
-                    "bash" if ":code-bash-" in ref else "python" if ":code-python-" in ref else ""
+                    "bash"
+                    if ":code-bash-" in ref
+                    else "python" if ":code-python-" in ref else ""
                 ),
             }
         )
@@ -94,7 +99,9 @@ def plan_skill(
     environment = read(Path(__file__).parent / "tool-inventory.json")
     missing = missing_scripts(source)
     if missing:
-        progress(output, "input material: referenced scripts missing: " + ", ".join(missing))
+        progress(
+            output, "input material: referenced scripts missing: " + ", ".join(missing)
+        )
     if environment.get("code_scanner_available"):
         environment["scanner_api"] = (
             "from agent_sec_cli.code_scanner.scanner import scan; from agent_sec_cli.code_scanner.models import Language; scan(code, Language.BASH, mode='regex')"
@@ -172,11 +179,17 @@ def run_task(
     evidence, corrections, task_results = [], [], []
     task_checks, hygiene_review = {}, {}
     limitations = [
-        f"planning/{identifier}: {reason}" for identifier, reason in audit.planning_errors.items()
+        f"planning/{identifier}: {reason}"
+        for identifier, reason in audit.planning_errors.items()
     ]
     final_available = False
     environment = {}
-    baseline_task = {"completed": False, "failure_kind": "unknown", "assessable": False, "refs": []}
+    baseline_task = {
+        "completed": False,
+        "failure_kind": "unknown",
+        "assessable": False,
+        "refs": [],
+    }
     execution_count = 0
     try:
         try:
@@ -187,7 +200,11 @@ def run_task(
         save(output / "environment.json", environment)
         for probe in ([] if environment.get("error") else probes):
             attempts = []
-            item = {"probe_id": probe.id, "complete": False, "error": "execution budget exhausted"}
+            item = {
+                "probe_id": probe.id,
+                "complete": False,
+                "error": "execution budget exhausted",
+            }
             for attempt in range(2 if probe.required else 1):
                 remaining = config.deadline_minutes * 60 - (time.monotonic() - start)
                 if remaining <= 0 or execution_count >= config.hard_run_limit:
@@ -268,8 +285,12 @@ def run_task(
             save(output / "runtime-signals.json", dynamic_signals)
         catalog.update(dynamic_signals.get("cleaned", {}))
         save(output / "evidence-catalog.json", catalog)
-        required_refs = {s["ref"] for s in dynamic_signals.get("signals", []) if s.get("ref")}
-        required_refs.update(ref for f in audit.findings for ref in f.refs + f.control_refs)
+        required_refs = {
+            s["ref"] for s in dynamic_signals.get("signals", []) if s.get("ref")
+        }
+        required_refs.update(
+            ref for f in audit.findings for ref in f.refs + f.control_refs
+        )
         required_refs.update(ref for gap in gaps for ref in gap.refs + gap.control_refs)
         required_refs.update(
             ref
@@ -277,7 +298,10 @@ def run_task(
             for ref in item.get("entry_exit_refs", item.get("entry_failure_refs", []))
         )
         model_catalog, catalog_stats = judge_catalog(catalog, required_refs)
-        save(output / "judge-catalog.json", {"catalog": model_catalog, "stats": catalog_stats})
+        save(
+            output / "judge-catalog.json",
+            {"catalog": model_catalog, "stats": catalog_stats},
+        )
         final = Adjudication.model_validate(
             judge.call(
                 "final",
@@ -295,7 +319,11 @@ def run_task(
                     },
                     "hygiene_checks": RULES,
                     "coverage": [
-                        {k: v for k, v in item.items() if k not in {"catalog", "events"}}
+                        {
+                            k: v
+                            for k, v in item.items()
+                            if k not in {"catalog", "events"}
+                        }
                         for item in evidence
                     ],
                 },
@@ -305,7 +333,9 @@ def run_task(
         )
         validate_refs(final.findings, catalog)
         validate_gaps(final.control_gaps, catalog)
-        if {finding.id for finding in findings} - {finding.id for finding in final.findings}:
+        if {finding.id for finding in findings} - {
+            finding.id for finding in final.findings
+        }:
             raise ContractError("final Judge silently dropped prior findings")
         if {gap.id for gap in gaps} - {gap.id for gap in final.control_gaps}:
             raise ContractError("final Judge silently dropped prior control gaps")
@@ -315,10 +345,14 @@ def run_task(
             key: [check.model_dump() for check in checks]
             for key, checks in final.task_checks.items()
         }
-        hygiene_review = {key: check.model_dump() for key, check in final.hygiene_review.items()}
+        hygiene_review = {
+            key: check.model_dump() for key, check in final.hygiene_review.items()
+        }
         task_results = [item.model_dump() for item in final.task_results]
         corrections.extend(final.corrections)
-        baseline = next((item for item in evidence if item["probe_id"] == "baseline"), {})
+        baseline = next(
+            (item for item in evidence if item["probe_id"] == "baseline"), {}
+        )
         assessable, baseline_reason = (
             baseline_eligibility(final, probes[0], baseline, catalog)
             if probes
@@ -326,7 +360,9 @@ def run_task(
         )
         baseline_task = {
             "completed": final.baseline_completed,
-            "failure_kind": "none" if final.baseline_completed else final.baseline_failure,
+            "failure_kind": (
+                "none" if final.baseline_completed else final.baseline_failure
+            ),
             "reason": final.baseline_reason,
             "refs": final.baseline_refs,
             "assessable": assessable,
@@ -343,7 +379,9 @@ def run_task(
                 and finding.status in {"material_risk", "unresolved"}
                 for finding in findings
             )
-            observed = next((item for item in evidence if item["probe_id"] == probe.id), {})
+            observed = next(
+                (item for item in evidence if item["probe_id"] == probe.id), {}
+            )
             if (
                 probe.required
                 and active
@@ -366,7 +404,9 @@ def run_task(
             for finding in findings
             if finding.severity == "Critical" and finding.scope == "skill"
         )
-        critical_candidates = [finding for finding in findings if finding.id in critical_ids]
+        critical_candidates = [
+            finding for finding in findings if finding.id in critical_ids
+        ]
         if critical_candidates and not canary_findings(evidence):
             progress(output, "independent Critical adjudication")
             try:
@@ -444,7 +484,8 @@ def run_task(
     cited = {
         ref
         for finding in findings
-        if finding.scope == "skill" and finding.status in {"material_risk", "unresolved"}
+        if finding.scope == "skill"
+        and finding.status in {"material_risk", "unresolved"}
         for ref in finding.refs
     }
     if not final_available and any(
@@ -470,7 +511,8 @@ def run_task(
         "corrections": corrections,
         "probes": [p.model_dump() for p in probes],
         "coverage": [
-            {k: v for k, v in item.items() if k not in {"catalog", "events"}} for item in evidence
+            {k: v for k, v in item.items() if k not in {"catalog", "events"}}
+            for item in evidence
         ],
         "baseline_task": baseline_task,
         "task_results": task_results,
@@ -491,7 +533,10 @@ def run_task(
         "critical_gate": data["decision"] in {"blocked", "needs_review"},
     }
     save(output / "evidence-catalog.json", catalog)
-    save(output / "events.json", [event for item in evidence for event in item.get("events", [])])
+    save(
+        output / "events.json",
+        [event for item in evidence for event in item.get("events", [])],
+    )
     calls = []
     for stage in ("adjudication", "critical"):
         path = output / f"{stage}.json"
@@ -501,7 +546,9 @@ def run_task(
             calls.extend(read(path.with_suffix(".attempts.json")))
     data["usage"] = {
         "judge_calls": sum("seconds" in call or "usage" in call for call in calls),
-        "judge_tokens": sum(call.get("usage", {}).get("total_tokens", 0) for call in calls),
+        "judge_tokens": sum(
+            call.get("usage", {}).get("total_tokens", 0) for call in calls
+        ),
         "runtime_attempts": execution_count,
         "runtime_prompt_tokens": sum(
             (item.get("usage") or {}).get("total_prompt_tokens") or 0
@@ -521,7 +568,9 @@ def run_task(
 def finding_excerpt_refs(finding: dict[str, Any], coverage: list[dict]) -> list[str]:
     """Keep a source and the matched outcome visible when the public excerpt is bounded."""
     refs = list(
-        dict.fromkeys(finding["refs"] + finding["control_refs"] + finding["control_test_refs"])
+        dict.fromkeys(
+            finding["refs"] + finding["control_refs"] + finding["control_test_refs"]
+        )
     )
     outcomes = [
         ref
@@ -542,7 +591,10 @@ def finding_excerpt_refs(finding: dict[str, Any], coverage: list[dict]) -> list[
 def public_report(data: dict[str, Any], catalog: dict[str, str]) -> dict[str, Any]:
     deductions = {item["id"]: item["deduction"] for item in data["contributions"]}
     findings = [
-        {key: item[key] for key in ("id", "title", "severity", "status", "dynamic", "reason")}
+        {
+            key: item[key]
+            for key in ("id", "title", "severity", "status", "dynamic", "reason")
+        }
         | {
             "deduction": deductions.get(item["id"], 0.0),
             "evidence": [
@@ -585,7 +637,11 @@ def public_report(data: dict[str, Any], catalog: dict[str, str]) -> dict[str, An
                 or "task completion was not established by the final Judge",
             }
         execution.append(
-            {"task_id": probe["id"], "completed": item["completed"], "reason": item["reason"]}
+            {
+                "task_id": probe["id"],
+                "completed": item["completed"],
+                "reason": item["reason"],
+            }
         )
     return {
         "schema_version": "agent-sec-skill-score/report-v1",
@@ -600,7 +656,11 @@ def public_report(data: dict[str, Any], catalog: dict[str, str]) -> dict[str, An
         ),
         "findings": findings,
         "execution": execution,
-        **({"planning_notes": data["planning_notes"]} if data.get("planning_notes") else {}),
+        **(
+            {"planning_notes": data["planning_notes"]}
+            if data.get("planning_notes")
+            else {}
+        ),
         **({"limitations": data["limitations"]} if data.get("limitations") else {}),
         **(
             {

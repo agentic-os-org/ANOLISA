@@ -22,7 +22,8 @@ class ScoreRawPackageTest(unittest.TestCase):
         self.stage = self.root / "stage"
         (self.stage / ".anolisa").mkdir(parents=True)
         shutil.copyfile(
-            COMPONENT / ".anolisa/component.toml", self.stage / ".anolisa/component.toml"
+            COMPONENT / ".anolisa/component.toml",
+            self.stage / ".anolisa/component.toml",
         )
         self.base = tomllib.loads((self.stage / ".anolisa/component.toml").read_text())[
             "component"
@@ -55,7 +56,9 @@ class ScoreRawPackageTest(unittest.TestCase):
             if extra is not None:
                 archive.addfile(extra, io.BytesIO())
 
-    def stage_score(self, version: str | None = None) -> subprocess.CompletedProcess[str]:
+    def stage_score(
+        self, version: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
@@ -73,11 +76,15 @@ class ScoreRawPackageTest(unittest.TestCase):
         self.archive()
         result = self.stage_score()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.stage / "bin/agent-sec-cli").read_bytes(), b"V2 binary fixture")
+        self.assertEqual(
+            (self.stage / "bin/agent-sec-cli").read_bytes(), b"V2 binary fixture"
+        )
         contract = tomllib.loads((self.stage / ".anolisa/component.toml").read_text())
         self.assertEqual(contract["component"]["name"], "sec-core")
         self.assertEqual(contract["component"]["version"], self.version)
-        targets = {entry["target"] for entry in contract["component"]["layout"]["files"]}
+        targets = {
+            entry["target"] for entry in contract["component"]["layout"]["files"]
+        }
         self.assertIn("{bindir}/agent-sec-cli", targets)
         self.assertNotIn("{bindir}/agent-sec-skill-score", targets)
         self.assertFalse((self.stage / "bin/agent-sec-skill-score").exists())
@@ -92,7 +99,10 @@ class ScoreRawPackageTest(unittest.TestCase):
         self.assertFalse(any(path.is_symlink() for path in self.stage.rglob("*")))
         command = subprocess.run(
             [
-                str(self.stage / "lib/anolisa/sec-core/skill-score/cli/bin/agent-sec-cli"),
+                str(
+                    self.stage
+                    / "lib/anolisa/sec-core/skill-score/cli/bin/agent-sec-cli"
+                ),
                 "skill-score",
                 "plan",
                 "path with spaces",
@@ -113,7 +123,9 @@ class ScoreRawPackageTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            (self.stage / "lib/anolisa/sec-core/skill-score/cli/lib/data.txt").stat().st_mode
+            (self.stage / "lib/anolisa/sec-core/skill-score/cli/lib/data.txt")
+            .stat()
+            .st_mode
             & 0o777,
             0o644,
         )
@@ -121,22 +133,40 @@ class ScoreRawPackageTest(unittest.TestCase):
     def test_preview_requires_base_version_and_safe_commit_suffix(self) -> None:
         self.archive()
         original = (self.stage / ".anolisa/component.toml").read_bytes()
-        for version in (self.base, "9.9.9-skillscore.1234567", self.base + "-skillscore../bad"):
+        for version in (
+            self.base,
+            "9.9.9-skillscore.1234567",
+            self.base + "-skillscore../bad",
+        ):
             with self.subTest(version=version):
                 result = self.stage_score(version)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("preview version", result.stderr)
-        self.assertEqual((self.stage / ".anolisa/component.toml").read_bytes(), original)
+        self.assertEqual(
+            (self.stage / ".anolisa/component.toml").read_bytes(), original
+        )
+
+    def test_custom_base_variant_preserves_component_version(self) -> None:
+        self.archive()
+        version = self.version + ".base.abcdef012345"
+        result = self.stage_score(version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        contract = tomllib.loads((self.stage / ".anolisa/component.toml").read_text())
+        self.assertEqual(contract["component"]["version"], version)
 
     def test_payload_cannot_overwrite_default_cli(self) -> None:
         self.archive(tarfile.TarInfo("bin/agent-sec-cli"))
         result = self.stage_score()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("escapes assessment prefixes", result.stderr)
-        self.assertEqual((self.stage / "bin/agent-sec-cli").read_bytes(), b"V2 binary fixture")
+        self.assertEqual(
+            (self.stage / "bin/agent-sec-cli").read_bytes(), b"V2 binary fixture"
+        )
 
     def test_private_daemon_is_rejected(self) -> None:
-        self.archive(tarfile.TarInfo("opt/agent-sec/skill-score-cli/bin/agent-sec-daemon"))
+        self.archive(
+            tarfile.TarInfo("opt/agent-sec/skill-score-cli/bin/agent-sec-daemon")
+        )
         result = self.stage_score()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("without a daemon", result.stderr)

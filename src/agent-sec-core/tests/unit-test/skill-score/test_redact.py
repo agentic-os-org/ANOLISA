@@ -103,6 +103,40 @@ def test_horizontal_unicode_whitespace_credential_assignment_remains_redacted(
     assert find_secret_markers(redacted) == []
 
 
+def test_benign_digests_and_token_counts_are_not_redacted() -> None:
+    value = {
+        "source_digest": "sha256:" + "a" * 64,
+        "n_input_tokens": 100,
+        "observation": "The controlled marker was created.",
+    }
+
+    assert redact_value(value) == value
+    assert_redacted(value)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "Path('/app/guard/token').read_text()",
+        "os.environ['TOKEN']",
+        "get_secret()",
+        "config.token",
+    ],
+)
+def test_source_expression_is_preserved(expression: str) -> None:
+    source = f"token = {expression}\n"
+    assert redact_text(source) == source
+    assert "credential_assignment" not in find_secret_markers(source)
+
+
+def test_source_literal_and_exact_configured_secret_are_still_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_SEC_MODEL_API_KEY", "actualconfiguredvalue")
+    assert "actualconfiguredvalue" not in redact_text("token = actualconfiguredvalue")
+    assert redact_text('token = "literal-secret-value"') == 'token = "[REDACTED]"'
+
+
 @pytest.mark.parametrize("encodings", [0, 1, 2, 3])
 def test_serialized_tool_metadata_has_the_same_sanitized_view(encodings: int) -> None:
     secret = "NEW_PRIVATE_LITERAL_7eQ8"
@@ -148,12 +182,11 @@ def test_api_token_is_redacted_in_source_and_serialized_json() -> None:
     }
 
 
-def test_benign_digests_and_token_counts_are_not_redacted() -> None:
-    value = {
-        "source_digest": "sha256:" + "a" * 64,
-        "n_input_tokens": 100,
-        "observation": "The controlled marker was created.",
-    }
-
-    assert redact_value(value) == value
-    assert_redacted(value)
+def test_nested_exact_model_credential_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    literal = 'private-model-"quote"-\\backslash'
+    monkeypatch.setenv("AGENT_SEC_MODEL_API_KEY", literal)
+    nested = json.dumps(json.dumps({"message": literal, "exit_code": 0}))
+    restored = json.loads(json.loads(redact_value(nested)))
+    assert restored == {"message": "[REDACTED]", "exit_code": 0}

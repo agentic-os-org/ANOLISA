@@ -2,6 +2,8 @@
 
 [English](skill-score-runtime.md)
 
+> 本文保留旧 Python 预览版设计，作为迁移 oracle 基线。Rust 原生评分与独立可选安装已替代本文的交付方式，参见[原生设计](skill-score-native-design_zh.md)和[当前用户指南](../../../../docs/user-guide/zh/agent-sec-core/skill-score.md)。
+
 本次在 ANOLISA 基线 `5351c892f2e89d6be799ebdbeea948c173d3d7c2` 上纳入独立评分源码。`packaging/skill-score/source-import.json` 绑定来源附件；不会把 release tag 的基线提交视为完整源码。镜像和软件包的实际验收与单元测试分别记录。
 
 评测 CLI 负责计划、源码 hash 核验、证据解读和报告版本；Python 3.12 worker 负责既有 Docker/Harbor 执行。预览版标准 raw 包在 `/usr/local/lib/anolisa/sec-core/skill-score/{cli,runtime}` 安装私有运行时，并在 V2 CLI 中提供 `agent-sec-cli skillsec score plan/run`。该命令走明确的本地分支，在可观测运行时初始化前执行 Unix exec，保留 PID、进程组、标准输入输出和 Python 退出状态，不连接 daemon，也不继承 daemon 请求超时。原 `skill-ledger` 拼写保留为 `skillsec` 的兼容别名。CLI 接入当前原生 prompt backend，扫描错误、降级和截断都不能当作无风险结果。
