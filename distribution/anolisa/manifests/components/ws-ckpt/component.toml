@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.2.17"
+min_anolisa_version = "0.3.15"
 
 [backends.rpm]
 package = "ws-ckpt"
@@ -131,6 +131,10 @@ entry = "openclaw.plugin.json"
 schema = 1
 entry = "openclaw.plugin.json"
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/runtime/ws-ckpt/plugins/openclaw/"
+managed_packages = ["ws-ckpt-plugins"]
+
 [[adapters]]
 framework = "hermes"
 name = "ws-ckpt-hermes"
@@ -149,3 +153,7 @@ entry = "plugin.yaml"
 [adapters.hermes.bundle]
 schema = 1
 entry = "plugin.yaml"
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/runtime/ws-ckpt/plugins/hermes/"
+managed_packages = ["ws-ckpt-plugins"]

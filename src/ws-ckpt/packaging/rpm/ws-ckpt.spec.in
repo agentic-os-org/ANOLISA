@@ -1,6 +1,5 @@
 %define anolis_release 1
 %global debug_package %{nil}
-%global _localbindir /usr/local/bin
 # Filter false musl libc deps introduced by vendored node native modules
 %global __requires_exclude ^(libc\.musl-x86_64\.so\.1|libc\.so)\(\)\(64bit\)$
 
@@ -23,16 +22,52 @@ BuildRequires:  systemd-rpm-macros
 BuildRequires:  nodejs >= 18
 BuildRequires:  npm
 
-Requires:       rsync
-Requires:       btrfs-progs
+Requires:       %{name}-core = %{version}-%{release}
+Requires:       %{name}-plugins = %{version}-%{release}
+Requires:       %{name}-skills = %{version}-%{release}
 Provides:       anolisa-component(ws-ckpt)
 
 %description
+Compatibility package selecting matching ws-ckpt core, plugins, and skills
+through exact-version dependencies, without a runtime payload of its own.
+
+%package core
+Summary:        Workspace checkpoint CLI and system daemon
+Requires:       rsync
+Requires:       btrfs-progs
+Requires(post): systemd
+Requires(preun): systemd
+Requires(postun): systemd
+Requires(postun): util-linux
+Conflicts:      %{name} < %{version}
+Conflicts:      anolisa < 0.3.21
+
+%description core
 ws-ckpt is an AI-oriented filesystem snapshot tool. It supports workspace
 initialization, snapshot creation and second-level rollback. Its
 multi-backend architecture (btrfs-base / btrfs-loop) with
 three-tier auto detection picks the optimal backend for efficient
 snapshots.
+
+%package plugins
+Summary:        ws-ckpt OpenClaw and Hermes integrations
+Requires:       %{name}-core = %{version}-%{release}
+Requires:       bash
+Requires:       nodejs >= 18
+Requires:       python3
+Conflicts:      %{name} < %{version}
+
+%description plugins
+Host plugin bundles and detection, registration, and removal scripts for
+OpenClaw and Hermes. Register integrations as the target Agent user.
+
+%package skills
+Summary:        Workspace checkpoint skill
+Requires:       %{name}-core = %{version}-%{release}
+Conflicts:      %{name} < %{version}
+
+%description skills
+Bundled skill documentation and scripts for workspace checkpoint operations.
 
 %prep
 %setup -q -a 1
@@ -46,7 +81,7 @@ npm run build
 
 %install
 rm -rf $RPM_BUILD_ROOT
-install -d -m 0755 %{buildroot}%{_localbindir}
+install -d -m 0755 %{buildroot}%{_bindir}
 install -d -m 0755 %{buildroot}%{_unitdir}
 install -d -m 0755 %{buildroot}/etc/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
@@ -56,8 +91,8 @@ install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes
 
-install -p -m 0755 src/target/release/ws-ckpt %{buildroot}%{_localbindir}/ws-ckpt
-install -p -m 0644 packaging/systemd/ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
+install -p -m 0755 src/target/release/ws-ckpt %{buildroot}%{_bindir}/ws-ckpt
+make install-systemd-unit DESTDIR="%{buildroot}" SYSTEMD_SYSTEM_DIR="%{_unitdir}" SERVICE_BINDIR="%{_bindir}"
 install -p -m 0644 src/config.toml.sample %{buildroot}/etc/ws-ckpt/config.toml.sample
 # Ship the live config too; %config(noreplace) preserves admin edits on
 # upgrade and saves them as .rpmsave on erase (issue #3070).
@@ -82,29 +117,26 @@ install -p -m 0755 scripts/hermes/install-hermes.sh %{buildroot}%{_datadir}/anol
 install -p -m 0755 scripts/hermes/uninstall-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
 
 %files
+
+%files core
 %license LICENSE
 %doc README.md
-%attr(0755,root,root) %{_localbindir}/ws-ckpt
+%attr(0755,root,root) %{_bindir}/ws-ckpt
 %{_unitdir}/ws-ckpt.service
 %dir /etc/ws-ckpt
 %config(noreplace) /etc/ws-ckpt/config.toml
 /etc/ws-ckpt/config.toml.sample
+
+%files skills
 %dir %{_datadir}/anolisa/runtime
 %dir %{_datadir}/anolisa/runtime/skills
 %{_datadir}/anolisa/runtime/skills/ws-ckpt/
+
+%files plugins
 %{_datadir}/anolisa/runtime/ws-ckpt/
 %{_datadir}/anolisa/adapters/ws-ckpt/
 
-%post
-if [ $1 -ge 2 ]; then
-    # Upgrade: try remove legacy binary from old FHS path
-    if [ -e %{_bindir}/ws-ckpt ] && \
-       rpm -qf %{_bindir}/ws-ckpt 2>/dev/null | grep -q '^ws-ckpt-[0-9]'; then
-        rm -f %{_bindir}/ws-ckpt
-    fi
-    # Upgrade: remove pre-0.3.4 flat scripts/ layout (now per-framework)
-    rm -rf %{_datadir}/anolisa/adapters/ws-ckpt/scripts 2>/dev/null || true
-fi
+%post core
 systemctl daemon-reload
 systemctl enable ws-ckpt.service
 systemctl restart ws-ckpt.service 2>/dev/null || true
@@ -112,7 +144,12 @@ echo "ws-ckpt installed, started and enabled at boot."
 echo "Run 'systemctl status ws-ckpt' to check service status."
 echo "Run 'ws-ckpt --help' for usage."
 
-%preun
+%post plugins
+# The first split-package upgrade installs plugins as a new package too.
+# This obsolete directory is not part of the current per-framework inventory.
+rm -rf %{_datadir}/anolisa/adapters/ws-ckpt/scripts 2>/dev/null || true
+
+%preun core
 if [ $1 -eq 0 ]; then
     # Recover workspaces before stopping the daemon. A sentinel file carries
     # the outcome to %postun: when recover fails (e.g. a detached registration
@@ -121,8 +158,8 @@ if [ $1 -eq 0 ]; then
     # to touch. The sentinel lives in /run (tmpfs) so it never survives a
     # reinstall or leaks into the package's file list.
     rm -f /run/ws-ckpt-recover-failed
-    if [ -x %{_localbindir}/ws-ckpt ]; then
-        if ! %{_localbindir}/ws-ckpt recover --all --force; then
+    if [ -x %{_bindir}/ws-ckpt ]; then
+        if ! %{_bindir}/ws-ckpt recover --all --force; then
             echo "WARNING: ws-ckpt recover --all failed; preserving /var/lib/ws-ckpt"
             echo "         (and /data/ws-ckpt if present) for manual inspection."
             echo "         Reinstall ws-ckpt or inspect the snapshots manually"
@@ -134,7 +171,7 @@ if [ $1 -eq 0 ]; then
     systemctl disable ws-ckpt.service 2>/dev/null || true
 fi
 
-%postun
+%postun core
 if [ $1 -eq 0 ]; then
     # BtrfsLoop backend: umount, detach loop, then wipe state dirs.
     # The daemon may have been serving on either the canonical FHS path or

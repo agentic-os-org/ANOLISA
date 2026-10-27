@@ -37,6 +37,19 @@ sudo anolisa --install-mode system install ws-ckpt
 sudo yum install ws-ckpt
 ```
 
+| RPM | 内容 |
+|---|---|
+| `ws-ckpt` | 兼容聚合包：对下列三个包的精确 version/release 依赖 |
+| `ws-ckpt-core` | CLI、daemon、配置、服务 unit 和生命周期、许可证及文档 |
+| `ws-ckpt-plugins` | OpenClaw/Hermes bundle 及检测、注册、卸载脚本；依赖同版本 core |
+| `ws-ckpt-skills` | 内置 checkpoint skill；依赖同版本 core |
+
+只需要服务和 CLI 时，选择 `sudo yum install ws-ckpt-core`，按需添加 plugins
+或 skills。core 安装会 enable/restart 服务，随后用
+`systemctl status ws-ckpt.service` 确认状态。框架插件仍由实际 Agent 用户另行注册。
+本地 RPM 通过 `yum install /absolute/path/to/matching-rpms/*.rpm` 在同一事务中
+安装或升级，目录内应只放匹配 version/release 的产物集合。
+
 ### 方式三：源码编译（开发者）
 
 在 Linux 的仓库根目录执行：
@@ -271,6 +284,10 @@ daemon 配置文件位于 `/etc/ws-ckpt/config.toml`，为系统级 daemon 进�
 ```
 
 ### Hermes 插件配置
+
+Hermes 同步计划时，从 Agent 的 `PATH` 查找 `ws-ckpt`，并将可执行文件的绝对路径
+写入 crontab。使用自定义安装前缀时，先将其 `bin` 目录加入该 `PATH`。
+如果找不到 CLI，同步失败并保留现有 crontab；删除计划不要求程序仍已安装。
 
 ```bash
 hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project

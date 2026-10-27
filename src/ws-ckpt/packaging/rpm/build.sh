@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-rpm.sh — Build ws-ckpt RPM package.
+# build-rpm.sh — Build ws-ckpt compatibility and role RPMs.
 # Usage:
 #   ./build-rpm.sh          # build SRPM + binary RPM (default)
 #   ./build-rpm.sh --srpm   # build SRPM only (for Koji submission)
@@ -82,16 +82,25 @@ echo "==> Done!"
 echo ""
 
 SRPM=$(ls -1 "${RPMBUILD_DIR}/SRPMS/${NAME}-${VERSION}-"*.rpm 2>/dev/null | head -1)
-RPM=$(find "${RPMBUILD_DIR}/RPMS/" -name "${NAME}-${VERSION}-*.rpm" ! -name '*debuginfo*' 2>/dev/null | head -1)
 
 if [[ -n "${SRPM:-}" ]]; then
     echo "SRPM: ${SRPM}"
     echo "  Koji submit:  koji build <target> ${SRPM}"
 fi
 
-if [[ -n "${RPM:-}" ]]; then
-    echo ""
-    echo "RPM:  ${RPM}"
-    echo "  Install:      sudo yum install -y rsync btrfs-progs && sudo rpm -ivh ${RPM}"
-    echo "  Upgrade:      sudo rpm -Uvh --replacepkgs ${RPM}"
+if [[ "${1:-}" != "--srpm" ]]; then
+    # Query this spec's exact NEVRAs, excluding artifacts from older builds.
+    RPM_FILES=()
+    while IFS= read -r relative; do
+        artifact="${RPMBUILD_DIR}/RPMS/${relative}"
+        test -f "$artifact" || { echo "ERROR: missing RPM output: $artifact" >&2; exit 1; }
+        RPM_FILES+=("$artifact")
+    done < <(rpmspec -q --rpms --qf '%{ARCH}/%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}.rpm\n' "$SPEC")
+    test "${#RPM_FILES[@]}" -eq 4 || { echo "ERROR: expected ws-ckpt, core, plugins, and skills RPMs" >&2; exit 1; }
+    printf '\nRPM: %s\n' "${RPM_FILES[@]}"
+    printf '  Install:      sudo yum install -y rsync btrfs-progs && sudo rpm -ivh'
+    printf ' %q' "${RPM_FILES[@]}"
+    printf '\n  Upgrade:      sudo rpm -Uvh --replacepkgs'
+    printf ' %q' "${RPM_FILES[@]}"
+    printf '\n'
 fi

@@ -1,7 +1,8 @@
 # ws-ckpt workspace snapshot daemon
 #
-# Render {bindir} from SERVICE_BINDIR for a custom or legacy installation.
-# The default system unit is kept in ws-ckpt.service.
+# Two ways to start:
+#   Service mode:  cp ws-ckpt.service /etc/systemd/system/ && systemctl enable --now ws-ckpt
+#   Manual mode:   ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level debug]
 
 [Unit]
 Description=ws-ckpt workspace snapshot daemon

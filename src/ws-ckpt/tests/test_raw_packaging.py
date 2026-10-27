@@ -102,7 +102,11 @@ class WsCkptPackagingTests(unittest.TestCase):
             COMPONENT.parents[1]
             / "distribution/anolisa/manifests/components/ws-ckpt/component.toml"
         )
-        self.assertEqual(distribution_contract.read_bytes(), CONTRACT.read_bytes())
+        distribution = tomllib.loads(distribution_contract.read_text())
+        for field in ("name", "version"):
+            self.assertEqual(distribution["component"][field], self.manifest["component"][field])
+        self.assertEqual(distribution["component"]["health_check"]["binary"], "{bindir}/ws-ckpt")
+        self.assertEqual(self.manifest["component"]["health_check"]["binary"], "{bindir}/ws-ckpt")
         for entry in self.manifest["component"]["layout"]["files"]:
             self.assertTrue((payload / entry["source"]).exists(), entry["source"])
         for adapter in self.manifest["adapters"]:

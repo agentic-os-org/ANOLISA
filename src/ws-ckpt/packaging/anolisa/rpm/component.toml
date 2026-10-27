@@ -1,11 +1,15 @@
 manifest_version = 2
-anolisa_min_version = "0.1.12"
+anolisa_min_version = "0.3.15"
 
 [component]
 name = "ws-ckpt"
 version = "0.6.0"
 layer = "runtime"
 description = "ws-ckpt adapters for OpenClaw and Hermes"
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.3.15"
 
 [install]
 modes = ["system"]
@@ -20,6 +24,9 @@ plugin_id = "ws-ckpt"
 source = "scripts/openclaw"
 dest = "{datadir}/runtime/ws-ckpt/plugins/openclaw/"
 detect = { binary = "openclaw" }
+
+[adapters.backends.rpm]
+managed_packages = ["ws-ckpt-plugins"]
 
 [adapters.compat]
 framework_version = ">=2026.2.13"
@@ -42,6 +49,9 @@ plugin_id = "ws-ckpt"
 source = "scripts/hermes"
 dest = "{datadir}/runtime/ws-ckpt/plugins/hermes/"
 detect = { binary = "hermes" }
+
+[adapters.backends.rpm]
+managed_packages = ["ws-ckpt-plugins"]
 
 [adapters.bundle]
 schema = 1

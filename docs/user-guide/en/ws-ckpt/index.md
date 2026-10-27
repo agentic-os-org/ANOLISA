@@ -37,6 +37,19 @@ sudo anolisa --install-mode system install ws-ckpt
 sudo yum install ws-ckpt
 ```
 
+| RPM | Contents |
+|---|---|
+| `ws-ckpt` | Compatibility aggregate: exact version/release dependencies on all three packages below |
+| `ws-ckpt-core` | CLI, daemon, configuration, service unit and lifecycle, license, and documentation |
+| `ws-ckpt-plugins` | OpenClaw/Hermes bundles and detection, registration, and removal scripts; requires matching core |
+| `ws-ckpt-skills` | Bundled checkpoint skill; requires matching core |
+
+Select `sudo yum install ws-ckpt-core` for the service and CLI alone; add
+plugins or skills when needed. Core installation enables/restarts the service;
+check `systemctl status ws-ckpt.service`. Register host plugins separately as
+the Agent user. Install or upgrade local RPMs as one matching version/release
+set with `yum install /absolute/path/to/matching-rpms/*.rpm`.
+
 ### Option 3: Source build (developers)
 
 From the repository root on Linux:
@@ -298,6 +311,12 @@ There is no user-side global config file. Auto-checkpoint and cleanup behavior a
 ```
 
 ### Hermes Plugin Configuration
+
+Hermes resolves `ws-ckpt` from the Agent's `PATH` when synchronizing
+schedules and saves the absolute executable path in crontab. For a custom
+installation prefix, add its `bin` directory to that `PATH` first. If the CLI
+is unavailable, synchronization fails and retains the existing crontab;
+removing schedules does not require the binary to remain installed.
 
 ```bash
 hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project

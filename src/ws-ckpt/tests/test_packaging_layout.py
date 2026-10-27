@@ -477,7 +477,7 @@ class PackagingLayout(unittest.TestCase):
             archive.extractall(unpacked, filter="data")
         source = next(path for path in unpacked.iterdir() if path.is_dir())
         self.assertTrue((source / "packaging/rpm/ws-ckpt.spec.in").is_file())
-        self.assertTrue((source / "packaging/systemd/ws-ckpt.service").is_file())
+        self.assertTrue((source / "packaging/systemd/ws-ckpt.service.in").is_file())
         self.assertTrue((source / "packaging/install.mk").is_file())
         self.assertTrue((source / "packaging/anolisa/raw/component.toml").is_file())
         self.assertTrue((source / "packaging/anolisa/rpm/component.toml").is_file())

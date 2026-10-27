@@ -47,16 +47,18 @@ else
 endif
 
 # File-only targets are shared by public installation and delivery staging.
-.PHONY: build-core build-plugin install-files install-core-files install-plugin-files install-skills-files install-component-metadata
+.PHONY: build-core build-plugin install-files install-core-files install-systemd-unit install-plugin-files install-skills-files install-component-metadata
 install-files: install-core-files install-plugin-files install-skills-files install-component-metadata
 
-install-core-files:
-	install -d -m 0755 "$(DESTDIR)$(BINDIR)"
-	install -p -m 0755 "$(BINARY)" "$(DESTDIR)$(BINDIR)/ws-ckpt"
+install-systemd-unit:
 	install -d -m 0755 "$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)"
 	sed 's|{bindir}|$(SERVICE_BINDIR)|g' packaging/systemd/ws-ckpt.service.in \
 		> "$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/ws-ckpt.service"
 	chmod 0644 "$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/ws-ckpt.service"
+
+install-core-files: install-systemd-unit
+	install -d -m 0755 "$(DESTDIR)$(BINDIR)"
+	install -p -m 0755 "$(BINARY)" "$(DESTDIR)$(BINDIR)/ws-ckpt"
 	install -d -m 0755 "$(DESTDIR)$(CONFIG_DIR)"
 	install -p -m 0644 src/config.toml.sample \
 		"$(DESTDIR)$(CONFIG_DIR)/config.toml.sample"

@@ -1,4 +1,9 @@
 # Included by the component root Makefile; no second public Makefile/profile.
+.PHONY: test-rpm-packages
+test-packaging: test-rpm-packages
+test-rpm-packages:
+	python3 tests/test_rpm_packages.py
+
 DELIVERY_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 # File-origin legacy install defaults must not leak into the public file-only installer.
 delivery-input = $(if $(filter command line environment override,$(origin $(1))),$($(1)),$(2))
