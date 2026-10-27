@@ -206,7 +206,7 @@ def convert_session_to_trace(
 
     # Read session events
     session_events = []
-    with open(session_path) as f:
+    with open(session_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -625,7 +625,7 @@ def convert_session_to_trace(
     # Write output
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         for event in output_events:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
