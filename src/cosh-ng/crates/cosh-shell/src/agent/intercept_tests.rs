@@ -64,6 +64,11 @@ fn path_prompt_notice_is_stable_and_redacts_sensitive_input() {
         rendered.contains("Agent input: read ./README.md"),
         "{rendered}"
     );
+    // The newline ownership belongs to the relay display flow (the accept
+    // echo of the replayed submission), not to the renderer: a leading
+    // newline here would double up into a blank line whenever the display
+    // flow already ended on a line break (#8760).
+    assert!(!rendered.starts_with(['\n', '\r']), "{rendered}");
 
     let secret = "read ./README.md --token ghp_abcdefghijklmnopqrstuvwxyz123456";
     let event = path_prompt_event(secret, true);
@@ -73,6 +78,7 @@ fn path_prompt_notice_is_stable_and_redacts_sensitive_input() {
     let rendered = String::from_utf8(output).expect("UTF-8 notice");
     assert!(rendered.contains("Agent input: <redacted>"), "{rendered}");
     assert!(!rendered.contains("ghp_"), "{rendered}");
+    assert!(!rendered.starts_with(['\n', '\r']), "{rendered}");
 }
 
 #[test]

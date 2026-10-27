@@ -115,6 +115,12 @@ pub(super) struct OscParser {
     /// Rust-owned controls read in the same batch as preceding shell lines.
     /// Each counter reaches zero only after those submissions reach PS1.
     pending_prompt_intercepts: Vec<(String, String, usize)>,
+    /// Path-prompt intercepts held until the next prompt boundary: the
+    /// replayed submission's accept echo (the newline that owns the notice's
+    /// line) may still be in flight when the intercept event is drained, so
+    /// rendering immediately can glue the notice onto the echoed input
+    /// (#8760). prompt_ready fires only after that echo has been displayed.
+    pending_path_prompt_intercepts: Vec<(String, Option<String>, bool)>,
     /// A preexec or routing marker proves the next prompt boundary belongs to
     /// a submitted non-empty line rather than startup prompt initialization.
     submission_boundary_observed: bool,
@@ -541,6 +547,19 @@ impl OscParser {
                     .push((input, reason, remaining));
             }
         }
+        // The intercept notice must render after the replayed submission's
+        // accept echo owns its line, which this boundary proves (#8760).
+        for (input, cwd, sensitive) in std::mem::take(&mut self.pending_path_prompt_intercepts) {
+            self.push_intercept_event_with_routing(
+                &session_id,
+                input,
+                cwd.or_else(|| prompt_cwd.clone()),
+                "path_prompt",
+                None,
+                false,
+                sensitive,
+            );
+        }
     }
 
     fn observe_shell_environment(&mut self, marker: &Marker) -> Option<u64> {
@@ -764,6 +783,20 @@ impl OscParser {
                 pending_submits.max(1),
             ));
         }
+    }
+
+    /// Holds a path-prompt intercept until the next prompt boundary so the
+    /// notice renders after the replayed submission's accept echo owns its
+    /// line (#8760). Always queued: draining the input event happens ahead of
+    /// the PTY echo that the boundary must first display.
+    pub(super) fn hold_path_prompt_intercept_for_prompt_boundary(
+        &mut self,
+        input: String,
+        cwd: Option<String>,
+        sensitive: bool,
+    ) {
+        self.pending_path_prompt_intercepts
+            .push((input, cwd, sensitive));
     }
 
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {

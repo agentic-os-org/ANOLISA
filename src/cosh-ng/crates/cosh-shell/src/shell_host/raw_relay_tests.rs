@@ -532,9 +532,11 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
     )
     .expect("draw isolated candidate states");
 
+    // The commit newline is `\r\n`: raw mode disables OPOST, so a bare `\n`
+    // would leave the cursor at the echoed column and skew the next frame.
     assert_eq!(
         String::from_utf8(output).expect("utf8 output"),
-        "\r\x1b[2Kprompt> 你好\r\x1b[2Kprompt> 你好\n\r\x1b[2Kprompt> "
+        "\r\x1b[2Kprompt> 你好\r\x1b[2Kprompt> 你好\r\n\r\x1b[2Kprompt> "
     );
 }
 
