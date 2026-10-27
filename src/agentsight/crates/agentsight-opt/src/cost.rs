@@ -93,9 +93,21 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             model: String::new(),
             token_ratio_version: String::new(),
             usage_steps: 0,
-            total_real_input_tok: 0,
-            total_real_output_tok: 0,
-            total_real_cached_tok: 0,
+            total_real_input_tok: trajectory
+                .final_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_prompt_tokens)
+                .unwrap_or(0),
+            total_real_output_tok: trajectory
+                .final_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_completion_tokens)
+                .unwrap_or(0),
+            total_real_cached_tok: trajectory
+                .final_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_cached_tokens)
+                .unwrap_or(0),
             headroom: CostHeadroom::default(),
         });
     }
@@ -278,9 +290,21 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             .iter()
             .filter(|c| c.real_prompt_tokens.is_some())
             .count(),
-        total_real_input_tok: calls.iter().filter_map(|c| c.real_prompt_tokens).sum(),
-        total_real_output_tok: calls.iter().filter_map(|c| c.real_completion_tokens).sum(),
-        total_real_cached_tok: calls.iter().filter_map(|c| c.real_cached_tokens).sum(),
+        total_real_input_tok: trajectory
+            .final_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.total_prompt_tokens)
+            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_prompt_tokens).sum()),
+        total_real_output_tok: trajectory
+            .final_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.total_completion_tokens)
+            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_completion_tokens).sum()),
+        total_real_cached_tok: trajectory
+            .final_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.total_cached_tokens)
+            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_cached_tokens).sum()),
         calls,
         model,
         token_ratio_version: TOKEN_RATIO_VERSION.to_string(),
