@@ -1354,7 +1354,7 @@
         "qwenpaw==2.2.2.post1",
         "agentscope==2.0.10"
       ],
-      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks. Ordinary App replies use child scopes through pinned Agent and Coordinator seams; resident tests cover 1025 calls with bounded active capacity, cancellation and original finalizers, private execution environments, exact dispatch input and strict PostTool output withholding. Pinned HTTP output and next-Agent hints are checked across processor, completion and offload barriers, cleanup failures and one shutdown deadline. A real scope CLI/service fixture checks denial text, Tokenless retry instructions and completion. Resident hot reload and evidence capture are rejected; the separate reloadable path retains its prior idle-update contract. Managed MCP tool resolution adds a real ClientSession tools/call boundary with native-parent identity, full schema/annotations, exact approved arguments and complete structured/multimodal error envelopes; real protocol and AW Provider suites verify denial causes zero server calls and phases execute once.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks. Ordinary App replies use child scopes through pinned Agent and Coordinator seams; resident tests cover 1025 calls with bounded active capacity, cancellation and original finalizers, private execution environments, exact dispatch input and strict PostTool output withholding. Pinned HTTP output and next-Agent hints are checked across processor, completion and offload barriers, cleanup failures and one shutdown deadline. A real scope CLI/service fixture checks denial text, Tokenless retry instructions and completion. Ordinary resident App startup confirms readiness before its first reply; the native startup seam and real service tests verify pre-first-task updates. Ordinary resident replies support explicit idle policy updates with immutable task snapshots, same-Agent reuse, strict Post and MCP route changes; private lease cleanup retains busy after child closure. Evidence capture is rejected. The separate reloadable path retains its prior idle-update contract. Managed MCP tool resolution adds a real ClientSession tools/call boundary with native-parent identity, full schema/annotations, exact approved arguments and complete structured/multimodal error envelopes; real protocol and AW Provider suites verify denial causes zero server calls and phases execute once.",
       "cases": [
         {
           "name": "middleware",
@@ -1455,7 +1455,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 56
+          "tests": 69
         },
         {
           "name": "resident-service",
@@ -1467,7 +1467,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 4
+          "tests": 8
         },
         {
           "name": "structured-mcp",
@@ -1658,7 +1658,7 @@
       "npm_packages": [
         "@qoder-ai/qoder-agent-sdk@1.0.56"
       ],
-      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy or result replacement. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 53-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: six hosted Worker cases verify successful/error results, required failure, timeout and report behavior through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon and resident hot reload are unsupported. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Ordinary resident Queries require evidence mode off; launch admission rejects enabled AgentSight evidence. MCP schema parsing that changes approved arguments is rejected before handler execution. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request.",
+      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy or result replacement. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 53-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: six hosted Worker cases verify successful/error results, required failure, timeout and report behavior through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon are unsupported. Ordinary resident policies update between fully closed Queries; model waits, callbacks, MCP and private lease cleanup retain busy. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Ordinary resident Queries require evidence mode off; launch admission rejects enabled AgentSight evidence. MCP schema parsing that changes approved arguments is rejected before handler execution. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request. Seven hosted ordinary-resident policy cases verify daemon prewarming for 35 seconds without a Query, first-task Hook addition, no-Hook busy admission, newly added and removed security routes, strict Post enable/report restoration, managed MCP denial and unchanged worker/daemon across revisions.",
       "cases": [
         {
           "name": "daemon-hooks",
@@ -1795,6 +1795,43 @@
                   "report",
                   "native-error",
                   "failure-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-policy-update",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk-resident-policy",
+            "--resident-reload"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-resident-policy/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "open-query-busy-without-hooks",
+                  "new-query-adds-security-hook",
+                  "new-query-removes-security-hook",
+                  "new-query-enables-strict-post",
+                  "new-query-restores-report-post",
+                  "updated-managed-mcp-denial",
+                  "same-worker-and-daemon-across-revisions"
                 ],
                 "values": {
                   "status": "passed"

@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -223,7 +224,9 @@ plugin.plugin.register(SimpleNamespace(
     register_startup_hook=lambda name, callback: STARTUP.append(callback),
 ))
 for callback in STARTUP:
-    callback()
+    result = callback()
+    if inspect.isawaitable(result):
+        asyncio.run(result)
 config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
 assert config["resident"] is True
 readiness = json.loads(Path(config["ready_path"]).read_text())

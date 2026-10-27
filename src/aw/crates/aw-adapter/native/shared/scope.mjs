@@ -1,6 +1,7 @@
 /** Acknowledged task handles remain private to one managed session. */
 import { readFileSync, realpathSync } from "node:fs";
 import { run } from "./transport.mjs";
+import { randomUUID } from "node:crypto";
 
 export class Scope {
   constructor(config, adapter = "pi") {
@@ -8,6 +9,7 @@ export class Scope {
     this.adapter = adapter;
     this.pid = process.pid;
     this.handle = null;
+    this.reservation = null;
     this.closed = false;
     this.failed = false;
     this.environment = undefined;
@@ -46,13 +48,50 @@ export class Scope {
     this.running = true;
   }
 
-  async open(cwd, environment) {
+  async ready() {
+    if (this.reservation || this.handle || this.closed || this.pid !== process.pid)
+      throw new Error("AW worker readiness requires an unused scope");
+    const reply = await this.command("ready", { pid: this.pid }, 6000);
+    if (reply.code !== 0) throw new Error("AW worker readiness failed");
+  }
+
+  async reserve() {
+    if (this.reservation || this.handle || this.closed || this.pid !== process.pid)
+      throw new Error("AW task cannot reserve admission");
+    // Retain the identity before transport: a lost response may already be busy.
+    this.reservation = { pid: this.pid, key: randomUUID() };
+    const reply = await this.command("reserve", this.reservation, 6000);
+    if (reply.code !== 0) throw new Error("AW task reservation failed");
+  }
+
+  async release() {
+    if (!this.reservation) return;
+    if (!this.closed || this.releaseError || this.pid !== process.pid)
+      throw new Error("AW task cleanup is not confirmed");
+    const reply = await this.command("release", this.reservation, 6000);
+    if (reply.code !== 0) throw new Error("AW task reservation release failed");
+    this.reservation = null;
+  }
+
+  async open(cwd, environment, { deferAcknowledgement = false } = {}) {
     if (this.handle || this.closed || this.pid !== process.pid)
       throw new Error("AW task cannot be reopened");
     this.environment = { ...environment };
     const result = await this.command("open", { pid: this.pid, cwd: realpathSync(cwd), environment }, 33000);
     if (result.code !== 0) throw new Error("AW task admission failed");
     this.handle = JSON.parse(result.stdout);
+    if (!deferAcknowledgement) await this.acknowledge();
+  }
+
+  async policy() {
+    this.check();
+    const reply = await this.command("policy", this.handle, 6000);
+    if (reply.code !== 0) throw new Error("AW task policy handoff failed");
+    return JSON.parse(reply.stdout);
+  }
+
+  async acknowledge() {
+    this.check();
     try {
       const reply = await this.command("acknowledge", this.handle, 6000);
       if (reply.code !== 0) throw new Error("AW task handoff acknowledgement failed");

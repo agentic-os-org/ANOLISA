@@ -20,6 +20,27 @@ from agentscope.tool import ToolChunk, ToolResponse
 
 
 
+def validate_hooks(config: dict[str, Any]) -> None:
+    """Apply the same native route contract at launch and task handoff."""
+    if not isinstance(config.get("hooks"), list):
+        raise ValueError("AW plugin configuration requires hooks")
+    for hook in config["hooks"]:
+        if not isinstance(hook, dict):
+            raise ValueError("AW Hook route must be an object")
+        if hook.get("event") not in {"tool.before", "tool.after"}:
+            raise ValueError("Unsupported AW native event")
+        if not isinstance(hook.get("step"), str) or not hook["step"]:
+            raise ValueError("AW step must be a nonempty string")
+        if hook.get("on_error") not in {"report", "block", "withhold_result"}:
+            raise ValueError("Invalid AW failure policy")
+        if type(hook.get("budget_ms")) is not int or not 1 <= hook["budget_ms"] <= 55000:
+            raise ValueError("AW native budget must be 1..55000 ms")
+        if type(hook.get("replace_result", False)) is not bool:
+            raise ValueError("AW result replacement must be boolean")
+        if hook.get("replace_result", False) and hook["event"] != "tool.after":
+            raise ValueError("AW result replacement requires tool.after")
+
+
 class CallbackFailure(RuntimeError):
     """A fixed adapter failure code, separate from a native policy denial."""
 
@@ -262,17 +283,7 @@ class AwPlugin:
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(config.get(key), str) or not config[key]:
                 raise ValueError(f"AW plugin configuration requires {key}")
-        if not isinstance(config.get("hooks"), list):
-            raise ValueError("AW plugin configuration requires hooks")
-        for hook in config["hooks"]:
-            if hook.get("event") not in {"tool.before", "tool.after"}:
-                raise ValueError("Unsupported AW native event")
-            if not isinstance(hook.get("step"), str) or not hook["step"]:
-                raise ValueError("AW step must be a nonempty string")
-            if hook.get("on_error") not in {"report", "block", "withhold_result"}:
-                raise ValueError("Invalid AW failure policy")
-            if type(hook.get("budget_ms")) is not int or not 1 <= hook["budget_ms"] <= 55000:
-                raise ValueError("AW native budget must be 1..55000 ms")
+        validate_hooks(config)
         if config.get("resident"):
             if config.get("reloadable"):
                 raise RuntimeError("AW resident task scopes require a non-reloadable QwenPaw binding")
@@ -293,12 +304,15 @@ class AwPlugin:
         # The native App invokes startup hooks only after load_all_plugins has
         # completed and its plugin registry is published. Registration alone
         # would also succeed before the loader finishes or rolls a plugin back.
-        api.register_startup_hook("aw-ready", lambda: self._startup(config) if config.get("reloadable") else self._ready(config))
+        api.register_startup_hook("aw-ready", lambda: self._startup(config) if config.get("reloadable") or config.get("resident_policy_reload") else self._ready(config))
 
     @staticmethod
     async def _startup(config: dict[str, Any]) -> None:
         if config.get("reloadable"):
             await AwReloadMiddleware(config).lifecycle("ready", "")
+        if config.get("resident_policy_reload"):
+            from .aw_scope import Scope
+            await Scope({**config, "adapter": "qwenpaw"}).ready()
         AwPlugin._ready(config)
 
     @staticmethod

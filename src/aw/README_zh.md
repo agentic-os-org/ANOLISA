@@ -52,6 +52,12 @@ launcher 转发退出信号后，Agent 需要超过默认两秒的强制清理�
 详见[配置](../../docs/user-guide/zh/aw/configuration.md#比较策略修改)；
 此命令不更新运行中的实例。
 
+普通 Qoder SDK 和 QwenPaw worker 支持显式空闲策略更新，无需重启。全部 Query/reply、
+原生回调和私有租约完全清理后，更新为新任务快照选择策略，保留严格 Post 和受管 MCP。
+受管 Qoder `startDaemon()` 和 QwenPaw App startup 在首个任务前确认就绪。先准备 Hook
+文件，再执行 `aw update --config aw.yaml --agent TARGET` 应用完整策略，成功后派发任务。
+同一目标有多个实例时使用 `--instance ID`。管控侧串行化更新与任务派发；活跃任务使更新返回 `busy`。
+
 通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2.post1 /
 AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / Worker 1.1.78
 预装实验性空闲更新桥接。
@@ -134,7 +140,7 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 两种普通 resident 路径均准入严格 After 的 `on_error: withhold_result`，阻止未核验
 结果交付和后续派发。Post 之前已经发生的工具副作用继续生效。
 [统一安全示例](crates/aw-service/examples/aw.sdk-security.yaml) 通过
-`--agent qoder-sdk` 或 `--agent qwenpaw` 选择目标。resident 策略变更采用滚动重启；
+`--agent qoder-sdk` 或 `--agent qwenpaw` 选择目标。resident 策略变更支持在 Query 完整关闭或 reply 完整排空后显式空闲更新；
 `--reloadable` 保留独立的空闲更新路径，不提供严格 Post 和私有执行租约。
 
 <!-- aw-regression-matrix:start -->

@@ -6,6 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import * as bridge from "../../../../aw-adapter/native/qoder-sdk/bridge.mjs";
 import "./resident.test.mjs";
+import "./resident-policy.test.mjs";
 import "./daemon.test.mjs";
 import "./private.test.mjs";
 import "./cleanup-fence.test.mjs";
@@ -214,6 +215,30 @@ test("daemon launch admission rejects overrides and unregistered daemons", async
   await daemon.stop();
   assert(fs.existsSync(path.join(f.root, "stopped")));
   await assert.rejects(bridge.startDaemon({ failStart: true }), /daemon startup failed/);
+});
+
+test("managed prewarm confirms worker readiness without creating a Query", async t => {
+  const f = fixture(t);
+  f.config.resident = true;
+  f.config.resident_policy_reload = true;
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const daemon = await bridge.startDaemon({});
+  try {
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, "input"))).pid, process.pid);
+    assert.equal(JSON.parse(fs.readFileSync(f.config.ready_path)).hooks, f.config.hooks.length);
+  } finally { await daemon.stop(); }
+});
+
+test("failed prewarm readiness stops its daemon and publishes no receipt", async t => {
+  const f = fixture(t, "deny");
+  f.config.resident = true;
+  f.config.resident_policy_reload = true;
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  await assert.rejects(bridge.startDaemon({}), /readiness failed/);
+  assert(fs.existsSync(path.join(f.root, "stopped")));
+  assert(!fs.existsSync(path.join(f.root, "queried")));
+  assert(!fs.existsSync(f.config.ready_path));
 });
 
 test("Hook-disable flags use the pinned Worker's whitespace normalization", async (t) => {

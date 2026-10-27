@@ -49,6 +49,53 @@ pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
     }
 }
 
+/// Check the ordinary resident adapters with immutable task policy snapshots.
+pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
+    if !matches!(capabilities.adapter.as_str(), "qoder-sdk" | "qwenpaw") {
+        return Err("resident policy updates require Qoder SDK or QwenPaw".into());
+    }
+    supported(capabilities)
+}
+
+/// Validate a replacement with the ordinary factory's native routing contract.
+pub fn validate_resident(
+    document: &Value,
+    target: &str,
+    capabilities: &AdapterCapabilities,
+) -> Result<()> {
+    resident_supported(capabilities)?;
+    let config = aw_config::Validator::new()
+        .map_err(|error| error.to_string())?
+        .parse(&serde_json::to_vec(document)?)
+        .map_err(|error| error.to_string())?;
+    let steps = aw_provider::admission::preflight(&config, target, capabilities)
+        .map_err(|error| error.to_string())?;
+    scope_policy(document, target, &steps, capabilities)?;
+    Ok(())
+}
+
+/// Project an immutable task's routes without exposing Provider configuration.
+pub fn scope_policy(
+    document: &Value,
+    target: &str,
+    steps: &[AdmittedStep],
+    capabilities: &AdapterCapabilities,
+) -> Result<Value> {
+    resident_supported(capabilities)?;
+    if document["spec"]["agents"][target]["adapter"] != capabilities.adapter {
+        return Err("resident policy adapter differs from its target".into());
+    }
+    if adapter::observation_enabled(document, target) {
+        return Err("resident policy scopes do not support native evidence capture".into());
+    }
+    let (events, hooks) = match capabilities.adapter.as_str() {
+        "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps)?,
+        "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, false)?,
+        _ => return Err("unsupported resident policy adapter".into()),
+    };
+    Ok(json!({"events": events, "hooks": hooks}))
+}
+
 /// Validate native scheduling and budget constraints before Provider preparation.
 pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabilities) -> Result<()> {
     supported(capabilities)?;

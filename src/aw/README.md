@@ -63,6 +63,15 @@ Use `aw validate --config next.yaml --against current.yaml` to check policy-only
 edits offline. See [configuration](../../docs/user-guide/en/aw/configuration.md#compare-policy-edits);
 this does not update a running instance.
 
+Ordinary Qoder SDK and QwenPaw workers support explicit idle policy updates
+without restarting. After all Queries/replies, native callbacks and private leases
+have drained, an update selects the policy for new task snapshots; strict Post and
+managed MCP remain active. Managed Qoder `startDaemon()` and QwenPaw App startup
+confirm readiness before the first task. Provision Hook files, apply the complete
+policy with `aw update --config aw.yaml --agent TARGET`, then dispatch work.
+Use `--instance ID` when a target has multiple instances. The control plane
+serializes updates and task dispatch; active tasks make updates return `busy`.
+
 Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
 Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App, or
 Qoder SDK 1.0.56 / Worker 1.1.78.
@@ -159,8 +168,8 @@ Both ordinary resident paths admit strict after steps with
 `on_error: withhold_result`, preventing unverified result delivery and subsequent
 dispatch. Tool side effects that occurred before Post remain in effect. Use the
 [shared security example](crates/aw-service/examples/aw.sdk-security.yaml) with
-`--agent qoder-sdk` or `--agent qwenpaw`. Resident policy changes use a rolling
-restart; `--reloadable` keeps a separate idle-update path without strict Post
+`--agent qoder-sdk` or `--agent qwenpaw`. Resident policy changes use explicit
+idle updates between closed Queries or fully drained replies; `--reloadable` keeps a separate path without strict Post
 or private execution leases.
 
 <!-- aw-regression-matrix:start -->

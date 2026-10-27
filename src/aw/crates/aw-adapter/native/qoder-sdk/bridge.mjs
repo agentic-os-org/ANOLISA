@@ -5,9 +5,10 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { invoke } from "./callback.mjs";
 import { Reload } from "./reload.mjs";
-import { Resident, bounded } from "./resident.mjs";
+import { Resident, bounded, validateHooks } from "./resident.mjs";
 import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
 import { managedMcpServer } from "./mcp.mjs";
+import { Scope } from "./scope.mjs";
 export { PRIVATE_EXECUTION_VERSION, executionEnvironment, hookEnvironment } from "./private.mjs";
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
@@ -18,15 +19,7 @@ function configuration() {
   const config = JSON.parse(readFileSync(process.env.AW_QODER_SDK_CONFIG, "utf8"));
   for (const key of ["sdk", "executable", "binding", "cwd", "ready_path", "ready_token"])
     if (typeof config[key] !== "string" || !config[key]) throw new Error(`Missing AW ${key}`);
-  if (!Array.isArray(config.hooks)) throw new Error("Missing AW hooks");
-  for (const hook of config.hooks)
-    if (!["tool.before", "tool.after"].includes(hook.event) ||
-        typeof hook.step !== "string" || !hook.step ||
-        !(["block", "report"].includes(hook.on_error) ||
-          (config.resident && hook.event === "tool.after" && hook.on_error === "withhold_result")) ||
-        hook.replace_result !== false ||
-        !Number.isInteger(hook.budget_ms) || hook.budget_ms < 1 || hook.budget_ms > 55000)
-      throw new Error("Invalid AW Qoder SDK hook route");
+  validateHooks(config);
   return config;
 }
 
@@ -49,7 +42,18 @@ export async function startDaemon(options) {
     ...(options.auth ? { auth: credentialOptions(options.auth) } : {}) };
   runtime(options);
   const sdk = await import(pathToFileURL(config.sdk).href);
-  return await managedDaemon(sdk, options, config, bounded, environment);
+  const daemon = await managedDaemon(sdk, options, config, bounded, environment);
+  if (config.resident_policy_reload) {
+    try {
+      await new Scope(config, "qoder-sdk").ready();
+      ready(config);
+    } catch (error) {
+      try { await daemon.stop(); }
+      catch (cleanup) { throw new AggregateError([error, cleanup], "AW daemon startup cleanup failed"); }
+      throw error;
+    }
+  }
+  return daemon;
 }
 
 /** Preserve SDK tool definitions while requiring one managed MCP server per Query. */

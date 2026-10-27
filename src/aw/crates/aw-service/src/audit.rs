@@ -23,6 +23,12 @@ pub(crate) struct Audit {
     recent: Mutex<VecDeque<Value>>,
     #[cfg(test)]
     started_appends: std::sync::atomic::AtomicUsize,
+    /// Test-only boundary after the idle check and before the durable activation write.
+    #[cfg(test)]
+    pub(crate) activation_gate: Mutex<()>,
+    /// Test-only proof that activation reached the blocked durable-write boundary.
+    #[cfg(test)]
+    pub(crate) activation_appends: std::sync::atomic::AtomicUsize,
 }
 
 impl Audit {
@@ -56,6 +62,10 @@ impl Audit {
             recent: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             started_appends: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            activation_gate: Mutex::new(()),
+            #[cfg(test)]
+            activation_appends: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -91,6 +101,13 @@ impl Audit {
         if record["phase"] == "started" {
             self.started_appends.fetch_add(1, Ordering::Release);
         }
+        #[cfg(test)]
+        let _activation = if record["phase"] == "closed" && record["status"] == "active" {
+            self.activation_appends.fetch_add(1, Ordering::Release);
+            Some(self.activation_gate.lock().unwrap())
+        } else {
+            None
+        };
         self.mutate(|journal| {
             let written = journal.append(key, &record)?;
             if record["phase"] == "completed" {

@@ -8,4 +8,4 @@ pub(super) mod openclaw;
 pub(super) mod pi;
 pub(super) mod qoder_sdk;
 pub(super) mod qwenpaw;
-mod sdk_tools;
+pub(super) mod sdk_tools;

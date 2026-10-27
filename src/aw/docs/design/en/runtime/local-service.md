@@ -123,7 +123,10 @@ configuration and Provider protocols.
 `own_instance` pins the same-user launcher's PID, start ticks and PID namespace.
 `open_scope` inherits the root's admitted target, capabilities and configuration,
 then runs Provider preparation with the task's own cwd and complete environment.
-Nested scopes, reloadable roots and active observation are rejected. The owning
+Nested scopes, restricted reloadable roots and active observation are rejected.
+Ordinary resident Qoder SDK/QwenPaw roots may enable idle policy updates; their
+whole-task reservations and immutable child snapshots follow
+[the policy update contract](policy-reload.md#ordinary-resident-task-snapshots). The owning
 worker must be the launcher itself or its descendant; forked workers create new
 scopes after fork. Process identity corroborates lifetime within the same-user trust boundary.
 
@@ -380,13 +383,16 @@ run chain has its own audit key. See [evidence lifecycle](evidence-context.md#au
 
 ## Explicit instance policy updates
 
-Reloadable `aw run` instances use `EnableReload`, `AssociateProcess`,
-`BridgeLifecycle`, `HookPlan` and `UpdatePolicy`. Service identity remains the
+Supported resident and restricted reloadable `aw run` instances share
+`EnableReload`, `AssociateProcess`, `BridgeLifecycle` and `UpdatePolicy`. Resident
+children use immutable `ScopePolicy` snapshots; restricted bridges use `HookPlan`.
+Service identity remains the
 bootstrap digest; `expected_revision` addresses the instance Host's current
 revision. Native request entry and the final update check share the instance
 registry gate. Candidate Host preparation runs outside it. Busy updates never
-queue, drain tools or activate after the response. Completed event leases remain
-claimed across updates; evidence is built from the owning Host snapshot.
+queue, drain tools or activate after the response. Restricted bridges retain
+completed event claims across updates; resident scopes retain their reclamation
+and retired-identity protection. Evidence uses the owning Host snapshot.
 
 The [policy reload design](policy-reload.md) defines the lifecycle, process
 association, pinned entrypoints, manual acceptance and later attach/steer scope.

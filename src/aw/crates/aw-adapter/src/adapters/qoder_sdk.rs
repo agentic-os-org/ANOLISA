@@ -172,6 +172,7 @@ impl PreparedLaunch for Prepared {
             &serde_json::to_vec(&json!({
                 "executable":context.executable, "binding":context.binding_path, "sdk":self.sdk,
                 "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable,
+                "resident_policy_reload": !self.input.options.reloadable,
                 "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
             }))?,
         )?;

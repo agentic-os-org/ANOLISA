@@ -8,7 +8,7 @@ use aw_provider::admission::AdmittedStep;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-pub(super) fn routes(
+pub(crate) fn routes(
     document: &Value,
     steps: &[AdmittedStep],
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {

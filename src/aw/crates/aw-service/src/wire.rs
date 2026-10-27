@@ -182,7 +182,7 @@ pub enum Operation {
     },
     /// Prepare an isolated task binding under an owned root's immutable policy.
     OpenScope {
-        /// Owned root; nested task scopes and reloadable roots are rejected.
+        /// Owned root; nested task scopes and restricted reload roots are rejected.
         parent_id: String,
         /// Task worker PID: the root launcher itself or one of its descendants.
         pid: u32,
@@ -191,6 +191,11 @@ pub enum Operation {
         /// Complete explicit task environment, with no daemon inheritance.
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
+    },
+    /// Read the immutable task policy before preparing and acknowledging native routes.
+    ScopePolicy {
+        /// Prepared task scope under an owned resident reload root.
+        instance_id: String,
     },
     /// Confirm that the native owner received its task handle within five seconds.
     AcknowledgeScope {

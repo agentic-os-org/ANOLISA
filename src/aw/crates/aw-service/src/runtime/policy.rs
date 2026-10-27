@@ -15,7 +15,11 @@ use std::{
 
 use super::process::Process;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct Reload {
+    pub(super) resident: bool,
     process: Option<Process>,
     ready: bool,
     pending_bridge: Option<u32>,
@@ -26,6 +30,18 @@ pub(super) struct Reload {
     pub(super) preparation_cancelled: Option<Arc<AtomicBool>>,
 }
 
+impl Reload {
+    pub(super) fn admit_scope(&self, pid: u32) -> Result<()> {
+        if !self.resident || !self.ready || self.requests.is_empty() {
+            return Err(rejected("request_not_admitted"));
+        }
+        self.process
+            .as_ref()
+            .ok_or_else(|| rejected("process_not_associated"))?
+            .corroborate(pid)
+    }
+}
+
 impl Runtime {
     pub(super) fn enable_reload(&self, id: &str) -> Result<Value> {
         let mut instances = self
@@ -33,20 +49,20 @@ impl Runtime {
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
         let instance = instance(&mut instances, id)?;
-        if self
-            .owners
-            .lock()
-            .map_err(|_| rejected("state_poisoned"))?
-            .contains_key(id)
-        {
-            return Err(rejected("scope_reload_unsupported"));
-        }
+        let resident = self.resident_root(id)?;
         if instance.reload.is_some() {
             return Err(rejected("reload_already_enabled"));
         }
-        aw_adapter::reload::supported(instance.host.capabilities())
-            .map_err(|_| rejected("unsupported"))?;
+        if resident {
+            aw_adapter::reload::resident_supported(instance.host.capabilities())
+                .map_err(|_| rejected("unsupported"))?;
+            self.no_scope_children(id)?;
+        } else {
+            aw_adapter::reload::supported(instance.host.capabilities())
+                .map_err(|_| rejected("unsupported"))?;
+        }
         instance.reload = Some(Reload {
+            resident,
             process: None,
             ready: false,
             pending_bridge: None,
@@ -69,6 +85,10 @@ impl Runtime {
             .reload
             .as_mut()
             .ok_or_else(|| rejected("unsupported"))?;
+        if state.resident {
+            self.check_scope_owner(id)?;
+            self.corroborate_scope_root(id, pid)?;
+        }
         if state.process.is_some() {
             return Err(rejected("process_already_associated"));
         }
@@ -106,6 +126,10 @@ impl Runtime {
             .reload
             .as_mut()
             .ok_or_else(|| rejected("unsupported"))?;
+        if state.resident {
+            self.check_scope_owner(id)?;
+            self.corroborate_scope_root(id, pid)?;
+        }
         if matches!(phase, LifecyclePhase::Ready) && state.process.is_none() {
             if !key.is_empty() || state.pending_bridge.is_some() {
                 return Err(rejected("bridge_already_ready"));
@@ -123,8 +147,11 @@ impl Runtime {
             .corroborate(pid)?;
         match phase {
             LifecyclePhase::Ready => {
-                if !key.is_empty() || state.ready {
+                if !key.is_empty() || (state.ready && !state.resident) {
                     return Err(rejected("bridge_already_ready"));
+                }
+                if state.ready {
+                    return Ok(json!({"policy_revision":instance.host.revision(),"ready":true}));
                 }
                 state.bridge_audit =
                     Some(self.lifecycle_record("bridge_ready", id, json!({"pid":pid}))?);
@@ -143,7 +170,12 @@ impl Runtime {
                 } else {
                     &mut state.requests
                 };
-                if claims.len() >= 64 || !claims.insert(key.into()) {
+                let limit = if state.resident {
+                    self.limits.bindings
+                } else {
+                    64
+                };
+                if claims.len() >= limit || !claims.insert(key.into()) {
                     return Err(rejected("busy"));
                 }
             }
@@ -195,12 +227,14 @@ impl Runtime {
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         Ok(Value::Array(instances.iter().filter_map(|(id, instance)| instance.as_ref().map(|instance| {
             let state = instance.reload.as_ref();
             json!({"instance_id":id,"target":instance.host.target(),"policy_revision":instance.host.revision(),
+                "parent_instance_id":owners.get(id).and_then(|owner| owner.parent.as_ref()),
                 "adapter":instance.host.capabilities().adapter,"native_version":instance.host.capabilities().version,
                 "entrypoint":instance.host.capabilities().entrypoint,"cwd":instance.context.cwd,
-                "reloadable":state.is_some(),"ready":state.is_some_and(|s| s.ready),
+                "reloadable":state.is_some(),"resident_reload":state.is_some_and(|s| s.resident),"ready":state.is_some_and(|s| s.ready),
                 "process_audit":state.and_then(|s| s.process_audit.as_ref()),"bridge_audit":state.and_then(|s| s.bridge_audit.as_ref()),
                 "requests":state.map(|s| s.requests.len()),"tools":state.map(|s| s.tools.len()),
                 "process":state.and_then(|s| s.process.as_ref()).map(Process::metadata)})
@@ -217,6 +251,10 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| rejected("process_not_associated"))?
             .check()?;
+        if state.resident {
+            self.check_scope_owner(id)?;
+            self.no_scope_children(id)?;
+        }
         if !state.ready
             || !state.requests.is_empty()
             || !state.tools.is_empty()
@@ -321,7 +359,7 @@ impl Runtime {
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Value> {
         let started = Instant::now();
-        let (baseline, target, capabilities, context, update) = {
+        let (baseline, target, capabilities, context, update, resident) = {
             let mut instances = self
                 .instances
                 .lock()
@@ -337,6 +375,7 @@ impl Runtime {
                 instance.host.capabilities().clone(),
                 instance.context.clone(),
                 instance.policy_update.clone(),
+                instance.reload.as_ref().is_some_and(|state| state.resident),
             )
         };
         // Preparation does not block native requests. A concurrent request wins
@@ -360,8 +399,13 @@ impl Runtime {
         validator
             .parse(&baseline)?
             .validate_policy_update(&candidate)?;
-        aw_adapter::reload::validate(candidate.as_value(), &target, &capabilities)
-            .map_err(|_| rejected("native_policy_unsupported"))?;
+        if resident {
+            aw_adapter::reload::validate_resident(candidate.as_value(), &target, &capabilities)
+                .map_err(|_| rejected("native_policy_unsupported"))?;
+        } else {
+            aw_adapter::reload::validate(candidate.as_value(), &target, &capabilities)
+                .map_err(|_| rejected("native_policy_unsupported"))?;
+        }
         let attempt = self.identifier()?;
         let host = self.prepare(
             bytes,
@@ -390,6 +434,15 @@ impl Runtime {
             }
             self.audit.append(key, json!({"phase":"closed","status":"active",
                 "previous_revision":expected,"policy_revision":host.revision(),"preparation_audit":attempt}))?;
+            // Durable writes can block while the native owner exits. Do not
+            // activate a prepared policy after losing its execution boundary.
+            self.idle(instance, id)?;
+            if cancelled.load(Ordering::Acquire)
+                || self.stopped.load(Ordering::Acquire)
+                || Instant::now() >= deadline
+            {
+                return Err(rejected("policy_update_cancelled"));
+            }
             let revision = host.revision().to_owned();
             instance.host = std::sync::Arc::new(host);
             instance.bytes = bytes.to_vec();

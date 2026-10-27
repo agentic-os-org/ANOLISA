@@ -21,7 +21,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--npm", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
-parser.add_argument("--reloadable", action="store_true")
+modes = parser.add_mutually_exclusive_group()
+modes.add_argument("--reloadable", action="store_true")
+modes.add_argument("--resident-reload", action="store_true")
 args = parser.parse_args()
 evidence = args.output.resolve()
 evidence.mkdir(parents=True, exist_ok=True)
@@ -42,7 +44,8 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
     (case / "work/node_modules").symlink_to(
         args.npm.resolve() / "node_modules", target_is_directory=True
     )
-    shutil.copyfile(fixture / "native.mjs", case / "work/app.mjs")
+    application = "native-resident-policy.mjs" if args.resident_reload else "native.mjs"
+    shutil.copyfile(fixture / application, case / "work/app.mjs")
     shutil.copyfile(fixture / "native-safety.mjs", case / "work/native-safety.mjs")
     shutil.copyfile(fixture / "native-timeout.mjs", case / "work/native-timeout.mjs")
     environment = {
@@ -114,6 +117,16 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
         save(case / "candidate.json", policy)
         policy["spec"]["providers"] = {}
         policy["spec"]["events"] = {}
+        save(config, policy)
+    if args.resident_reload:
+        policy = json.loads(config.read_text())
+        policy["spec"]["execution"]["default_event_budget_ms"] = 2400
+        save(case / "candidate.json", policy)
+        policy["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = "withhold_result"
+        save(case / "strict.json", policy)
+        policy["spec"]["providers"] = {}
+        policy["spec"]["events"] = {}
+        save(case / "empty.json", policy)
         save(config, policy)
     processes = Processes(case, evidence, environment)
     try:

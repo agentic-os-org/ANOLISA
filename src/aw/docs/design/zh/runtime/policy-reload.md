@@ -3,13 +3,51 @@
 [English](../../en/runtime/policy-reload.md)
 
 AW 可以显式更新通过稳定桥接启动的空闲实例策略，原生宿主进程保持运行；忙碌实例拒绝更新。
-运行时路径通过 `aw run --reloadable` 显式启用，固定 Qoder 1.1.73 TUI 和
+受限桥接路径通过 `aw run --reloadable` 显式启用，固定 Qoder 1.1.73 TUI 和
 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled Worker
 1.1.78。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
 外部接入和 steer 仍在规划中。
 `qoder-sdk` 的普通 `aw run` 为每个受管 Query 建立常驻子 scope。
 普通 QwenPaw App 启动为每个受管 Agent reply 建立任务 scope。
-常驻策略变更采用滚动重启；`--reloadable` 保留下述独立的空闲更新合同。
+两种普通常驻路径支持显式空闲策略更新；`--reloadable` 保留独立的受限合同。
+
+## 普通 resident 任务快照
+
+普通 Qoder SDK 和 QwenPaw 启动启用同一套显式空闲事务。launcher 持有根实例并关联
+存活 worker。受管 Qoder `startDaemon()` 和 QwenPaw App startup 在首个任务前确认就绪。
+各受管工厂在任务准备或私有租约申请前登记唯一的完整任务占用。
+受限 `--reloadable` 桥接继续使用稳定派发合同。其他普通 Adapter 在完成并验证原生
+安全切换点之前保持固定策略，后续接入包含 Claude SDK 和 Pi。启动策略持续生效，
+直到更新成功。`Ready` 与 `RequestStart` 是两个独立 RPC；预热 worker 可在尚无任务时
+空闲更新。任务预留后取得当时活动策略的快照，占用开始后阻止后续激活。
+启动回执始终确认启动配置，与后续任务快照独立。
+
+公共 service 在同一实例锁下串行处理根占用、子任务预留和策略激活。准备中或未确认
+的子任务也阻止更新。每个子 Host 固定一份版本，通过 `ScopePolicy` 只公开版本、事件
+路由和原生 Hook 描述。工厂先安装快照，再确认子任务并开放派发。CLI 回调在整个任务
+周期从子 Host 读取权威路由和预算。快照不包含 Provider 参数、配置或凭据。
+
+子 scope 关闭后，根占用继续覆盖原生回调、严格 Post、受管 MCP 和私有执行租约清理。
+清理失败或无法确认时保留占用。下一 Qoder Query 或同一 QwenPaw Agent 的后续 reply
+可以取得新激活版本；已有 Qoder Query 始终保留原策略。准入和激活复查 owner/worker
+存活状态，包括持久化审计后、发布 Host 前。并发容量使用配置的 binding 上限，完成
+占用及时移除，没有累计历史调用上限。快照缺失、确认过期或 owner 失效会阻止任务执行。
+
+`aw update --config aw.yaml --agent TARGET` 在原配置关联的同一服务中选择根实例。
+多个匹配要求 `--instance ID`。既有 `aw agent connect --pid` / `aw install --pid` 及
+`--remove` 流程继续支持 Qoder TUI、QwenPaw App 的 PID 接入。便捷选择器
+`aw update --pid` 延后，与 Adapter 接入独立；服务侧进程关联和身份检查持续生效。
+此更新路径不增加跨 namespace 控制。管控侧选择执行容器，在最终路径准备 Hook 文件，并将
+更新和任务派发串行化；更新成功后再恢复派发。活跃任务及清理期间返回 `busy`，
+不提供自动重试、等待任务排空或任务内切换。
+
+[空闲更新支持矩阵](../../../../../../docs/user-guide/zh/aw/configuration.md#更新预热实例)
+记录各启动模式的就绪接点、安全边界及选择入口。普通 Qoder SDK/QwenPaw 扩展公共服务事务，
+受限桥接及外部 attach 沿用已有合同；普通 Claude SDK、Pi、Qoder CLI、OpenClaw、Hermes、
+AgentScope SDK 保持固定策略。Qoder 预热应先调用受管 `startDaemon()` 再等待用户流量。
+无显式 daemon 时，`createQuery()` 须在 30 秒启动期限内初始化，其预留使更新保持 busy，
+直到 Query 完整关闭。后续 Adapter 复用更新准入、版本校验和审计，并实现、验证各自的
+就绪、任务占用和快照采纳接点。
 
 ## Qoder SDK 请求准入
 
@@ -73,13 +111,16 @@ aw validate --config next.yaml --against current.yaml
 ## 已实现：预热与显式空闲激活
 
 预热容器、AW、稳定的 before/after 桥接和可复用的原生宿主。具体 Agent 或 Session
-仍可在用户请求到达时由框架创建；先应用所需 AW 策略，再创建或派发该请求。
+仍可在用户请求到达时由框架创建。先初始化受管 Qoder daemon 或 QwenPaw App、准备
+Hook 文件，再于首个请求派发前应用策略。普通 resident worker 和已就绪受限桥接均在
+没有任务或清理占用时允许更新。
 模型、凭据和 Session 配置继续由框架管理；此操作只修改前述 AW 策略字段。
 
 `aw run --config current.yaml --agent TARGET --reloadable` 即使默认没有用户 Hook，
 也会预装稳定回调。`aw status` 返回实例 ID、激活策略版本、就绪、请求/工具数量和进程元数据。
 通过 `aw update --config current.yaml --agent TARGET` 应用同一份已编辑的配置，
-选择目标的唯一实例并读取当前版本；保留独立 `--policy next.yaml` 形式。多个匹配要求 `--instance`；`--socket` 和
+选择目标的唯一实例并读取当前版本；保留独立 `--policy next.yaml` 形式。多个匹配要求
+`--instance`；`--socket` 和
 `--expected-revision` 用于显式定位及指定并发前置版本。查询到的版本仍约束激活，冲突不自动重试。
 不要求用户组装内部回调。
 仅修改配置文件不会激活。
@@ -93,9 +134,12 @@ aw validate --config next.yaml --against current.yaml
    准备过程不持有请求准入门。
 3. 在与原生请求入口共用的准入门内复查版本、进程身份、就绪及全部请求/工具/事件生命周期。
    新请求先进入时，更新返回 `busy` 并丢弃候选 Host。
-4. 空闲时持久记录并原子发布版本，返回实例、前后版本、审计 key、准备耗时与激活耗时。
+4. 空闲时先持久化非终态激活 intent，再于准入门内复查 owner 存活、取消和截止时间。
+   发布 Host 后写入唯一 `active` 终态，返回实例、前后版本、审计 key、准备及激活耗时。
+   若发布后的终态审计持久化失败，释放准入门前封锁后续派发并停止服务，须重启恢复；
+   不回滚，也不写入声称旧策略继续生效的 rejected 终态。
 
-busy、准备失败、冲突和取消都不排队或安排稍后激活；保留旧策略并释放候选。
+busy、准备失败、冲突和提交前取消都不排队或安排稍后激活；保留旧策略并释放候选。
 准备及准入门持有时间有界，不等待工具排空，不替换运行中的工具或 middleware。
 同一次工具调用的 before/after 使用同一版本。RPC 超时可能无法确定操作是否已经发生；
 应查询实际版本后再决定下一步，不派发要求尚未确认版本的请求。
@@ -106,7 +150,8 @@ busy、准备失败、冲突和取消都不排队或安排稍后激活；保留�
 
 AW 事件数或工具数为零不代表完整请求空闲；模型等待仍为 busy。
 请求返回后，原生终结证据继续保留未结束工具（含后台任务）；结束状态未知时保持 busy。
-原始回调关联声明跨版本保留，旧回调不能重新取得预算。事件证据使用所属 Host 的版本及
+受限桥接跨版本保留原始回调关联声明；resident scope 复用现有回收与已退休身份保护。
+旧回调不能重新取得预算。事件证据使用所属 Host 的版本及
 策略约束，不再使用服务启动配置。
 
 本地协议为 `aw-service/v1alpha7`，旧 daemon/binding 通过版本和服务代次检查显式拒绝。
@@ -114,7 +159,7 @@ AW 事件数或工具数为零不代表完整请求空闲；模型等待仍为 b
 进程祖先，并在激活前重新检查生命周期。审计保留关联与切换，不记录 Provider 配置值。
 
 
-CLI 在 reloadable 启动或原生连接时，记录规范配置路径、socket 和原服务身份。
+CLI 在支持的 resident/reloadable 启动或原生连接时，记录规范配置路径、socket 和原服务身份。
 私有元数据按路径摘要保存在 `$XDG_RUNTIME_DIR/aw/connections`，未设置时使用
 `/tmp/aw-UID/connections`，不包含策略或凭据内容。原子替换用户文件不会改变连接。
 status、detach 和 update 使用记录的身份，不根据候选配置的 endpoint 或摘要重新选服务。
@@ -124,9 +169,9 @@ status、detach 和 update 使用记录的身份，不根据候选配置的 endp
 服务前检查已有连接。修改文件后重新启动需要先停止记录中的服务；活动实例使用
 `aw update`。原服务停止后，显式启动会刷新已有连接。没有连接记录的普通启动根据配置选择服务。
 
-用户只维护一份期望配置。文件编辑属于离线操作；更新失败或 busy 时，内存中的旧策略
-保持生效，不回写用户文件。现有服务快照和策略版本校验不变，不新增服务 RPC、
-每 session 策略语义或自动重试。
+用户只维护一份期望配置。文件编辑属于离线操作；busy 和提交前失败保留内存中的旧策略，
+不回写用户文件。提交后终态审计失败会阻止后续派发并停止服务，须重启服务和 worker 后复用。
+现有服务快照和策略版本校验不变。按 session 选择策略和自动重试仍不支持。
 
 ### 更新权限与审计
 
@@ -138,8 +183,9 @@ status、detach 和 update 使用记录的身份，不根据候选配置的 endp
 
 启用运行时更新前，每次尝试必须记录仅含元数据的审计：已验证的调用方 UID/PID、
 服务代次、实例、新旧策略版本摘要、结果/原因及实际激活版本。不记录配置正文、
-Provider 参数、凭据或原生 payload。区分失败、busy 与实际激活；必需审计记录无法
-持久化时拒绝激活。
+Provider 参数、凭据或原生 payload。区分失败、busy 与实际激活；无法持久化必要的
+激活 intent 时拒绝激活。Host 发布后终态审计失败会封锁派发并停止服务，不能将其报告为
+提交前拒绝或静默回滚。
 
 ### 后续：Agent 循环边界的 steer
 

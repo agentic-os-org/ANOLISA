@@ -359,8 +359,11 @@ paths.
 The startup receipt confirms plugin loading; each Agent additionally passes the
 actual installation guard before its request starts. Use App/API after the native
 Hooks ready message. ACP/TUI and multi-worker launches remain rejected.
-`--reloadable` retains legacy busy tracking and policy updates; resident child
-scopes and its long-session retirement are available on ordinary launches.
+`--reloadable` retains its separate request-idle update contract. Ordinary
+launches provide resident child scopes, long-session retirement and explicit
+updates between fully drained replies. A reused Agent reads the active policy
+for each new reply after reservation. App startup confirms update readiness before
+the first reply; startup policy remains active until an update succeeds.
 Native evidence capture is rejected for ordinary resident launches because that
 child-scope observation contract is unavailable.
 
@@ -706,7 +709,8 @@ directory under `XDG_RUNTIME_DIR`, or under `/tmp/aw-UID` when that variable is
 unset. Explicit paths must be absolute and agree on the `aw.sock` location.
 
 The service retains its bootstrap configuration snapshot. Editing `aw.yaml` does not
-reload it. Opt-in instances can use [explicit idle policy updates](../../../user-guide/en/aw/configuration.md#update-a-prewarmed-instance);
+reload it. Supported ordinary resident and opt-in restricted instances can use
+[explicit idle policy updates](../../../user-guide/en/aw/configuration.md#update-a-prewarmed-instance);
 these change the instance Host without changing service identity. Stop a service using its original file or socket before retiring that
 configuration; auto paths for changed configuration may select a different
 service. Exiting an Agent does not stop other sessions or the shared daemon.
@@ -717,7 +721,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
 | `aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and AgentScope SDK reject this command |
-| `aw update --config CURRENT --agent TARGET --policy NEXT` | Update an opted-in idle instance; busy rejects without queuing |
+| `aw update --config CURRENT --agent TARGET --policy NEXT` | Update a supported ready, idle instance; busy rejects without queuing |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
 | `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |
@@ -1072,7 +1076,8 @@ stdin and print a JSON boolean with exit status zero. In this example, before
 effect and is still a successful check. A failed result check must exit nonzero;
 `on_error: withhold_result` then prevents delivery and subsequent dispatch.
 Native permissions and the caller's daemon/App lifecycle remain in force.
-Use ordinary `aw run` and a rolling restart for changes. Private credentials need
+Use ordinary `aw run` and explicit idle updates between closed Queries or
+completed replies. Private credentials need
 the [explicit execution factory](../../../../src/aw/docs/design/en/adapters/private-execution.md)
 in application code; this YAML installs the security policy.
 
@@ -1192,21 +1197,30 @@ See [Structured MCP dispatch](../../../../src/aw/docs/design/en/adapters/structu
 for metadata and complete result-envelope handling. Result replacement remains
 unsupported.
 
-Strict Post and private execution leases require ordinary resident mode; update
-them with a rolling restart. `--reloadable` rejects these contracts. For policies
-compatible with the idle-update path, update existing Queries without restarting
+Strict Post and private execution leases require ordinary resident mode. After
+all Queries close and finish cleanup, an explicit idle update affects the next
+Query. Open Queries remain busy even between turns; they keep their original
+policy. Managed `startDaemon()` confirms update readiness and the launch receipt
+before the first Query, allowing the daemon to remain prewarmed without a dummy
+Query. The startup policy remains active until an update succeeds. New Queries
+snapshot the active revision after reservation. Keep task dispatch paused while
+provisioning Hook files and updating policy, then submit work after success.
+
+The separate restricted `--reloadable` mode rejects strict Post and private
+execution leases. For compatible policies, update existing Queries without restarting
 the daemon by opting in with
 `aw run --config aw.yaml --agent sdk --reloadable`. Keep using the same
 `createQuery` factory and caller-owned `startDaemon()`; an asynchronous input
 iterator keeps a Query available between requests. Use `aw update --config
 aw.yaml --agent sdk --policy desired.yaml` to explicitly activate a complete
-candidate policy. No SDK-specific command or service RPC is introduced.
+candidate policy through the shared CLI and `UpdatePolicy` transaction.
 
-All managed Queries in the instance must be idle. Submitted/queued messages,
-model waits, native callbacks and Query close cleanup keep the instance busy.
+In this restricted mode, all managed Queries in the instance must be idle.
+Submitted/queued messages, model waits, native callbacks and Query close cleanup keep the instance busy.
 A result message alone is not an idle acknowledgement: inspect `aw service
 status --config aw.yaml` and retry an explicit update after the request count
-returns to zero. Failed updates preserve the active policy. Stable callbacks
+returns to zero. Pre-commit failures preserve the active policy. A terminal audit
+failure after commit blocks dispatch and stops the service; restart before reuse. Stable callbacks
 are registered even for an empty initial policy; additions and removals affect
 the next request on existing Queries. Native permissions remain authoritative.
 

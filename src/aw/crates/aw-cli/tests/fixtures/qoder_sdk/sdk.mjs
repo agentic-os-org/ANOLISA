@@ -1,5 +1,8 @@
 /** Deliberately synthetic SDK double; the real SDK parser has a separate native suite. */
 import { writeFileSync } from "node:fs";
+export async function startDaemon() {
+  return { async stop() { writeFileSync("daemon-stopped", "yes"); } };
+}
 let fixtureQuery;
 export async function runFixture() { return await fixtureQuery.fixture(); }
 export function query({ options }) {

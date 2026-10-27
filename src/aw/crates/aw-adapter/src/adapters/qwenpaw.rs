@@ -320,6 +320,7 @@ impl Prepared {
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
                 "reloadable":self.input.options.reloadable,
                 "resident": !self.input.options.reloadable,
+                "resident_policy_reload": !self.input.options.reloadable,
             }))?,
         )?;
         self.plugin = Some(OwnedPlugin::create(plugin_root)?);
@@ -373,7 +374,7 @@ fn check_args(args: &[std::ffi::OsString]) -> Result<()> {
     Ok(())
 }
 
-fn event_routes(
+pub(crate) fn event_routes(
     document: &Value,
     steps: &[AdmittedStep],
     observe: bool,

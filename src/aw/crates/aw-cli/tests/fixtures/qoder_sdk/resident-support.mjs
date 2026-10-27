@@ -49,7 +49,7 @@ export function query({ prompt, options }) {
       state.events.push("native-closed");
     },
   };
-  const config = { sdk, binding: path.join(root, "binding"), hooks: [] };
+  const config = { sdk, resident: true, binding: path.join(root, "binding"), hooks: [] };
   const resident = new Resident(config);
   const scope = resident.scope;
   scope.open = async () => { scope.handle = {}; };
@@ -59,9 +59,9 @@ export function query({ prompt, options }) {
     scope.handle = null;
     scope.closed = true;
   };
-  const create = (extra = {}) => {
+  const create = (extra = {}, compose = (_config, options) => ({ ...options, hooks: {} })) => {
     state.pending = resident.create("fixture", { cwd: process.cwd(), ...extra },
-      (_config, options) => ({ ...options, hooks: {} }), () => { state.ready++; })
+      compose, config => { state.ready++; state.readyConfig = config; })
       .then(value => ({ value }), error => ({ error }))
       .finally(() => { state.settled = true; });
     return state.pending;

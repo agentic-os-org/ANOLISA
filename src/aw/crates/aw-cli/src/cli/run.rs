@@ -139,11 +139,17 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     if args.flags.contains_key("--reloadable") {
         aw_adapter::reload::supported(&prepared.capabilities())?;
     }
+    let resident_policy_reload =
+        !args.flags.contains_key("--reloadable") && matches!(name, "qoder-sdk" | "qwenpaw");
+    if resident_policy_reload {
+        aw_adapter::reload::resident_supported(&prepared.capabilities())?;
+    }
     let steps = aw_provider::admission::preflight(&config, target, &capabilities.clone().into())?;
     prepared.validate_steps(&steps)?;
     let configuration = Path::new(args.required("--config")?);
-    let remember_connection =
-        args.flags.contains_key("--reloadable") || super::connection::recorded(configuration)?;
+    let remember_connection = args.flags.contains_key("--reloadable")
+        || resident_policy_reload
+        || super::connection::recorded(configuration)?;
     if let Some((client, _)) =
         super::connection::selected(configuration, Instant::now() + Duration::from_secs(5), true)?
     {
@@ -203,7 +209,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
                 Instant::now() + Duration::from_secs(2),
             )?;
         }
-        if reloadable {
+        if reloadable || resident_policy_reload {
             service.client.call(
                 Operation::EnableReload {
                     instance_id: binding.instance_id.clone(),
@@ -231,6 +237,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         let hook_binding = HookBinding {
             adapter: name.into(),
             reloadable,
+            resident_policy_reload,
             binding,
             socket: service.paths.socket.clone(),
             cwd,
@@ -255,7 +262,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             shutdown_grace,
             plan.readiness,
             |pid| {
-                if reloadable {
+                if reloadable || resident_policy_reload {
                     reported = service
                         .client
                         .call(

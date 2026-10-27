@@ -26,9 +26,10 @@ Install the selected Providers first; the generator supplies executable paths an
 
 ## Edit existing configuration
 
-Exit Agents using the file and stop the service with the original configuration before editing.
-Configuration files are not watched. For an explicitly reloadable instance, use
-the idle-update workflow below.
+For restart-based changes, exit Agents using the file and stop the service with
+the original configuration before editing. Supported instances can instead use
+the idle-update workflow below for policy-only changes. Configuration files are
+not watched.
 
 ```bash
 aw stop --config "$AW_HOME/aw.yaml"
@@ -178,20 +179,52 @@ Combining native-registration options with `--prefix` or `--bundle` is rejected.
 
 ## Update a prewarmed instance
 
-To retain a warm host while changing AW Hooks, opt in when launching it:
+Ordinary managed Qoder SDK 1.0.56 / Worker 1.1.78 and QwenPaw
+2.2.2.post1 / AgentScope 2.0.10 App workers support explicit idle updates through
+`aw run --config aw.yaml --agent TARGET`. They keep strict Post, managed MCP and
+private execution leases. Each new Query or Agent reply takes one immutable
+policy snapshot. Close the Qoder Query completely before updating; a reused
+QwenPaw Agent takes a fresh snapshot on its next reply. No factory API change is
+required. Managed Qoder `startDaemon()` and QwenPaw App startup confirm readiness
+before the first task, so a prewarmed worker can accept a user Hook before any
+Query or reply starts. The startup policy remains active until an update succeeds.
+Each task reserves occupancy before reading its policy snapshot. Claude SDK and
+Pi integration is planned; other ordinary Adapters retain launch-time policy.
+
+| Adapter / mode | Readiness before the first task | Safe update boundary | Entry / selection |
+| --- | --- | --- | --- |
+| Ordinary Qoder SDK | Managed `startDaemon()` confirms readiness; without an explicit daemon, initialize `createQuery()` within the 30-second launch deadline | All Queries fully closed and cleanup finished; next Query gets the snapshot | `aw run`; `aw update --agent TARGET [--instance ID]` |
+| Ordinary QwenPaw App | Managed App startup confirms readiness | All replies and cleanup finished; next reply gets the snapshot | `aw run`; same update command |
+| Restricted Qoder TUI / Qoder SDK / QwenPaw App | Native stable bridge confirms readiness; SDK requires an explicit daemon and initialized managed Query | Confirmed native request idle, including callback and background cleanup | Existing `aw run --reloadable`; same update command |
+| Externally started Qoder TUI / QwenPaw App | Attach before first request; native bridge confirmation must succeed | Existing restricted request-idle contract | Existing `aw agent connect --pid PID`; same update command; `--remove` detaches |
+| Ordinary Claude SDK / Pi | Launch readiness exists; runtime update integration is planned | Fixed policy for the worker lifetime; restart to change it | `aw run`; runtime update unsupported |
+| Ordinary Qoder CLI / OpenClaw / Hermes / AgentScope SDK | No runtime update bridge in these launch modes | Fixed launch policy; restart to change it | `aw run`; runtime update unsupported |
+
+Ordinary Qoder SDK and QwenPaw updates retain strict Post, managed MCP and private
+leases. Restricted modes retain their existing capability limits. For a Qoder
+worker that waits for user traffic before creating a Query, use managed
+`startDaemon()` during startup. A no-daemon Query occupies the instance as soon as
+its factory reserves it; close it completely before applying an update.
+
+The common update operation selects an existing instance through `--agent` and
+`--instance`. PID-based bootstrap remains available through `aw agent connect`
+and the existing `aw install --pid ... [--remove]` alias. Process association and
+liveness checks protect both update paths. A convenience `aw update --pid`
+selector is deferred; it is independent of Adapter update support. These entries
+cover idle policy updates only; general Hook support remains in the
+[capability matrix](../../../../src/aw/README.md#hook-support).
+
+The separate restricted bridge also remains available:
 
 ```bash
 aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
-This runtime path is pinned to Qoder 1.1.73 TUI or QwenPaw 2.2.2.post1 with
-AgentScope 2.0.10 App, and Qoder SDK 1.0.56 / bundled Worker 1.1.78.
-For SDK targets, use the [explicit daemon and Query factories](../../../developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker);
-all managed sessions in the instance must be idle, including native cleanup.
-For QwenPaw, use its configured target and initialized
-`QWENPAW_WORKING_DIR` as in the native integration reference. Ordinary `aw run`
-keeps its existing behavior. An instance started without the stable bridge
-cannot be upgraded by this command. For a caller-owned native process, use the installation flow below.
+It supports pinned Qoder 1.1.73 TUI, QwenPaw App and Qoder SDK, with its existing
+stable callback behavior. This mode does not provide resident strict Post or
+private execution leases. For QwenPaw, initialize `QWENPAW_WORKING_DIR` as in the
+native integration reference. Caller-owned native processes use the installation
+flow below; this command does not retrofit ordinary unsupported workers.
 
 Keep editing the same `aw.yaml` after launch or connection. In another terminal,
 explicitly apply its complete desired policy to the existing instance:
@@ -207,10 +240,19 @@ previous policy active; the file retains your desired edits for an explicit retr
 Keep launch fields unchanged and use `aw service status --config` to inspect the
 active revision. Keep the same file path and runtime directory for these commands.
 
+Ordinary Qoder SDK/QwenPaw launches also save this connection. Read-only containers
+must supply an absolute, writable `XDG_RUNTIME_DIR`, owned by the launching user with mode
+`0700`, and use that directory for launch, update, status and stop. AW writes
+private metadata under `$XDG_RUNTIME_DIR/aw/connections`; when unset it uses
+`/tmp/aw-UID/connections`. Keep that dedicated runtime mount for the worker lifetime and
+remove it after workers and the service stop. Provider credentials are not stored
+in connection records.
+
 For a `qoder-sdk` target, use the same update flow with `--agent sdk` when its
-configured name is `sdk`. All managed Queries share the instance policy;
-requests, background-task cleanup and Query close keep updates busy until native
-cleanup completes. A relaunch with edited bytes is rejected while the recorded
+configured name is `sdk`. All managed Queries share the instance policy. In
+ordinary mode, any open Query keeps updates busy, including between model turns.
+In restricted `--reloadable` mode, requests, background-task cleanup and Query
+close keep updates busy until native cleanup completes. A relaunch with edited bytes is rejected while the recorded
 service is live. Close the worker and stop that service before launching again.
 
 The separate-file form remains supported:
@@ -221,7 +263,9 @@ the complete desired policy in `aw.yaml`; AW never merges an update as a patch.
 The command selects the target's unique live instance and reads its current
 policy revision. That revision remains an optimistic concurrency check: if a
 concurrent update wins, the command fails with a conflict rather than retrying.
-No matching instance fails; multiple matching instances require `--instance ID`.
+No matching instance fails; multiple matches require `--instance ID`.
+`--agent` selects root instances; combine it with `--instance` to constrain the
+selection. Task scopes cannot be updated independently.
 Use `aw status --config "$AW_HOME/aw.yaml"` to inspect instance IDs and revisions.
 Selection includes unready and nonreloadable instances; it never silently chooses
 an idle instance over a busy one.
@@ -241,31 +285,45 @@ Success returns the actual active `policy_revision`, previous revision, audit ke
 `preparation_ms` and `activation_ms`. The command does not edit configuration,
 restart the native host or start a service. The saved connection keeps `aw update`,
 `aw status` and `aw stop` addressing the original service after policy edits.
-Starting another reloadable launch with an edited file while that service is live
+Starting another launch with an edited file while its recorded service is live
 is rejected before starting a new daemon; update existing instances, or stop the
 service before launching from the edited configuration. New bindings initially
 use the service's default; native attach applies the current desired policy
 before reporting success.
 
-A missing lifecycle acknowledgement or unavailable active-plan transport blocks
-`tool.before` in reloadable mode. Once a plan is resolved, each step keeps its
+In restricted `--reloadable` mode, a missing lifecycle acknowledgement or
+unavailable active-plan transport blocks `tool.before`. Once a plan is resolved, each step keeps its
 configured report/block failure action.
+
+For ordinary resident workers, occupancy begins before task preparation and
+private lease acquisition. It ends after native callbacks, MCP, strict Post, the
+child scope and private leases have all drained. Snapshot/acknowledgement failures
+prevent dispatch; uncertain cleanup retains busy until the worker exits.
 
 An active Agent request, even while waiting for a model with no tools running,
 returns `busy` and leaves the old policy active. No update is queued or applied
 later automatically. Failed preparation, revision conflicts and unsupported
-native policies also leave the old policy active. After an indeterminate timeout,
-query the active revision before dispatching work. The control plane must own
+native policies also leave the old policy active. If terminal audit persistence
+fails after the Host is committed, AW blocks further dispatch and stops the
+service; restart the service and worker before accepting more tasks. After an
+indeterminate timeout, query the active revision before dispatching work. The control plane must own
 exclusive instance assignment and serialize updates with Session dispatch;
 success is not a reservation for a future request. Multiple Sessions in one
 App share the instance policy, and any active request prevents switching.
 
-Apply policy changes before creating or dispatching the first user Session.
+For a prewarmed container, initialize the managed Qoder daemon or QwenPaw App,
+then provision Hook executables and configuration at their final container paths.
+Keep task dispatch paused, apply the complete policy through the same configured
+AW service, and dispatch the first task only after update succeeds. Later updates
+use the same idle workflow after all tasks and cleanup finish. The command neither
+waits for tasks to drain nor queues a retry. The control plane selects the execution
+container; AW does not add remote routing or cross-namespace attachment here.
 Model accounts and native Agent definitions stay with the framework's own
 Session configuration. Updating those fields through AW still requires another
 launch. For Qoder, native sequential tool hooks also require `qoder.sequential: true`
 in the AW target so dispatch retains the same scheduling. Qoder `Stop` is not an idle signal; reload waits for its native idle-prompt
-notification. QwenPaw releases request/tool occupancy on normal stream exhaustion.
+notification. The restricted QwenPaw bridge releases request/tool occupancy on
+normal stream exhaustion.
 Early stream closure, cancellation or exceptions before confirmed completion keep the instance busy because
 the native cleanup cannot be confirmed; use a fresh instance in that case.
 AW delivers final responses and terminal error/interrupted chunks after native
@@ -337,7 +395,7 @@ Resident Pi/Claude targets retain this configuration format. Select the resident
 
 Each ordinary managed Qoder SDK Query owns a child scope; daemon shutdown drains its Queries and original callbacks.
 
-Ordinary QwenPaw App launches use a task scope for each managed Agent reply. Private tool environments require the explicit native execution helper. Resident policy changes use a rolling restart; `--reloadable` keeps the separate idle-update path.
+Ordinary QwenPaw App launches use a task scope for each managed Agent reply. Private tool environments require the explicit native execution helper. Explicit idle updates select a fresh policy for the next reply; `--reloadable` keeps its separate restricted path.
 Use the [native integration reference](../../../developer-guide/en/aw/native-agents.md) for the required factories and lifecycle boundaries.
 
 ## Attach to an already started native process

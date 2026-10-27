@@ -227,6 +227,7 @@ fn attach(
             &serde_json::to_vec(&HookBinding {
                 adapter: name.into(),
                 reloadable: true,
+                resident_policy_reload: false,
                 binding,
                 socket: socket.clone(),
                 cwd: native.command.cwd.clone(),

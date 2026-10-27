@@ -26,8 +26,8 @@ aw config init --prefix "$AW_PREFIX" \
 
 ## 修改已有配置
 
-退出使用这份配置的 Agent，用原配置停止服务后再编辑。配置文件不会被监听；
-已显式启用稳定桥接的实例可使用下述空闲更新流程。
+通过重启生效的修改，应先退出使用这份配置的 Agent，并用原配置停止服务再编辑。
+支持热更新的实例可对策略字段使用下述空闲更新流程。配置文件不会被自动监听。
 
 ```bash
 aw stop --config "$AW_HOME/aw.yaml"
@@ -147,18 +147,43 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 
 ## 更新预热实例
 
-需要保留预热宿主并更新 AW Hook 时，在原启动入口显式启用稳定桥接：
+普通受管 Qoder SDK 1.0.56 / Worker 1.1.78 和 QwenPaw 2.2.2.post1 /
+AgentScope 2.0.10 App worker 通过 `aw run --config aw.yaml --agent TARGET`
+支持显式空闲更新，保留严格 Post、受管 MCP 和私有执行租约。每个新 Query 或 Agent reply
+取得一份不可变策略快照。Qoder 必须完整关闭 Query 后再更新；复用的 QwenPaw Agent
+在下一轮 reply 取得新快照。公共工厂 API 无需修改。启动策略持续生效，直到更新成功。
+受管 Qoder `startDaemon()` 和 QwenPaw App startup 在首个任务前确认就绪，预热 worker
+可在任何 Query 或 reply 开始前接入用户 Hook。每个任务先登记占用，再读取策略快照。
+Claude SDK、Pi 接入仍属规划；其他普通 Adapter 继续使用启动时的策略。
+
+| Adapter / 模式 | 首任务前就绪条件 | 安全更新边界 | 入口 / 选择方式 |
+| --- | --- | --- | --- |
+| 普通 Qoder SDK | 受管 `startDaemon()` 确认就绪；不使用显式 daemon 时，须在 30 秒启动期限内初始化 `createQuery()` | 所有 Query 完整关闭且清理结束；下一 Query 取得快照 | `aw run`；`aw update --agent TARGET [--instance ID]` |
+| 普通 QwenPaw App | 受管 App startup 确认就绪 | 所有 reply 及清理结束；下一 reply 取得快照 | `aw run`；同一更新命令 |
+| 受限 Qoder TUI / Qoder SDK / QwenPaw App | 原生稳定桥接确认就绪；SDK 要求显式 daemon 及已初始化受管 Query | 确认原生请求空闲，包含回调及后台清理 | 已有 `aw run --reloadable`；同一更新命令 |
+| 外部启动的 Qoder TUI / QwenPaw App | 首请求前 attach，原生桥接确认成功 | 已有受限请求空闲合同 | 已有 `aw agent connect --pid PID`；同一更新命令；`--remove` 卸载 |
+| 普通 Claude SDK / Pi | 已有启动就绪，运行时更新接入待实现 | worker 生命周期内固定策略，修改需重启 | `aw run`；暂不支持运行时更新 |
+| 普通 Qoder CLI / OpenClaw / Hermes / AgentScope SDK | 这些启动模式尚无运行时更新桥接 | 固定启动策略，修改需重启 | `aw run`；暂不支持运行时更新 |
+
+普通 Qoder SDK、QwenPaw 更新保留严格 Post、受管 MCP 和私有租约；受限模式沿用已有
+能力限制。Qoder worker 若要等待用户流量后才创建 Query，应在启动时调用受管
+`startDaemon()`。不使用显式 daemon 的 Query 从工厂预留开始占用实例，须完整关闭后再更新。
+
+公共更新操作通过 `--agent` 和 `--instance` 选择已有实例。PID 启动接入继续由
+`aw agent connect` 和已有 `aw install --pid ... [--remove]` 兼容入口提供，两种更新路径
+均保留进程关联和存活检查。便捷选择器 `aw update --pid` 延后，与各 Adapter 的更新支持
+独立。此表只描述空闲策略更新；通用 Hook 支持仍见[能力矩阵](../../../../src/aw/README_zh.md#hook-支持)。
+
+独立的受限桥接路径继续可用：
 
 ```bash
 aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
-运行时路径支持已验证的 Qoder 1.1.73 TUI、QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，
-以及 Qoder SDK 1.0.56 / bundled Worker 1.1.78。SDK 目标使用
-[显式 daemon 和 Query 工厂](../../../developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)；
-实例内所有受管 session 都须空闲，包括原生清理完成。
-QwenPaw 按原生接入参考选择配置目标并设置已初始化的 `QWENPAW_WORKING_DIR`。
-普通 `aw run` 保持现有行为；未预装稳定桥接的实例不能通过此命令升级。外部启动的原生进程可使用下方的安装流程。
+该路径支持固定版本 Qoder 1.1.73 TUI、QwenPaw App 和 Qoder SDK，沿用稳定回调行为，
+不提供 resident 严格 Post 或私有执行租约。QwenPaw 按原生接入参考初始化
+`QWENPAW_WORKING_DIR`。外部启动的原生进程使用下方安装流程；此命令不能改造
+尚未支持更新的普通 worker。
 
 启动或连接后，继续编辑同一份 `aw.yaml`。在另一个终端显式应用其中的完整期望策略：
 
@@ -171,9 +196,16 @@ AW 记录该配置路径已经连接的服务身份。编辑或原子替换文�
 保持启动字段不变，通过 `aw service status --config` 查看当前生效版本。
 这些命令应使用相同的文件路径和运行时目录。
 
+普通 Qoder SDK/QwenPaw 启动也会保存该连接。只读容器须提供绝对路径、可写的
+`XDG_RUNTIME_DIR`，目录属于启动用户且权限为 `0700`，启动、更新、状态与停止命令
+共用该目录。AW 在 `$XDG_RUNTIME_DIR/aw/connections` 写入私有元数据；未设置时使用
+`/tmp/aw-UID/connections`。AW 专用运行时挂载保留到 worker 和服务停止后再清理。
+连接记录不保存 Provider 凭据。
+
 `qoder-sdk` 目标使用相同更新流程；目标配置名为 `sdk` 时，选择 `--agent sdk`。
-所有受管 Query 共用实例策略；请求、后台任务清理和 Query 关闭期间保持 busy，
-直到原生清理完成。原服务仍在运行时，使用已修改的文件重新启动会被拒绝。
+所有受管 Query 共用实例策略。普通模式中，任一未关闭 Query 都保持 busy，包含
+模型轮次之间的空闲。受限 `--reloadable` 模式中，请求、后台任务清理和 Query 关闭
+期间保持 busy，直到原生清理完成。原服务仍在运行时，使用已修改的文件重新启动会被拒绝。
 再次启动前，先关闭 Worker 并停止该服务。
 
 仍支持独立候选文件：`aw update --config aw.yaml --agent qoder --policy next.yaml`。
@@ -182,7 +214,8 @@ AW 记录该配置路径已经连接的服务身份。编辑或原子替换文�
 
 命令选择该目标唯一的存活实例，并读取当前策略版本。这个版本仍用于乐观并发校验：
 若另一个更新先完成，本次返回冲突，不会自动重试。没有匹配实例时报错；多个匹配实例时
-要求补充 `--instance ID`。通过 `aw status --config "$AW_HOME/aw.yaml"` 查询实例 ID 和版本。
+要求补充 `--instance ID`。`--agent` 选择根实例，可与 `--instance` 求交限定目标。
+任务子作用域不能单独更新。通过 `aw status --config "$AW_HOME/aw.yaml"` 查询实例 ID 和版本。
 选择范围包括未就绪和未启用热更新的实例，不会在忙碌实例旁边默默选择一个空闲实例。
 
 需要显式选择实例或接入外部管控时：
@@ -198,23 +231,32 @@ aw update --socket "$AW_SOCKET" --instance "$AW_INSTANCE" \
 成功返回实际激活的 `policy_revision`、前版本、审计 key、`preparation_ms` 和 `activation_ms`。
 命令不修改配置、不重启原生宿主，也不会启动服务。保存的连接使 `aw update`、
 `aw status` 和 `aw stop` 在策略编辑后仍访问原服务。该服务存活时，用已编辑文件再次
-启动 reloadable 实例会在创建新 daemon 前被拒绝；请更新已有实例，或先停止服务再用
+启动实例会在创建新 daemon 前被拒绝；请更新已有实例，或先停止服务再用
 编辑后的配置启动。新 binding 初始使用服务默认策略；native attach 在报告成功前
 应用当前期望策略。
 
-热更新模式下，生命周期确认缺失或无法取得激活计划时，`tool.before` 会阻断。
+受限 `--reloadable` 模式下，生命周期确认缺失或无法取得激活计划时，`tool.before` 会阻断。
 成功取得计划后，每个步骤仍使用配置的 report/block 错误策略。
+
+普通 resident worker 在任务准备和私有租约申请前取得占用，直到原生回调、MCP、
+严格 Post、子 scope 和私有租约全部清理后释放。快照或确认失败会阻止派发；
+清理状态无法确认时保持 busy，直到 worker 退出。
 
 活跃 Agent 请求（含没有工具执行的模型等待）返回 `busy`，旧策略保持生效，更新不排队，
 之后也不会自动应用。准备失败、版本冲突和不支持的原生策略同样保留旧策略。
+若 Host 提交后终态审计持久化失败，AW 阻止后续派发并停止服务；重启服务和 worker 后再接收任务。
 超时无法确定是否已经生效时，先查询实际版本再派发工作。管控侧必须独占分配实例，并将
 更新与 Session 派发串行化；成功确认不等于预留下一条请求。同一 App 的多个 Session 共用
 实例策略，任一活跃请求都会阻止切换。
 
-在创建或派发首个用户 Session 前完成策略更新。模型账号、原生 Agent 定义由框架自己的
+预热容器时先初始化受管 Qoder daemon 或 QwenPaw App，再将 Hook 可执行文件与配置放到
+容器内的最终路径。暂停任务派发，通过原配置关联的同一 AW 服务应用完整策略，更新成功后
+再派发首个任务。后续更新沿用该流程，等待所有任务和清理结束后由管控侧发起。
+更新命令不等待排空、不排队重试；管控侧选择执行容器，AW 此处不新增远程路由或跨 namespace
+接管能力。模型账号、原生 Agent 定义由框架自己的
 Session 配置处理；通过 AW 修改这些字段仍需另起实例。Qoder 原生工具 Hook 使用顺序执行时，AW 目标也须设置 `qoder.sequential: true`，以保留相同调度。
 Qoder 的 `Stop` 不等于空闲，须等
-原生 idle_prompt 通知。QwenPaw 在正常耗尽流后释放请求/工具占用；确认完成前提前关闭流、取消或异常退出
+原生 idle_prompt 通知。受限 QwenPaw 桥接在正常耗尽流后释放请求/工具占用；确认完成前提前关闭流、取消或异常退出
 无法确认原生清理完成，因此保留 busy。AW 在原生清理完成后交付最终响应及终结错误/中断片段，
 因此正常返回的结构化工具错误不会阻止后续更新；无法确定结束时
 使用新实例。
@@ -279,7 +321,7 @@ Pi / Claude 常驻目标沿用同一配置格式，按 [SDK worker 说明](../..
 
 普通受管 Qoder SDK Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。
 
-普通 QwenPaw App 启动为每个受管 Agent reply 分配任务 scope。工具私有环境需要显式接入原生执行 helper。resident 策略变更采用滚动重启，`--reloadable` 保留独立的空闲更新路径。
+普通 QwenPaw App 启动为每个受管 Agent reply 分配任务 scope。工具私有环境需要显式接入原生执行 helper。显式空闲更新为下一轮 reply 选择新策略；`--reloadable` 保留独立的受限路径。
 所需工厂及生命周期边界见[原生接入说明](../../../developer-guide/zh/aw/native-agents.md)。
 
 ## 接入已启动的原生进程

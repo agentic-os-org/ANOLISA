@@ -268,6 +268,16 @@ for (const mode of ["tool-failure", "cancel"]) {
     const f = fixture(t);
     const entered = deferred(), finalizing = deferred(), finish = deferred();
     let released = false;
+    f.config.resident_policy_reload = true;
+    f.scope.reserve = async () => { f.scope.reservation = {}; };
+    f.scope.policy = async () => ({ policy_revision: "a".repeat(64), hooks: [], events: {} });
+    f.scope.acknowledge = async () => {};
+    f.scope.release = async () => {
+      assert(released, "root reservation must outlive credential release");
+      assert(f.scope.closed, "root reservation must outlive child cleanup");
+      f.state.events.push("root-released");
+      f.scope.reservation = null;
+    };
     f.state.importGate.resolve();
     const result = await f.create({ awExecutionFactory: async () => ({
       version: PRIVATE_EXECUTION_VERSION, environment: {}, hookEnvironment: {}, secrets: {},
@@ -299,6 +309,6 @@ for (const mode of ["tool-failure", "cancel"]) {
     await Promise.all([operation, closing]);
     assert.equal(f.state.scopeCloses, 1);
     assert.equal(f.scope.handle, null);
-    assert.deepEqual(f.state.events, ["native-closed", "handler-finally", "lease-released", "scope-closed"]);
+    assert.deepEqual(f.state.events, ["native-closed", "handler-finally", "lease-released", "scope-closed", "root-released"]);
   });
 }

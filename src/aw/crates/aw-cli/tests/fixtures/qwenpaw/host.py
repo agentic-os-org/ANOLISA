@@ -2,7 +2,9 @@
 """Synthetic App lifecycle for CLI contract tests; native adoption is tested separately."""
 
 import asyncio
+from contextlib import nullcontext
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -38,6 +40,7 @@ class Response(Block):
 
 
 for name, values in {
+    "anyio": {"CancelScope": lambda **kwargs: nullcontext()},
     "agentscope": {},
     "agentscope.message": {"TextBlock": Block, "ToolResultState": SimpleNamespace(DENIED="denied")},
     "agentscope.middleware": {"MiddlewareBase": object},
@@ -47,8 +50,9 @@ for name, values in {
     module.__dict__.update(values)
     sys.modules[name] = module
 
-spec = importlib.util.spec_from_file_location("fixture_plugin", plugin_path)
+spec = importlib.util.spec_from_file_location("fixture_plugin", plugin_path, submodule_search_locations=[str(plugin_path.parent)])
 plugin = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
 plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
 # This fixture covers legacy callback transport. Real resident construction and
@@ -64,7 +68,9 @@ plugin.plugin.register(SimpleNamespace(
     register_startup_hook=lambda name, callback: startup.append(callback),
 ))
 for callback in startup:
-    callback()
+    result = callback()
+    if inspect.isawaitable(result):
+        asyncio.run(result)
 native_config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
 readiness = json.loads(Path(native_config["ready_path"]).read_text())
 

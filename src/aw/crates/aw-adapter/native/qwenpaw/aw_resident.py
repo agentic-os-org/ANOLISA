@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 import json
 import os
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -181,7 +182,8 @@ class ResidentMiddleware(MiddlewareBase):
     """One request scope survives until all its Coordinator work has drained."""
 
     def __init__(self, config: dict, evaluate: Any, context: Any) -> None:
-        self.config = {**config, "adapter": "qwenpaw"}
+        self.root_config = {**config, "adapter": "qwenpaw"}
+        self.config = dict(self.root_config)
         self.evaluate = evaluate
         self.context = context
         self.scope = Scope(self.config)
@@ -196,6 +198,8 @@ class ResidentMiddleware(MiddlewareBase):
         self.private = False
         self.lease_context = None
         self.lease_entered = False
+        self.acquisition_finished = True
+        self.request_released = False
         self.session = None
         self.agent = None
         self.reply_stream = None
@@ -216,6 +220,8 @@ class ResidentMiddleware(MiddlewareBase):
             raise ResidentFailure("AW required Agent middleware was removed")
 
     def on_reply(self, agent, input_kwargs, next_handler):
+        if self.reply_stream is not None and self.reply_stream.ag_frame is not None:
+            raise ResidentFailure("AW concurrent replies require separate Agent instances")
         stream = self._on_reply(agent, input_kwargs, next_handler)
         self.reply_stream = stream
         return stream
@@ -224,7 +230,12 @@ class ResidentMiddleware(MiddlewareBase):
         check_cleanup()
         self.reply_task = asyncio.current_task()
         if self.opened:
-            raise ResidentFailure("AW request middleware cannot be reused")
+            if not self.request_released or self.failed:
+                raise ResidentFailure("AW previous request has not completed cleanup")
+            reply_stream = self.reply_stream
+            self.__init__(self.root_config, self.evaluate, self.context)
+            self.reply_stream = reply_stream
+            self.reply_task = asyncio.current_task()
         self.opened = True
         self.agent = agent
         self.session = agent.state.session_id
@@ -234,10 +245,25 @@ class ResidentMiddleware(MiddlewareBase):
         self.private = factory is not public_execution
         stream = None
         try:
-            self.lease_context = factory()
-            await settle(self.acquire_lease())
             cwd = str(getattr(self.context, "workspace_dir", os.getcwd()))
-            await self.scope.open(cwd, self.lease.hook_environment)
+            if self.root_config.get("resident_policy_reload"):
+                await settle(self.scope.reserve())
+            self.lease_context = factory()
+            self.acquisition_finished = False
+            await settle(self.acquire_lease())
+            if self.root_config.get("resident_policy_reload"):
+                await self.scope.open(cwd, self.lease.hook_environment, acknowledge=False)
+                from .plugin import validate_hooks
+                policy = await self.scope.policy()
+                if not isinstance(policy, dict) or not isinstance(policy.get("policy_revision"), str) or not re.fullmatch(r"[a-f0-9]{64}", policy["policy_revision"]):
+                    raise ResidentFailure("AW resident policy handoff is malformed")
+                validate_hooks(policy)
+                # Keep launch identity and executable fields outside the snapshot.
+                self.config = {**self.root_config, "policy_revision": policy["policy_revision"],
+                               "hooks": json.loads(json.dumps(policy["hooks"]))}
+                await self.scope.acknowledge()
+            else:
+                await self.scope.open(cwd, self.lease.hook_environment)
             self.check()
             stream = next_handler(**input_kwargs)
             while True:
@@ -255,6 +281,10 @@ class ResidentMiddleware(MiddlewareBase):
             try:
                 if stream is not None:
                     await settle(stream.aclose())
+            except BaseException:
+                self.failed = True
+                fence_cleanup()
+                raise
             finally:
                 self.request_done = True
                 try:
@@ -278,6 +308,7 @@ class ResidentMiddleware(MiddlewareBase):
         except Exception:
             raise ResidentFailure("AW private execution acquisition failed") from None
         finally:
+            self.acquisition_finished = True
             if self.request_done:
                 await self.close_if_drained()
 
@@ -328,7 +359,7 @@ class ResidentMiddleware(MiddlewareBase):
 
     async def close_if_drained(self):
         async with self.closing:
-            if not self.request_done or (self.lease is None and not self.lease_entered):
+            if not self.request_done or not self.acquisition_finished or self.request_released:
                 return
             if self.active and not (self.failed and all(call.drained() for call in self.active.values())):
                 return
@@ -340,7 +371,8 @@ class ResidentMiddleware(MiddlewareBase):
                 raise
             finally:
                 try:
-                    await self.lease_context.__aexit__(None, None, None)
+                    if self.lease is not None or self.lease_entered:
+                        await self.lease_context.__aexit__(None, None, None)
                 except asyncio.CancelledError:
                     self.failed = True
                     fence_cleanup()
@@ -353,6 +385,17 @@ class ResidentMiddleware(MiddlewareBase):
                     clear_execution(self.lease)
                     self.lease = None
                     self.lease_entered = False
+            # The task stays busy until both the child scope and application-owned
+            # credential finalizer have acknowledged their complete cleanup.
+            if self.root_config.get("resident_policy_reload"):
+                check_cleanup()
+                try:
+                    await self.scope.release()
+                except BaseException:
+                    self.failed = True
+                    fence_cleanup()
+                    raise
+            self.request_released = True
 
     def selected(self, hook, call):
         def matches(selectors):

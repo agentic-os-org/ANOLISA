@@ -103,7 +103,8 @@ Rust 客户端通过 `Error::Attempt` 暴露该记录键。
 
 `own_instance` 固定同用户 launcher 的 PID、启动时刻和 PID namespace。
 `open_scope` 继承根 binding 已准入的 target、能力与配置，再以任务自己的 cwd 和完整
-环境重新进行 Provider 准备。嵌套 scope、可热更新的根和已启动观测均被拒绝。
+环境重新进行 Provider 准备。嵌套 scope、受限 reloadable 根和已启动观测均被拒绝。普通 resident Qoder SDK/QwenPaw
+根可启用空闲更新；完整任务占用和不可变子快照遵循[策略更新合同](policy-reload.md#普通-resident-任务快照)。
 worker 可以是 launcher 自身或其后代；fork worker 在 fork 后创建独立 scope。
 进程身份用于同用户信任边界内的生命周期核对。
 
@@ -294,11 +295,13 @@ SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意
 
 ## 显式实例策略更新
 
-启用稳定桥接的 `aw run` 实例使用 `EnableReload`、`AssociateProcess`、
-`BridgeLifecycle`、`HookPlan` 和 `UpdatePolicy`。服务身份保持启动摘要，
+支持更新的 resident 和受限 reloadable `aw run` 实例共用 `EnableReload`、
+`AssociateProcess`、`BridgeLifecycle` 和 `UpdatePolicy`。resident 子任务使用不可变
+`ScopePolicy` 快照，受限桥接使用 `HookPlan`。服务身份保持启动摘要，
 `expected_revision` 指定实例 Host 的当前版本。原生请求入口与最终更新检查共用实例注册
 准入门，候选 Host 准备不持有该门。busy 更新不排队、不等工具排空，也不在返回后激活。
-已完成事件的关联声明跨版本保留，证据来自所属 Host 快照。
+受限桥接跨版本保留已完成事件关联声明；resident scope 保留现有回收及已退休身份保护。
+证据来自所属 Host 快照。
 
 [策略热更新设计](policy-reload.md) 说明生命周期、进程关联、固定入口、人工验收及
 后续 attach/steer 范围。

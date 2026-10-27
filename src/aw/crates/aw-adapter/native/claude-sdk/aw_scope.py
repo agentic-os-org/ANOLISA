@@ -9,6 +9,7 @@ from pathlib import Path
 import signal
 import sys
 from typing import Any
+from uuid import uuid4
 
 import anyio
 
@@ -124,12 +125,57 @@ class Scope:
         self.release_error: BaseException | None = None
         self.environment: dict[str, str] = {}
         self.invocation_limit = 0
+        self.reservation: str | None = None
 
     def check(self) -> None:
         if self.pid != os.getpid() or self.closed or self.handle is None:
             raise RuntimeError("SDK scope is closed, unbound or inherited across fork")
 
-    async def open(self, cwd: str, environment: dict[str, str]) -> None:
+    async def ready(self) -> None:
+        """Confirm managed startup without admitting an application task."""
+        if self.reservation is not None or self.handle is not None or self.closed or self.pid != os.getpid():
+            raise RuntimeError("AW worker readiness requires an unused scope")
+        code, _ = await command(self.config, "ready", {"pid": self.pid}, 6)
+        if code:
+            raise RuntimeError("AW worker readiness failed")
+
+    async def reserve(self) -> None:
+        """Retain root occupancy before application-owned task preparation starts."""
+        if self.reservation is not None or self.closed or self.pid != os.getpid():
+            raise RuntimeError("AW task reservation cannot be reused or inherited")
+        # Keep the key even when the response is lost: only explicit confirmed
+        # cleanup may release a reservation whose commit outcome is unknown.
+        self.reservation = str(uuid4())
+        code, _ = await command(
+            self.config, "reserve", {"pid": self.pid, "key": self.reservation}, 6,
+        )
+        if code:
+            raise RuntimeError("AW task reservation failed")
+
+    async def release(self) -> None:
+        """Release occupancy only after child and application cleanup succeeds."""
+        if self.reservation is None:
+            return
+        if self.pid != os.getpid() or not self.closed or self.release_error is not None:
+            raise RuntimeError("AW task reservation still owns unconfirmed cleanup")
+        code, _ = await command(
+            self.config, "release", {"pid": self.pid, "key": self.reservation}, 6,
+        )
+        if code:
+            raise RuntimeError("AW task reservation release failed; worker restart required")
+        self.reservation = None
+
+    async def policy(self) -> dict[str, Any]:
+        """Fetch this task's immutable routes before acknowledging native setup."""
+        self.check()
+        code, output = await command(self.config, "policy", self.handle, 6)
+        if code:
+            raise RuntimeError("AW task policy handoff failed")
+        return json.loads(output)
+
+    async def open(
+        self, cwd: str, environment: dict[str, str], *, acknowledge: bool = True,
+    ) -> None:
         if self.handle is not None or self.closed or self.pid != os.getpid():
             raise RuntimeError("SDK scope cannot be reopened or inherited across fork")
         self.environment = dict(environment)
@@ -147,6 +193,12 @@ class Scope:
             raise RuntimeError("AW task admission failed")
         self.handle = json.loads(output)
         # The handle is retained before acknowledgement; cancellation can now release it.
+        if acknowledge:
+            await self.acknowledge()
+
+    async def acknowledge(self) -> None:
+        """Enable callbacks only after the native owner has installed its routes."""
+        self.check()
         try:
             code, _ = await command(self.config, "acknowledge", self.handle, 6)
             if code:

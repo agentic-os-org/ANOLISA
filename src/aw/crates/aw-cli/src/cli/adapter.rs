@@ -13,6 +13,8 @@ pub(super) struct HookBinding {
     pub adapter: String,
     #[serde(default)]
     pub reloadable: bool,
+    #[serde(default)]
+    pub resident_policy_reload: bool,
     pub binding: Binding,
     pub socket: PathBuf,
     pub cwd: PathBuf,

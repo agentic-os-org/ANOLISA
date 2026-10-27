@@ -271,6 +271,8 @@ fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
         parse("update --config aw.yaml --agent qoder").unwrap(),
         Command::Update(Update { policy: None, .. })
     ));
+    assert!(parse("update --config aw.yaml --pid 123").is_err());
+    assert!(parse("update --config aw.yaml --pid 123 --agent worker").is_err());
     assert!(parse("update --socket /socket --agent qoder").is_err());
     assert!(matches!(parse("update --config boot.yaml --agent qoder --instance one --policy next.yaml --expected-revision abc").unwrap(), Command::Update(_)));
     for input in [

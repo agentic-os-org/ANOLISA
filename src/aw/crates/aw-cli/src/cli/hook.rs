@@ -75,20 +75,38 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
 }
 
 pub(super) fn deadline(args: &Arguments, binding: &HookBinding) -> Result<Instant> {
+    deadline_at(args, binding, Instant::now())
+}
+
+pub(super) const TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(2);
+
+pub(super) fn deadline_at(
+    args: &Arguments,
+    binding: &HookBinding,
+    started: Instant,
+) -> Result<Instant> {
     let event = args.required("--event")?;
     let route = binding
         .events
         .get(event)
         .ok_or("event is absent from binding")?;
-    if !(1..=55000).contains(&route.budget_ms) {
+    budget_deadline(
+        started,
+        route.budget_ms,
+        args.flags.contains_key("--close-event"),
+    )
+}
+
+fn budget_deadline(started: Instant, budget_ms: u64, close: bool) -> Result<Instant> {
+    if !(1..=55000).contains(&budget_ms) {
         return Err("invalid event budget".into());
     }
-    Ok(Instant::now()
-        + Duration::from_millis(if args.flags.contains_key("--close-event") {
-            2000
-        } else {
-            route.budget_ms + 2000
-        }))
+    let deadline =
+        started + TRANSPORT_ALLOWANCE + Duration::from_millis(if close { 0 } else { budget_ms });
+    if deadline <= Instant::now() {
+        return Err("event transport deadline expired".into());
+    }
+    Ok(deadline)
 }
 
 // Resident SDK callers keep transport/Provider errors visible and stop the task.
@@ -261,6 +279,31 @@ pub(super) fn read_input(deadline: Instant) -> Result<Vec<u8>> {
         input.extend_from_slice(&buffer[..count as usize]);
         if input.len() > 1024 * 1024 {
             return Err("native hook stdin exceeds one MiB".into());
+        }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_consumes_one_transport_budget_without_renewal() {
+        let started = Instant::now() - Duration::from_millis(1500);
+        for budget in [1, 1200, 55000] {
+            let deadline = budget_deadline(started, budget, false).unwrap();
+            assert_eq!(deadline - started, Duration::from_millis(budget + 2000));
+            assert!(started + TRANSPORT_ALLOWANCE < deadline);
+            assert!(deadline < started + Duration::from_millis(budget + 3000));
+        }
+        assert_eq!(
+            budget_deadline(started, 55000, true).unwrap(),
+            started + TRANSPORT_ALLOWANCE
+        );
+        let expired = Instant::now() - Duration::from_secs(60);
+        assert!(budget_deadline(expired, 55000, false).is_err());
+        for invalid in [0, 55001] {
+            assert!(budget_deadline(started, invalid, false).is_err());
         }
     }
 }

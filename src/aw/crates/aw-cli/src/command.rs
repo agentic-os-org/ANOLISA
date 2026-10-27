@@ -66,7 +66,7 @@ enum Command {
         after_help = "No system service is installed. serve runs in the foreground."
     )]
     Service(Service),
-    /// Update an opted-in idle instance's policy, not installed software
+    /// Update a supported idle instance's runtime policy
     Update(Update),
     /// Query service and optional Provider views; may execute view commands
     Inspect(Inspect),

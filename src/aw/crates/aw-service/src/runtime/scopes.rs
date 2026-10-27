@@ -13,14 +13,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod policy;
 #[cfg(test)]
 mod tests;
 
 pub(super) struct Owner {
-    parent: Option<String>,
+    pub(super) parent: Option<String>,
     process: Process,
     cancelled: Arc<AtomicBool>,
     acknowledge_by: Option<Instant>,
+    policy_confirmed: bool,
 }
 
 impl Runtime {
@@ -72,6 +74,9 @@ impl Runtime {
             .ok_or_else(|| rejected("scope_parent_unavailable"))?;
         root.process.check()?;
         owner.process.check()?;
+        if !owner.policy_confirmed {
+            return Err(rejected("scope_policy_unconfirmed"));
+        }
         if root.cancelled.load(Ordering::Acquire)
             || owner.cancelled.load(Ordering::Acquire)
             || !owner
@@ -80,7 +85,8 @@ impl Runtime {
         {
             return Err(rejected("scope_acknowledgement_expired"));
         }
-        let metadata = json!({"parent_instance_id": parent});
+        let metadata = json!({"parent_instance_id": parent,
+            "policy_revision": instances.get(id).and_then(Option::as_ref).map(|instance| instance.host.revision())});
         let owner = owners
             .get_mut(id)
             .ok_or_else(|| rejected("scope_unavailable"))?;
@@ -123,6 +129,7 @@ impl Runtime {
             Owner {
                 parent: None,
                 acknowledge_by: None,
+                policy_confirmed: true,
                 process,
                 cancelled: Arc::new(AtomicBool::new(false)),
             },
@@ -152,7 +159,12 @@ impl Runtime {
                 .get(parent)
                 .and_then(Option::as_ref)
                 .filter(|instance| {
-                    !instance.closing && instance.reload.is_none() && instance.observation.is_none()
+                    !instance.closing
+                        && instance
+                            .reload
+                            .as_ref()
+                            .is_none_or(|reload| reload.resident)
+                        && instance.observation.is_none()
                 })
                 .ok_or_else(|| rejected("scope_parent_unavailable"))?;
             let owner = owners
@@ -160,6 +172,10 @@ impl Runtime {
                 .filter(|owner| owner.parent.is_none() && !owner.cancelled.load(Ordering::Acquire))
                 .ok_or_else(|| rejected("scope_parent_unowned"))?;
             owner.process.corroborate(pid)?;
+            if let Some(reload) = &instance.reload {
+                reload.admit_scope(pid)?;
+            }
+            let policy_confirmed = instance.reload.is_none();
             if instances.len() >= self.limits.bindings {
                 return Err(self.overload("binding_limit"));
             }
@@ -174,6 +190,7 @@ impl Runtime {
                 Owner {
                     parent: Some(parent.into()),
                     acknowledge_by: Some(deadline + Duration::from_secs(5)),
+                    policy_confirmed,
                     process,
                     cancelled: Arc::clone(&cancellation),
                 },
@@ -239,7 +256,7 @@ impl Runtime {
             self.lifecycle_record(
                 "task_scope",
                 &id,
-                json!({"parent_instance_id": parent, "process": owners[&id].process.metadata()}),
+                json!({"parent_instance_id": parent, "process": owners[&id].process.metadata(), "policy_revision": host.revision()}),
             )?;
             self.contexts.activate(&id)?;
             Ok(host)

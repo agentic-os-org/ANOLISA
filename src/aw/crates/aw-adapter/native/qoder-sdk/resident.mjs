@@ -14,6 +14,19 @@ const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
 const stopped = () => ({ continue: false, stopReason: "AW required Hook failed" });
 
+/** Launch and task snapshots share the same native Hook contract. */
+export function validateHooks(config) {
+  if (!Array.isArray(config.hooks)) throw new Error("Missing AW hooks");
+  for (const hook of config.hooks)
+    if (!hook || typeof hook !== "object" || !["tool.before", "tool.after"].includes(hook.event) ||
+        typeof hook.step !== "string" || !hook.step ||
+        !(["block", "report"].includes(hook.on_error) ||
+          (config.resident && hook.event === "tool.after" && hook.on_error === "withhold_result")) ||
+        hook.replace_result !== false ||
+        !Number.isInteger(hook.budget_ms) || hook.budget_ms < 1 || hook.budget_ms > 55000)
+      throw new Error("Invalid AW Qoder SDK hook route");
+}
+
 class Scope extends SharedScope {
   checkExecution(execution = this.execution) {
     checkExecutionCleanup();
@@ -319,8 +332,28 @@ export class Resident {
     return Object.freeze(facade);
   }
 
+  async preparePolicy(cwd, environment) {
+    if (!this.config.resident_policy_reload) return;
+    // The root claim also covers native import and finalizers after child close.
+    await this.scope.reserve();
+    await this.scope.open(cwd, environment, { deferAcknowledgement: true });
+    const policy = await this.scope.policy();
+    if (!policy || typeof policy !== "object" || Array.isArray(policy) ||
+        typeof policy.policy_revision !== "string" || !/^[a-f0-9]{64}$/.test(policy.policy_revision))
+      throw new Error("AW resident policy handoff is malformed");
+    validateHooks({ ...this.config, hooks: policy.hooks });
+    const hooks = structuredClone(policy.hooks);
+    for (const hook of hooks) Object.freeze(hook);
+    // Task snapshots cannot replace launch identity or executable fields.
+    this.config = { ...this.config, policy_revision: policy.policy_revision,
+      hooks: Object.freeze(hooks) };
+    this.strictPost = this.config.hooks.some(hook => hook.event === "tool.after" &&
+      hook.on_error === "withhold_result");
+  }
+
   async create(prompt, options, compose, ready) {
     checkExecutionCleanup();
+    const startupConfig = this.config;
     const { awExecutionFactory, ...nativeOptions } = options;
     options = nativeOptions;
     if (awExecutionFactory !== undefined) {
@@ -342,34 +375,36 @@ export class Resident {
     const cwd = realpathSync(options.cwd ?? process.cwd());
     this.cwd = cwd;
     this.mcp = admitMcp(options);
-    const scoped = { ...this.config, cwd, scope: this.scope };
-    const composed = compose(scoped, { ...options, cwd });
-    for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
-      if (!composed.hooks[event]?.length)
-        composed.hooks[event] = [{ matcher: "*", hooks: [async () => ({})] }];
-    // Each policy callback receives the AW UUID while application Hooks retain native IDs.
-    for (const [event, groups] of Object.entries(composed.hooks)) {
-      if (!["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event)) continue;
-      const originalCount = options.hooks?.[event]?.length ?? 0;
-      for (const group of groups.slice(originalCount)) {
-        group.hooks = group.hooks.map(callback => async (input, id, context) => {
-          const entry = this.identities.dispatch.getStore()?.entry;
-          if (!entry) throw new Error("AW policy callback lacks native dispatch identity");
-          if (delegatesMcp(this, this.identities.dispatch.getStore().request.input)) return {};
-          if (event !== "PreToolUse") {
-            await postTools(this, this.identities.payload(entry, input), context.signal);
-            return {};
-          }
-          const result = await callback(this.identities.payload(entry, input), entry.id, context);
-          return result;
-        });
-      }
-    }
-    const decorated = this.decorate(composed);
     this.ownerClose = () => this.close();
     try {
+      await this.preparePolicy(cwd, environment);
+      const scoped = { ...this.config, cwd, scope: this.scope };
+      const composed = compose(scoped, { ...options, cwd });
+      for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
+        if (!composed.hooks[event]?.length)
+          composed.hooks[event] = [{ matcher: "*", hooks: [async () => ({})] }];
+      // Each policy callback receives the AW UUID while application Hooks retain native IDs.
+      for (const [event, groups] of Object.entries(composed.hooks)) {
+        if (!["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event)) continue;
+        const originalCount = options.hooks?.[event]?.length ?? 0;
+        for (const group of groups.slice(originalCount)) {
+          group.hooks = group.hooks.map(callback => async (input, id, context) => {
+            const entry = this.identities.dispatch.getStore()?.entry;
+            if (!entry) throw new Error("AW policy callback lacks native dispatch identity");
+            if (delegatesMcp(this, this.identities.dispatch.getStore().request.input)) return {};
+            if (event !== "PreToolUse") {
+              await postTools(this, this.identities.payload(entry, input), context.signal);
+              return {};
+            }
+            const result = await callback(this.identities.payload(entry, input), entry.id, context);
+            return result;
+          });
+        }
+      }
+      const decorated = this.decorate(composed);
+      if (this.config.resident_policy_reload) await this.scope.acknowledge();
       const sdk = await import(pathToFileURL(this.config.sdk).href);
-      await this.scope.open(cwd, environment);
+      if (!this.config.resident_policy_reload) await this.scope.open(cwd, environment);
       // No await may separate this fence from native creation and owner registration.
       checkExecutionCleanup();
       if (this.owner?.closing) throw new Error("AW daemon stopped during Query admission");
@@ -392,7 +427,8 @@ export class Resident {
         throw new Error("AW resident Query closed during initialization");
       if (!initialization?.capabilities?.includes("msg_lifecycle_v1"))
         throw new Error("AW resident Query requires msg_lifecycle_v1");
-      ready(this.config);
+      // Launcher readiness attests the launch; task routes may already be newer.
+      ready(startupConfig);
       this.releaseInput();
       return this.facade();
     } catch (error) {
@@ -430,6 +466,7 @@ export class Resident {
     await this.scope.drain();
     this.identities.active.clear();
     await this.scope.close();
+    if (this.config.resident_policy_reload) await this.scope.release();
     this.owner?.queries.delete(this.ownerClose);
   }
 }

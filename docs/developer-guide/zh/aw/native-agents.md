@@ -309,7 +309,9 @@ After Hook 接收脱敏后的终结 `ToolResponse`，包括 AW 拒绝结果。�
 
 Startup 回执确认插件加载，每个 Agent 在请求开始前另行通过实际安装检查。看到原生
 Hook 就绪信息后使用 App/API；ACP/TUI、多 worker 启动继续被拒绝。`--reloadable`
-保留既有 busy 跟踪与策略更新；普通启动提供 resident 子作用域及长会话回收。共享
+保留独立的请求空闲更新合同；普通启动提供 resident 子作用域、长会话回收，以及 reply
+完整排空后的显式更新。复用的 Agent 在每轮新 reply 预留任务后读取活动策略。
+App startup 在首个 reply 前确认更新就绪；启动策略持续生效，直到更新成功。共享
 子作用域尚无原生证据采集合同，普通 resident 启动会拒绝该配置。
 
 ```bash
@@ -594,7 +596,8 @@ AW 保留该文件的其他字段和 Hook 条目，加入自己的回调，再�
 私有目录；该变量未设置时使用 `/tmp/aw-UID` 下的目录。显式路径必须是绝对路径，
 并且指向同一个 `aw.sock` 位置。
 
-服务保留启动配置快照，编辑 `aw.yaml` 不会热更新它。显式启用稳定桥接的实例可使用
+服务保留启动配置快照，编辑 `aw.yaml` 不会自动热更新它。支持更新的普通 resident
+和显式启用受限桥接的实例可使用
 [空闲策略更新](../../../user-guide/zh/aw/configuration.md#更新预热实例)，更换实例 Host，服务身份不变。停用某份配置前，用原文件或
 socket 停止相应服务；修改配置后的 auto 路径可能指向另一个服务。退出 Agent 不会
 停止其他会话或共享 daemon。本地端点是同用户访问边界，不提供 sandbox。
@@ -604,7 +607,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
 | `aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 不支持 |
-| `aw update --config CURRENT --agent TARGET --policy NEXT` | 更新已启用稳定桥接的空闲实例；busy 拒绝且不排队 |
+| `aw update --config CURRENT --agent TARGET --policy NEXT` | 更新支持该能力且已就绪的空闲实例；busy 拒绝且不排队 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
 | `aw stop --config FILE` 或 `aw stop --socket ABSOLUTE_PATH` | 请求正常关闭服务 |
@@ -909,7 +912,7 @@ sec-core 步骤只匹配 `native:qoder-sdk:Bash` 和
 零退出。本例 Before 的 `true` 请求 `block`，After 的 `true` 记录 `observe`；
 After 的 `false` 不产生效果，检查仍视为成功。结果检查失败须非零退出，随后
 `on_error: withhold_result` 阻止交付及后续派发。保留原生权限和调用方负责的
-daemon/App 生命周期。使用普通 `aw run`，通过滚动重启更新。私有凭据需在应用代码
+daemon/App 生命周期。使用普通 `aw run`，在 Query 关闭或 reply 完成后显式空闲更新。私有凭据需在应用代码
 接入[显式执行工厂](../../../../src/aw/docs/design/zh/adapters/private-execution.md)，
 此 YAML 安装安全策略。
 
@@ -1008,21 +1011,26 @@ MCP 子调用绑定原生 control request、精确的 server/tool/arguments 和�
 封装处理见[结构化 MCP 派发](../../../../src/aw/docs/design/zh/adapters/structured-mcp.md)。
 结果替换仍不支持。
 
-严格 Post 和私有执行租约要求普通 resident 模式，通过滚动重启更新；`--reloadable`
-拒绝这些合同。兼容空闲更新路径的策略，需要在不重启 daemon 的情况下更新已有
-Query 时，使用
+严格 Post 和私有执行租约要求普通 resident 模式。所有 Query 关闭并完成清理后，
+显式空闲更新作用于下一 Query。未关闭 Query 即使在轮次之间也保持 busy，并使用原策略。
+受管 `startDaemon()` 在首个 Query 前确认更新就绪并写入启动回执，daemon 可直接预热，
+无需创建虚假 Query。启动策略持续生效，直到更新成功；新 Query 在任务预留后取得活动版本快照。
+准备 Hook 文件和更新策略时暂停任务派发，成功后再提交工作。
+
+独立的受限 `--reloadable` 模式拒绝严格 Post 和私有执行租约。兼容该模式的策略若需
+在不重启 daemon 的情况下更新已有 Query，使用
 `aw run --config aw.yaml --agent sdk --reloadable` 显式启用。沿用同一个
 `createQuery` 工厂和调用方管理的 `startDaemon()`；异步输入迭代器可让 Query
 在请求之间保持可用。使用 `aw update --config aw.yaml --agent sdk --policy desired.yaml`
-显式激活完整候选策略；不增加 SDK 专用命令或服务 RPC。
+通过公共 CLI 和 `UpdatePolicy` 事务显式激活完整候选策略。
 
-实例内所有受管 Query 必须空闲。已提交或排队的消息、模型等待、原生回调、Query 关闭
+该受限模式要求实例内所有受管 Query 空闲。已提交或排队的消息、模型等待、原生回调、Query 关闭
 清理期间，实例都保持 busy。结果消息本身不是空闲确认：可检查
 `aw service status --config aw.yaml`，在 requests 回到零后重新显式更新。
-失败的更新保留原活动策略。即使初始策略没有 Hook，也会注册稳定回调；新增和移除
+提交前失败保留原活动策略；提交后终态审计失败会阻止派发并停止服务，须重启后复用。即使初始策略没有 Hook，也会注册稳定回调；新增和移除
 会作用于已有 Query 的下一次请求，原生权限保持优先。
 
-可更新 Query 要求显式 daemon 和 `msg_lifecycle_v1` 能力。桥接等待原生命令队列
+受限 `--reloadable` Query 要求显式 daemon 和 `msg_lifecycle_v1` 能力。桥接等待原生命令队列
 完成后释放请求准入；提前 return 或出错时，等待原生 `close()` 和仍在执行的回调结束。
 普通 Bash 命令超时后可能自动转入后台。子进程退出且原生完成通知回合清理结束之前，
 对应请求持续保持 busy。提前关闭 Query 时，先通过原生 `stopTask()` 停止这些任务，
@@ -1041,14 +1049,14 @@ Worker 1.1.78 的 `UpdateGoal` 只能完成或
 普通模式下，Worker 1.1.78 的 worktree 子代理回调仍携带父 Query 的 `cwd` 和子代理
 `agent_id`，而工具实际在 worktree 中执行。AW 能观察到这些回调，但不会重建实际执行
 工作目录。依赖该目录的策略不支持 worktree 执行；普通模式不会在创建 Query 时拒绝它。
-可更新模式会按上述规则在执行前拒绝 worktree。
+受限 `--reloadable` 模式会按上述规则在执行前拒绝 worktree。
 
-可更新桥接会持续读取原生输出，以便在应用暂停读取时仍能观察清理完成。
+受限 `--reloadable` 桥接会持续读取原生输出，以便在应用暂停读取时仍能观察清理完成。
 输出缓冲区没有固定上限：提交工作期间应持续消费 Query 输出，收到 result 后也应继续读取。
 若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
 丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
 
-可更新 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
+受限 `--reloadable` Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
 request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
 记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
 并发提交量；策略更新不会清空关联历史。

@@ -5,8 +5,9 @@
 Applications supply short-lived tool credentials through an explicit execution
 factory. AW owns admission, result redaction and cleanup ordering; the application
 owns credential acquisition and revocation. Native model/daemon authentication
-keeps its own lifecycle. Use ordinary resident launches and a rolling restart for
-policy or factory changes.
+keeps its own lifecycle. Use ordinary resident launches. Explicit idle updates
+apply policy to subsequent tasks after all Queries/replies and private leases
+drain; factory changes require a rolling restart.
 
 ## Ownership and environment boundaries
 

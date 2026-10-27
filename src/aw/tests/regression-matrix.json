@@ -762,6 +762,34 @@
     "claude-response-cleanup": {
       "target": "aw-cli/test/claude_sdk",
       "test": "managed_response_iterators_close_before_native_teardown"
+    },
+    "resident-policy-handoff": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::resident_claim_covers_preparation_unacknowledged_scope_and_final_cleanup"
+    },
+    "resident-policy-race": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::resident_reservation_wins_during_candidate_preparation"
+    },
+    "resident-policy-owner-exit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::owner_exit_during_activation_audit_preserves_previous_policy"
+    },
+    "resident-policy-capacity": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::resident_request_capacity_is_concurrent_and_configured"
+    },
+    "qoder-sdk-startup-policy-receipt": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "resident_reload::first_query_policy_update_preserves_launch_receipt"
+    },
+    "qoder-sdk-resident-reload": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "resident_reload::ordinary_queries_update_hooks_post_and_mcp_after_cleanup"
+    },
+    "resident-policy-deadline": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::hook::deadline_tests::discovery_consumes_one_transport_budget_without_renewal"
     }
   },
   "agents": {
@@ -1082,7 +1110,12 @@
         "qwenpaw-resident-report",
         "qwenpaw-resident-denial",
         "qwenpaw-resident-registration",
-        "qwenpaw-withhold-reload-rejection"
+        "qwenpaw-withhold-reload-rejection",
+        "resident-policy-handoff",
+        "resident-policy-race",
+        "resident-policy-owner-exit",
+        "resident-policy-capacity",
+        "resident-policy-deadline"
       ],
       "security": [
         "security-retry",
@@ -1133,7 +1166,14 @@
         "sdk-scope-expired-close",
         "sdk-scope-process-cli",
         "qoder-sdk-post-drain",
-        "qoder-sdk-private-fence"
+        "qoder-sdk-private-fence",
+        "resident-policy-handoff",
+        "resident-policy-race",
+        "resident-policy-owner-exit",
+        "resident-policy-capacity",
+        "qoder-sdk-resident-reload",
+        "qoder-sdk-startup-policy-receipt",
+        "resident-policy-deadline"
       ],
       "security": [
         "security-retry",

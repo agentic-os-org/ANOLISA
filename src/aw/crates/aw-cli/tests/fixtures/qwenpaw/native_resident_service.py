@@ -12,9 +12,10 @@ from types import MethodType, SimpleNamespace
 import unittest
 
 import native_resident as native
+from native_resident_policy import ResidentPolicyTests
 
 
-class NativeResidentServiceTests(unittest.IsolatedAsyncioTestCase):
+class NativeResidentServiceTests(ResidentPolicyTests, unittest.IsolatedAsyncioTestCase):
     async def command(self, *args, operation=None):
         process = await asyncio.create_subprocess_exec(
             str(self.binary), *map(str, args), cwd=self.root,
@@ -90,6 +91,7 @@ class NativeResidentServiceTests(unittest.IsolatedAsyncioTestCase):
         binding = await self.rpc("bind", target="native", cwd=str(self.root), environment={}, capabilities={
             "adapter": "qwenpaw", "version": "2.2.2.post1", "entrypoint": "app",
             "events": {"tool.before": ["observe", "block"], "tool.after": ["observe", "replace_result"]},
+            "failure_actions": {"tool.after": ["withhold_result"]},
         })
         self.parent = binding["instance_id"]
         await self.rpc("own_instance", instance_id=self.parent, pid=os.getpid())
