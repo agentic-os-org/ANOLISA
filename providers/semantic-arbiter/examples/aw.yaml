@@ -1,0 +1,70 @@
+# Synthetic template only: replace paths and session explicitly before use.
+# No Agent or model server is started by this Provider.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: semantic-task-shadow
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: /absolute/private-aw-state
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 3000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    target:
+      adapter: qoder
+      argv: [/absolute/path/to/qodercli]
+  providers:
+    semantic:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv: [/absolute/path/to/aw-provider-semantic-arbiter]
+      timeout_ms: 2000
+      max_output_bytes: 65536
+      config:
+        version: 1
+        task:
+          session_id: synthetic-session
+          version: task-v1
+          text: Update the synthetic greeting, preserving the synthetic reference file.
+          allowed_resource_ids: [greeting]
+          preserve_resource_ids: [reference]
+        adapter: qoder
+        workspace_path: /absolute/synthetic-workspace
+        workspace_id: synthetic-workspace
+        tools:
+          Edit: {operation: replace, path_pointer: /file_path}
+          Write: {operation: replace, path_pointer: /file_path}
+        resources:
+          /absolute/synthetic-workspace/greeting.txt: greeting
+          /absolute/synthetic-workspace/reference.txt: reference
+        model:
+          config_revision: aw_request
+          backend:
+            kind: bailian
+            endpoint_url: http://127.0.0.1:18080/synthetic
+            model: synthetic-model
+            key_env: SEMANTIC_PROVIDER_SYNTHETIC_TEST_KEY
+          timeout_ms: 1500
+          max_response_bytes: 4096
+          thresholds: {preservation_ppm: 900000, task_scope_ppm: 900000}
+          transport: loopback_test
+        record_dir: /absolute/private-shadow-records
+        max_records: 100
+        max_storage_bytes: 419430400
+  events:
+    tool.before:
+      enabled: true
+      steps:
+        - id: semantic-shadow
+          provider: semantic
+          operation: evaluate_task_scope
+          effects: [observe]
+          on_error: report

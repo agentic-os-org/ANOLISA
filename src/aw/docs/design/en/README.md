@@ -30,6 +30,7 @@ connect through the process protocol without AW package records.
 | MCP | [Structured MCP](adapters/structured-mcp.md) · [Claude MCP](adapters/claude-mcp.md) |
 | Private execution | [Execution leases](adapters/private-execution.md) |
 | sec-core | [Provider](providers/sec-core/sec-core-provider.md) · [Health](providers/sec-core/sec-core-health.md) |
+| Semantic Arbiter | [Explicit task binding and private shadow records](../../../../../providers/semantic-arbiter/README.md); no execution effects or installer integration |
 
 Tool selection and malformed-event failures are defined in the
 [Provider Host contract](runtime/provider-host.md); shipped names and input

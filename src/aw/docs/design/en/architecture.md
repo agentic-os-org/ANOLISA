@@ -106,6 +106,11 @@ blocked. See [local package management](packaging/package-management.md).
 | --- | --- | --- | --- |
 | `aw-provider-sec-core` | `providers/agent-sec-core/` | Bridge the sec-core CLI for security checks | exec, provider |
 | `aw-provider-tokenless` | `providers/tokenless/` | Bridge the Tokenless CLI for output compression | exec, provider |
+| `aw-provider-semantic-arbiter` | `providers/semantic-arbiter/` | Evaluate explicit single-task scope and retain local shadow records | provider; host and config in tests only |
+
+The semantic Provider consumes the independent `semantic-arbiter` library. It keeps
+complete native candidates, declares observation, and returns no execution effects.
+It is built separately and is not included in Preview installation.
 
 These implementations each own an independent Cargo workspace and lockfile at
 the repository root. They connect as separate processes and are not part of the
@@ -132,8 +137,9 @@ the service retains runtime activation and policy revisions. See the
 3. `aw-service` manages the binding, event deadline, and audit, then delegates the
    step to `aw-host`.
 4. The Host validates protocol messages with `aw-provider` and starts the configured
-   Provider command through `aw-exec`. Built-in bridges then invoke Tokenless or
-   sec-core through their public CLIs, across a process boundary.
+   Provider command through `aw-exec`. The security and compression bridges invoke
+   sec-core or Tokenless through their public CLIs. The semantic observer uses the
+   arbiter library and configured model HTTP backend, retaining private local records.
 5. Results return through the same path. The Adapter adopts blocking or result
    replacement through the native interface. A successful Provider call alone
    does not prove adoption; the Adapter must confirm it.
@@ -183,7 +189,7 @@ contracts and are not interchangeable call layers.
 ## Directories and source entry points
 
 `src/aw/Cargo.toml` defines only the workspace. Ten framework crates live in
-`crates/`; two concrete Providers live in the repository-root `providers/`, each
+`crates/`; three concrete Providers live in the repository-root `providers/`, each
 with its own workspace, source and tests. The former root `src/` contracts code now lives in `crates/aw-contracts/`.
 
 `providers/` is a collaboration space for first-party and community implementations.
@@ -203,7 +209,7 @@ and packaging scope.
 | `../../distribution/packaging/aw/` | Independent AW archives, integration backend builds and concrete configuration templates |
 | `crates/aw-exec/src/packages.rs` | Shared runtime ownership of known installed files |
 | `crates/aw-contracts/src/registry.rs` | Contract schemas embedded in the program |
-| `../../providers/agent-sec-core/`, `../../providers/tokenless/` | Concrete Providers, configuration examples, and tests |
+| `../../providers/agent-sec-core/`, `../../providers/tokenless/`, `../../providers/semantic-arbiter/` | Concrete Providers, configuration examples, and tests |
 | `crates/aw-adapter/src/` | Shared native dialects and catalog for launcher and service |
 | `crates/aw-adapter/native/` | Packaged Python/JavaScript native bridge assets |
 | `scripts/`, `tests/` | Workspace checks, cross-language vectors, and native acceptance |

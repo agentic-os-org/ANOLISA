@@ -10,6 +10,11 @@ and protocol libraries remain in `../src/aw/crates/`.
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README.md) | Command security checks | First-party sec-core CLI/backend |
 | [Tokenless](tokenless/README.md) | Tool output compression and command suggestions | Separately installed Tokenless CLI |
+| [Semantic Arbiter](semantic-arbiter/README.md) | Observe-only `task_scope` shadow evaluation | First-party `src/semantic-arbiter` library |
+
+Semantic Arbiter uses the independent `aw-provider-semantic-arbiter` package and
+binary. Shadow evaluation does not approve or block tool execution. It is not
+included in the AW installer or distribution packages.
 
 ## Contribute or distribute
 
@@ -36,11 +41,12 @@ distributor selects versions, validates their composition and delivers installat
 and upgrades. First-party Providers should build, test and release outside the
 repository using pinned public AW libraries.
 
-The bundled Rust Providers currently use repository-local AW libraries; Tokenless
-composition tests also use the sec-core bridge, so builds outside the repository
-are not yet supported. Standalone SDK publication and artifact-based composition
-are future work. Integration builds select and test compatible framework, Provider
-and backend versions together; extension packages have independent IDs and versions.
+The in-tree Rust Providers currently use repository-local AW libraries; Tokenless
+composition tests also use the sec-core bridge, and Semantic Arbiter links the
+library at `src/semantic-arbiter`. Builds outside the repository are not yet
+supported. Standalone SDK publication and artifact-based composition are future
+work. Integration builds select and test compatible framework, Provider and
+backend versions together; extension packages have independent IDs and versions.
 
 The distribution target `make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` builds
 independent core, sec-core Provider and Tokenless Provider archives through scripts in

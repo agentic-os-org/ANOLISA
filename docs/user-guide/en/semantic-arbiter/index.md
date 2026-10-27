@@ -12,13 +12,14 @@ The complete target design covers six business scenarios: protect results, enfor
 |---|---|
 | **Implemented core** | Preservation/task-scope judgments, frozen inline evidence, bounded EvidenceSource collection, closed-scenario JudgmentUnit replacement, deterministic Outcome composition, consumer-side executor contracts, deterministic `check` and Noul model evaluation through Bailian/TypeSafe |
 | **Contract types/validation only** | Full `nop < allow < ask < block` CandidateControl vocabulary, wider Outcome types, Directive projection and receipt validation exist; current scenarios do not produce `ask` or wider actions |
-| **Pending consumer integration** | Task/history delivery, native admission and blocking, real Executors, native Adapter integration, persistent production claims/audit and effect verification still require integration |
+| **AW shadow Provider** | A separate Provider binds an explicit operator task to one session, retains complete mapped candidates and local records, and returns no execution effects |
+| **Pending consumer integration** | Automatic task/history delivery, native admission and blocking, real Executors, native adoption verification, persistent production claims/audit and effect verification still require integration |
 | **External capability requires verification** | AgentSight, AW, ws-ckpt and native Adapter interfaces must be checked against target-version source and deployment behavior; historical capability inventories establish no support |
 
 | Business scenario | Purpose | Proposed output | Availability |
 |---|---|---|---|
 | Preservation | Keep required versions; protect unique results before modification | `allow` with `audit`, add `snapshot` for unique results; `block` when preservation is required or proof is unusable | Implemented core: `preservation`; execution pending |
-| Task scope | Check task intent and allowed resources; eventually include command structure and network destinations | `allow/block` with `audit`; a future deterministic approval rule may produce `ask` after integration | Implemented core: `task_scope`, currently resource `replace/delete` only |
+| Task scope | Check task intent, allowed resources and supplied native arguments | `allow/block` with `audit`; a future deterministic approval rule may produce `ask` after integration | Implemented core: `task_scope`, resource `replace/delete` with optional complete native arguments; AW observer supports explicitly mapped single-resource tools |
 | Context supplementation | Find missing skills, memories or other reviewed material | `retrieve_skill/retrieve_memory`, `inject_context`, `audit`; candidate handling depends on delivery path | Pending scenario and integration |
 | Diagnosis | Assess failures, resource pressure and task progress; request assistance | `diagnose`, `notify`, `audit`; a later candidate may need `ask` | Pending scenario and integration |
 | Security response | Assess event credibility and contain the affected subject | `block` before execution; `freeze/quarantine/kill` with `audit`, optionally `notify` | Pending scenario and integration |
@@ -80,6 +81,12 @@ Help exits `0` with text on stdout. `describe`, `check` and `evaluate` retain JS
 ## Evaluate with a decision model
 
 `evaluate` sends task text, the candidate and selected provenance-labeled evidence to the configured service. Authorize the endpoint, credential use and outbound data before running it. Use the supplied synthetic samples first. Remote availability and semantic accuracy require separate validation.
+
+### Complete native candidates
+
+A consumer may include `candidate.native_tool` with a nonblank `name` (at most 128 UTF-8 bytes) and the complete `input` JSON object (at most 65536 compact JSON bytes). The whole request remains bounded to 262144 bytes. Inputs must not be truncated to fit these limits. Native names and arguments are untrusted data; they grant no authority and do not replace the structured resource ceiling. The `task-scope-v2` question considers every supplied argument.
+
+When `native_tool` is present, `binding.candidate_revision` must equal the public Rust `contract::candidate_revision(&candidate)` result. It hashes the complete candidate using recursively sorted object keys, compact JSON and the domain `semantic-arbiter/v1alpha1\0candidate\0`. Changes to the operation, resource, tool name or parameters require a fresh revision and matching evidence bindings. Both judgment commands reject nested duplicate JSON keys. Requests without native data retain their existing candidate revision format and input digests.
 
 ### Configure the backend
 
@@ -292,4 +299,4 @@ For local development checks:
 make check
 ```
 
-This runs formatting checks, clippy, tests and strict rustdoc. Local checks cannot establish remote availability or model accuracy. An AW adapter remains pending and belongs in the repository's `providers/` directory; this binary cannot be configured as an AW Provider.
+This runs formatting checks, clippy, tests and strict rustdoc. Local checks cannot establish remote availability or model accuracy. For AW observation, use the separate [semantic Provider](../../../../providers/semantic-arbiter/README.md): it binds one explicit operator task, preserves complete native arguments and records task-scope judgments locally with empty execution effects. Configure `aw-provider-semantic-arbiter` as the Provider command; this core CLI retains its own protocol.

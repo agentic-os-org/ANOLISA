@@ -12,13 +12,14 @@
 |---|---|
 | **核心已实现** | 成果保护/任务范围判断、冻结内联证据、有界 EvidenceSource 采集、封闭场景 JudgmentUnit 替换、确定性 Outcome 组合、消费方侧 executor 契约、确定性 `check`，以及通过 Bailian/TypeSafe 进行 Noul 模型求值 |
 | **仅契约类型/校验** | 已有完整 `nop < allow < ask < block` CandidateControl 词汇、更完整的 Outcome 类型、Directive 投影和回执校验；当前场景不会产生 `ask` 或扩展动作 |
-| **消费方集成待实现** | 任务/历史投递、原生准入与阻断、真实 Executor、原生 Adapter 集成、生产级持久 claim/审计和效果核验仍需接入 |
+| **AW 旁路 Provider** | 独立 Provider 将显式操作者任务绑定到一个会话，保留完整映射候选和本地记录，返回空执行效果 |
+| **消费方集成待实现** | 自动任务/历史投递、原生准入与阻断、真实 Executor、原生采纳验证、生产级持久 claim/审计和效果核验仍需接入 |
 | **外部能力须核验** | AgentSight、AW、ws-ckpt 和原生 Adapter 接口须对照目标版本源码与部署行为核验；历史能力清单不能证明支持情况 |
 
 | 业务场景 | 目的 | 目标输出 | 可用范围 |
 |---|---|---|---|
 | 成果保护 | 保留必需版本；修改前保护独有成果 | `allow` 配合 `audit`，独有成果另加 `snapshot`；要求保留或证明不可用时 `block` | 核心已实现：`preservation`；执行待接入 |
-| 任务范围 | 检查任务意图与允许资源；目标扩展到命令结构和网络目的地 | `allow/block` 配合 `audit`；未来确定性审批规则在接入后可产生 `ask` | 核心已实现：`task_scope`，当前仅资源 `replace/delete` |
+| 任务范围 | 检查任务意图、允许资源与提供的原生参数 | `allow/block` 配合 `audit`；未来确定性审批规则在接入后可产生 `ask` | 核心已实现：`task_scope`，资源 `replace/delete` 可附完整原生参数；AW 观测支持显式映射的单资源工具 |
 | 上下文补给 | 查找缺失的 skill、记忆或其他已审核材料 | `retrieve_skill/retrieve_memory`、`inject_context`、`audit`；候选处置取决于交付路径 | 场景和集成待实现 |
 | 状态诊断 | 判断故障、资源压力和任务进展；请求协助 | `diagnose`、`notify`、`audit`；后续候选可能需要 `ask` | 场景和集成待实现 |
 | 安全响应 | 判断事件可信度并控制受影响主体 | 执行前 `block`；`freeze/quarantine/kill` 配合 `audit`，可附加 `notify` | 场景和集成待实现 |
@@ -80,6 +81,12 @@ cargo run --example evidence_source
 ## 使用决策模型求值
 
 `evaluate` 将任务文本、候选和保留来源标记的所选证据发送给配置的服务。运行前须取得端点、凭证使用和出站数据授权。先使用提供的合成样本。远端可用性和语义准确率需要单独验证。
+
+### 完整原生候选
+
+消费方可在 `candidate.native_tool` 中提供非空白 `name`（最多 128 个 UTF-8 字节）和完整的 `input` JSON 对象（紧凑 JSON 最多 65536 字节）。整个请求仍受 262144 字节上限约束，不能通过截断输入满足限制。原生工具名和参数是不可信数据，不授予权限，也不替代结构化资源上限。`task-scope-v2` 问题会考虑所有提供的参数。
+
+存在 `native_tool` 时，`binding.candidate_revision` 必须等于公共 Rust API `contract::candidate_revision(&candidate)` 的结果。该函数对完整候选使用递归对象键排序、紧凑 JSON 和域 `semantic-arbiter/v1alpha1\0candidate\0` 计算摘要。操作、资源、工具名或参数变化都需要新的版本及匹配的证据绑定。两个判定命令均拒绝嵌套重复 JSON 键。不携带原生数据的请求保留现有候选版本格式和输入摘要。
 
 ### 配置后端
 
@@ -292,4 +299,4 @@ unknown 回执涉及执行效果，与 unknown 判定答案、候选 `nop` 或�
 make check
 ```
 
-此命令执行格式检查、clippy、测试和严格 rustdoc。本地检查不能证明远端可用性或模型准确率。AW Adapter 尚待实现，应位于仓库的 `providers/` 目录；本程序不能配置为 AW Provider。
+此命令执行格式检查、clippy、测试和严格 rustdoc。本地检查不能证明远端可用性或模型准确率。AW 观测使用独立的[语义 Provider](../../../../providers/semantic-arbiter/README_zh.md)：绑定一个显式操作者任务，保留完整原生参数，在本地记录任务范围判断并返回空执行效果。Provider 命令配置为 `aw-provider-semantic-arbiter`；本核心 CLI 保持自身协议。
