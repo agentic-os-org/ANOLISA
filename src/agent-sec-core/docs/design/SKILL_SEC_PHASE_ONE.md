@@ -9,6 +9,12 @@ acceptance boundaries. The current contract does not support key rotation and us
 `managedSkillDirs` configuration as its only persisted discovery set. Earlier dated rotation and
 private-registry acceptance results below are historical, not current capability claims.
 
+The current Rust CLI entry point is `agent-sec-cli skillsec`. `skill-ledger` remains a
+compatibility alias for the same command tree, request parameters, output and exit codes.
+This naming transition does not change `action.skill_sec`, audit event types, capability IDs,
+environment variables or persistent data. Existing Hook callers remain compatible. CLI contract
+tests cover both spellings; the core workflow and discovery process tests use `skillsec`.
+
 ## Delivery and acceptance
 
 The core migration and Agent Hook integration are separate PRs. This PR covers the Rust core,

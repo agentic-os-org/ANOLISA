@@ -33,7 +33,7 @@ pub(super) fn prepare_using(
         .tempdir()?;
     let shared = root.path().join("crates/tokenless-stats/src");
     fs::create_dir_all(&shared)?;
-    for name in ["home.rs", "path_policy.rs"] {
+    for name in ["home.rs", "path_policy.rs", "rtk_outcome.rs"] {
         copy(
             &repo
                 .join("src/tokenless/crates/tokenless-stats/src")
@@ -76,6 +76,11 @@ pub(super) fn stage(
             "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
         ),
         (
+            "tokenless-stats/rtk_outcome.rs",
+            shared.join("rtk_outcome.rs"),
+            "src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs",
+        ),
+        (
             "setup-rtk.sh",
             repo.join("src/tokenless/scripts/setup-rtk.sh"),
             "src/tokenless/scripts/setup-rtk.sh",
@@ -108,7 +113,7 @@ pub(super) fn stage(
             "upstream":{"repository":"https://github.com/rtk-ai/rtk.git","release":"v0.49.0",
                 "commit":fs::read_to_string(rtk.join(".anolisa-rtk-commit"))?.trim()},
             "anolisa_source_commit":source_commit,
-            "shared_sources_reason":"The Tokenless statistics patch includes home.rs and path_policy.rs by relative path to share passwd-based home and state-path rules.",
+            "shared_sources_reason":"The Tokenless patch includes home.rs, path_policy.rs and rtk_outcome.rs by relative path to share home, state-path and call-scoped receipt rules.",
             "inputs":inputs
         }))?,
     )?;

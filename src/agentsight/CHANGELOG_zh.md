@@ -1,5 +1,35 @@
 # 更新日志
 
+## 0.15.0
+
+### 新功能
+- 轨迹采集器和本地查看器可发现 `~/.gemini/tmp/<project>/chats/` 下的 Gemini CLI JSONL 会话，识别项目名及子 agent 轨迹；查看器也可打开旧版整文件会话。子 agent 的组合 ID 暂不关联父会话记录。
+- 独立 `analyze` CLI 和批量分析脚本新增 `--stats-only`，可在无 API 凭证、无 LLM 请求的情况下计算本地 `perf`/`cost` 统计；不支持 `accuracy --stats-only`，不加此参数时保持原有模型分析模式。
+- Rust 库新增无需挂载探针的 `PipelineCore` API，支持事件解析、关联与分析；并公开导出 `agentsight::analyzer::HttpContext`，库调用方可直接使用 `AnalysisResult::HttpContext` 携带的 HTTP 数据类型。现有命令语法和采集行为保持不变。
+
+### 修复
+- 有时间戳时，Tokenless 节省量按请求时间窗口限定，缩小 Dashboard 范围后排除历史优化记录。本地旧版 `stats.db` 的表缺少 `timestamp` 时仍保留全部匹配记录，节省量可能继续包含窗口外的优化。
+- mode 缺失、为 null 或大写的 Tokenless 记录也计入已应用的节省量，仅排除 dry-run 记录。
+- 连接中断后重建流式响应时，保留 Anthropic 服务端工具与 MCP 工具调用及其参数。
+- 工具结果以 JVM 或 SQL 异常开头时，会话评分与中断检测均将其识别为工具失败，与 grounding 分类器保持一致。
+- Token 拆分可保留非流式 Anthropic、Responses、Gemini 及旧 completions 的回答和工具调用，避免输出被计为零。
+- 从已解析消息生成 Gemini 调用时，即使没有原始 HTTP body，也保留提示、回答、工具和停止原因。
+- DeepSeek Harness 的 `agentsight_status` 工具通过文本内容块渲染结果，使宿主和模型能获取已校验的状态。
+- 在 Python 可执行文件和共享 libpython 中识别 SSL 符号，接入已有 TLS 采集路径；保留镜像读取重试和启动错误原因。
+- 故障请求未完整送达时判定 benchmark campaign 失败，避免错误报告为通过。(#8890)
+- 恢复中断的 benchmark campaign 时校验检查点、归档无效结果并重新执行，检查点改为原子替换。(#8857)
+- 在网络或文件操作前拒绝无效 benchmark 时间参数，防止 PID 复用污染进程存活与资源证据。(#8889, #8856)
+- 正确读取含 URI 标点的实际采集数据库路径，损坏 JSONL 行不影响其他有效记录，并报告丢弃记录的告警。
+- 缺失或无效资源观测会中断恢复窗口，异常最终丢事件计数不再证明改善，并报告无法证实的恢复条件。
+- 正确读取新版 h2load 的请求延迟汇总，保留平均值、中位数、p95 和 p99，不从相邻行拼接字段。
+
+### 性能
+- benchmark 延迟分位数复用一次排序的快照，并释放未使用的回退样本，降低长期运行的计算与内存开销。(#8888)
+
+### 文档
+- 用户手册目录结构扁平化。
+- ANOLISA 集成容器镜像源文件从 `docker/` 迁移到 `distribution/docker/`，AgentSight 部署文档中的入口脚本路径同步更新；CLI 语法、镜像 tag 和容器行为保持不变。
+
 ## 0.14.3
 
 本节统一汇总 0.14.2 与 0.14.3 的发布改动。0.14.2 中补记的已发布修复在下方单独标明。

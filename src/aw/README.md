@@ -64,8 +64,8 @@ edits offline. See [configuration](../../docs/user-guide/en/aw/configuration.md#
 this does not update a running instance.
 
 Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
-Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App, or
-Qoder SDK 1.0.54 / Worker 1.1.74.
+Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App, or
+Qoder SDK 1.0.56 / Worker 1.1.78.
 Edit the same configuration file, then explicitly apply it.
 `aw update --config aw.yaml --agent TARGET` selects the
 unique target instance, retains its process and rejects busy instances; see
@@ -94,6 +94,8 @@ for versioned command metadata. `aw completion bash` prints a completion script;
 Zsh, Fish, PowerShell and Elvish are also supported. Scripts are not installed
 automatically. See [command discovery](../../docs/user-guide/en/aw/operations.md#command-discovery-and-completion).
 
+Configuration validation reports steps projected out for each declared target,
+helping check security coverage in shared multi-target files.
 Local package install/uninstall, `config init`, `config validate`, and offline configuration edits
 accept `--json` for a versioned management result. Human summaries remain the
 default; existing service and protocol JSON is unchanged. See
@@ -109,6 +111,11 @@ rollback from an exit code. See
 Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.
+
+Use event and step `match.tools` to select which tool calls invoke each Provider.
+Unmatched steps retain a skipped audit record; generated sec-core checks select
+Qoder `Bash` and OpenClaw `exec` and block selected calls when checking fails.
+See [tool selection](../../docs/user-guide/en/aw/configuration.md#select-tools-for-a-hook-step).
 
 For an independently started Qoder TUI or QwenPaw App, use
 `aw agent connect --config current.yaml --agent TARGET --pid PID` before its first request;
@@ -142,6 +149,20 @@ It lists capabilities declared by the runtime and covered by CI contract tests.
 See the [native Agent integration reference](../../docs/developer-guide/en/aw/native-agents.md)
 for supported versions, tool types, and text replacement boundaries.
 
+Each ordinary managed Qoder SDK Query owns a child scope; daemon shutdown drains
+its Queries and original callbacks. An explicit application factory provides a
+private lease per managed MCP handler. Ordinary QwenPaw App launches use a task
+scope and one private execution lease per managed Agent reply. Tools explicitly
+consume these environments; see [Private execution leases](docs/design/en/adapters/private-execution.md).
+
+Both ordinary resident paths admit strict after steps with
+`on_error: withhold_result`, preventing unverified result delivery and subsequent
+dispatch. Tool side effects that occurred before Post remain in effect. Use the
+[shared security example](crates/aw-service/examples/aw.sdk-security.yaml) with
+`--agent qoder-sdk` or `--agent qwenpaw`. Resident policy changes use a rolling
+restart; `--reloadable` keeps a separate idle-update path without strict Post
+or private execution leases.
+
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
 | --- | --- | --- | --- | --- |
@@ -155,12 +176,12 @@ for supported versions, tool types, and text replacement boundaries.
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
-Qoder SDK 1.0.54 / Worker 1.1.74 requires the bridge daemon and Query factories
+Qoder SDK 1.0.56 / Worker 1.1.78 requires the bridge daemon and Query factories
 to admit the native runtime and register per-Query callbacks through
 `aw run`; `--reloadable` enables explicit policy updates for idle existing Queries,
 returning busy during requests and native cleanup. See the [SDK worker guide](../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker).
-It supports before observation/denial and after observation; external attach
-and result replacement remain unsupported.
+It supports before observation/denial, after observation and ordinary resident
+Post withholding; external attach and result replacement remain unsupported.
 
 
 A Tokenless retry suggestion blocks the original call. The Agent must make a new

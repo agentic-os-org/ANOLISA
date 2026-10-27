@@ -191,8 +191,10 @@ preserve their bytes, `$id`, registry names and canonical digest vectors.
 Qoder SDK integration uses `options.hooks` on each Query. The foreground worker
 selects the Adapter's daemon and Query factories. The daemon factory admits
 runtime launch options and registers its identity before a Query can use it.
-Tool dispatch reuses the existing CLI callback →
-service → Host → Provider path. The application retains daemon and Query
+Ordinary Queries open acknowledged child scopes with their own cwd/environment;
+the Adapter registers model-produced identities before native dispatch and
+retires them after the native queue and original callbacks drain. Tool dispatch
+uses CLI scope transport → service → Host → Provider. The application retains daemon and Query
 ownership; no SDK-specific service operation or Provider is introduced.
 
 Reloadable Qoder SDK Queries reuse the stable dispatcher and service policy gate.
@@ -200,7 +202,7 @@ The Adapter owns message admission and native queue/close completion; the CLI
 transports lifecycle frames through the existing bridge RPC. See the
 [policy reload contract](runtime/policy-reload.md#qoder-sdk-request-admission).
 
-[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.
+[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi, Claude and ordinary Qoder SDK Queries.
 
 [Managed Claude MCP handlers](adapters/claude-mcp.md) add an explicit handler source, task-owned invocation identity and success-aware result adoption through the existing Provider path.
 

@@ -64,6 +64,46 @@ fn preparation_deduplicates_enabled_providers_and_skips_disabled_references() {
 }
 
 #[test]
+fn foreign_target_requirements_never_prepare_a_provider() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["agents"]["app"] =
+        json!({"adapter":"qwenpaw","argv":["/no-agent-is-started"]});
+    document["spec"]["providers"]["foreign"] = document["spec"]["providers"]["policy"].clone();
+    document["spec"]["providers"]["foreign"]["transport"]["argv"] =
+        json!(["/foreign-provider-must-not-run"]);
+    document["spec"]["events"]["tool.after"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"foreign", "provider":"foreign", "operation":"record",
+            "effects":["observe"], "on_error":"withhold_result",
+            "match":{"tools":["native:qwenpaw:execute_shell_command"]}
+        }));
+    let host = fixture.prepare(&document);
+    assert_eq!(host.steps().len(), 2);
+    assert!(host.steps().iter().all(|step| step.provider == "policy"));
+    assert_eq!(host.configuration().as_value(), &document);
+    assert_eq!(host.preparation().len(), 2);
+    assert_eq!(fixture.calls("describe").len(), 1);
+    assert_eq!(fixture.calls("validate_config").len(), 1);
+
+    document["spec"]["events"]["tool.after"]["steps"][1]["match"]["tools"] =
+        json!(["native:qoder:Bash"]);
+    let result = Host::prepare(
+        &serde_json::to_vec(&document).unwrap(),
+        "target",
+        capabilities(),
+        fixture.context(),
+        Instant::now() + TIMEOUT,
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(result, Err(Error::Admission(_))));
+    assert_eq!(fixture.calls("describe").len(), 1);
+    fixture.assert_reaped();
+}
+
+#[test]
 fn unsupported_configuration_is_rejected_before_any_provider_side_effect() {
     let fixture = Fixture::new();
     for (pointer, replacement) in [
@@ -454,5 +494,46 @@ fn mismatched_or_invalid_event_data_is_rejected_before_invocation() {
     assert!(matches!(invocation.result, Err(Failure::Protocol(_))));
     assert!(invocation.record.process.is_none());
     assert!(fixture.calls("invoke").is_empty());
+    fixture.assert_reaped();
+}
+
+#[test]
+fn admitted_withholding_preserves_provider_failure_and_success() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    let mut caps = capabilities();
+    caps.failure_actions
+        .insert("tool.after".into(), vec!["withhold_result".into()]);
+    let cancelled = AtomicBool::new(false);
+    let host = Host::prepare(
+        &serde_json::to_vec(&document).unwrap(),
+        "target",
+        caps,
+        fixture.context(),
+        Instant::now() + TIMEOUT,
+        &cancelled,
+    )
+    .unwrap();
+    for scenario in ["normal", "provider-error"] {
+        let selected = host
+            .event(
+                event("tool.after", scenario),
+                Instant::now() + TIMEOUT,
+                &cancelled,
+            )
+            .unwrap();
+        let invocation = selected.invoke("record").unwrap();
+        if scenario == "normal" {
+            assert!(invocation.result.is_ok());
+            assert_eq!(invocation.failure_action, None);
+        } else {
+            assert!(matches!(invocation.result, Err(Failure::Provider { .. })));
+            assert_eq!(
+                invocation.failure_action,
+                Some(FailureAction::WithholdResult)
+            );
+        }
+    }
     fixture.assert_reaped();
 }

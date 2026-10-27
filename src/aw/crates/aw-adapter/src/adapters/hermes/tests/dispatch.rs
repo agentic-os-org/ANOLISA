@@ -205,6 +205,8 @@ fn generated_profile_marks_only_the_admitted_replacement_step() {
             event: "tool.after".into(),
             step_id: id.into(),
             provider: "fixture".into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["*".into()],
             on_error: "report".into(),
             execution: StepExecution::Provider {
                 operation: "record".into(),

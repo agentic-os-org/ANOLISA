@@ -10,6 +10,8 @@ use serde_json::Value;
 pub(super) struct Config {
     version: u8,
     pub(super) mode: Mode,
+    #[serde(default)]
+    pub(super) unmapped_tool: UnmappedTool,
     pub(super) tools: BTreeMap<String, Tool>,
 }
 
@@ -18,6 +20,14 @@ pub(super) struct Config {
 pub(super) enum Mode {
     Observe,
     Block,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum UnmappedTool {
+    #[default]
+    Error,
+    Observe,
 }
 
 #[derive(Deserialize)]

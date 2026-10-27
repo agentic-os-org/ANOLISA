@@ -32,6 +32,9 @@ pub struct Capabilities {
     pub entrypoint: String,
     /// Supported effects by event.
     pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions supported at the exact launch entrypoint.
+    #[serde(default)]
+    pub failure_actions: BTreeMap<String, Vec<String>>,
 }
 
 impl From<AdapterCapabilities> for Capabilities {
@@ -41,6 +44,7 @@ impl From<AdapterCapabilities> for Capabilities {
             version: value.version,
             entrypoint: value.entrypoint,
             events: value.events,
+            failure_actions: value.failure_actions,
         }
     }
 }
@@ -52,6 +56,7 @@ impl From<Capabilities> for AdapterCapabilities {
             version: value.version,
             entrypoint: value.entrypoint,
             events: value.events,
+            failure_actions: value.failure_actions,
         }
     }
 }

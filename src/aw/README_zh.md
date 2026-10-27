@@ -52,8 +52,8 @@ launcher 转发退出信号后，Agent 需要超过默认两秒的强制清理�
 详见[配置](../../docs/user-guide/zh/aw/configuration.md#比较策略修改)；
 此命令不更新运行中的实例。
 
-通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
-AgentScope 2.0.9 App，以及 Qoder SDK 1.0.54 / Worker 1.1.74
+通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2.post1 /
+AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / Worker 1.1.78
 预装实验性空闲更新桥接。
 直接编辑同一份配置文件，再显式应用。
 `aw update --config aw.yaml --agent TARGET` 选择目标的唯一实例，
@@ -79,6 +79,7 @@ aw stop --config "$HOME/aw/aw.yaml"
 命令元数据。`aw completion bash` 输出补全脚本，也支持 Zsh、Fish、PowerShell
 和 Elvish；不会自动安装脚本。详见[命令发现与补全](../../docs/user-guide/zh/aw/operations.md#命令发现与补全)。
 
+配置验证按每个已声明 target 报告投影排除的步骤，便于核对多 target 共享配置的安全覆盖。
 本地包安装/卸载、`config init`、`config validate` 和离线配置编辑支持 `--json`，返回带版本的管理结果。
 默认仍为人类摘要，已有服务和协议 JSON 保持不变。
 
@@ -90,6 +91,11 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需要启动 sec-core
 后端；这些能力都要通过配置启用。AW 不安装 Agent，也不配置模型凭据。
+
+通过事件和步骤的 `match.tools` 选择哪些工具调用进入各个 Provider。
+未匹配步骤保留跳过审计记录；生成的 sec-core 检查选择 Qoder `Bash` 和
+OpenClaw `exec`，选中调用的检查失败时阻断。见
+[工具选择](../../docs/user-guide/zh/aw/configuration.md#为-hook-步骤选择工具)。
 
 对于独立启动的 Qoder TUI 或 QwenPaw App，在首请求前执行
 `aw agent connect --config current.yaml --agent TARGET --pid PID`；添加 `--remove`
@@ -120,6 +126,17 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 覆盖的能力。支持版本、工具类型和文本替换范围见
 [原生 Agent 接入参考](../../docs/developer-guide/zh/aw/native-agents.md)。
 
+普通受管 Qoder SDK Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。
+显式应用工厂为每次受管 MCP handler 调用提供私有租约。普通 QwenPaw App 启动为每个
+受管 Agent reply 分配任务 scope 和一个私有执行租约。工具显式消费这些环境，见
+[私有执行租约](docs/design/zh/adapters/private-execution.md)。
+
+两种普通 resident 路径均准入严格 After 的 `on_error: withhold_result`，阻止未核验
+结果交付和后续派发。Post 之前已经发生的工具副作用继续生效。
+[统一安全示例](crates/aw-service/examples/aw.sdk-security.yaml) 通过
+`--agent qoder-sdk` 或 `--agent qwenpaw` 选择目标。resident 策略变更采用滚动重启；
+`--reloadable` 保留独立的空闲更新路径，不提供严格 Post 和私有执行租约。
+
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
 | --- | --- | --- | --- | --- |
@@ -133,11 +150,12 @@ profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会�
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
-Qoder SDK 1.0.54 / Worker 1.1.74 使用 Bridge 的 daemon 和 Query 工厂校验
+Qoder SDK 1.0.56 / Worker 1.1.78 使用 Bridge 的 daemon 和 Query 工厂校验
 原生运行时，通过 `aw run` 显式注册每个 Query 的回调，
 可通过 `--reloadable` 显式启用已有 Query 的空闲策略更新；忙碌或清理未完成时返回 busy。
 参见 [SDK Worker 指南](../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)。
-支持调用前观察/拒绝和调用后观察，不包含外部 attach 或结果替换。
+支持调用前观察/拒绝、调用后观察和普通 resident Post 结果扣留，外部 attach 与结果
+替换仍不支持。
 
 
 Tokenless 重试建议会阻止原调用，Agent 需发起新调用并重新经过安全和原生权限检查。

@@ -68,6 +68,7 @@ impl Fixture {
             .call(Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),

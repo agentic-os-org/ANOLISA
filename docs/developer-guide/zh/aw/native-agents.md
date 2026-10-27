@@ -9,7 +9,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 会话结束后继续保存执行记录。
 
 当前 Linux 源码版本支持 Qoder CLI >=1.1.64、OpenClaw 2026.9.6、
-QwenPaw 2.2.2b4 / AgentScope 2.0.9、Hermes 官方提交 `952c941e`，以及显式接入的
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10、Hermes 官方提交 `952c941e`，以及显式接入的
 Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core SDK 0.84.2 worker，
 以及在前台 Python worker 中通过显式公共工厂接线的 AgentScope SDK 2.0.6。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
@@ -69,7 +69,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 | --- | --- | --- |
 | Qoder | 支持原生命令 Hook 的 CLI >=1.1.64，已登录 | 交互或 print 入口；可选 `--native-settings` |
 | OpenClaw | 2026.9.6，已配置的 JSON 和现有状态目录；先停止使用该 profile 的 Gateway | AW 新启 `gateway run`，须传入两个原生路径 |
-| QwenPaw | 2.2.2b4 / AgentScope 2.0.9，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
+| QwenPaw | 2.2.2.post1 / AgentScope 2.0.10，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
 | Hermes | 干净的官方提交 `952c941e`、已安装的 Python console script 和已初始化的本地 chat profile | 在该 profile 中安装一次 AW 插件，运行时使用同一 profile |
 
 启动 Qoder：
@@ -237,7 +237,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ## 启动 AgentScope SDK
 
 使用安装了 `agentscope==2.0.6` 的 Python 环境；这与 QwenPaw 已验证的
-AgentScope 2.0.9 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
+AgentScope 2.0.10 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
 `-m MODULE`。AW 校验该 SDK 版本，提供 `aw_agentscope` 与受保护的运行配置，
 等待真实公共工厂安装 middleware 后生成的回执。
 
@@ -282,21 +282,35 @@ RTK，PostTool 不依赖 RTK。文本槽适用条件、故障处理和遥测配�
 
 ## 启动 QwenPaw
 
-安装 QwenPaw 2.2.2b4 与 AgentScope 2.0.9，通过 QwenPaw 初始化模型配置。示例
+安装 QwenPaw 2.2.2.post1 与 AgentScope 2.0.10，通过 QwenPaw 初始化模型配置。示例
 使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
 AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
 
-原生 middleware 保持嵌套顺序：before 正序、after 逆序展开，工具并发由宿主决定。
-after 观察终结的 `ToolResponse`，包括 AW 拒绝结果，不对流式 chunk 重复调用。
-当前点位覆盖 App 内实际执行的工具；外部执行工具以及进入 middleware 前已被拒绝
-的尝试不在覆盖范围。事件预算为 1..55,000 ms。原生命令使用 AW 插件明确约定：
-before 退出 2 表示拒绝，退出 0 表示继续，显式 ask/approve 尚不支持。
-回调故障记录错误并按步骤的 `on_error` 处理：`report` 保留工具执行和 after 结果，
-工具前的 `block` 返回拒绝；宿主取消继续传播。
+普通启动会检查每个已构造 Agent 实际安装的 resident middleware，并创建已确认的
+任务作用域。Before 正序执行、After 逆序展开，原生工具并发由宿主决定。Offload 工具
+保留作用域直到生成器、原生 Hook 和后台完成回调全部结束；已完成调用及时回收状态，
+长会话按活跃调用容量准入。
 
-原生 startup hook 在插件加载完成后确认注册；它不承诺 App 对外端口开放之前已经
-防护。ACP/TUI、reload 和多 worker 启动仍被拒绝，这些入口的插件生命周期尚未验收。
-看到原生 Hook 就绪提示后，通过 App 原有 API 或界面使用。
+后台 HTTP 输出和下一轮提示在全部必要原生回调成功后才发布；拒绝结果保留策略说明及
+Tokenless 重试参数。脱敏函数必须幂等，以支持多个交付及 Hook 边界重复检查。
+After Hook 接收脱敏后的终结 `ToolResponse`，包括 AW 拒绝结果。应用凭据扩展提供
+每次 Agent reply 一个私有执行租约，由该 reply 的工具共享，并负责清理；见
+[私有执行租约](../../../../src/aw/docs/design/zh/adapters/private-execution.md)。
+授权所依据的工具参数保持原样。`on_error: report` 保持配置的
+回调故障报告策略，工具前 `block` 拒绝执行。结构化 Provider 和布尔 Hook 的工具后
+`withhold_result` 阻止未核验结果交付及后续派发，仅普通 resident 启动准入该动作。
+严格 After 路径暂扣匹配工具的流式 chunk；任务私有执行也会暂扣中间 chunk，直到终态脱敏。
+原生 Hook 或生命周期故障会封锁 Agent，包括 AW 步骤配置为 `report` 的情况；
+修复原因后重启失败的 Agent。清理超时或 finish/release 确认状态不明会在进程范围内
+封锁新请求，须重启 worker；凭据保留至原生工作确认排空。Shutdown 与嵌套清理
+共用十秒预算，包含取消后的排空。
+事件预算为 1..55,000 ms，ask/approve 指令尚不支持。
+原生权限检查在这些回调之前执行；外部执行工具和此前的权限拒绝沿各自原生路径处理。
+
+Startup 回执确认插件加载，每个 Agent 在请求开始前另行通过实际安装检查。看到原生
+Hook 就绪信息后使用 App/API；ACP/TUI、多 worker 启动继续被拒绝。`--reloadable`
+保留既有 busy 跟踪与策略更新；普通启动提供 resident 子作用域及长会话回收。共享
+子作用域尚无原生证据采集合同，普通 resident 启动会拒绝该配置。
 
 ```bash
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
@@ -308,7 +322,7 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 在工具前后执行命令，不安装安全策略。受支持的适配器可复用同一份
 `aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
 
-零 Provider、零事件步骤的配置也可以启动 App；AW 确认插件就绪，不注册工具 middleware。
+零 Provider、零事件步骤的普通配置也会安装 resident 准入与清理 middleware。
 
 ## 启动 OpenClaw
 
@@ -597,7 +611,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | 从 stdin 读取一个开发者操作 JSON 对象，默认 5,000 毫秒 |
 
 `--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
-当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.9
+当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2.post1 / AgentScope 2.0.10
 和 Hermes 官方提交 `952c941e` Adapter，以及显式 Claude SDK 0.2.88、Pi SDK 0.84.2
 与 AgentScope SDK 2.0.6 worker。
 `aw agent connect` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，
@@ -873,10 +887,36 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
 
+## 为常驻 SDK 复用一份安全策略
+
+[统一 SDK 安全示例](../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+通过 `--agent` 选择 Qoder SDK 或 QwenPaw。替换全部绝对路径，按对应章节初始化
+原生运行时，并在启动前按配置的 socket 启动 sec-core：
+
+```bash
+aw validate --config /absolute/path/aw.sdk-security.yaml
+aw run --config /absolute/path/aw.sdk-security.yaml --agent qoder-sdk -- "your prompt"
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home aw run \
+  --config /absolute/path/aw.sdk-security.yaml --agent qwenpaw
+```
+
+sec-core 步骤只匹配 `native:qoder-sdk:Bash` 和
+`native:qwenpaw:execute_shell_command`。AW 在能力准入和 Provider 准备前投影所选
+目标的步骤。其他工具仍执行自定义前后检查，不会隐式增加 sec-core 扫描。扩展扫描
+范围时，显式增加 selector 及对应的 Provider 工具映射。
+
+自定义脚本使用布尔 Hook 合同：从 stdin 读取一个规范化事件，输出 JSON 布尔值并以
+零退出。本例 Before 的 `true` 请求 `block`，After 的 `true` 记录 `observe`；
+After 的 `false` 不产生效果，检查仍视为成功。结果检查失败须非零退出，随后
+`on_error: withhold_result` 阻止交付及后续派发。保留原生权限和调用方负责的
+daemon/App 生命周期。使用普通 `aw run`，通过滚动重启更新。私有凭据需在应用代码
+接入[显式执行工厂](../../../../src/aw/docs/design/zh/adapters/private-execution.md)，
+此 YAML 安装安全策略。
+
 ## 启动 Qoder SDK Worker
 
-使用 `adapter: qoder-sdk`、`@qoder-ai/qoder-agent-sdk@1.0.54`、随包提供的
-Worker 1.1.74（国际版）和 Node.js 22 或更新版本。将 SDK 安装到 Worker 的应用目录，
+使用 `adapter: qoder-sdk`、`@qoder-ai/qoder-agent-sdk@1.0.56`、随包提供的
+Worker 1.1.78（国际版）和 Node.js 22 或更新版本。将 SDK 安装到 Worker 的应用目录，
 在现有 AW 配置中设置目标：
 
 ```yaml
@@ -921,17 +961,56 @@ AW 沿用前台 Worker 生命周期，在 Worker 退出时释放自己的绑定�
 
 AW 在 Query 初始化前注册回调，SDK 握手成功后报告就绪。
 `tool.before` 支持观察和拒绝；`tool.after` 观察原生工具成功和失败的结果。
-原生权限拒绝保留优先级，结果替换在准入时拒绝。现有 SDK Hook 保留；参数改写和权限
-Hook 覆盖不受支持，防止实际执行参数与检查参数不同。
+普通 resident Query 准入 `on_error: withhold_result`：Post 失败或超时会在回复回调前
+关闭原生 Query，扣留未核验结果并停止后续派发。Post 之前已发生的工具副作用继续生效。
+`on_error: report` 报告故障并允许正常结果处理。
+准入仅允许 `tool.before` 使用 `on_error: block`。原生权限拒绝保留优先级，结果替换仍
+不支持。现有 SDK Hook 保留；参数改写和权限 Hook 覆盖不受支持，防止实际执行参数
+与检查参数不同。
 
 使用 `settingSources: []`，不要传入 `settings`、插件、额外 CLI 参数或运行时 transport
 覆盖。进程环境和启动环境中的 Hook 禁用标志按 bundled Worker 的去除首尾空白
-语义解析并拒绝。所有接入 AW 的 Query 使用绑定的工作目录。回调按 Query 注册；同一 daemon 上
-直接使用原生 SDK 创建的 Query 不受修改，**也不受 AW 保护**。同一 AW 实例内接入的
-Query 共用配置的策略，不支持分别选择 session 策略。注册后通过 `applyFlagSettings` 修改 Hook 路由不在支持范围内；
-AW 不保证修改后的策略执行和审计完整性。
+语义解析并拒绝。普通 `createQuery()` 为每个 Query 建立已确认的常驻 scope，
+使用其规范工作目录和环境快照。直接创建的 Query 可以使用不同环境；共享 daemon
+拥有固定环境及当前凭据，其 Query 拒绝 `env` 和 `auth` 覆盖。
+运行期可通过原生 `daemon.auth(payload)` 更换 daemon 凭据。`daemon.stop()` 等待
+所有已安装 payload 的活动凭据回调，包括凭据更换后仍在运行的旧回调。需要不同原生凭据时，
+使用独立 daemon 或直接创建 Query。受管 Query 共用配置策略；通过原生 SDK 绕过
+Bridge 创建的 Query **不受 AW 保护**。
 
-需要在不重启 daemon 的情况下更新已有 Query 时，使用
+普通 Query 要求 evidence `mode: off`：子 scope 无法继承 AgentSight 观测根 binding。
+启动准入在发布就绪前明确拒绝启用的 evidence。
+
+Bridge 返回冻结的公共 Query 接口，隐藏原生解析器、transport、回调映射和 Hook 路由
+修改方法。内部启用 Worker partial 输出，使模型工具身份先于分派到达；调用方未设置
+`includePartialMessages: true` 时隐藏 `stream_event`。回调数据无法自行登记工具身份。
+工具完成后，等待原生命令队列屏障及原始回调 finally 结束，再退休其关联记录。
+提前 return、取消和 transport 故障均等待原生 close，以及原始 Hook、权限、凭据、
+模型和 MCP 回调完成后释放 scope。记忆生成/消费、技能演进的 gate/result 回调，
+以及执行中的 `sendHostAction()`（包括原生 fallback 清理）也纳入等待。
+关闭开始后拒绝新 Host action。派发故障在原生工作排空、凭据撤销确认后可退休 scope；
+原生清理失败会保留所有权；租约清理失败或超时还会在进程范围内封锁新工作，直到 Worker 重启。
+原生认证回调保留自己的生命周期。普通 Query 可通过 `options.awExecutionFactory`
+为每次受管 MCP handler 调用获取版本化私有租约。Bridge 在调用 SDK 前移除此选项，
+并导出 `PRIVATE_EXECUTION_VERSION`、`executionEnvironment()` 与
+`hookEnvironment()`。handler 显式消费私有环境，结果在 Post 与交付前脱敏。
+固定版本 SDK 的内建 Bash 没有对应环境注入接点。公共工厂合同与清理顺序见
+[私有执行租约](../../../../src/aw/docs/design/zh/adapters/private-execution.md)。
+
+进程内 MCP 使用 `await bridge.createSdkMcpServer(options)`，每个 Query 提供新的受管
+server。保留原生 schema、annotations、权限设置和结构化结果 envelope。
+若 schema 通过默认值、transform 或移除未知字段改变已批准参数，则在应用 handler
+执行前拒绝。严格 Pre 拒绝阻止 handler 进入。
+普通 resident MCP 调用与原生工具共用已准入的 Post `withhold_result` 屏障。
+MCP 子调用绑定原生 control request、精确的 server/tool/arguments 和所属 Query。
+`parentIdentity: "query"` 为默认值：固定版本 Worker 的 MCP 请求未提供来源模型
+工具 ID；`parentIdentity: "required"` 在创建原生 server 前拒绝。元数据与完整结果
+封装处理见[结构化 MCP 派发](../../../../src/aw/docs/design/zh/adapters/structured-mcp.md)。
+结果替换仍不支持。
+
+严格 Post 和私有执行租约要求普通 resident 模式，通过滚动重启更新；`--reloadable`
+拒绝这些合同。兼容空闲更新路径的策略，需要在不重启 daemon 的情况下更新已有
+Query 时，使用
 `aw run --config aw.yaml --agent sdk --reloadable` 显式启用。沿用同一个
 `createQuery` 工厂和调用方管理的 `startDaemon()`；异步输入迭代器可让 Query
 在请求之间保持可用。使用 `aw update --config aw.yaml --agent sdk --policy desired.yaml`
@@ -953,13 +1032,13 @@ AW 不保证修改后的策略执行和审计完整性。
 `CronCreate` 和 `run_in_background`
 工具，因为这些入口可以在准入边界之外调度工作。定时器触发的回合绕过输入迭代器，
 因此不支持创建定时唤醒或 cron 任务；`CronList` 和 `CronDelete` 仍可使用。
-Worker 1.1.74 的 `UpdateGoal` 只能完成或
+Worker 1.1.78 的 `UpdateGoal` 只能完成或
 阻塞已有 goal，不能激活 goal，因此仍可使用。
 创建 Query 时还会拒绝自定义 `agents` 中的 `background: true` 或 `isolation: "worktree"`。
 `Agent` 工具传入 `isolation: "worktree"` 也会在执行前被拒绝，因为 worktree 执行不属于
-支持的绑定边界。前台定义和默认隔离的 Agent 调用仍可使用。普通 `aw run` 保留原 SDK 路径。此接入不提供外部 PID attach/detach、按 session 独立选择 AW 策略或 steer。
+支持的绑定边界。前台定义和默认隔离的 Agent 调用仍可使用。普通 `aw run` 使用常驻 scope 路径并保留原生 goal API。此接入不提供外部 PID attach/detach、按 session 独立选择 AW 策略或 steer。
 
-普通模式下，Worker 1.1.74 的 worktree 子代理回调仍携带父 Query 的 `cwd` 和子代理
+普通模式下，Worker 1.1.78 的 worktree 子代理回调仍携带父 Query 的 `cwd` 和子代理
 `agent_id`，而工具实际在 worktree 中执行。AW 能观察到这些回调，但不会重建实际执行
 工作目录。依赖该目录的策略不支持 worktree 执行；普通模式不会在创建 Query 时拒绝它。
 可更新模式会按上述规则在执行前拒绝 worktree。
@@ -969,7 +1048,7 @@ Worker 1.1.74 的 `UpdateGoal` 只能完成或
 若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
 丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
 
-上文 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
+可更新 Qoder SDK 路径保留现有容量限制：每实例最多保留 1024 条 Hook 关联记录，
 request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
 记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
 并发提交量；策略更新不会清空关联历史。

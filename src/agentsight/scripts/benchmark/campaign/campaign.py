@@ -223,9 +223,7 @@ def run_once(
     summary["runtime_clean"] = runtime_clean
     summary["runtime_errors"] = runtime_errors
     if summary_path.exists():
-        summary_path.write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        write_json(summary_path, summary)
     evaluation = evaluate(summary, campaign["thresholds"], scenario)
     if status != 0:
         evaluation["verdict"] = "FAIL"
@@ -461,9 +459,7 @@ def capacity(
             "confirmation": confirmation,
         }
         report_path = results / f"capacity-{version}.json"
-        report_path.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        write_json(report_path, report)
         raise RuntimeError(
             f"{version} failed at the minimum capacity search level "
             f"({resolution} QPS); lower capacity.qps_resolution and start a new "
@@ -588,9 +584,7 @@ def capacity(
         "probes": probes,
         "confirmation": confirmation,
     }
-    (results / f"capacity-{version}.json").write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json((results / f"capacity-{version}.json"), report)
     return report
 
 
@@ -628,9 +622,7 @@ def resolved_qps(campaign: dict[str, Any], results: Path) -> tuple[list[int], in
     }
     if resolution_path.exists() and read_json(resolution_path) != resolved:
         raise ValueError("resolved campaign load levels changed after first use")
-    resolution_path.write_text(
-        json.dumps(resolved, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json(resolution_path, resolved)
     return matrix, soak, overload
 
 

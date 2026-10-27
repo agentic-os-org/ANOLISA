@@ -33,7 +33,7 @@ downloads uncached dependencies; schema validation reads only bundled resources.
 The runner, local service, Provider Host execution, command execution and FileJournal require Linux;
 this gate does not certify other operating systems or minimum supported versions.
 
-For pull requests that change `src/aw/**` or `providers/**`,
+For pull requests changing AW, Providers, AW workflows or the declared Tokenless consumer inputs,
 [AW CI](../../.github/workflows/aw-ci.yml) runs these checks against the candidate
 merge commit. Run the command above on Linux before submitting AW changes. If CI
 fails, find the failing command in the job log and rerun it locally from `src/aw`.
@@ -87,11 +87,41 @@ python3 -B -m unittest discover -s tests -p 'test_ci_*.py'
 
 ## Daily CI and nightly integration
 
-PRs run AW checks only when `src/aw/**` or `providers/**` changes. The daily gate retains all
+AW/Provider and AW workflow changes run the full gate. The daily gate retains all
 credential-free security, Tokenless, lifecycle and Agent/Hook matrix contracts,
 including native-inventory validation and source-size checks. Other components'
-internal changes are owned by their own CI. An externally changed public contract
-consumed by AW needs explicit compatibility validation on the candidate SHA.
+internal changes are owned by their own CI. Tokenless CLI/protocol/runtime/statistics
+source, its AW Provider and real fixtures, RTK setup/patches, dependency/toolchain
+inputs, shared Provider protocol/executor source and package-builder inputs select
+real Tokenless compatibility (the exact paths are in
+`scripts/check.py`). It uses the existing package builder, then explicitly runs
+four named real-CLI Provider tests, including the attributed RTK retry and
+PostTool contract. Missing/ignored tests, failures and mismatched tested SHAs fail
+the required result. Other backend public contracts need explicit compatibility acceptance.
+
+Scope selection starts independent AW and Tokenless jobs on the same candidate
+SHA. Each job has its own runner, build directory and cache key; the Tokenless
+job does not install Node.js. The existing `AW / required` check always joins
+both job results and their tested SHAs. Failures, cancellations, unexpected skips
+and missing evidence block it, including failures after a test output was published.
+Only an explicit unselected scope permits a skipped job. AW checks retain a
+35-minute deadline; the real backend build and contracts have a separate
+60-minute deadline. Parallel elapsed time depends on available runners and caches.
+Ordinary Agent, service, CLI, installer/transaction, documentation and shared-crate
+test/example changes run the AW fixture gate without building real Tokenless/RTK.
+Mixed changes still select real contracts when any consumed input changes. Manual
+dispatch and forced pushes select both jobs. Tokenless's own component, adapter
+and prebuilt CI workflows retain their triggers and full coverage independently.
+
+Run this gate locally from a clean, committed checkout:
+
+```bash
+python3 -B src/aw/scripts/check_tokenless.py --output /absolute/new/evidence-directory
+```
+
+The output must be new; it retains package manifests, binary hashes, test logs
+and cleanup records. No hosted credentials are required. Remove that exact
+evidence directory after review; normal component build caches remain reusable.
 
 [AW Integration](../../.github/workflows/aw-preview.yml) runs every night at 03:23
 Asia/Shanghai and accepts a full 40-character `candidate_sha` for manual
@@ -101,13 +131,24 @@ lifecycle, side-by-side prefixes for rollback, and uninstall. Side-by-side
 acceptance uses the same candidate build; it does not certify cross-version data
 migration. Native jobs reuse checksummed binaries from that exact build.
 
+The Python-free package stage uses `scripts/check_packages.sh` to cap test
+parallelism at two, retaining real AW payloads and the 30-second CLI deadline.
+Nested runner containers can expose more CPUs than their effective quota. Each
+Cargo suite has a 600-second outer deadline; failures stop later suites. The
+always-uploaded `test-evidence/` contains commands, elapsed times, exit codes and
+before/after cgroup CPU, memory and I/O counters. CLI fixture failures identify
+the exact command and working directory without dumping the environment.
+Python is installed only after this stage for package inventory comparisons.
+Installed prefixes and their database live in one private `/tmp` directory;
+cleanup removes them while retaining demo evidence in the artifact directory.
+
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered
 Agent. The nightly job matrix is generated from this inventory. All eight Agents
 have automated suites. OpenClaw covers official Hook runners; full OpenClaw
 Gateway model flows still require explicit acceptance.
 
-Qoder CLI 1.1.64 and QwenPaw 2.2.2b4 / AgentScope 2.0.9 each require four real
+Qoder CLI 1.1.64 and QwenPaw 2.2.2.post1 / AgentScope 2.0.10 each require four real
 sec-core cases: `allow`, `scan-deny`, `backend-error` and `timeout-block`. The jobs
 reuse the candidate's checksummed `aw`, Provider, `agent-sec-cli` and
 `agent-sec-daemon` binaries. Each case starts a private Ubuntu 24.04 container,
@@ -140,8 +181,8 @@ adopted descendants across sessions and removes containers carrying that command
 unique ownership label. It retains a cleanup report and fails the interrupted run.
 
 QwenPaw drives its stock App/API with a deterministic loopback OpenAI-compatible
-model, requiring no cloud key. Qoder CLI uses its real hosted Performance model; Qoder SDK 1.0.54 uses its
-bundled Worker 1.1.74 and hosted `auto` model. Both require
+model, requiring no cloud key. Qoder CLI uses its real hosted Performance model; Qoder SDK 1.0.56 uses its
+bundled Worker 1.1.78 and hosted `auto` model. Both require
 the repository `QODER_PERSONAL_ACCESS_TOKEN` Secret, as documented in
 [Qoder authentication](https://docs.qoder.com/cli/authentication). Dependency
 installation does not receive the Secret. The Qoder launcher and its native
@@ -165,16 +206,75 @@ commit and validate any additional release-specific native boundaries.
 
 The daily Rust cache is restored for PRs and written only by main pushes; the
 heavy build cache is written by nightly. Native Python/npm dependencies are
-cached separately, and native concurrency is capped at three jobs. Dispatch from
-`main`; the candidate must belong to the fetched `origin/main` history before
-any candidate script runs or receives the Qoder Secret. Unmerged feature/release
-commits are rejected. Local native execution remains available for those commits
-with explicitly supplied local credentials.
+cached separately, and native concurrency is capped at three jobs. The full profile requires dispatch from
+`main` and a candidate in the fetched `origin/main` history before any candidate
+script runs or receives the Qoder Secret. A manual fork dispatch can select
+`credential_free=true` for its exact workflow SHA. This profile runs packages, all
+six credential-free Agents and the resident container; its summary explicitly
+leaves Qoder CLI/SDK hosted-model acceptance to the full trusted-main nightly.
+Both the caller and native job withhold the Qoder Secret in this profile.
 
 ```bash
 gh workflow run aw-ci.yml --ref main -f integration=true
 gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
 ```
+
+### Minimal resident container
+
+The additional required container job reuses every `tests/sdk_resident.py` command
+and exact JSON report in the native inventory: currently 24 suites (16 Claude
+and eight Pi) out of 49 native suites (42 in the credential-free profile). They
+include 1,280-call sessions, state retirement, resource-growth assertions, callback
+drain, session-store reuse and native denial, alongside all earlier lifecycle/MCP
+cases. Model-relay and dispatch contract entrypoints remain in the host native lane.
+
+The image contains only allowlisted public fixtures, pinned SDK dependencies and
+four candidate binaries: `aw`, `aw-provider-tokenless`, `tokenless`, and `rtk`.
+RTK is required by PreTool in the mixed Bash/MCP long-session suite. Ubuntu,
+Node and uv images use manifest digests; Python and SDK versions come from the
+native inventory, and Pi uses its committed npm lock. The build context excludes
+the repository checkout, deployment files and user configuration. Execution uses
+an unprivileged test user, synthetic data, loopback model fixtures, no external
+network, no host mounts and no forwarded credentials. One image archive is shared by all four Agent/regular-or-long shards through a
+one-day Actions artifact; its SHA-256, image ID and source revision are checked
+after loading. No image is pushed to a registry.
+Only declared result JSON, runtime versions, input digests and command/cleanup records are retained;
+private profiles and per-task data remain in the removed container. Aggregation
+rechecks every report, candidate SHA, runtime version and container/image removal.
+
+Run the fork candidate profile explicitly:
+
+```bash
+gh workflow run aw-ci.yml --repo <owner>/anolisa --ref <branch> \
+  -f integration=true -f credential_free=true
+```
+
+Run only the container locally from `src/aw`, using the matching nightly bundle:
+
+```bash
+python3 -B scripts/resident_container.py --candidate-sha "$(git rev-parse HEAD)" \
+  --bin target/native-binaries --output target/resident-evidence
+```
+
+The output directory must be new and image inputs must be committed. The local
+command builds once and runs all four shards; CI builds once and runs up to two
+shards concurrently. Each shard deadline sums its declared case deadlines with
+cleanup allowance; its job reserves another 15 minutes for image load, evidence
+and cleanup. Host native job budgets likewise follow the inventory plus setup.
+Aggregation requires all shards and the same cleaned-up build identity. The runner
+removes its context, container and unique image tag on success or failure.
+Image build/load interrupts wait for the bounded Docker operation to settle before
+tag removal. A timed-out image operation records incomplete cleanup because the
+daemon may still publish its tag; use the recorded command to check and remove it.
+Retain
+`target/resident-evidence` for inspection; remove it with
+`rm -rf -- target/resident-evidence` after review. The container record includes
+exact stop/removal commands if Docker becomes unavailable during cleanup.
+
+Resident composition with real sec-core, SDK saturation/recovery, request ingress/drain
+and supervisor restart remain separate acceptance work. The resident suite preserves
+fail-close, original permissions and metadata-only evidence; it does not certify
+production endpoints, traffic or deployment-specific shutdown integration.
 
 Local inventory planning and native execution use the same entrypoints as CI:
 

@@ -36,6 +36,8 @@ fn validate(options: &super::Validate) -> Result<Outcome, ValidationError> {
     }
     Ok(Outcome::ConfigurationChecked {
         policy_update_scope: options.against.is_some(),
+        projected_out_steps: crate::output::projection::collect(&candidate)
+            .map_err(ValidationError::Projection)?,
     })
 }
 

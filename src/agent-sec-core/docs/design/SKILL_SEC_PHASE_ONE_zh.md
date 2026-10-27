@@ -7,6 +7,11 @@ SkillSec 在一个 `asc-capability-skill-sec` crate 内拆分 Skill 扫描、内
 及 Linux 验收边界。当前合同不支持密钥轮转，以系统 `managedSkillDirs` 配置作为唯一持久化
 发现集合。下文带日期的旧换钥与私有登记表验收仅是历史证据，不代表当前功能。
 
+当前 Rust CLI 入口为 `agent-sec-cli skillsec`，`skill-ledger` 保留为兼容别名，使用相同的
+命令树、请求参数、输出和退出码。此次命名迁移不改变 `action.skill_sec`、审计事件类型、
+能力 ID、环境变量或持久化数据，现有 Hook 调用保持兼容。CLI 合同测试覆盖两种命令名，
+核心工作流及目录发现的进程测试使用 `skillsec`。
+
 ## 交付与验收
 
 核心迁移和 Agent Hook 接入分为两个 PR。当前 PR 包含 Rust 核心、公共 Action Runtime 审计、

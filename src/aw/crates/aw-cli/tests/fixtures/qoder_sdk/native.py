@@ -28,11 +28,11 @@ evidence.mkdir(parents=True, exist_ok=True)
 fixture = Path(__file__).resolve().parent
 sdk = args.npm.resolve() / "node_modules/@qoder-ai/qoder-agent-sdk"
 metadata = json.loads((sdk / "package.json").read_text())
-assert metadata["version"] == "1.0.54" and metadata["qoderCliVersion"] == "1.1.74"
+assert metadata["version"] == "1.0.56" and metadata["qoderCliVersion"] == "1.1.78"
 worker = sdk / "dist/_worker/qoder-worker-runtime.obf.mjs"
 assert (
     subprocess.check_output(["node", str(worker), "--version"], text=True, timeout=15).strip()
-    == "1.1.74"
+    == "1.1.78"
 )
 assert os.environ.get("QODER_PERSONAL_ACCESS_TOKEN"), "Qoder native acceptance requires a PAT"
 with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:

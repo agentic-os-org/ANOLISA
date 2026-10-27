@@ -31,11 +31,11 @@ def redact_logs(directory: Path, secret: str) -> None:
                 path.write_text(text.replace(secret, "[REDACTED]"))
 
 
-def verify_bundle(directory: Path, expected: str) -> None:
+def verify_bundle(directory: Path, expected: str, required: set[str] | None = None) -> None:
     """Bind every executable to the package build and candidate commit."""
     if (directory / "source-sha.txt").read_text().strip() != sha(expected):
         raise ValueError("native binary bundle belongs to a different commit")
-    required = {
+    required = required if required is not None else {
         "aw",
         "aw-provider-tokenless",
         "aw-provider-sec-core",
@@ -230,7 +230,7 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
             ],
             AW,
         )
-    if "@qoder-ai/qoder-agent-sdk@1.0.54" in row.get("npm_packages", []):
+    if "@qoder-ai/qoder-agent-sdk@1.0.56" in row.get("npm_packages", []):
         commands.run(["node", str(npm / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs")], AW)
     if (npm / "package-lock.json").exists():
         shutil.copyfile(npm / "package-lock.json", commands.evidence / "npm-lock.json")

@@ -59,3 +59,6 @@
 # ws-ckpt prebuilt build and packaging ownership
 /.github/actions/build-ws-ckpt-prebuilt/ @yummypeng
 /.github/workflows/ws-ckpt-prebuilt-ci.yaml @yummypeng
+
+# Shared benchmark runners and their documentation.
+/benchmark/                             @alex-yuxi                 # auto-label: component:benchmark

@@ -153,8 +153,13 @@ named sibling modules, preserve test entrypoints and assertions, and avoid
 compressing code or adding size exemptions. Never add `mod.rs` except the
 repository-approved `tests/common/mod.rs` convention.
 
-Only PRs changing `src/aw/**` or `providers/**` automatically run AW CI. Component internals belong
-in component CI; explicitly validate public contract changes consumed by AW.
+AW/Provider and AW workflow changes run the full AW gate. Tokenless public
+CLI/protocol/runtime/statistics source, Provider protocol/executor source, RTK
+and package-builder inputs, dependency locks and toolchains also select real
+consumer compatibility through scripts/check.py. Ordinary AW runtime, installer,
+documentation and shared-crate test changes retain fixture coverage without a
+real backend build. Preserve Tokenless's independent component CI. Other
+component internals remain in component CI; validate newly consumed contracts explicitly.
 Keep daily checks credential-free. The nightly integration workflow builds all
 Preview packages once and reuses checksummed candidate-SHA binaries for pinned
 native acceptance. Preserve exact version evidence, bounded processes, complete
@@ -163,7 +168,10 @@ integration result. Prepare private native tool environments; do not weaken
 admission to accommodate runner loader overrides or writable shared caches.
 Rerun on the exact release SHA before release.
 
-CI checks belong to the existing `AW / required` workflow and local entrypoint.
+The existing `AW / required` check joins parallel AW and Tokenless jobs after
+scope selection. Keep independent build caches, whole-job results and tested
+SHAs; a late artifact failure or cancellation must still block the result.
+Local entrypoints retain the same checks without requiring Actions orchestration.
 Scope selection must use the complete change and preserve candidate/tested SHA
 identity. Compile test harnesses once, enumerate them directly and reuse the
 build for the workspace run. Do not save CI time by skipping shared security,

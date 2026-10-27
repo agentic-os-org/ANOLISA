@@ -176,7 +176,7 @@ def load_captured(
                 if since_ns is not None and "timestamp_ns" in columns:
                     query += " AND timestamp_ns >= ?"
                     parameters.append(since_ns)
-                rows = connection.execute(query, parameters).fetchall()
+                rows = connection.execute(query, parameters)
                 for request_id, total in rows:
                     request_id = str(request_id)
                     if (not prefix or request_id.startswith(prefix)) and (
@@ -202,7 +202,7 @@ def load_captured(
                 if since_ns is not None and "start_timestamp_ns" in columns:
                     query += " WHERE start_timestamp_ns >= ?"
                     parameters.append(since_ns)
-                rows = connection.execute(query, parameters).fetchall()
+                rows = connection.execute(query, parameters)
                 for row in rows:
                     record = dict(zip(selected, row))
                     identifiers = {
@@ -299,29 +299,30 @@ def load_captured_incremental(
                         else " WHERE start_timestamp_ns >= ?"
                     )
                     parameters.append(since_ns)
-                rows = [
-                    row if has_id else (None, *row) for row in connection.execute(query, parameters)
-                ]
-                if has_id and pending_genai_ids:
-                    pending_rows = []
-                    remaining_ids = set(pending_genai_ids)
+
+                def rows() -> Iterable[tuple[Any, ...]]:
+                    # Keep payload memory bounded even when the capture database
+                    # contains a large backlog outside this benchmark's prefix.
+                    for row in connection.execute(query, parameters):
+                        yield row if has_id else (None, *row)
+                    if not has_id:
+                        return
                     pending_list = sorted(pending_genai_ids)
                     for start in range(0, len(pending_list), 500):
                         chunk = pending_list[start : start + 500]
+                        missing = set(chunk)
                         placeholders = ",".join("?" for _ in chunk)
-                        refreshed = list(
-                            connection.execute(
-                                f"SELECT id, {', '.join(selected)} "
-                                f"FROM genai_events WHERE id IN ({placeholders})",
-                                chunk,
-                            )
-                        )
-                        pending_rows.extend(refreshed)
-                        remaining_ids.difference_update(row[0] for row in refreshed)
-                    # Retention-deleted rows cannot receive a later completion.
-                    next_pending_ids.difference_update(remaining_ids)
-                    rows.extend(pending_rows)
-                for row in rows:
+                        for row in connection.execute(
+                            f"SELECT id, {', '.join(selected)} "
+                            f"FROM genai_events WHERE id IN ({placeholders})",
+                            chunk,
+                        ):
+                            missing.discard(row[0])
+                            yield row
+                        # Retention-deleted rows cannot receive a later completion.
+                        next_pending_ids.difference_update(missing)
+
+                for row in rows():
                     row_id = int(row[0]) if row[0] is not None else None
                     record = dict(zip(selected, row[1:]))
                     identifiers = {

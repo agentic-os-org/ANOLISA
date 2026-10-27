@@ -115,6 +115,7 @@ warning and should be justified or replaced before review.
 | `src/skillfs/` | `skillfs` |
 | `src/ktuner/` | `ktuner` |
 | `src/aw/` | `aw` |
+| `benchmark/` | `benchmark` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |

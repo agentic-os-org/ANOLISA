@@ -208,6 +208,7 @@ impl Event<'_> {
 
     /// Execute one retained step, preserving failure details and its `on_error` action.
     ///
+    /// Tool-selector misses retain their claim and return a neutral skipped result.
     /// No implicit shell, scheduling, retry or native action is performed. An empty
     /// effect list adds no restriction and never grants native permission. Cleanup
     /// failures remain transport failures even when `on_error` requests blocking.
@@ -276,66 +277,75 @@ impl Event<'_> {
             .lock()
             .map_err(|_| Error::Invalid("callback view poisoned"))?
             .clone();
-        let (record, result) = match &step.execution {
-            StepExecution::Native => {
-                let input = callback
-                    .as_ref()
-                    .map(|(_, input)| input)
-                    .or(self.native_input.as_ref())
-                    .ok_or(Error::Invalid("native callback input is missing"))?;
-                transport.native(record, input, environment)
-            }
-            StepExecution::Provider { effects, .. } | StepExecution::Hook { effects, .. } => {
-                let request_id = record.request_id.clone();
-                let operation = if let StepExecution::Provider { operation, .. } = &step.execution {
-                    operation.as_str()
-                } else {
-                    "invoke"
-                };
-                // Bind one immutable event across callbacks; projections belong
-                // only to the final replacement Provider, not earlier observers.
-                let mut event = callback
-                    .as_ref()
-                    .map(|(value, _)| value)
-                    .unwrap_or(&self.value)
-                    .clone();
-                if !step.execution.replaces_result() {
-                    if let Some(tool) = event["tool"].as_object_mut() {
-                        tool.remove("result_projection");
-                    }
+        let value = callback
+            .as_ref()
+            .map(|(value, _)| value)
+            .unwrap_or(&self.value);
+        let (record, result) = if !step.matches_tool(value) {
+            transport.skipped(record, value)
+        } else {
+            match &step.execution {
+                StepExecution::Native => {
+                    let input = callback
+                        .as_ref()
+                        .map(|(_, input)| input)
+                        .or(self.native_input.as_ref())
+                        .ok_or(Error::Invalid("native callback input is missing"))?;
+                    transport.native(record, input, environment)
                 }
-                let build = |budget_ms| {
-                    let value = json!({
-                        "api_version": VERSION, "method": "invoke", "request_id": request_id,
-                        "operation": operation, "config_revision": self.host.revision,
-                        "budget_ms": budget_ms, "allowed_effects": effects,
-                        "config": provider.config, "event": event,
-                    });
-                    if matches!(step.execution, StepExecution::Hook { .. }) {
-                        self.host.protocol.bind_hook_invocation(value)
-                    } else {
-                        self.host.protocol.bind_invocation(value)
+                StepExecution::Provider { effects, .. } | StepExecution::Hook { effects, .. } => {
+                    let request_id = record.request_id.clone();
+                    let operation =
+                        if let StepExecution::Provider { operation, .. } = &step.execution {
+                            operation.as_str()
+                        } else {
+                            "invoke"
+                        };
+                    // Bind one immutable event across callbacks; projections belong
+                    // only to the final replacement Provider, not earlier observers.
+                    let mut event = callback
+                        .as_ref()
+                        .map(|(value, _)| value)
+                        .unwrap_or(&self.value)
+                        .clone();
+                    if !step.execution.replaces_result() {
+                        if let Some(tool) = event["tool"].as_object_mut() {
+                            tool.remove("result_projection");
+                        }
                     }
-                };
-                let Exchange { record, result } =
-                    if let StepExecution::Hook { reason_code, .. } = &step.execution {
-                        transport.hook(record, build, reason_code.as_deref())
-                    } else {
-                        transport.exchange(record, build)
+                    let build = |budget_ms| {
+                        let value = json!({
+                            "api_version": VERSION, "method": "invoke", "request_id": request_id,
+                            "operation": operation, "config_revision": self.host.revision,
+                            "budget_ms": budget_ms, "allowed_effects": effects,
+                            "config": provider.config, "event": event,
+                        });
+                        if matches!(step.execution, StepExecution::Hook { .. }) {
+                            self.host.protocol.bind_hook_invocation(value)
+                        } else {
+                            self.host.protocol.bind_invocation(value)
+                        }
                     };
-                let result = result.and_then(|reply| match reply {
-                    Reply::Invocation(outcome) => Ok(StepOutput::Provider(outcome)),
-                    _ => Err(Failure::Protocol(aw_provider::Error::Invalid(
-                        "unexpected invocation reply type",
-                    ))),
-                });
-                (record, result)
+                    let Exchange { record, result } =
+                        if let StepExecution::Hook { reason_code, .. } = &step.execution {
+                            transport.hook(record, build, reason_code.as_deref())
+                        } else {
+                            transport.exchange(record, build)
+                        };
+                    let result = result.and_then(|reply| match reply {
+                        Reply::Invocation(outcome) => Ok(StepOutput::Provider(outcome)),
+                        _ => Err(Failure::Protocol(aw_provider::Error::Invalid(
+                            "unexpected invocation reply type",
+                        ))),
+                    });
+                    (record, result)
+                }
             }
         };
-        let failure_action = result.is_err().then_some(if step.on_error == "block" {
-            FailureAction::Block
-        } else {
-            FailureAction::Report
+        let failure_action = result.is_err().then_some(match step.on_error.as_str() {
+            "block" => FailureAction::Block,
+            "withhold_result" => FailureAction::WithholdResult,
+            _ => FailureAction::Report,
         });
         Ok(Invocation {
             record,

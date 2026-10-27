@@ -94,7 +94,9 @@ cache failure cannot fail the event or change audit health. Reads clone at most 
 entries, holding no lock across Provider I/O. No new persistent history is created;
 restart clears the ring while existing keyed durable audit remains available.
 Projection includes Provider/step, method, duration, status, failure category,
-failure action and structured policy block request. No raw input/output, native
+failure action and structured policy block request. The optional `kind` field
+distinguishes `provider`, `native` and `skipped`; a skipped completion starts no
+invocation process. Readers also accept projections from services that omit `kind`. No raw input/output, native
 environment, replacement contents or approval receipt is retained there.
 
 Inspect pins configuration revision and service generation. It rechecks the same

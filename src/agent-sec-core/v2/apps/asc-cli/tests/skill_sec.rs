@@ -31,7 +31,7 @@ async fn invoke(socket: &Path, arguments: &[&str]) -> (i32, Value, String) {
     let mut args: Vec<std::ffi::OsString> = vec![
         "--socket".into(),
         socket.as_os_str().into(),
-        "skill-ledger".into(),
+        "skillsec".into(),
     ];
     args.extend(arguments.iter().map(Into::into));
     let output = tokio::task::spawn_blocking(move || common::run(&args))
@@ -315,7 +315,7 @@ async fn assert_root_identity_contract(socket: &Path, path: &str, directory: &Pa
                 .arg(socket)
                 .arg("--timeout-ms")
                 .arg("5000")
-                .arg("skill-ledger")
+                .arg("skillsec")
                 .args(&arguments)
                 .uid(1001)
                 .gid(1001)
@@ -379,7 +379,7 @@ async fn assert_user_can_edit_after_rollback(socket: &Path, directory: &Path) {
         .arg("--socket")
         .arg(socket)
         .args([
-            "skill-ledger",
+            "skillsec",
             "decide",
             skill.to_str().unwrap(),
             "--action",
@@ -472,7 +472,7 @@ fn certify_cleanup_is_projected_before_output_and_never_changes_certification_st
         command
             .arg("--socket")
             .arg(&socket)
-            .args(["skill-ledger", "certify", "/fixture/skill", "--findings"])
+            .args(["skillsec", "certify", "/fixture/skill", "--findings"])
             .arg(&findings);
         if case != "retained" {
             command.arg("--delete-findings");

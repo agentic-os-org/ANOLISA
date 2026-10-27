@@ -49,6 +49,9 @@ if method == "describe":
         }
         for name in ["check", "second", "record"]
     ]
+    reply["operations"].append({
+        "name": "replace", "events": ["tool.after"], "effects": ["replace_result"]
+    })
 elif method == "invoke":
     native = request["event"]["native"]
     scenario = native["scenario"]
@@ -66,6 +69,8 @@ elif method == "invoke":
     if scenario in ["block", "observe", "wait"]:
         effect = "observe" if scenario == "wait" else scenario
         reply["effects"] = [{"type": effect, "reason_code": "fixture_policy"}]
+    if scenario == "replace" and request["operation"] == "replace":
+        reply["effects"] = [{"type": "replace_result", "text": "short result"}]
 
 if scenario == "wrong-id":
     reply["request_id"] = "uncorrelated-response"

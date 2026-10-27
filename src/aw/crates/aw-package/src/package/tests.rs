@@ -108,6 +108,7 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
         "src/tokenless/crates/tokenless-stats/src/home.rs",
         "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
+        "src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs",
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
@@ -465,6 +466,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
         "src/tokenless/crates/tokenless-stats/src/home.rs",
         "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
+        "src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs",
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
@@ -509,7 +511,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         .as_str()
         .unwrap()
         .contains("relative path"));
-    for module in ["home.rs", "path_policy.rs"] {
+    for module in ["home.rs", "path_policy.rs", "rtk_outcome.rs"] {
         let origin = format!("src/tokenless/crates/tokenless-stats/src/{module}");
         let input = provenance["inputs"]
             .as_array()
@@ -546,12 +548,13 @@ fn rtk_preparation_uses_fresh_owned_source_and_preserves_cached_edits() {
     fs::create_dir_all(&modules).unwrap();
     fs::write(modules.join("home.rs"), "trusted home module").unwrap();
     fs::write(modules.join("path_policy.rs"), "shared state path module").unwrap();
+    fs::write(modules.join("rtk_outcome.rs"), "call-scoped receipt module").unwrap();
     let source = rtk::prepare_using(repo, &AtomicBool::new(false), |root| {
         let destination = root.join("third_party/rtk");
         assert!(!destination.exists());
         fs::create_dir_all(destination.join("src/core"))?;
-        // Match the two relative module includes in the official RTK patch.
-        for name in ["home.rs", "path_policy.rs"] {
+        // Match the relative module includes in the official RTK patch.
+        for name in ["home.rs", "path_policy.rs", "rtk_outcome.rs"] {
             let relative = destination
                 .join("src/core/../../../../crates/tokenless-stats/src")
                 .join(name);

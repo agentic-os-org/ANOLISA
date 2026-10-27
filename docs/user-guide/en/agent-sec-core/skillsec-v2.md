@@ -3,8 +3,11 @@
 [中文版](../../zh/agent-sec-core/skillsec-v2.md)
 
 SkillSec scans Skill content, signs its results, retains recoverable versions and publishes the
-selected version to SkillFS. Built-in scanning runs locally without model calls. The Rust CLI keeps
-the `agent-sec-cli skill-ledger` entry point and sends operations to one root daemon.
+selected version to SkillFS. Built-in scanning runs locally without model calls. The Rust CLI uses
+`agent-sec-cli skillsec` and sends operations to one root daemon. `skill-ledger` remains a
+compatibility alias with the same subcommands, options, output and exit codes. Existing Hook
+adapters and scripts can keep using it; new commands should use `skillsec`. Capability IDs,
+`SKILL_LEDGER_*` environment variables, RPC methods and stored data paths are unchanged.
 
 This page covers the V2 core and its Hook adapters. The [Skill Ledger guide](skill-ledger.md)
 retains the V1 reference and host-specific matching and policy controls. The adapters retain their
@@ -55,7 +58,7 @@ that the daemon is available:
 
 ```sh
 sudo systemctl status agent-sec-core.service
-agent-sec-cli skill-ledger status
+agent-sec-cli skillsec status
 ```
 
 If the RPM was installed into an image or container without a systemd manager, or the service was
@@ -100,7 +103,7 @@ directory must already exist; it creates the private state directory if absent.
 
 Restart the Agent after installing the matching plugin or changing its trusted launch environment.
 Keep `AGENT_SEC_DAEMON_SOCKET` consistent with the daemon when using a non-default socket. Before
-loading a Skill, run `agent-sec-cli skill-ledger status` and scan it explicitly if startup has not
+loading a Skill, run `agent-sec-cli skillsec status` and scan it explicitly if startup has not
 established V2 trust; a V1 key or manifest does not establish V2 trust.
 
 | Host | Query | Initialization on a matched Skill call | Default policy |
@@ -236,14 +239,14 @@ initializes only the shared key. `scan` also initializes a missing key; neither 
 replaces a damaged key.
 
 ```sh
-agent-sec-cli skill-ledger init --no-baseline
-agent-sec-cli skill-ledger list-scanners
-agent-sec-cli skill-ledger analyze /path/to/skill
-agent-sec-cli skill-ledger scan /path/to/skill
-agent-sec-cli skill-ledger check /path/to/skill
-agent-sec-cli skill-ledger show /path/to/skill
-agent-sec-cli skill-ledger audit /path/to/skill --verify-snapshots
-agent-sec-cli skill-ledger status --verbose
+agent-sec-cli skillsec init --no-baseline
+agent-sec-cli skillsec list-scanners
+agent-sec-cli skillsec analyze /path/to/skill
+agent-sec-cli skillsec scan /path/to/skill
+agent-sec-cli skillsec check /path/to/skill
+agent-sec-cli skillsec show /path/to/skill
+agent-sec-cli skillsec audit /path/to/skill --verify-snapshots
+agent-sec-cli skillsec status --verbose
 ```
 
 `analyze` requires an authorized Skill path but remains read-only and does not initialize keys or write a Ledger. The default built-ins are
@@ -275,14 +278,14 @@ Import an external JSON findings report through the CLI. Custom `skill`, `cli` o
 entries are import-only; the root daemon never executes their configured commands.
 
 ```sh
-agent-sec-cli skill-ledger certify /path/to/skill --findings /path/to/findings.json --scanner skill-vetter
-agent-sec-cli skill-ledger decide /path/to/skill --action allow --reason 'Reviewed this version'
-agent-sec-cli skill-ledger decide /path/to/skill --action always_allow
-agent-sec-cli skill-ledger decide /path/to/skill --action block
-agent-sec-cli skill-ledger decide /path/to/skill --action rollback --version v000001
-agent-sec-cli skill-ledger decide /path/to/skill --clear
-agent-sec-cli skill-ledger export /path/to/skill --version v000001 --output /path/to/empty-export
-agent-sec-cli skill-ledger activate /path/to/skill
+agent-sec-cli skillsec certify /path/to/skill --findings /path/to/findings.json --scanner skill-vetter
+agent-sec-cli skillsec decide /path/to/skill --action allow --reason 'Reviewed this version'
+agent-sec-cli skillsec decide /path/to/skill --action always_allow
+agent-sec-cli skillsec decide /path/to/skill --action block
+agent-sec-cli skillsec decide /path/to/skill --action rollback --version v000001
+agent-sec-cli skillsec decide /path/to/skill --clear
+agent-sec-cli skillsec export /path/to/skill --version v000001 --output /path/to/empty-export
+agent-sec-cli skillsec activate /path/to/skill
 ```
 
 `allow` approves the selected version; `always_allow` persists the broader manual approval.

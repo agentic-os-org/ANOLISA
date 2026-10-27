@@ -10,7 +10,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 if sys.argv[1:] == ["--version"]:
-    print(os.environ.get("FAKE_QWENPAW_VERSION", "QwenPaw, version 2.2.2b4"))
+    print(os.environ.get("FAKE_QWENPAW_VERSION", "QwenPaw, version 2.2.2.post1"))
     raise SystemExit(0)
 
 root = Path(os.environ["FAKE_ROOT"])
@@ -50,7 +50,13 @@ for name, values in {
 spec = importlib.util.spec_from_file_location("fixture_plugin", plugin_path)
 plugin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plugin)
-plugin.version = lambda name: "2.2.2b4" if name == "qwenpaw" else "2.0.9"
+plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
+# This fixture covers legacy callback transport. Real resident construction and
+# Coordinator dispatch are exercised by native_resident.py with the pinned SDK.
+config_path = Path(os.environ["AW_NATIVE_CONFIG"])
+config = json.loads(config_path.read_text())
+config["resident"] = False
+config_path.write_text(json.dumps(config))
 factories, startup = [], []
 plugin.plugin.register(SimpleNamespace(
     config={},

@@ -129,6 +129,14 @@
                     "github": "jfeng18"
                 }
             ]
+        },
+        {
+            "label": "component:benchmark",
+            "maintainers": [
+                {
+                    "github": "alex-yuxi"
+                }
+            ]
         }
     ],
     "default": {

@@ -89,7 +89,37 @@ def output(**values: str) -> None:
             stream.write(lines)
 
 
-def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
+def tokenless_input(path: str) -> bool:
+    """Select real backend contracts only for their source and build inputs."""
+    return path.startswith((
+        "providers/tokenless/src/", "providers/tokenless/tests/",
+        "src/tokenless/crates/tokenless-cli/src/", "src/tokenless/crates/tokenless-protocol/src/",
+        "src/tokenless/crates/tokenless-runtime/src/", "src/tokenless/crates/tokenless-stats/src/",
+        "src/tokenless/third_party/patches/", "src/aw/crates/aw-provider/src/",
+        "src/aw/crates/aw-provider/schemas/", "src/aw/crates/aw-exec/src/",
+        "src/aw/crates/aw-package/src/package/", "src/aw/crates/aw-package/src/manifest/",
+        "src/aw/crates/aw-package/src/bin/support/",
+    )) or path in {
+        "providers/tokenless/Cargo.toml", "providers/tokenless/Cargo.lock",
+        "providers/tokenless/rust-toolchain.toml", "src/tokenless/rust-toolchain.toml",
+        "src/tokenless/Cargo.toml", "src/tokenless/Cargo.lock",
+        "src/tokenless/crates/tokenless-cli/Cargo.toml",
+        "src/tokenless/crates/tokenless-protocol/Cargo.toml",
+        "src/tokenless/crates/tokenless-runtime/Cargo.toml",
+        "src/tokenless/crates/tokenless-stats/Cargo.toml",
+        "src/tokenless/scripts/setup-rtk.sh", "src/aw/Cargo.toml", "src/aw/Cargo.lock",
+        "src/aw/rust-toolchain.toml", "src/aw/crates/aw-provider/Cargo.toml",
+        "src/aw/crates/aw-exec/Cargo.toml", "src/aw/crates/aw-package/Cargo.toml",
+        "src/aw/crates/aw-package/src/lib.rs", "src/aw/crates/aw-package/src/package.rs",
+        "src/aw/crates/aw-package/src/manifest.rs", "src/aw/crates/aw-package/src/bin/aw-build.rs",
+        "src/aw/scripts/check_tokenless.py", "src/aw/scripts/check.py",
+        "src/aw/tests/test_ci_tokenless.py", "src/aw/tests/test_ci_daily_workflow.py",
+        ".github/workflows/aw-ci.yml",
+    }
+
+
+def scope(event_name: str, event: dict, actual: str, repo: Path = REPO,
+          *, compatibility: bool = False) -> bool:
     """Select the complete AW gate for relevant event changes."""
     comparisons = []
     if event_name == "pull_request":
@@ -124,11 +154,9 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
             )
         )
     return any(
-        path.startswith(("src/aw/", "providers/"))
-        or (
-            event_name != "pull_request"
-            and path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-preview.yml"}
-        )
+        tokenless_input(path) if compatibility else
+        (path.startswith(("src/aw/", "providers/")) or tokenless_input(path)
+         or path == ".github/workflows/aw-preview.yml")
         for path in changed
     )
 
@@ -244,6 +272,13 @@ def required(env: dict[str, str]) -> None:
         print(f"AW gate passed for {actual}")
     else:
         raise ValueError("AW checks missing, unsuccessful, or tested a different SHA")
+    selected = env.get("TOKENLESS_SELECTED")
+    if selected == "true":
+        if (env.get("TOKENLESS_RESULT") != "success"
+                or env.get("TOKENLESS_TESTED_SHA") != actual):
+            raise ValueError("Tokenless compatibility missing, unsuccessful, or stale")
+    elif selected != "false" or env.get("TOKENLESS_RESULT") != "skipped":
+        raise ValueError("Tokenless compatibility selection/result is invalid")
 
 
 def interrupted(signum: int, _frame: object) -> None:
@@ -264,7 +299,10 @@ def main() -> int:
             selftest(scope_only=True)
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
             selected = scope(os.environ["GITHUB_EVENT_NAME"], event, actual)
-            output(selected=str(selected).lower(), candidate_sha=actual)
+            tokenless = scope(os.environ["GITHUB_EVENT_NAME"], event, actual,
+                              compatibility=True)
+            output(selected=str(selected).lower(), tokenless=str(tokenless).lower(),
+                   candidate_sha=actual)
         elif command == "check":
             check()
         else:

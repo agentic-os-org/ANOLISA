@@ -6,16 +6,25 @@ on:
     paths:
       - 'src/aw/**'
       - 'providers/**'
+      - 'src/tokenless/**'
+      - '.github/workflows/aw-preview.yml'
       - '.github/workflows/aw-ci.yml'
   pull_request:
     paths:
+      - '.github/workflows/aw-ci.yml'
       - 'src/aw/**'
       - 'providers/**'
+      - 'src/tokenless/**'
+      - '.github/workflows/aw-preview.yml'
   merge_group:
   workflow_dispatch:
     inputs:
       integration:
         description: Also run the nightly suites on this exact workflow commit
+        type: boolean
+        default: false
+      credential_free:
+        description: Validate an unmerged fork without hosted-model credentials
         type: boolean
         default: false
 
@@ -37,15 +46,18 @@ jobs:
     uses: ./.github/workflows/aw-preview.yml
     with:
       candidate_sha: ${{ github.sha }}
+      credential_free: ${{ inputs.credential_free }}
     secrets:
-      QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+      QODER_PERSONAL_ACCESS_TOKEN: ${{ !inputs.credential_free && secrets.QODER_PERSONAL_ACCESS_TOKEN || '' }}
 
-  required:
-    name: AW / required
-    runs-on: >-
-      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
-      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
-    timeout-minutes: 35
+  scope:
+    name: AW / scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      selected: ${{ steps.scope.outputs.selected }}
+      tokenless: ${{ steps.scope.outputs.tokenless }}
+      candidate_sha: ${{ steps.scope.outputs.candidate_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,24 +72,35 @@ jobs:
         id: scope
         run: python3 src/aw/scripts/check.py scope
 
-      - name: Restore the full working tree for Cargo package discovery
-        if: steps.scope.outputs.selected == 'true'
-        run: git sparse-checkout disable
+  checks:
+    name: AW / contract checks
+    needs: scope
+    if: needs.scope.outputs.selected == 'true'
+    runs-on: >-
+      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
+      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
+    timeout-minutes: 35
+    outputs:
+      tested_sha: ${{ steps.checks.outputs.tested_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          # Migration acceptance builds the pinned historical installer.
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
-        if: steps.scope.outputs.selected == 'true'
         with:
           python-version: '3.12.3'
       - uses: actions/setup-node@v4
-        if: steps.scope.outputs.selected == 'true'
         with:
           node-version: '24.15.0'
       - name: Prepare the pinned Rust toolchain
-        if: steps.scope.outputs.selected == 'true'
         working-directory: src/aw
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
-        if: steps.scope.outputs.selected == 'true'
         with:
+          key: aw-checks
           workspaces: |
             src/aw
             providers/agent-sec-core
@@ -85,16 +108,75 @@ jobs:
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks
-        if: steps.scope.outputs.selected == 'true'
         id: checks
         run: python3 src/aw/scripts/check.py
 
+  tokenless:
+    name: AW / Tokenless compatibility
+    needs: scope
+    if: needs.scope.outputs.tokenless == 'true'
+    runs-on: >-
+      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
+      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    outputs:
+      tested_sha: ${{ steps.tokenless.outputs.tested_sha }}
+    steps:
+      - name: Select isolated Tokenless evidence
+        run: echo "AW_TOKENLESS_EVIDENCE=$RUNNER_TEMP/aw-tokenless-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.3'
+      - name: Prepare the pinned Rust toolchain
+        working-directory: src/aw
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aw-tokenless
+          workspaces: |
+            src/aw
+            providers/tokenless
+            src/tokenless
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Validate real Tokenless and RTK consumer contracts
+        id: tokenless
+        run: python3 -B src/aw/scripts/check_tokenless.py --output "$AW_TOKENLESS_EVIDENCE"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.tokenless.outcome != '' && steps.tokenless.outcome != 'skipped'
+        with:
+          name: aw-tokenless-compatibility-${{ github.sha }}
+          path: |
+            ${{ env.AW_TOKENLESS_EVIDENCE }}/*.json
+            ${{ env.AW_TOKENLESS_EVIDENCE }}/*.jsonl
+            ${{ env.AW_TOKENLESS_EVIDENCE }}/*.log
+          retention-days: 7
+          if-no-files-found: error
+
+  required:
+    name: AW / required
+    needs: [scope, checks, tokenless]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /src/aw/scripts/check.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - name: Require the expected result
-        if: always()
         env:
-          SCOPE_RESULT: ${{ steps.scope.outcome }}
-          CHECKS_RESULT: ${{ steps.checks.outcome }}
-          SELECTED: ${{ steps.scope.outputs.selected }}
-          CANDIDATE_SHA: ${{ steps.scope.outputs.candidate_sha }}
-          TESTED_SHA: ${{ steps.checks.outputs.tested_sha }}
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          SELECTED: ${{ needs.scope.outputs.selected }}
+          CANDIDATE_SHA: ${{ needs.scope.outputs.candidate_sha }}
+          TESTED_SHA: ${{ needs.checks.outputs.tested_sha }}
+          TOKENLESS_SELECTED: ${{ needs.scope.outputs.tokenless }}
+          TOKENLESS_RESULT: ${{ needs.tokenless.result }}
+          TOKENLESS_TESTED_SHA: ${{ needs.tokenless.outputs.tested_sha }}
         run: python3 src/aw/scripts/check.py required

@@ -23,11 +23,15 @@ request = json.loads(raw)
 if (args.protocol == "provider" and request["method"] == "describe"
         and os.environ.get("FAKE_PREPARE_BLOCK") == "1"
         and not (args.root / "allow-prepare").exists()):
-    (args.root / "preparing.pid").write_text(str(os.getpid()))
+    preparing = args.root / f"preparing-{os.getpid()}.tmp"
+    preparing.write_text(str(os.getpid()))
+    preparing.replace(args.root / "preparing.pid")
     time.sleep(8)
 if (args.protocol == "provider" and request["method"] == "describe"
         and os.environ.get("FAKE_PREPARE_WAIT") == "1"):
-    (args.root / "preparing.pid").write_text(str(os.getpid()))
+    preparing = args.root / f"preparing-{os.getpid()}.tmp"
+    preparing.write_text(str(os.getpid()))
+    preparing.replace(args.root / "preparing.pid")
     deadline = time.monotonic() + 5
     while not (args.root / "allow-prepare").exists():
         if time.monotonic() >= deadline:

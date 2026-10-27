@@ -638,6 +638,15 @@ fn rewrite_after_doc_label(line: &str, rewrite: impl Fn(&str) -> String) -> Stri
 /// line — an argument of an earlier rewritten command — keeps its original
 /// context.
 fn rewrite_invocation_tokens(line: &str, needle: &str, candidates: &[(&str, &str)]) -> String {
+    rewrite_invocation_tokens_if(line, needle, candidates, |_, _, _| true)
+}
+
+fn rewrite_invocation_tokens_if(
+    line: &str,
+    needle: &str,
+    candidates: &[(&str, &str)],
+    accept: impl Fn(&str, &str, &str) -> bool,
+) -> String {
     let mut output = String::with_capacity(line.len());
     let mut copied = 0; // bytes of `line` already emitted
     for (pos, _) in line.match_indices(needle) {
@@ -653,7 +662,10 @@ fn rewrite_invocation_tokens(line: &str, needle: &str, candidates: &[(&str, &str
         let token_ends = line[end..].chars().next().is_none_or(|ch| {
             ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | ')' | '`' | '<' | '>')
         });
-        if token_ends && is_command_position(line, pos) {
+        if token_ends
+            && is_command_position(line, pos)
+            && accept(&line[..pos], matched, &line[end..])
+        {
             output.push_str(&line[copied..pos]);
             output.push_str(replacement);
             copied = end;
@@ -740,7 +752,7 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
         let run = format!("{node_pm} run");
         let test = format!("{node_pm} test");
         result = rewrite_after_doc_label(&result, |commands| {
-            rewrite_invocation_tokens(
+            rewrite_invocation_tokens_if(
                 commands,
                 "npm",
                 &[
@@ -748,11 +760,33 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
                     ("npm run", run.as_str()),
                     ("npm test", test.as_str()),
                 ],
+                |prefix, command, tail| {
+                    // Yarn installs the manifest with `install`, but adds named
+                    // packages with `add` and has different flags across versions.
+                    // Preserve argument-bearing npm installs instead of guessing
+                    // their translation. Only an unambiguous end of command is safe.
+                    node_pm != "yarn"
+                        || command != "npm install"
+                        || bare_install_ends_here(prefix, tail)
+                },
             )
         });
     }
 
     result
+}
+
+fn bare_install_ends_here(prefix: &str, tail: &str) -> bool {
+    let tail = tail.trim_start();
+    match tail.chars().next() {
+        None | Some(';' | '|' | ')' | '#') => true,
+        // Bash's &> and &>> redirect output without ending the command.
+        Some('&') => !tail.starts_with("&>"),
+        // Only recognize a standalone inline span. A backtick elsewhere
+        // can start a command substitution that supplies package arguments.
+        Some('`') => prefix.trim() == "`" && tail.trim_end() == "`",
+        _ => false,
+    }
 }
 
 /// Choose the best available Node package manager (pnpm > yarn > npm).

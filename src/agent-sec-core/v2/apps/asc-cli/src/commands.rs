@@ -51,7 +51,7 @@ pub(crate) enum Command {
     /// List the caller's own security events from the daemon.
     Events(EventsCommand),
     /// Manage Skill scanning, signatures, history and activation.
-    #[command(subcommand)]
+    #[command(name = "skillsec", alias = "skill-ledger", subcommand)]
     SkillLedger(skill_ledger::SkillLedgerCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
     Capabilities(CapabilitiesCommand),

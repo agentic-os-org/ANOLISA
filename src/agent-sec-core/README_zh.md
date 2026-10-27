@@ -43,7 +43,10 @@ CLI 命令与集成 capability surface。
 
 ## V2 SkillSec 与 Policy CLI
 
-Rust V2 核心通过现有 `skill-ledger` 命令提供 **SkillSec**：本地扫描、系统密钥签名、版本历史、
+使用 `agent-sec-cli skillsec status` 查看状态，或运行 `agent-sec-cli skillsec --help`。
+旧命令 `skill-ledger` 保留为行为一致的兼容别名；现有 Hook 能力 ID、环境变量及存储数据保持不变。
+
+Rust V2 核心通过 `agent-sec-cli skillsec` 命令提供 **SkillSec**：本地扫描、系统密钥签名、版本历史、
 人工决策、回滚及 SkillFS 激活由一个 root daemon 统一处理。所有本地用户均可管理已启用的默认目录、
 管理员配置范围或已认证 SkillFS 挂载内的 Skill。daemon 启动后自动授权并在后台扫描系统默认目录
 及所有本地账户 HOME 下的标准 Skill 目录，这些位置无需用户配置。`enableDefaultSkillDirs: false`

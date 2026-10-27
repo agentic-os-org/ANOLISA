@@ -564,9 +564,9 @@ class RegistrationTests(unittest.TestCase):
                     MODULE.AwPlugin().register(SimpleNamespace(config={}))
 
     def test_wrong_runtime_or_disabled_plugin_never_registers(self):
-        incompatible = {"qwenpaw": "2.2.2b4", "agentscope": "2.0.8"}
+        incompatible = {"qwenpaw": "2.2.2.post1", "agentscope": "2.0.8"}
         with patch.object(MODULE, "version", side_effect=incompatible.__getitem__):
-            with self.assertRaisesRegex(RuntimeError, "AgentScope 2.0.9"):
+            with self.assertRaisesRegex(RuntimeError, "AgentScope 2.0.10"):
                 MODULE.AwPlugin().register(SimpleNamespace())
         with patch.object(MODULE, "version", return_value="wrong"), self.assertRaisesRegex(RuntimeError, "requires"):
             MODULE.AwPlugin().register(SimpleNamespace())

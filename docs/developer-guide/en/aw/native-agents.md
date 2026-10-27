@@ -11,7 +11,7 @@ starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
 The current Linux source build supports Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10, Hermes revision `952c941e` and explicit
 Claude SDK 0.2.88 workers with bundled CLI 2.1.161, plus Pi Coding Agent/Core SDK 0.84.2 workers
 and AgentScope SDK 2.0.6 through explicitly wired public factories in a foreground Python worker.
 Other first-release adapters are delivered separately. AW does not install an
@@ -79,7 +79,7 @@ native permissions. Test one target at a time initially.
 | --- | --- | --- |
 | Qoder | CLI >=1.1.64 with native command Hooks, completed login | Interactive or print; optional `--native-settings` |
 | OpenClaw | 2026.9.6, configured JSON and existing state directory; stop any Gateway using that profile | AW starts a new `gateway run`; pass both native paths |
-| QwenPaw | 2.2.2b4 / AgentScope 2.0.9, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
+| QwenPaw | 2.2.2.post1 / AgentScope 2.0.10, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
 | Hermes | Clean official revision `952c941e`, installed Python console script and initialized local chat profile | Install the AW plugin once into that profile; pass the same profile when running |
 
 Launch Qoder:
@@ -266,7 +266,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ## Start AgentScope SDK
 
 Use a Python environment with `agentscope==2.0.6`; the SDK is separate from
-QwenPaw's verified AgentScope 2.0.9 runtime. `argv` selects the SDK environment's
+QwenPaw's verified AgentScope 2.0.10 runtime. `argv` selects the SDK environment's
 Python and a `.py` application or `-m MODULE`. AW verifies that exact SDK version,
 supplies `aw_agentscope` and a protected runtime configuration, and awaits a
 receipt after the real public factory has installed middleware.
@@ -320,27 +320,49 @@ final-response replacement directives report failure and retain the original res
 
 ## Start QwenPaw
 
-Install QwenPaw 2.2.2b4 with AgentScope 2.0.9 and initialize its model configuration
+Install QwenPaw 2.2.2.post1 with AgentScope 2.0.10 and initialize its model configuration
 through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
 `QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
 its owned temporary plugin, preserves existing plugins and native configuration,
 and removes its plugin after the App exits.
 
-Native middleware retains onion ordering: before runs forward, after unwinds in
-reverse, and the host controls concurrent tools. After observes terminal
-`ToolResponse` objects, including AW-denied results, without repeating streaming
-chunks. The point covers tools executed inside the App; external execution tools
-and attempts denied before middleware are outside its coverage. Event budgets
-must be 1..55,000 ms. Native commands use the AW plugin's documented convention:
-before exit 2 denies, exit 0 continues, and explicit ask/approve is unsupported.
-Callback failures are reported and follow the step's `on_error`; `report` preserves
-execution and after results, while before `block` denies. Cancellation still propagates.
+Ordinary launches verify resident middleware on each constructed Agent and open
+an acknowledged task scope. Before Hooks run forward; after Hooks unwind in
+reverse. The host controls native tool concurrency. Offloaded tools keep their
+scope until native generators, Hooks and background completion callbacks finish.
+Background HTTP output and next-request hints become visible only after all required
+native callbacks succeed. Denials retain policy text and Tokenless retry arguments.
+Completed invocations retire their state, allowing long sessions to continue
+within the bounded active-call limit.
 
-The native startup hook confirms plugin registration after loading completes.
-It does not promise enforcement before the App's public endpoint opens. ACP/TUI,
-reload and multi-worker launch remain rejected because this integration does not
-verify their plugin lifecycle. Use the App's normal API or interface after the
-native Hooks ready message.
+After Hooks receive redacted terminal `ToolResponse` objects, including AW-denied
+results. The application credential extension supplies one private execution
+lease per Agent reply, shared by that reply's tools, and owns its cleanup; see
+[Private execution leases](../../../../src/aw/docs/design/en/adapters/private-execution.md).
+Redactors must be idempotent across repeated delivery/Hook checks.
+Authorization-bearing arguments remain unchanged. `on_error: report`
+preserves callback error reporting; before `block` denies execution. For structured
+Providers and boolean Hooks, after `withhold_result` prevents unverified result
+delivery and later dispatch. This action is admitted only on ordinary resident
+launches. Strict after processing withholds streaming chunks for matching tools.
+Task-private execution also withholds intermediate chunks until terminal redaction.
+Native Hook or lifecycle failures fence the Agent even when AW steps use `report`;
+restart the failed Agent after correcting the cause. Cleanup timeout or uncertain finish/release acknowledgement fences
+new requests process-wide and requires a worker restart. Credentials remain owned
+until native work is confirmed drained. Shutdown shares one ten-second budget
+with nested cleanup, including cancellation. Event budgets must be
+1..55,000 ms;
+ask/approve directives remain unsupported. Native permissions run before these
+callbacks; external execution and earlier permission denials have separate native
+paths.
+
+The startup receipt confirms plugin loading; each Agent additionally passes the
+actual installation guard before its request starts. Use App/API after the native
+Hooks ready message. ACP/TUI and multi-worker launches remain rejected.
+`--reloadable` retains legacy busy tracking and policy updates; resident child
+scopes and its long-session retirement are available on ordinary launches.
+Native evidence capture is rejected for ordinary resident launches because that
+child-scope observation contract is unavailable.
 
 ```bash
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
@@ -353,8 +375,8 @@ runs commands before and after tools; it installs no security policy. Use the
 same `aw-provider/v1alpha1` policy configuration across supported adapters.
 The native Hook output dialect and event coverage remain framework-specific.
 
-A configuration with no Providers or event steps also starts the App; AW verifies
-plugin readiness without registering any tool middleware.
+An ordinary configuration with no Providers or event steps still installs
+resident admission and cleanup middleware.
 
 ## Start OpenClaw
 
@@ -703,7 +725,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
 the implementation. This build implements Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10, Hermes revision `952c941e` and explicit
 Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw agent connect`
 validates the configuration and dispatches to that adapter. Hermes supports
 persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and
@@ -1024,10 +1046,40 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
 
+## Use one security policy for resident SDKs
+
+The [shared SDK security example](../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+selects Qoder SDK or QwenPaw through `--agent`. Replace every absolute path,
+initialize the native runtime as described in its section, and start sec-core
+with the configured socket before launching:
+
+```bash
+aw validate --config /absolute/path/aw.sdk-security.yaml
+aw run --config /absolute/path/aw.sdk-security.yaml --agent qoder-sdk -- "your prompt"
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home aw run \
+  --config /absolute/path/aw.sdk-security.yaml --agent qwenpaw
+```
+
+The sec-core step matches only `native:qoder-sdk:Bash` and
+`native:qwenpaw:execute_shell_command`. AW projects the selected target's steps
+before capability admission and Provider preparation. Other tools still use the
+custom before/after checks without acquiring an implicit sec-core scan. Add
+explicit selectors and matching Provider tool mappings when extending coverage.
+
+The custom scripts use the boolean Hook contract: read one normalized event from
+stdin and print a JSON boolean with exit status zero. In this example, before
+`true` requests `block`; after `true` records `observe`. After `false` produces no
+effect and is still a successful check. A failed result check must exit nonzero;
+`on_error: withhold_result` then prevents delivery and subsequent dispatch.
+Native permissions and the caller's daemon/App lifecycle remain in force.
+Use ordinary `aw run` and a rolling restart for changes. Private credentials need
+the [explicit execution factory](../../../../src/aw/docs/design/en/adapters/private-execution.md)
+in application code; this YAML installs the security policy.
+
 ## Start a Qoder SDK worker
 
-Use `adapter: qoder-sdk` with `@qoder-ai/qoder-agent-sdk@1.0.54`, its bundled
-Worker 1.1.74 (global), and Node.js 22 or newer. Install the SDK in the worker's
+Use `adapter: qoder-sdk` with `@qoder-ai/qoder-agent-sdk@1.0.56`, its bundled
+Worker 1.1.78 (global), and Node.js 22 or newer. Install the SDK in the worker's
 application directory. Configure the target in your existing AW configuration:
 
 ```yaml
@@ -1075,22 +1127,75 @@ AW keeps the foreground-worker lifecycle and releases its binding on worker exit
 
 AW registers per-Query callbacks before initialization, then reports readiness
 after the SDK handshake. `tool.before` supports observation and denial;
-`tool.after` observes successful and failed native tool calls. Native permission
-denials retain precedence. Result replacement is rejected during admission.
+`tool.after` observes successful and failed native tool calls. Ordinary resident
+Queries admit `on_error: withhold_result`: a Post failure or timeout closes the
+native Query before replying to the callback, withholds the unverified result and
+stops subsequent dispatch. Tool side effects that occurred before Post remain in
+effect. `on_error: report` reports the failure and allows normal result handling.
+Admission allows `on_error: block` only for `tool.before`. Native permission
+denials retain precedence. Result replacement remains unsupported.
 Existing SDK hooks are retained; argument rewrites and permission-hook overrides
 are rejected so a tool cannot execute different arguments from those checked.
 
 Use `settingSources: []` and no `settings`, plugins, extra CLI flags or runtime
 transport overrides. Hook-disable flags are parsed with the bundled Worker's
 whitespace normalization and rejected in both process and launch environments.
-All managed Queries must use the bound working directory.
-Each Query gets its own callbacks; an ordinary SDK Query on the same daemon is
-unmodified and is **not protected by AW**. Managed Queries within one AW instance
-share its configured policy, not independently selectable per-session policies.
-Changing Hook routing through `applyFlagSettings` after registration is outside
-the supported contract; AW does not guarantee policy enforcement or complete
-auditing after such changes.
-To update existing Queries without restarting the daemon, opt in with
+Ordinary `createQuery()` opens an acknowledged resident scope for each Query,
+with its canonical working directory and a captured environment. Direct Queries
+can use distinct environments. A shared daemon owns one immutable environment
+and its current credentials; its Queries reject `env` and `auth` overrides.
+Use native `daemon.auth(payload)` to replace the daemon's credentials at runtime.
+`daemon.stop()` joins active credential callbacks from every installed payload,
+including callbacks still running after their credentials were replaced.
+Use separate daemons or direct Queries when native credentials must differ.
+Managed Queries share the configured policy. Native SDK Queries created outside
+the bridge remain **unprotected by AW**.
+
+Ordinary Queries require evidence `mode: off`: child scopes cannot inherit an
+AgentSight observation root. Launch admission rejects enabled evidence before
+readiness.
+
+The bridge returns a frozen public Query facade. Native parser, transport,
+callback maps and Hook-routing mutation methods are private. Worker partial
+output is enabled internally so model tool identities arrive before dispatch;
+`stream_event` messages are hidden unless `includePartialMessages: true` was
+requested. Callback data cannot register a tool identity. Completed tools retire
+after the native command queue barrier and original callback finalizers finish.
+Early return, cancellation and transport failure join native close and original
+Hook, permission, credential, model and MCP callbacks before retiring the scope.
+Memory generation/consumption and skill-evolution gate/result callbacks are also
+joined, along with in-flight `sendHostAction()` work, including its native
+fallback cleanup. Closing rejects new Host actions.
+A dispatch failure can retire its scope after native drain and confirmed credential
+revocation. Native cleanup failure retains ownership; lease cleanup failure or
+timeout also fences new work process-wide until worker restart. Native authentication
+callbacks keep their own lifecycle. Ordinary Queries may pass `options.awExecutionFactory` to acquire a
+versioned private lease for each managed MCP handler. The bridge consumes this
+option before calling the SDK and exports `PRIVATE_EXECUTION_VERSION`,
+`executionEnvironment()` and `hookEnvironment()`. Handlers explicitly consume the
+private environment; results are redacted before Post and delivery. The pinned
+SDK has no such environment injection seam for built-in Bash. See
+[Private execution leases](../../../../src/aw/docs/design/en/adapters/private-execution.md)
+for the public factory contract and cleanup ordering.
+
+For in-process MCP, use `await bridge.createSdkMcpServer(options)` and provide a
+fresh managed server per Query. Native schemas, annotations, permission settings
+and structured result envelopes are retained. A schema that changes approved
+arguments through defaults, transforms or unknown-key stripping is rejected
+before the application handler. Strict Pre rejection prevents handler entry.
+Ordinary resident MCP calls use the same admitted Post `withhold_result` barrier
+as native tools. MCP child invocations bind the native control request, exact
+server/tool/arguments and owning Query. `parentIdentity: "query"` is the default:
+the pinned Worker does not expose the originating model tool ID in that MCP
+request. `parentIdentity: "required"` rejects before native server creation.
+See [Structured MCP dispatch](../../../../src/aw/docs/design/en/adapters/structured-mcp.md)
+for metadata and complete result-envelope handling. Result replacement remains
+unsupported.
+
+Strict Post and private execution leases require ordinary resident mode; update
+them with a rolling restart. `--reloadable` rejects these contracts. For policies
+compatible with the idle-update path, update existing Queries without restarting
+the daemon by opting in with
 `aw run --config aw.yaml --agent sdk --reloadable`. Keep using the same
 `createQuery` factory and caller-owned `startDaemon()`; an asynchronous input
 iterator keeps a Query available between requests. Use `aw update --config
@@ -1118,17 +1223,17 @@ Use prompt input or `streamInput` to submit work. Goal options, `setGoal`,
 `run_in_background` tools are rejected because they can schedule work outside
 that admission boundary. Timer-created turns bypass the input iterator, so
 creating a scheduled wakeup or cron job is unsupported; `CronList` and `CronDelete`
-remain available. Worker 1.1.74's `UpdateGoal` only completes or blocks an
+remain available. Worker 1.1.78's `UpdateGoal` only completes or blocks an
 existing goal; it does not activate one and remains available. Query creation also
 rejects custom `agents`
 definitions with `background: true` or `isolation: "worktree"`. The `Agent` tool's
 `isolation: "worktree"` input is denied before execution because worktree
 execution is outside the supported binding boundary. Foreground definitions and default-isolation
-Agent calls remain allowed. Ordinary `aw run` keeps the original SDK path.
+Agent calls remain allowed. Ordinary `aw run` uses the resident scope path and retains native goal APIs.
 External PID attach/detach, independently selected per-session AW policies and
 steer are not provided by this integration.
 
-In ordinary mode, Worker 1.1.74 sends worktree child callbacks with the parent
+In ordinary mode, Worker 1.1.78 sends worktree child callbacks with the parent
 Query's `cwd` and a child `agent_id`, although tools execute in the worktree.
 AW observes those callbacks; it does not reconstruct the actual execution
 working directory. Worktree execution is not supported for policies that depend
@@ -1142,7 +1247,7 @@ application stops consuming, stop submitting and await `close()` or `return()`;
 these discard buffered output and await native cleanup. This mode does not
 provide backpressure for an indefinitely paused consumer.
 
-The Qoder SDK path described above retains 1024
+The reloadable Qoder SDK path retains 1024
 Hook correlation entries per instance, and 64 active claims per request/tool
 claim set. Completed request claims are released; Hook correlation entries are
 retained until instance release. These are not a count of supported lifetime

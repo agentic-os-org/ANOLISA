@@ -3,7 +3,9 @@
 [English](../../en/aw/security.md)
 
 sec-core 在工具执行前检查命令。发现风险或必需检查失败时，AW 可以阻止该次调用。
-包生成的配置检查 Qoder 的 `Bash` 和 OpenClaw 的 `exec`，其他工具需要另行配置。
+生成的 `scan-code` 步骤使用 `native:qoder:Bash` 和 `native:openclaw:exec` 选择
+Qoder 的 `Bash` 和 OpenClaw 的 `exec`，只包含生成时选定的 Agent。
+扫描其他工具须另行配置选择器和输入映射。
 这项能力通过原生 Hook 生效，不提供 OS 沙箱隔离。
 
 ## 准备程序与后台
@@ -73,7 +75,12 @@ git -c http.sslVerify=false --version
 校验的选项应被规则识别，Agent 应报告 AW 策略阻断。
 模型自行拒绝或没有调用工具不能算作 AW 检查通过；检查仍未执行时，查看 Agent 的原生提示。
 
-后台连接失败时，生成的安全配置会阻断调用。可以显式检查后台连接。
+生成的安全配置使用 `mode: block`、`unmapped_tool: error` 和 `on_error: block`。
+选中的工具缺少映射、代码输入缺失或不是字符串、后端检查失败时，均阻断调用。
+扫描步骤未选中的工具跳过扫描，其他匹配的 Hook 步骤和原生权限检查继续执行。
+生成的 `observe-completion` 步骤有意覆盖全部工具，通过 `observe_tool` 记录完成事件；
+只有 `scan-code` 执行安全扫描。
+可以显式检查后台连接。
 
 ```bash
 export AW_SEC_PROVIDER="$AW_PREFIX/libexec/aw/providers/sec-core"
@@ -91,4 +98,9 @@ export AW_SEC_PROVIDER="$AW_PREFIX/libexec/aw/providers/sec-core"
 
 需要检查其他工具或只记录不阻断时，阅读
 [工具映射与扫描模式](../../../developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
-未映射工具只产生观察记录，不会扫描。
+缺少映射默认返回 Provider 错误，省略 `unmapped_tool` 的已有配置也遵循此行为。
+显式设置 `unmapped_tool: observe` 可对已选中但未映射的工具只观察、不扫描。
+仅观察的评估使用 `mode: observe` 和 `on_error: report`，已映射工具的输入和后端
+错误仍会明确记录。[步骤选择器](configuration.md#为-hook-步骤选择工具)决定哪些调用
+进入 Provider。精确的 native 选择器匹配 Adapter 保留的 `event.tool.native_name`；
+`config.tools` 按规范化的 `event.tool.name` 映射代码输入。

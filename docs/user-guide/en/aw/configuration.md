@@ -52,6 +52,58 @@ AW does not expand variables such as `$HOME`.
 For all editor commands and a custom rule example, see the
 [configuration tool reference](packages.md#edit-existing-provider-and-hook-configuration).
 
+## Select tools for a Hook step
+
+Set `match.tools` on an existing step to limit which tools invoke its Provider.
+With a declared `security` Provider and Agent targets using the `qoder` and
+`openclaw` Adapters, this event fragment checks Qoder `Bash` and OpenClaw `exec`;
+other tools skip the scan step.
+
+```yaml
+tool.before:
+  enabled: true
+  required: true
+  match: {tools: ["*"]}
+  steps:
+    - id: scan-code
+      provider: security
+      operation: scan_code
+      match: {tools: ["native:qoder:Bash", "native:openclaw:exec"]}
+      effects: [observe, block]
+      on_error: block
+```
+
+The event and step selectors must both match. Omitting either selector, or using
+`["*"]`, selects all tools at that level. Standard names `bash`, `file_read` and
+`file_write` match the Adapter's normalized tool name. Exact
+`native:<adapter>:<name>` selectors use the Adapter ID and the Adapter-retained
+`event.tool.native_name`, with case-sensitive matching. Each native selector's
+Adapter ID must appear in `spec.agents[*].adapter`. Validation uses the union of
+all configured targets, so Qoder and OpenClaw selectors can share an event or
+step when both Adapters are declared. Lists are nonempty and unique; `*` must
+stand alone. Regex and glob patterns are unsupported.
+
+For `tool.after`, OpenClaw normalizes `bash` to `exec`, `apply-patch` to
+`apply_patch`, and `cron` to `automations` in `event.tool.name`;
+`event.tool.native_name` preserves the
+callback's supplied spelling. When result replacement and completion observation
+arrive separately, AW restores the original name saved in the replacement
+snapshot. A standalone completion uses the name supplied by its own callback.
+
+At launch, AW excludes a step only when its event/step selector intersection
+cannot match the selected Adapter. For example, a QwenPaw-only step does not
+require its Provider or effects when launching Qoder SDK from the same file.
+Configuration structure, references and selector spelling are still validated
+across the whole file. Wildcards and uncertain normalized/native intersections
+retain strict capability checks. The remaining steps drive Provider preparation,
+native routes and final-replacement ordering together.
+
+An unmatched admitted step records `kind: skipped` without invoking the Provider. Other
+steps keep their order and selection, so an observer or compression step can
+still run. Provider preparation and configuration checks still apply at launch.
+Native permission prompts and denials remain in force. Configure sec-core's
+input mappings separately; see [security checks](security.md).
+
 ## Set the Agent shutdown grace period
 
 Set `spec.agents.<target>.shutdown_grace_ms` in the selected Agent's configuration
@@ -96,6 +148,17 @@ It does not run Providers, modify files, check native readiness or update a
 running Agent. Use explicit idle updates below for a reloadable instance;
 otherwise use the stop/edit/run workflow above.
 Plain `aw validate --config FILE` still prints `configuration valid`.
+Both validation entrypoints also list enabled steps whose event/step selectors
+cannot overlap for each declared target. For example,
+`target sdk: projected out tool.after/app-result (tool selectors do not overlap)`
+means that this step will not run for `sdk`. Review these informational lines
+against the intended security coverage of a shared configuration; validation
+continues to accept deliberate cross-target selections. Ambiguous native aliases
+remain applicable. `aw config validate --json` includes nonempty diagnostics in
+`result.projected_out_steps`, with `target`, `event` and `step_id` fields;
+`--quiet` suppresses the human-readable lines. With `--against`, the diagnostics
+describe the candidate configuration. These are offline projection results;
+they do not create runtime audit events or invoke Providers.
 
 `aw config validate` is equivalent to `aw validate`, including `--against` and
 relative file paths; it does not enforce the editor's ownership checks. The
@@ -121,8 +184,8 @@ To retain a warm host while changing AW Hooks, opt in when launching it:
 aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
-This runtime path is pinned to Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 with
-AgentScope 2.0.9 App, and Qoder SDK 1.0.54 / bundled Worker 1.1.74.
+This runtime path is pinned to Qoder 1.1.73 TUI or QwenPaw 2.2.2.post1 with
+AgentScope 2.0.10 App, and Qoder SDK 1.0.56 / bundled Worker 1.1.78.
 For SDK targets, use the [explicit daemon and Query factories](../../../developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker);
 all managed sessions in the instance must be idle, including native cleanup.
 For QwenPaw, use its configured target and initialized
@@ -225,7 +288,7 @@ use the [native integration reference](../../../developer-guide/en/aw/native-age
 | --- | --- | --- |
 | Qoder | CLI 1.1.64 or later with native Hooks available | Interactive or print |
 | OpenClaw | 2026.9.6 with initialized native configuration and state | A newly launched Gateway |
-| QwenPaw | 2.2.2b4 with AgentScope 2.0.9 | App/API |
+| QwenPaw | 2.2.2.post1 with AgentScope 2.0.10 | App/API |
 | Hermes | Follow the [compatible version and setup](../../../developer-guide/en/aw/native-agents.md#start-hermes) | Local chat |
 | AgentScope, Pi, Claude SDK | Explicit application wiring required | [SDK integration reference](../../../developer-guide/en/aw/native-agents.md) |
 
@@ -272,10 +335,15 @@ both allowed and blocked calls.
 
 Resident Pi/Claude targets retain this configuration format. Select the resident entrypoint and public factory described in the [SDK worker reference](../../../developer-guide/en/aw/native-agents.md#resident-pi-and-claude-sdk-hosts).
 
+Each ordinary managed Qoder SDK Query owns a child scope; daemon shutdown drains its Queries and original callbacks.
+
+Ordinary QwenPaw App launches use a task scope for each managed Agent reply. Private tool environments require the explicit native execution helper. Resident policy changes use a rolling restart; `--reloadable` keeps the separate idle-update path.
+Use the [native integration reference](../../../developer-guide/en/aw/native-agents.md) for the required factories and lifecycle boundaries.
+
 ## Attach to an already started native process
 
-A container controller can start Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 /
-AgentScope 2.0.9 App normally, then install AW before dispatching the first request.
+A container controller can start Qoder 1.1.73 TUI or QwenPaw 2.2.2.post1 /
+AgentScope 2.0.10 App normally, then install AW before dispatching the first request.
 The controller owns the process, its terminal and its lifetime. Record its PID
 when starting it and keep request dispatch paused until installation succeeds.
 
@@ -290,7 +358,7 @@ validation before admission can be broadened.
 | Qoder TUI | Supported on 1.1.73, with ConfigChange confirmation before input and native idle-prompt acknowledgement after a request |
 | Qoder single `-p` / `--print` execution | Ordinary `aw run` supports print; attach/update does not admit this mode |
 | Qoder persistent headless input | Not admitted or validated; pre-input readiness, repeated requests and request/idle boundaries need separate validation |
-| QwenPaw `app` | Supported on 2.2.2b4 / AgentScope 2.0.9; this is the HTTP backend and can be driven headlessly through its API without opening a UI |
+| QwenPaw `app` | Supported on 2.2.2.post1 / AgentScope 2.0.10; this is the HTTP backend and can be driven headlessly through its API without opening a UI |
 | QwenPaw ACP / TUI | Not supported; the pinned TUI uses an ACP subprocess rather than the App's HTTP plugin-management endpoint |
 | QwenPaw `desktop` | Not a supported attach target; its UI starts a separate App through `python -m qwenpaw`, whose entrypoint/process ownership is outside this release's direct `qwenpaw app` validation |
 

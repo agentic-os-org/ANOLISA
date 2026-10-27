@@ -27,6 +27,16 @@ const VERSION: &str = "2026.9.6";
 const PLUGIN: &str = "aw-native-hooks";
 const MAX_BUDGET_MS: u64 = 12000;
 
+/// Match the pinned runtime's completion names without replacing native identity.
+pub(crate) fn policy_name(name: &str) -> String {
+    match name.trim().to_lowercase().as_str() {
+        "bash" => "exec".into(),
+        "apply-patch" => "apply_patch".into(),
+        "cron" => "automations".into(),
+        other => other.to_owned(),
+    }
+}
+
 pub(crate) struct OpenClaw;
 
 struct Prepared {
@@ -107,18 +117,13 @@ impl Adapter for OpenClaw {
         let context = native["context"]
             .as_object()
             .ok_or("missing OpenClaw context")?;
-        let tool = identifier(event.get("toolName"), "toolName")?;
+        let native_tool = identifier(event.get("toolName"), "toolName")?;
         // Native completion uses policy names; middleware retains the tool's name.
         // Match the pinned runtime's three aliases without changing before input.
         let tool = if name == "tool.after" {
-            match tool.trim().to_lowercase().as_str() {
-                "bash" => "exec".to_owned(),
-                "apply-patch" => "apply_patch".to_owned(),
-                "cron" => "automations".to_owned(),
-                _ => tool.trim().to_lowercase(),
-            }
+            policy_name(native_tool)
         } else {
-            tool.to_owned()
+            native_tool.to_owned()
         };
         let call = identifier(
             event.get("toolCallId").or(context.get("toolCallId")),
@@ -138,7 +143,7 @@ impl Adapter for OpenClaw {
             "agent": {"adapter":"openclaw", "binding_id":binding.target,
                 "instance_id":binding.instance_id},
             "session_id": session,
-            "tool": {"name":tool, "native_name":tool, "call_id":call_id,
+            "tool": {"name":tool, "native_name":native_tool, "call_id":call_id,
                 "input":params, "result":event.get("result").unwrap_or(&Value::Null)},
             "native": native,
         }))
@@ -439,6 +444,7 @@ mod tests {
             let native = json!({"hook":"after_tool_call","event":{"toolName":raw,"params":{},"toolCallId":"call","runId":"run"},"context":{"sessionId":"session"}});
             let normalized = OpenClaw.normalize(&binding, "tool.after", &native).unwrap();
             assert_eq!(normalized["tool"]["name"], canonical);
+            assert_eq!(normalized["tool"]["native_name"], raw);
             assert_eq!(normalized["native"]["event"]["toolName"], raw);
             let mut before = native;
             before["hook"] = json!("before_tool_call");
@@ -467,6 +473,8 @@ mod tests {
                 event: "tool.after".into(),
                 step_id: id.into(),
                 provider: "fixture".into(),
+                event_tools: vec!["*".into()],
+                step_tools: vec!["*".into()],
                 on_error: "report".into(),
                 execution: StepExecution::Provider {
                     operation: "record".into(),

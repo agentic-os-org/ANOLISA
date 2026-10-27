@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.15.0
+
+### Features
+- Discover Gemini CLI JSONL chats under `~/.gemini/tmp/<project>/chats/` in the trajectory collector and local viewer, including sub-agent transcripts and project names; the viewer also opens legacy whole-file chats. Sub-agent composite IDs do not link back to the parent row.
+- Add `--stats-only` to the standalone `analyze` CLI and batch-analysis wrapper for local `perf`/`cost` statistics without API credentials or LLM requests; `accuracy --stats-only` is rejected, and omitting the option retains model-backed analysis.
+- Expose the probe-independent `PipelineCore` Rust library API for parsing, correlating and analyzing events without attaching probes, and re-export `HttpContext` as `agentsight::analyzer::HttpContext` so library callers can name the HTTP data carried by `AnalysisResult::HttpContext`; existing command syntax and capture behavior are preserved.
+
+### Fixes
+- Bound the Tokenless savings numerator by the request window when timestamps are available, excluding older optimizations when the Dashboard range narrows. Legacy local `stats.db` tables without `timestamp` retain all matching records, so their savings can still include out-of-window optimizations.
+- Count Tokenless records with a missing, null or upper-case mode as applied savings; only dry-run records are excluded.
+- Keep Anthropic server-tool and MCP tool calls, including their arguments, when a stream is reconstructed after the connection drains.
+- Treat a tool result that opens with a JVM or SQL exception as a tool failure in conversation grading and interruption detection, matching the grounding classifier.
+- Preserve non-streaming Anthropic, Responses, Gemini and legacy-completion answers and tool calls in token breakdowns instead of reporting zero output.
+- Preserve Gemini prompts, answers, tools and finish reasons when building calls from parsed messages without raw HTTP bodies.
+- Render the DeepSeek Harness `agentsight_status` tool result through text content blocks so the host and model receive the validated status.
+- Detect SSL symbols in Python executables and shared libpython images for the existing TLS capture path; retain retryable image reads and startup error causes.
+- Reject fault attempts that were not fully delivered instead of reporting a passing benchmark campaign. (#8890)
+- Recover interrupted benchmark campaigns by validating resume checkpoints, archiving unusable results and atomically replacing checkpoints. (#8857)
+- Reject invalid benchmark time controls before network/file operations and prevent PID reuse from corrupting process-survival and resource evidence. (#8889, #8856)
+- Preserve literal capture-database paths containing URI punctuation and valid JSONL records around damaged lines, with warnings for discarded records.
+- Treat missing or invalid recovery observations as gaps, reject invalid final drop counters, and report unproven recovery gates instead of claiming an improvement.
+- Read modern h2load request-latency summaries correctly, preserving mean, median, p95 and p99 without borrowing fields from adjacent rows.
+
+### Performance
+- Compute benchmark latency percentiles from one sorted snapshot and release unused fallback samples to reduce long-run work and memory use. (#8888)
+
+### Docs
+- Flatten the user manual layout.
+- Move the integrated ANOLISA container image sources from `docker/` to `distribution/docker/` and update the AgentSight deployment guide's entrypoint path; CLI syntax, image tags and container behavior are unchanged.
+
 ## 0.14.3
 
 Combined release notes for the 0.14.2 and 0.14.3 release work. Previously shipped fixes recorded in 0.14.2 are identified separately below.

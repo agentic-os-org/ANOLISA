@@ -10,11 +10,18 @@ on:
         description: Exact 40-character commit to validate before release
         required: true
         type: string
+      credential_free:
+        description: Validate an unmerged fork without hosted-model credentials
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       candidate_sha:
         required: true
         type: string
+      credential_free:
+        type: boolean
+        default: false
     secrets:
       QODER_PERSONAL_ACCESS_TOKEN:
         description: Qoder account token for native hosted-model security acceptance
@@ -35,6 +42,7 @@ jobs:
     outputs:
       sha: ${{ steps.candidate.outputs.sha }}
       matrix: ${{ steps.matrix.outputs.matrix }}
+      resident_matrix: ${{ steps.matrix.outputs.resident_matrix }}
     steps:
       - name: Select the exact candidate
         id: candidate
@@ -57,15 +65,30 @@ jobs:
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
           WORKFLOW_REF: ${{ github.ref }}
+          CREDENTIAL_FREE: ${{ inputs.credential_free || false }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          test "$WORKFLOW_REF" = refs/heads/main
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main
+          if test "${CREDENTIAL_FREE:-false}" = true; then
+            test "$EVENT_NAME" = workflow_dispatch
+            test "$REPOSITORY" != agentic-os-org/ANOLISA
+            [[ "$WORKFLOW_REF" = refs/heads/* ]]
+            test "$WORKFLOW_SHA" = "$CANDIDATE_SHA"
+          else
+            test "$WORKFLOW_REF" = refs/heads/main
+            git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main
+          fi
       - name: Validate native coverage and select pinned runtimes
         id: matrix
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
-        run: python3 -B src/aw/scripts/check_native.py --candidate-sha "$CANDIDATE_SHA"
+          CREDENTIAL_FREE: ${{ inputs.credential_free || false }}
+        run: |
+          args=()
+          if test "$CREDENTIAL_FREE" = true; then args+=(--credential-free); fi
+          python3 -B src/aw/scripts/check_native.py --candidate-sha "$CANDIDATE_SHA" "${args[@]}"
 
   packages:
     needs: plan
@@ -102,10 +125,11 @@ jobs:
       - name: Test installer and build the four artifacts
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          ! command -v python3
-          cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-package
-          cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-cli \
-            --test installation --test config_edit_cli --test standalone --test packages
+          if command -v python3 >/dev/null; then
+            echo 'Installer acceptance requires a Python-free environment' >&2
+            exit 1
+          fi
+          bash src/aw/scripts/check_packages.sh "$AW_PREVIEW_DIR/test-evidence"
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
             --output "$AW_PREVIEW_DIR/packages" --component all
@@ -157,6 +181,8 @@ jobs:
             -p aw-provider-tokenless --test provider --test pretool --test managed_rtk -- --ignored
           cargo test --locked --manifest-path providers/tokenless/Cargo.toml \
             -p aw-provider-tokenless --test views -- --ignored
+      - name: Install package comparison prerequisite
+        run: apt-get install -y --no-install-recommends python3
       - name: Verify installed packages and service lifecycle
         shell: bash
         run: |
@@ -164,11 +190,12 @@ jobs:
           cd "$AW_PREVIEW_DIR/packages"
           sha256sum -c SHA256SUMS
           for archive in *.tar.gz; do tar -xzf "$archive"; done
-          root="$(dirname "$PWD")"
-          chmod 700 "$root"
+          evidence="$(dirname "$PWD")"
           runtime="$(mktemp -d /tmp/aw-preview.XXXXXX)"
+          root="$runtime/prefixes"
+          mkdir -m 700 "$root"
           export XDG_STATE_HOME="$runtime/package-state"
-          trap 'mkdir -p "$root/demo"; cp -a "$runtime/demo/." "$root/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
+          trap 'mkdir -p "$evidence/demo"; cp -a "$runtime/demo/." "$evidence/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
           bundle_dir() {
             local matches=( "$PWD/$1-"*/ )
             test "${#matches[@]}" -eq 1 || return 1
@@ -217,7 +244,7 @@ jobs:
           "$root/next/bin/aw" config validate --config "$runtime/next.yaml"
           "$combined_bundle/aw" uninstall --prefix "$root/next" --yes
           test -x "$root/combined/bin/aw"
-          cp "$combined_bundle/manifest.json" "$root/demo-manifest.json"
+          cp "$combined_bundle/manifest.json" "$evidence/demo-manifest.json"
           "$combined_bundle/aw" uninstall --prefix "$root/combined" --yes
           "$core_bundle/aw" uninstall --prefix "$root/split" --yes
           test -f "$runtime/demo/result.json"
@@ -235,6 +262,7 @@ jobs:
         with:
           name: aw-preview-evidence-${{ needs.plan.outputs.sha }}
           path: |
+            ${{ env.AW_PREVIEW_DIR }}/test-evidence/*.log
             ${{ env.AW_PREVIEW_DIR }}/demo-manifest.json
             ${{ env.AW_PREVIEW_DIR }}/demo/result.json
             ${{ env.AW_PREVIEW_DIR }}/demo/*.log
@@ -244,7 +272,7 @@ jobs:
     needs: [plan, packages]
     name: AW / Native (${{ matrix.agent }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: ${{ matrix.minutes }}
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -291,7 +319,7 @@ jobs:
           CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
           NATIVE_AGENT: ${{ matrix.agent }}
           # Only the Qoder matrix entry uses a cloud account. Missing credentials fail it.
-          QODER_PERSONAL_ACCESS_TOKEN: ${{ (matrix.agent == 'qoder' || matrix.agent == 'qoder-sdk') && secrets.QODER_PERSONAL_ACCESS_TOKEN || '' }}
+          QODER_PERSONAL_ACCESS_TOKEN: ${{ !inputs.credential_free && (matrix.agent == 'qoder' || matrix.agent == 'qoder-sdk') && secrets.QODER_PERSONAL_ACCESS_TOKEN || '' }}
         run: |
           "$AW_NATIVE_PYTHON" -B src/aw/scripts/native_acceptance.py --agent "$NATIVE_AGENT" \
             --candidate-sha "$CANDIDATE_SHA" --bin src/aw/target/native-binaries \
@@ -304,8 +332,84 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  resident-image:
+    needs: [plan, packages]
+    name: AW / Resident image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: aw-native-binaries-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/native-binaries
+      - name: Build one isolated image from the candidate payload
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          tar -xzf src/aw/target/native-binaries/native.tar.gz -C src/aw/target/native-binaries
+          python3 -B src/aw/scripts/resident_container.py --candidate-sha "$CANDIDATE_SHA" \
+            --bin src/aw/target/native-binaries --build-only --output src/aw/target/resident-image
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aw-resident-image-${{ needs.plan.outputs.sha }}
+          path: |
+            src/aw/target/resident-image/image.tar
+            src/aw/target/resident-image/image.json
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aw-resident-build-evidence-${{ needs.plan.outputs.sha }}
+          path: |
+            src/aw/target/resident-image/*.json
+            src/aw/target/resident-image/*.jsonl
+            src/aw/target/resident-image/*.log
+          retention-days: 7
+          if-no-files-found: error
+
+  resident-container:
+    needs: [plan, resident-image]
+    name: AW / Resident (${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.minutes }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.resident_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: aw-resident-image-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/resident-image
+      - name: Run the declared resident shard
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+          RESIDENT_SHARD: ${{ matrix.shard }}
+        run: |
+          python3 -B src/aw/scripts/resident_container.py --candidate-sha "$CANDIDATE_SHA" \
+            --image-bundle src/aw/target/resident-image --shard "$RESIDENT_SHARD" \
+            --output src/aw/target/resident-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aw-resident-evidence-${{ matrix.shard }}-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/resident-evidence
+          retention-days: 7
+          if-no-files-found: error
+
   result:
-    needs: [plan, packages, native]
+    needs: [plan, packages, native, resident-image, resident-container]
     if: always()
     name: AW / Integration result
     runs-on: ubuntu-24.04
@@ -326,6 +430,15 @@ jobs:
         with:
           pattern: aw-native-evidence-*-${{ needs.plan.outputs.sha }}
           path: src/aw/target/native-results
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: aw-resident-evidence-*-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/resident-results
+      - uses: actions/download-artifact@v4
+        if: always() && needs.plan.result == 'success'
+        with:
+          name: aw-resident-build-evidence-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/resident-results/image
       - name: Require all native suites and report acceptance boundaries
         if: always() && needs.plan.result == 'success'
         env:
@@ -333,4 +446,11 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           PACKAGE_RESULT: ${{ needs.packages.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
-        run: python3 -B src/aw/scripts/native_summary.py --candidate-sha "$CANDIDATE_SHA" --results src/aw/target/native-results
+          CREDENTIAL_FREE: ${{ inputs.credential_free || false }}
+          RESIDENT_IMAGE_RESULT: ${{ needs.resident-image.result }}
+          RESIDENT_RESULT: ${{ needs.resident-container.result }}
+        run: |
+          args=()
+          if test "$CREDENTIAL_FREE" = true; then args+=(--credential-free); fi
+          python3 -B src/aw/scripts/native_summary.py --candidate-sha "$CANDIDATE_SHA" \
+            --results src/aw/target/native-results --resident-results src/aw/target/resident-results "${args[@]}"

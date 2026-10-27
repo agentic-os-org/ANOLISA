@@ -25,7 +25,12 @@ pub(super) fn callback(args: &Arguments) -> Exit {
         Ok(exit) => exit,
         Err(error) => {
             eprintln!("aw hook failed: {error}");
-            if args.flags.contains_key("--close-event") {
+            if args.flags.contains_key("--close-event")
+                || args
+                    .flags
+                    .get("--on-error")
+                    .is_some_and(|value| value == "withhold_result")
+            {
                 return Exit::Code(1);
             }
             let blocked = args

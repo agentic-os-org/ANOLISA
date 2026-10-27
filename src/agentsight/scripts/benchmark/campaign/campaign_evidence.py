@@ -6,13 +6,14 @@ import csv
 import gzip
 import json
 import math
+import shlex
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from campaign_evaluation import numeric_measurement
+from campaign_evaluation import bounded_measurement
 
 # Campaign evidence uses the same percentile calculation as a single run.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "single_run"))
@@ -34,12 +35,37 @@ FAULT_CASES = {
     "tls_connect_then_close",
 }
 
-REQUIRED_REGRESSION_TOOLS = {
-    "diff-cover": ("diff-cover", "diff_cover.diff_cover_tool"),
-    "cargo fmt": ("cargo fmt",),
-    "cargo clippy": ("cargo clippy",),
-    "cargo test": ("cargo test",),
-}
+REQUIRED_REGRESSION_TOOLS = ("diff-cover", "cargo fmt", "cargo clippy", "cargo test")
+
+
+def regression_tool(check: dict[str, Any]) -> str | None:
+    """Identify the executed tool, never tool names inside arguments or output."""
+    try:
+        command = shlex.split(check["command"])
+    except ValueError:
+        return None
+    argv = check.get("argv", command)
+    if not isinstance(argv, list) or not argv or argv != command:
+        return None
+    if not all(isinstance(argument, str) for argument in argv):
+        return None
+    if any(flag in argv for flag in ("--help", "-h", "--version", "-V", "--list", "--no-run")):
+        return None
+    if Path(argv[0]).name == "rustup":
+        if len(argv) < 5 or argv[1] != "run":
+            return None
+        argv = argv[3:]
+    executable = Path(argv[0]).name
+    if executable == "cargo" and len(argv) >= 2:
+        # Cargo also accepts an explicit +toolchain selector before the subcommand.
+        position = 2 if argv[1].startswith("+") else 1
+        if len(argv) > position and argv[position] in ("fmt", "clippy", "test"):
+            return "cargo " + argv[position]
+    if executable == "diff-cover":
+        return "diff-cover"
+    if executable.startswith("python") and argv[1:3] == ["-m", "diff_cover.diff_cover_tool"]:
+        return "diff-cover"
+    return None
 
 
 def usable_regression_check(check: Any) -> bool:
@@ -108,16 +134,25 @@ def continuous_recovery(
     higher_is_better: bool,
     max_gap_seconds: float = 2.5,
     started_at: float | None = None,
+    ended_at: float | None = None,
 ) -> float | None:
     """Return time to the first uninterrupted recovered window."""
+    reference = bounded_measurement(reference)
     if reference is None or not samples:
         return None
-    ordered = sorted(samples, key=lambda sample: sample[0])
+    ordered = sorted(
+        ((sample_time, bounded_measurement(value)) for sample_time, value in samples),
+        key=lambda sample: sample[0],
+    )
     origin = ordered[0][0] if started_at is None else started_at
     threshold = reference * (1 - tolerance if higher_is_better else 1 + tolerance)
     recovered_at: float | None = None
     previous: float | None = None
     for sample_time, value in ordered:
+        # Legacy k6 series label each second at its beginning. Raw load
+        # records and resource points are filtered by the caller first.
+        if sample_time < math.floor(origin) or (ended_at is not None and sample_time > ended_at):
+            continue
         if value is None:
             recovered_at = None
             previous = sample_time
@@ -176,7 +211,9 @@ def _resource_series(
     return samples
 
 
-def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
+def load_samples(
+    run_path: Path, *, started_at: float | None = None, ended_at: float | None = None
+) -> dict[str, list[tuple[float, float]]]:
     """Build per-second effective-QPS and P99-latency samples from k6 JSONL."""
     path = run_path.parent / "measurement" / "k6.jsonl"
     if not path.exists():
@@ -193,6 +230,10 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
         value = finite_float(data.get("value"))
         if sample_time is None or value is None:
             continue
+        if (started_at is not None and sample_time < started_at) or (
+            ended_at is not None and sample_time > ended_at
+        ):
+            continue
         second = int(sample_time)
         if item.get("metric") == "benchmark_requests":
             requests[second] += value
@@ -204,12 +245,12 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
         if previous_second is not None and second > previous_second + 1:
             # One zero breaks continuity without allocating a potentially huge gap.
             throughput.append((float(previous_second + 1), 0.0))
-        throughput.append((float(second), requests[second]))
+        throughput.append((max(float(second), started_at or float(second)), requests[second]))
         previous_second = second
     return {
         "effective_qps": throughput,
         "latency_p99_ms": [
-            (float(key), float(percentile(latencies[key], 0.99)))
+            (max(float(key), started_at or float(key)), float(percentile(latencies[key], 0.99)))
             for key in sorted(latencies)
             if latencies[key]
         ],
@@ -254,15 +295,31 @@ def recovery_outcome(
             "failed": [],
             "seconds": {},
         }
+    ended_at = numeric(recover_run.get("ended_at_unix"))
+    if "ended_at_unix" in recover_run and (ended_at is None or ended_at <= started_at):
+        return {
+            "verdict": "INCONCLUSIVE",
+            "missing": ["recover.ended_at_unix"],
+            "failed": [],
+            "seconds": {},
+        }
     recover = summary_of_phase(phases, "recover")
     tolerance = settings["tolerance_ratio"]
     window = settings["recovery_window_seconds"]
-    load = load_samples(recover_path)
+    load = load_samples(recover_path, started_at=started_at, ended_at=ended_at)
     resources = _resource_series(
         recover_path,
         ("rss_mb", "channel_length", "connection_cache_bytes"),
         preserve_gaps=True,
     )
+    resources = {
+        field: [
+            (sample_time, value)
+            for sample_time, value in samples
+            if sample_time >= started_at and (ended_at is None or sample_time <= ended_at)
+        ]
+        for field, samples in resources.items()
+    }
     specifications = {
         "effective_qps": (
             nested(stable, "effective_qps"),
@@ -312,6 +369,7 @@ def recovery_outcome(
             window,
             higher_is_better=higher_is_better,
             started_at=started_at,
+            ended_at=ended_at,
         )
         for name, (reference, samples, higher_is_better) in specifications.items()
     }
@@ -323,7 +381,7 @@ def recovery_outcome(
     ]
     quality_checks = {
         "trace_completeness": (
-            numeric_measurement(nested(recover, "trace_completeness")),
+            bounded_measurement(nested(recover, "trace_completeness"), maximum=1),
             thresholds["min_trace_completeness"],
         ),
     }
@@ -363,13 +421,11 @@ def fault_outcome(
 ) -> dict[str, Any]:
     """Evaluate malformed-input counts, liveness, and normal-traffic quality."""
     path = run_path.parent / "measurement" / "fault-results.json"
-    if not path.exists():
-        return {
-            "verdict": "INCONCLUSIVE",
-            "missing": ["fault-results.json"],
-            "failed": [],
-        }
-    value = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Interrupted writes are missing evidence, just like an absent file.
+        value = None
     if not isinstance(value, dict):
         return {
             "verdict": "INCONCLUSIVE",
@@ -411,15 +467,15 @@ def fault_outcome(
     summary = run.get("summary", {})
     checks = {
         "http_success_rate": (
-            numeric_measurement(nested(summary, "http_success_rate")),
+            bounded_measurement(nested(summary, "http_success_rate"), maximum=1),
             thresholds["min_http_success_rate"],
         ),
         "trace_completeness": (
-            numeric_measurement(nested(summary, "trace_completeness")),
+            bounded_measurement(nested(summary, "trace_completeness"), maximum=1),
             thresholds["min_trace_completeness"],
         ),
         "token_accuracy": (
-            numeric_measurement(nested(summary, "token_accuracy")),
+            bounded_measurement(nested(summary, "token_accuracy"), maximum=1),
             thresholds["min_token_accuracy"],
         ),
         "process_survived": (nested(summary, "process_survived"), True),
@@ -611,16 +667,16 @@ def audit_campaign(
     checks = regression.get("checks", [])
     checks = checks if isinstance(checks, list) else []
     usable_checks = [check for check in checks if usable_regression_check(check)]
-    commands = "\n".join(check["command"] for check in usable_checks)
+    tools = {regression_tool(check) for check in usable_checks}
     if (
         not checks
         or len(usable_checks) != len(checks)
         or any(check["exit_code"] != 0 for check in usable_checks)
     ):
         issues.append("regression checks are missing or failed")
-    if not regression.get("full"):
+    if regression.get("full") is not True:
         issues.append("full Rust regression gates were not recorded")
-    for required, aliases in REQUIRED_REGRESSION_TOOLS.items():
-        if not any(alias in commands for alias in aliases):
+    for required in REQUIRED_REGRESSION_TOOLS:
+        if required not in tools:
             issues.append(f"regression evidence is missing {required}")
     return issues

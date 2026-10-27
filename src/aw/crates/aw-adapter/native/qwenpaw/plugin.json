@@ -6,5 +6,5 @@
   "description": "Connect QwenPaw App tool boundaries to AW.",
   "entry": {"backend": "plugin.py"},
   "dependencies": [],
-  "qwenpaw_version": {"min": "2.2.2b4", "max": "2.2.2b5"}
+  "qwenpaw_version": {"min": "2.2.2.post1", "max": "2.2.2.post2"}
 }

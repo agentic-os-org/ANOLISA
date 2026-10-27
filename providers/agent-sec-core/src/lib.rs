@@ -3,6 +3,7 @@
 mod config;
 pub mod health;
 mod scan;
+mod trace_context;
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 use aw_provider::{Protocol, Request, MAX_MESSAGE_BYTES, VERSION};
 use serde_json::{json, Value};
 
-use self::config::{Config, Mode};
+use self::config::{Config, Mode, UnmappedTool};
 
 /// Processes one EOF-terminated AW request and writes one JSON response.
 ///
@@ -95,13 +96,24 @@ fn dispatch(
             }
             let tool = event["tool"]["name"].as_str().ok_or("invalid_tool")?;
             match config.tools.get(tool) {
-                None => ("observe", "tool_unmapped"),
+                None => match config.unmapped_tool {
+                    UnmappedTool::Error => return Err("tool_unmapped"),
+                    UnmappedTool::Observe => ("observe", "tool_unmapped"),
+                },
                 Some(mapping) => {
                     let code = event["tool"]["input"]
                         .pointer(&mapping.input_pointer)
                         .and_then(Value::as_str)
                         .ok_or("invalid_tool_input")?;
-                    let verdict = scan::call(cli, socket, code, mapping.language, remaining)?;
+                    let trace_context = trace_context::from_event(event);
+                    let verdict = scan::call(
+                        cli,
+                        socket,
+                        code,
+                        mapping.language,
+                        &trace_context,
+                        remaining,
+                    )?;
                     match (config.mode, verdict) {
                         (Mode::Block, scan::Verdict::Risk) => ("block", "code_risk"),
                         (_, scan::Verdict::Risk) => ("observe", "code_risk"),

@@ -48,6 +48,49 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 YAML 中的路径须写成真实绝对路径，AW 不展开 `$HOME` 等变量。
 完整编辑命令和自定义规则示例见[配置工具参考](packages.md#编辑已有-provider-与-hook-配置)。
 
+## 为 Hook 步骤选择工具
+
+在已有步骤上设置 `match.tools`，限定哪些工具会调用其 Provider。
+已声明 `security` Provider，以及使用 `qoder` 和 `openclaw` Adapter 的 Agent
+目标时，以下事件片段检查 Qoder 的 `Bash` 和 OpenClaw 的 `exec`；其他工具跳过扫描步骤。
+
+```yaml
+tool.before:
+  enabled: true
+  required: true
+  match: {tools: ["*"]}
+  steps:
+    - id: scan-code
+      provider: security
+      operation: scan_code
+      match: {tools: ["native:qoder:Bash", "native:openclaw:exec"]}
+      effects: [observe, block]
+      on_error: block
+```
+
+事件和步骤选择器必须同时匹配。任一层省略选择器或使用 `["*"]` 时，该层选择
+全部工具。标准名称 `bash`、`file_read`、`file_write` 匹配 Adapter 规范化的工具名；
+精确的 `native:<adapter>:<name>` 使用 Adapter ID 和 Adapter 保留的
+`event.tool.native_name`，区分大小写。每个 native 选择器的 Adapter ID 都须出现在
+`spec.agents[*].adapter` 中。校验采用全部已配置目标的 Adapter 并集，因此声明了
+Qoder 和 OpenClaw 后，两者的选择器可以共用事件或步骤。列表须非空且无重复，
+`*` 必须单独使用；不支持正则或 glob 模式。
+
+OpenClaw 在 `tool.after` 的 `event.tool.name` 中将 `bash` 规范化为 `exec`、`apply-patch`
+规范化为 `apply_patch`、`cron` 规范化为 `automations`；`event.tool.native_name`
+保留回调传入的名称。结果替换与完成观察分别回调时，AW 从替换快照恢复已保存的
+原始名称。独立的完成事件使用其自身回调传入的名称。
+
+启动时，AW 仅排除事件与步骤选择器交集确定无法匹配当前 Adapter 的步骤。
+例如，同一配置中的 QwenPaw 专属步骤，不会让 Qoder SDK 启动时准备该 Provider
+或要求对应效果能力。配置结构、引用和选择器拼写仍对整个文件校验；通配符以及
+无法确定的标准名/原生名交集继续严格检查能力。剩余步骤共同决定 Provider 准备、
+原生路由及末尾结果替换顺序。
+
+已准入但未匹配当前工具的步骤记录 `kind: skipped`，不调用 Provider。其他步骤保留原有顺序和选择
+条件，观察或压缩步骤仍可继续执行。启动时仍检查 Provider 准备和配置。
+原生权限提示和拒绝继续生效。sec-core 的输入映射须另行配置，见[安全检查](security.md)。
+
 ## 设置 Agent 退出宽限期
 
 应用的退出处理需要更多时间关闭请求和 SDK 客户端时，在所选 Agent 的配置中设置
@@ -82,6 +125,13 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 比较不运行 Provider、不修改文件、不检查原生就绪，也不更新运行中的 Agent。
 启用稳定桥接的实例可使用下述显式空闲更新；其他实例使用前述停止、编辑、启动流程。
 原有 `aw validate --config FILE` 继续打印 `configuration valid`。
+两个验证入口还会按每个已声明 target 列出事件与步骤选择器无法重叠的已启用步骤。
+例如 `target sdk: projected out tool.after/app-result (tool selectors do not overlap)`
+表示该步骤不会对 `sdk` 执行。应据此核对共享配置的预期安全覆盖；有意配置的跨 target
+选择仍然合法，无法静态判断的原生别名保留适用。
+`aw config validate --json` 在诊断非空时输出 `result.projected_out_steps`，
+每项包含 `target`、`event` 和 `step_id`；`--quiet` 隐藏人类可读的提示行。
+使用 `--against` 时，诊断描述候选配置。离线投影不会生成运行时审计事件或调用 Provider。
 
 `aw config validate` 与 `aw validate` 等价，支持 `--against` 和相对文件路径，
 不执行编辑器的所有权检查。独立 `aw-package` 命令及其更严格的编辑器验证已删除。
@@ -103,8 +153,8 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
-运行时路径支持已验证的 Qoder 1.1.73 TUI、QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，
-以及 Qoder SDK 1.0.54 / bundled Worker 1.1.74。SDK 目标使用
+运行时路径支持已验证的 Qoder 1.1.73 TUI、QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，
+以及 Qoder SDK 1.0.56 / bundled Worker 1.1.78。SDK 目标使用
 [显式 daemon 和 Query 工厂](../../../developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)；
 实例内所有受管 session 都须空闲，包括原生清理完成。
 QwenPaw 按原生接入参考选择配置目标并设置已初始化的 `QWENPAW_WORKING_DIR`。
@@ -184,7 +234,7 @@ Qoder 的 `Stop` 不等于空闲，须等
 | --- | --- | --- |
 | Qoder | CLI 1.1.64 或更新版本，原生 Hook 可用 | 交互或 print |
 | OpenClaw | 2026.9.6，已初始化原生配置和状态目录 | 新启动的 Gateway |
-| QwenPaw | 2.2.2b4，AgentScope 2.0.9 | App/API |
+| QwenPaw | 2.2.2.post1，AgentScope 2.0.10 | App/API |
 | Hermes | 使用[兼容版本及安装步骤](../../../developer-guide/zh/aw/native-agents.md#启动-hermes) | 本地 chat |
 | AgentScope、Pi、Claude SDK | 需要在应用中显式接线 | [SDK 接入参考](../../../developer-guide/zh/aw/native-agents.md) |
 
@@ -227,10 +277,15 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 
 Pi / Claude 常驻目标沿用同一配置格式，按 [SDK worker 说明](../../../developer-guide/zh/aw/native-agents.md#pi-和-claude-sdk-常驻宿主) 选择常驻入口及公共工厂。
 
+普通受管 Qoder SDK Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。
+
+普通 QwenPaw App 启动为每个受管 Agent reply 分配任务 scope。工具私有环境需要显式接入原生执行 helper。resident 策略变更采用滚动重启，`--reloadable` 保留独立的空闲更新路径。
+所需工厂及生命周期边界见[原生接入说明](../../../developer-guide/zh/aw/native-agents.md)。
+
 ## 接入已启动的原生进程
 
-容器控制器可以照常启动 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
-AgentScope 2.0.9 App，在派发首个请求前安装 AW。进程、终端和生命周期仍由控制器
+容器控制器可以照常启动 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2.post1 /
+AgentScope 2.0.10 App，在派发首个请求前安装 AW。进程、终端和生命周期仍由控制器
 管理。启动时记录 PID，在安装成功前保持请求派发暂停。
 
 这些精确版本既是当前 Preview attach/update 路径允许的支持集合，也是实际验收版本。
@@ -242,7 +297,7 @@ AgentScope 2.0.9 App，在派发首个请求前安装 AW。进程、终端和生
 | Qoder TUI | 支持 1.1.73；输入前通过 ConfigChange 确认，请求后等待原生 idle-prompt 确认 |
 | Qoder 单次 `-p` / `--print` 执行 | 普通 `aw run` 支持 print；attach/update 不接纳此模式 |
 | Qoder 常驻 headless 输入 | 尚未接纳或验收；需要单独验证输入前 readiness、多次请求及请求结束/空闲边界 |
-| QwenPaw `app` | 支持 2.2.2b4 / AgentScope 2.0.9；它是 HTTP 后端，可通过 API 无界面使用，无须打开 UI |
+| QwenPaw `app` | 支持 2.2.2.post1 / AgentScope 2.0.10；它是 HTTP 后端，可通过 API 无界面使用，无须打开 UI |
 | QwenPaw ACP / TUI | 不支持；固定版本的 TUI 使用 ACP 子进程，不经过 App 的 HTTP 插件管理端点 |
 | QwenPaw `desktop` | 不是受支持的 attach 目标；它通过 `python -m qwenpaw` 启动独立 App，其入口及进程归属尚未纳入本版直接 `qwenpaw app` 的验收 |
 

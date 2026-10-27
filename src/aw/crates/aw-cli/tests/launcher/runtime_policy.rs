@@ -205,6 +205,7 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
                 Operation::Bind {
                     target: "qoder".into(),
                     capabilities: aw_service::Capabilities {
+                        failure_actions: Default::default(),
                         adapter: adapter.into(),
                         version: state["native_version"].as_str().unwrap().into(),
                         entrypoint: state["entrypoint"].as_str().unwrap().into(),

@@ -29,6 +29,7 @@ spec:
       config:
         version: 1
         mode: observe
+        unmapped_tool: error
         # Match normalized tool names supplied by the Agent adapter exactly.
         tools:
           shell: {language: bash, input_pointer: /command}
@@ -42,6 +43,8 @@ spec:
         - id: scan-code
           provider: security
           operation: scan_code
+          # Exact native names used by the synthetic Host example.
+          match: {tools: ["native:qoder:shell", "native:qoder:python"]}
           effects: [observe, block]
           on_error: report
     tool.after:

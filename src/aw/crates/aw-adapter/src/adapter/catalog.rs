@@ -17,6 +17,7 @@ const TOOL_EVENTS: &[(&str, &[&str])] = &[
 impl Profile {
     pub fn capabilities(&self, version: &str, entrypoint: &str) -> Capabilities {
         Capabilities {
+            failure_actions: Default::default(),
             adapter: self.name.into(),
             version: version.into(),
             entrypoint: entrypoint.into(),

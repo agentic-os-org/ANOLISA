@@ -256,6 +256,26 @@
       "status": "incubating"
     },
     {
+      "id": "benchmark",
+      "display_name": "Benchmark",
+      "aliases": [
+        "bench"
+      ],
+      "issue_option": "benchmark",
+      "path_prefixes": [
+        "benchmark/"
+      ],
+      "label": "component:benchmark",
+      "commit_scope": "benchmark",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": null,
+      "ci_key": null,
+      "issue_triagers": [
+        "alex-yuxi"
+      ],
+      "status": "incubating"
+    },
+    {
       "id": "osbase",
       "display_name": "OS Base",
       "aliases": [],

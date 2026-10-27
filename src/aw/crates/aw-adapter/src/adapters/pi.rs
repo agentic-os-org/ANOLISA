@@ -140,7 +140,7 @@ impl PreparedLaunch for Prepared {
         for (name, bytes) in [
             (
                 "transport.mjs",
-                include_bytes!("../../native/pi/transport.mjs").as_slice(),
+                include_bytes!("../../native/shared/transport.mjs").as_slice(),
             ),
             (
                 "producer.mjs",
@@ -148,7 +148,7 @@ impl PreparedLaunch for Prepared {
             ),
             (
                 "scope.mjs",
-                include_bytes!("../../native/pi/scope.mjs").as_slice(),
+                include_bytes!("../../native/shared/scope.mjs").as_slice(),
             ),
             (
                 "resident.mjs",

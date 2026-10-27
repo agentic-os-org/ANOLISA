@@ -3,6 +3,9 @@
 use aw_contracts::canonical;
 use serde_json::{json, Value};
 
+#[cfg(test)]
+mod tests;
+
 fn identifier(value: &Value) -> Option<&str> {
     value.as_str().filter(|text| {
         !text.trim().is_empty() && text.len() <= 512 && !text.chars().any(char::is_control)
@@ -51,7 +54,10 @@ fn matches_native(
         ),
         "qwenpaw" => (
             native["session_id"].clone(),
-            native["tool_call"]["id"].clone(),
+            native
+                .get("aw_invocation_id")
+                .unwrap_or(&native["tool_call"]["id"])
+                .clone(),
             native["tool_call"]["name"].clone(),
             match native["tool_call"]["input"]
                 .as_str()
@@ -108,12 +114,7 @@ fn matches_native(
                 return false;
             };
             let name = if after {
-                match name.trim().to_lowercase().as_str() {
-                    "bash" => "exec".into(),
-                    "apply-patch" => "apply_patch".into(),
-                    "cron" => "automations".into(),
-                    other => other.to_owned(),
-                }
+                crate::adapters::openclaw::policy_name(name)
             } else {
                 name.to_owned()
             };
@@ -133,11 +134,21 @@ fn matches_native(
         }
         _ => return false,
     };
+    let native_name = if adapter == "openclaw" && after {
+        let Some(retained) = identifier(&tool["native_name"]) else {
+            return false;
+        };
+        // A correlated observation retains its replacement's exact spelling,
+        // while the native completion can supply the runtime's policy alias.
+        json!(crate::adapters::openclaw::policy_name(retained))
+    } else {
+        tool["native_name"].clone()
+    };
     seam && identifier(&session).is_some()
         && identifier(&call).is_some()
         && event["session_id"] == session
         && tool["call_id"] == call
-        && tool["native_name"] == name
+        && native_name == name
         && tool["name"] == name
         && tool["input"] == input
         && tool["result"] == result

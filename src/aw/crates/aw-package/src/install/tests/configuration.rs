@@ -212,6 +212,19 @@ fn one_configuration_maps_both_agents_and_rejects_long_socket() {
     let value: serde_json::Value = serde_yaml_ng::from_slice(&fs::read(&config).unwrap()).unwrap();
     assert_eq!(value["spec"]["agents"].as_object().unwrap().len(), 2);
     assert_eq!(
+        value["spec"]["events"]["tool.before"]["steps"][0]["match"]["tools"],
+        serde_json::json!(["native:qoder:Bash", "native:openclaw:exec"])
+    );
+    assert_eq!(
+        value["spec"]["providers"]["security"]["config"]["unmapped_tool"],
+        "error"
+    );
+    assert_eq!(
+        value["spec"]["events"]["tool.before"]["steps"][0]["on_error"],
+        "block"
+    );
+
+    assert_eq!(
         value["spec"]["providers"]["security"]["config"]["tools"]
             .as_object()
             .unwrap()

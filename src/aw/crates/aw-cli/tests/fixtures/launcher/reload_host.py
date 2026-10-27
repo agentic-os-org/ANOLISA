@@ -13,7 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 adapter = os.environ["FAKE_RELOAD_ADAPTER"]
 if sys.argv[1:] == ["--version"]:
-    print("1.1.73" if adapter == "qoder" else "QwenPaw, version 2.2.2b4")
+    print("1.1.73" if adapter == "qoder" else "QwenPaw, version 2.2.2.post1")
     raise SystemExit(0)
 root = Path(os.environ["FAKE_ROOT"])
 deadline = time.monotonic() + 10
@@ -88,7 +88,7 @@ else:
     spec = importlib.util.spec_from_file_location("reload_plugin", source)
     plugin = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(plugin)
-    plugin.version = lambda name: "2.2.2b4" if name == "qwenpaw" else "2.0.9"
+    plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
     factories, startup = [], []
     plugin.plugin.register(SimpleNamespace(config={}, register_middleware=lambda f, **kw: factories.append(f),
                                           register_startup_hook=lambda name, f: startup.append(f)))

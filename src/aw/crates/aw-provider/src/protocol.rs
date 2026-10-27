@@ -73,6 +73,7 @@ pub enum Reply {
 pub struct Protocol {
     request: jsonschema::Validator,
     response: jsonschema::Validator,
+    event: jsonschema::Validator,
 }
 
 impl Protocol {
@@ -81,17 +82,38 @@ impl Protocol {
     /// # Errors
     /// Returns [`Error::InvalidSchema`] if a bundled schema is invalid.
     pub fn new() -> Result<Self, Error> {
-        fn compile(schema: &str) -> Result<jsonschema::Validator, Error> {
-            let schema: Value = serde_json::from_str(schema).map_err(|_| Error::InvalidSchema)?;
+        fn compile(schema: &Value) -> Result<jsonschema::Validator, Error> {
             jsonschema::draft202012::options()
                 .offline()
-                .build(&schema)
+                .build(schema)
                 .map_err(|_| Error::InvalidSchema)
         }
+        let request: Value =
+            serde_json::from_str(REQUEST_SCHEMA).map_err(|_| Error::InvalidSchema)?;
+        let response: Value =
+            serde_json::from_str(RESPONSE_SCHEMA).map_err(|_| Error::InvalidSchema)?;
         Ok(Self {
-            request: compile(REQUEST_SCHEMA)?,
-            response: compile(RESPONSE_SCHEMA)?,
+            request: compile(&request)?,
+            response: compile(&response)?,
+            event: compile(
+                request
+                    .pointer("/oneOf/2/properties/event")
+                    .ok_or(Error::InvalidSchema)?,
+            )?,
         })
+    }
+
+    /// Validate a normalized event without constructing or invoking a Provider request.
+    ///
+    /// # Errors
+    /// Rejects size/depth overflow, unknown or missing fields, malformed identities
+    /// and a tool result supplied before execution. Bare-event limits apply.
+    pub fn validate_event(&self, event: &Value) -> Result<(), Error> {
+        encode(event)?;
+        if !self.event.is_valid(event) {
+            return Err(Error::Invalid("event schema mismatch"));
+        }
+        check_event_result(event)
     }
 
     /// Parses one JSON request, rejecting ambiguity and unsupported invocation effects.
@@ -125,12 +147,7 @@ impl Protocol {
                     return Err(Error::Invalid("invocation effect is not implemented"));
                 }
             }
-            if before
-                && (!value["event"]["tool"]["result"].is_null()
-                    || value["event"]["tool"].get("result_projection").is_some())
-            {
-                return Err(Error::Invalid("tool.before cannot supply a tool result"));
-            }
+            check_event_result(&value["event"])?;
         }
         Ok(())
     }
@@ -268,6 +285,15 @@ impl Protocol {
             _ => Err(Error::Invalid("unknown request method")),
         }
     }
+}
+
+fn check_event_result(event: &Value) -> Result<(), Error> {
+    if event["name"] == "tool.before"
+        && (!event["tool"]["result"].is_null() || event["tool"].get("result_projection").is_some())
+    {
+        return Err(Error::Invalid("tool.before cannot supply a tool result"));
+    }
+    Ok(())
 }
 
 fn array(value: &Value) -> Result<&Vec<Value>, Error> {

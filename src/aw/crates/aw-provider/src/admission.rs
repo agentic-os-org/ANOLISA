@@ -4,6 +4,10 @@ use crate::{Description, Error, ValidatedConfig};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+mod selection;
+
+pub use selection::{projected_out_steps, ProjectedOutStep};
+
 /// Protocol-checked evidence supplied by the caller for one configured Provider.
 ///
 /// The caller owns discovery and must associate both responses with the same
@@ -31,6 +35,8 @@ pub struct AdapterCapabilities {
     pub entrypoint: String,
     /// Supported effects by event, restricted to this library's initial surface.
     pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions supported by each event at this exact entrypoint.
+    pub failure_actions: BTreeMap<String, Vec<String>>,
 }
 
 /// One configured step checked against the implementation and Adapter.
@@ -52,6 +58,34 @@ pub struct AdmittedStep {
     pub execution: StepExecution,
     /// The Host action required when Provider execution fails.
     pub on_error: String,
+    /// Event-level tool selectors; intersected with the step selectors.
+    pub event_tools: Vec<String>,
+    /// Step-level tool selectors; omitted configuration admits all tools.
+    pub step_tools: Vec<String>,
+}
+
+impl AdmittedStep {
+    /// Match a validated normalized event against both configured tool selectors.
+    ///
+    /// Standard selectors compare `tool.name`; exact native selectors compare the
+    /// Adapter ID and retained `tool.native_name`. No aliases or globs are inferred.
+    /// A mismatch still consumes the step and participates in ordered completion.
+    pub fn matches_tool(&self, event: &Value) -> bool {
+        let matches = |selectors: &[String]| {
+            selectors.iter().any(|selector| {
+                if selector == "*" {
+                    return true;
+                }
+                if let Some(native) = selector.strip_prefix("native:") {
+                    return native.split_once(':').is_some_and(|(adapter, name)| {
+                        event["agent"]["adapter"] == adapter && event["tool"]["native_name"] == name
+                    });
+                }
+                event["tool"]["name"] == *selector
+            })
+        };
+        matches(&self.event_tools) && matches(&self.step_tools)
+    }
 }
 
 /// Execution contract selected by the configured protocol or its documented default.
@@ -84,14 +118,15 @@ impl StepExecution {
 
 /// Admits enabled tool steps using explicit Provider and trusted Adapter evidence.
 ///
-/// Native commands and disabled steps require no Provider discovery. Enabled events
-/// must be supported even when `required` is false or their step list is empty.
+/// Native commands, disabled steps and steps that cannot select this Adapter
+/// require no Provider discovery. Applicable enabled events must be supported
+/// even when `required` is false or their step list is empty.
 /// Step order within each event is preserved; the result does not order distinct
 /// events or choose serial versus parallel execution.
 ///
 /// # Errors
 /// Rejects missing or mismatched evidence, unsupported events or effects, guards,
-/// exact tool selectors and unsupported failure actions. Success establishes
+/// and unsupported failure actions. Success establishes
 /// capability admission only, not installed hooks or a complete runtime binding.
 pub fn admit(
     config: &aw_config::Configuration,
@@ -111,7 +146,8 @@ pub fn admit(
 ///
 /// Checks the configured target, implementation and trusted Adapter capabilities,
 /// transport, selectors and failure actions. Disabled events and steps are
-/// skipped; enabled events require support even when optional or empty. Step
+/// skipped, as are selector intersections proven impossible for this Adapter.
+/// Applicable enabled events require support even when optional or empty. Step
 /// order within each event is preserved without choosing execution scheduling.
 ///
 /// Returned steps are candidates, not Provider-admitted steps. Hosts must still
@@ -144,6 +180,14 @@ pub fn preflight(
             "Adapter evidence exceeds the supported event or effect surface",
         )?;
     }
+    for (event, actions) in &capabilities.failure_actions {
+        require(
+            event == "tool.after"
+                && capabilities.events.contains_key(event)
+                && actions.iter().all(|action| action == "withhold_result"),
+            "Adapter evidence exceeds the supported failure action surface",
+        )?;
+    }
     require(
         spec["execution"]["guarantee"] == "native_hook",
         "only native_hook execution can be admitted",
@@ -154,6 +198,27 @@ pub fn preflight(
     let mut candidates = Vec::new();
     for (event_name, event) in events {
         if event["enabled"] != true {
+            continue;
+        }
+        let event_tools = tool_selectors(event)?;
+        if !selection::overlap(&event_tools, &["*".into()], &capabilities.adapter) {
+            continue;
+        }
+        let mut enabled = Vec::new();
+        let mut has_enabled_steps = false;
+        for step in event["steps"]
+            .as_array()
+            .ok_or(Error::Invalid("event steps must be an array"))?
+        {
+            if step["enabled"] == false {
+                continue;
+            }
+            has_enabled_steps = true;
+            if selection::overlap(&event_tools, &tool_selectors(step)?, &capabilities.adapter) {
+                enabled.push(step);
+            }
+        }
+        if has_enabled_steps && enabled.is_empty() {
             continue;
         }
         require(
@@ -168,21 +233,6 @@ pub fn preflight(
             event.get("guard").is_none(),
             "event guards are not supported",
         )?;
-        if let Some(selector) = event.get("match") {
-            let tools = selector["tools"]
-                .as_array()
-                .ok_or(Error::Invalid("tool selector must be an array"))?;
-            require(
-                tools.len() == 1 && tools[0] == "*",
-                "exact tool selectors are not supported",
-            )?;
-        }
-        let enabled: Vec<_> = event["steps"]
-            .as_array()
-            .ok_or(Error::Invalid("event steps must be an array"))?
-            .iter()
-            .filter(|step| step["enabled"] != false)
-            .collect();
         if let Some(index) = enabled.iter().position(|step| {
             step["effects"]
                 .as_array()
@@ -190,17 +240,17 @@ pub fn preflight(
         }) {
             require(
                 index + 1 == enabled.len(),
-                "result replacement must be the last enabled event step",
+                "result replacement must be the last applicable enabled event step",
             )?;
         }
-        for step in event["steps"]
-            .as_array()
-            .ok_or(Error::Invalid("event steps must be an array"))?
-        {
-            if step["enabled"] == false {
-                continue;
-            }
-            candidates.push(preflight_step(spec, event_name, step, effects)?);
+        for step in enabled {
+            candidates.push(preflight_step(
+                spec,
+                event_name,
+                step,
+                effects,
+                capabilities,
+            )?);
         }
     }
     Ok(candidates)
@@ -211,6 +261,7 @@ fn preflight_step(
     event: &str,
     step: &Value,
     adapter_effects: &[String],
+    capabilities: &AdapterCapabilities,
 ) -> Result<AdmittedStep, Error> {
     let provider_name = string(&step["provider"])?;
     let provider = spec["providers"]
@@ -265,7 +316,15 @@ fn preflight_step(
         on_error == "report"
             || (event == "tool.before"
                 && on_error == "block"
-                && adapter_effects.iter().any(|effect| effect == "block")),
+                && adapter_effects.iter().any(|effect| effect == "block"))
+            || (event == "tool.after"
+                && on_error == "withhold_result"
+                && capabilities
+                    .failure_actions
+                    .get(event)
+                    .is_some_and(|actions| {
+                        actions.iter().any(|action| action == "withhold_result")
+                    })),
         "failure action is not supported by the implementation and Adapter",
     )?;
     Ok(AdmittedStep {
@@ -274,6 +333,8 @@ fn preflight_step(
         provider: provider_name.to_owned(),
         execution,
         on_error: on_error.to_owned(),
+        event_tools: tool_selectors(&spec["events"][event])?,
+        step_tools: tool_selectors(step)?,
     })
 }
 
@@ -345,5 +406,17 @@ fn require(condition: bool, reason: &'static str) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::Invalid(reason))
+    }
+}
+
+fn tool_selectors(value: &Value) -> Result<Vec<String>, Error> {
+    match value["match"].get("tools") {
+        None => Ok(vec!["*".into()]),
+        Some(tools) => tools
+            .as_array()
+            .ok_or(Error::Invalid("tool selectors must be an array"))?
+            .iter()
+            .map(|tool| string(tool).map(str::to_owned))
+            .collect(),
     }
 }

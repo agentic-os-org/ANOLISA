@@ -63,9 +63,10 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 For install and daily use, see the [user guide](../../../../../docs/user-guide/en/aw/index.md).
 
 [Qoder SDK worker integration](../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
-uses per-Query registration with the existing Adapter and service contracts.
+uses acknowledged child scopes, model-produced invocation identities and callback
+drain for ordinary Queries through the existing Adapter and service contracts.
 
-[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.
+[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi, Claude and ordinary Qoder SDK Queries.
 
 [Managed Claude MCP handlers](adapters/claude-mcp.md) add an explicit handler source, task-owned invocation identity and success-aware result adoption through the existing Provider path.
 
@@ -73,3 +74,7 @@ Resident SDK model responses now enter an Adapter-owned identity producer before
 dispatch; the service owns sequence admission and active-state retirement.
 [Long-session ownership and limits](adapters/resident-sdk.md) also cover callback drain,
 MCP dispatch and the pinned Claude transport.
+
+[Structured MCP dispatch](adapters/structured-mcp.md) covers actual QwenPaw protocol calls, native-parent evidence, complete result envelopes and Qoder query-scoped identity limits.
+
+[Private execution leases](adapters/private-execution.md) defines Qoder managed-MCP invocation leases, QwenPaw reply leases, explicit environment consumers, redaction and confirmed cleanup before scope retirement.

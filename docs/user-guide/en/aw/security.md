@@ -3,8 +3,10 @@
 [中文版](../../zh/aw/security.md)
 
 sec-core checks commands before tool execution. AW can block a call when it finds a risk or a
-required check fails. Generated configuration checks Qoder `Bash` and OpenClaw `exec`;
-other tools need explicit mappings. This uses native Hooks and does not provide an OS sandbox.
+required check fails. The generated `scan-code` step selects Qoder `Bash` and
+OpenClaw `exec` with `native:qoder:Bash` and `native:openclaw:exec`, including only
+the Agents chosen during generation. Scanning other tools requires explicit
+selectors and input mappings. This uses native Hooks and does not provide an OS sandbox.
 
 ## Prepare programs and backend
 
@@ -77,7 +79,13 @@ or changing configuration, but its TLS-verification disabling option should matc
 produce an AW policy denial. A model declining or never calling the tool is not a successful AW
 check; inspect native prompts when the check did not run.
 
-The generated safety configuration blocks calls when the backend connection fails.
+The generated safety configuration uses `mode: block`, `unmapped_tool: error`
+and `on_error: block`. A selected tool is blocked when its mapping is missing,
+its code input is missing or not a string, or the backend check fails.
+Tools outside the scan step's selection skip scanning; other selected Hook
+steps and native permission checks continue.
+The generated `observe-completion` step intentionally covers all tools through
+`observe_tool` to record completions; only `scan-code` performs safety scans.
 You can explicitly check backend connectivity.
 
 ```bash
@@ -97,4 +105,10 @@ Uninstalling AW preserves external backend configuration and data.
 
 For other tools or observation without blocking, see
 [tool mappings and scan modes](../../../developer-guide/en/aw/providers/sec-core.md#configure-a-provider).
-Unmapped tools produce observation records without being scanned.
+Missing mappings default to a Provider error, including in existing configurations
+that omit `unmapped_tool`. Set `unmapped_tool: observe` explicitly to observe
+selected unmapped tools without scanning. For observation-only evaluation, use
+`mode: observe` and `on_error: report`; mapped input and backend errors remain
+visible. A [step selector](configuration.md#select-tools-for-a-hook-step) determines
+which calls reach the Provider. Exact native selectors match the Adapter-retained
+`event.tool.native_name`; `config.tools` maps normalized `event.tool.name` to code.

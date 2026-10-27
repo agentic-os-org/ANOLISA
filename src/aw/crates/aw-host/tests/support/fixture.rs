@@ -186,6 +186,7 @@ impl Drop for Fixture {
 
 pub fn capabilities() -> AdapterCapabilities {
     AdapterCapabilities {
+        failure_actions: Default::default(),
         adapter: "qoder".into(),
         version: "fixture-version".into(),
         entrypoint: "fixture-entrypoint".into(),

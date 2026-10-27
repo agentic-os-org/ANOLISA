@@ -98,7 +98,7 @@ class ReloadTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         binding = await self.rpc(
             "bind", target="native", cwd=str(self.root), environment={},
-            capabilities={"adapter": "qwenpaw", "version": "2.2.2b4", "entrypoint": "app",
+            capabilities={"adapter": "qwenpaw", "version": "2.2.2.post1", "entrypoint": "app",
                           "events": {"tool.before": ["observe", "block"],
                                      "tool.after": ["observe", "replace_result"]}},
         )

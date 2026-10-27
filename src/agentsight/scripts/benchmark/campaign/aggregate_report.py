@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -19,8 +20,14 @@ import campaign_evidence
 
 def read_json(path: Path) -> dict[str, Any]:
     """Read one JSON object."""
-    value = json.loads(path.read_text(encoding="utf-8"))
-    return value if isinstance(value, dict) else {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("expected a JSON object")
+        return value
+    except (OSError, UnicodeError, ValueError) as error:
+        print(f"Cannot read campaign artifact {path}: {error}", file=sys.stderr)
+        return {"_artifact_error": str(path)}
 
 
 def _artifact_number(value: Any) -> float | None:
@@ -768,8 +775,10 @@ def write_final(
     issues = campaign_evidence.audit_campaign(
         campaign_data, items, capacities, recovery, faults, regression
     )
-    complete = not issues
     manifest = read_json(results / "manifest.json")
+    if manifest.get("_artifact_error"):
+        issues.append("manifest could not be read; frozen inputs are unverified")
+    complete = not issues
     host = manifest.get("host", {})
     frozen = manifest.get("frozen", {})
     frozen_versions = frozen.get("versions", {})

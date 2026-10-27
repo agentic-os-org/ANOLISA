@@ -212,32 +212,37 @@ def _summarize_drop_rows(
     rows: list[dict[str, str]], load_requests: int
 ) -> dict[str, int | float | None]:
     values = {name: [] for name in DROP_METRICS}
+    invalid: set[str] = set()
     for row in rows:
         for name in DROP_METRICS:
             value = numeric(row.get(name))
-            if value is not None:
+            if value is None or value < 0 or not value.is_integer():
+                invalid.add(name)
+            else:
                 values[name].append(value)
-    ring_dropped = counter_delta(values["ring_buffer_dropped"])
-    channel_dropped = counter_delta(values["channel_dropped"])
-    completed = counter_delta(values["completed"])
-    total_dropped = ring_dropped + channel_dropped
-    available = any(
-        len(values[name]) >= 2 for name in ("ring_buffer_dropped", "channel_dropped")
+    deltas = {
+        name: counter_delta(samples) if len(samples) >= 2 and name not in invalid else None
+        for name, samples in values.items()
+    }
+    # A missing counter can hide drops even when the other source is zero.
+    ring, channel = deltas["ring_buffer_dropped"], deltas["channel_dropped"]
+    total_dropped = ring + channel if ring is not None and channel is not None else None
+    completed = deltas["completed"]
+    denominator = (
+        (completed + total_dropped or load_requests)
+        if completed is not None and total_dropped is not None
+        else load_requests
     )
-    denominator = completed + total_dropped or load_requests
     return {
-        "ring_buffer_dropped": (
-            ring_dropped if len(values["ring_buffer_dropped"]) >= 2 else None
-        ),
-        "channel_dropped": (
-            channel_dropped if len(values["channel_dropped"]) >= 2 else None
-        ),
-        "completed": completed if len(values["completed"]) >= 2 else None,
-        "total_dropped": (total_dropped if available else None),
+        **deltas,
+        "total_dropped": total_dropped,
         "drop_rate": (
-            total_dropped / denominator * 100 if available and denominator else None
+            total_dropped / denominator * 100
+            if total_dropped is not None and denominator > 0
+            else None
         ),
     }
+
 
 
 def build_summary(
