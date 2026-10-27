@@ -442,3 +442,52 @@ fn skipped_archive_directory_rejects_restore_without_replacing_live_content() {
     assert!(error.to_string().contains("skipped"), "{error}");
     assert_eq!(svc.read("doc.md").unwrap(), "live");
 }
+
+#[test]
+fn failed_snapshot_removes_partial_archive() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/a.md", "alpha", false).unwrap();
+
+    // A symlink anywhere under the mount aborts `create_tarball` after the
+    // partial archive has already been created, which is the error window
+    // that used to leak `<id>.tar.gz.partial` on every attempt.
+    let link = svc.mount.root.join("notes/escape");
+    std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+
+    let snapshots = svc.mount.meta_dir.join("snapshots");
+    let err = svc.mem_snapshot(Some("blocked")).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::PathOutsideMount(_)),
+        "unexpected error: {err:?}"
+    );
+
+    // `create_tarball` creates the directory, so a missing one here means the
+    // attempt failed earlier than the window under test — and the count below
+    // would assert nothing.
+    assert!(
+        snapshots.is_dir(),
+        "the snapshot attempt should have created its directory"
+    );
+    assert_eq!(
+        count_partials(&snapshots),
+        0,
+        "a failed snapshot left a .partial archive behind"
+    );
+
+    // The cleanup must not overshoot: once the cause is gone, the same store
+    // still snapshots successfully and the result is listable.
+    std::fs::remove_file(&link).unwrap();
+    let info = svc.mem_snapshot(Some("after-fix")).unwrap();
+    assert!(snapshots.join(format!("{}.tar.gz", info.id)).is_file());
+    assert!(snapshots.join(format!("{}.json", info.id)).is_file());
+    assert_eq!(svc.mem_snapshot_list().unwrap().len(), 1);
+    assert_eq!(count_partials(&snapshots), 0);
+}
+
+fn count_partials(dir: &std::path::Path) -> usize {
+    let entries = std::fs::read_dir(dir).expect("snapshots dir must be readable");
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".partial"))
+        .count()
+}
