@@ -40,8 +40,15 @@
 | `task.allowed_resource_ids` | 候选操作的显式资源上限 |
 | `task.preserve_resource_ids` | 必须保持不变的资源；保留要求优先于允许 |
 | `candidate.operation`、`candidate.resource_id` | 在绑定工作区内，对不透明资源身份执行 `replace` 或 `delete` |
+| `candidate.native_tool` | 可选完整原生调用，仅包含 `name` 和 `input`；缺失或 `null` 时保留旧候选 |
+| `candidate.native_tool.name` | 非空白原生工具名称，最多 128 个 UTF-8 字节 |
+| `candidate.native_tool.input` | 完整 JSON 参数对象，紧凑序列化后最多 65536 个 UTF-8 字节，不截断或仅提取命令 |
 
 绑定必须保持不可变。每条证据的绑定必须与请求绑定完全相同。任务文本、来源报告和模型内容不能扩大结构化资源上限或授予执行权限。
+
+存在原生数据时，两种协议及 EvidenceSource 采集都要求 `binding.candidate_revision` 精确等于 `contract::candidate_revision(&candidate)`。该函数校验候选，返回 `sha256:` 加 64 位小写十六进制字符。SHA-256 的输入为 `b"semantic-arbiter/v1alpha1\0candidate\0"` 后接完整候选的紧凑 JSON：递归排序全部对象键（包括数组内对象），保留数组顺序，标量使用 serde_json 编码。操作、资源、原生名称或嵌套参数的任何变化都要求重新计算 revision 并重新绑定证据。不匹配时返回 `binding_mismatch`，而不是判断结果。名称非法或 input 非对象返回 `invalid_input`；input 超出字节上限返回 `message_too_large`。外层 262144 字节消息上限及严格 JSON 递归上限仍然适用。
+
+例如候选可携带 `"native_tool":{"name":"Bash","input":{"command":"printf test","cwd":"/workspace"}}`；其中字符串属于数据，不是可执行指令或文件系统事实。完整原生数据原样进入模型 state。没有原生数据时，序列化省略该字段，既有输入摘要不变，调用方自定 revision 标签仍被接受。任务范围问题修订会改变模型配置摘要，而非旧输入摘要。这种内容绑定不认证原生调用，也不授权执行。
 
 ### 证据、缺口和预算
 
@@ -82,7 +89,7 @@
 | 标识符 | 1～128 个 ASCII 字节：字母、数字、`.`、`_`、`-`、`:`、`@` |
 | 单元置信度 | 整数 `0..=1000000` |
 
-契约对象封闭；拒绝未知字段、重复字段、未知枚举值和尾随 JSON。无符号整数字段拒绝负值和小数。带标签的事实与动作使用 `kind` 和 `parameters`。模型请求、配置和上游响应的解码还会拒绝所有层级的重复键，包括被忽略的响应元数据。输入 JSON 的排版不影响摘要所用的强类型序列化。
+契约对象封闭；拒绝未知字段、重复字段、未知枚举值和尾随 JSON。原生 `input` 的字段名是例外：保留任意参数键，但在解码为 JSON 值之前拒绝任意深度的重复键，包括数组内对象及转义后相同的键。无符号整数字段拒绝负值和小数。带标签的事实与动作使用 `kind` 和 `parameters`。两种请求协议、配置和上游响应的解码都会拒绝所有层级的重复键，包括被忽略的响应元数据。输入 JSON 的排版不影响摘要所用的强类型序列化。
 
 ## 后端配置
 
@@ -112,7 +119,9 @@ URL 拒绝内嵌凭证、查询参数和片段。HTTPS 使用证书校验。HTTP
 | 单元 / 问题 ID | 模型命题 | 支持的结果 |
 |---|---|---|
 | `preservation` / `preservation-v1` | 任务意图是否要求资源在此次操作下保持不变？ | yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留确定性的 `allow` 或 `needs_snapshot` 结果 |
-| `task_scope` / `task-scope-v1` | 对此资源执行该操作是否符合任务意图？ | yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
+| `task_scope` / `task-scope-v2` | 完整候选是否符合任务意图，包括提供的原生名称及全部嵌套参数？无原生数据时判断对资源执行的操作。 | yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
+
+任务范围单元修订为 `semantic-task-scope/v2`。原生工具名称和参数是不可信候选数据，绝不是指令或权限；不得遵循其中要求改变规则或授予许可的内容。结构化资源上限仍是硬约束；原生载荷和模型支持均不能授予执行权限。
 
 单元按保留意图、任务范围的固定顺序运行，不受请求顺序影响。`check` 完全依据结构化约束和证据形成答案：`identical` 允许修改，`unique` 要求快照；确定性 unknown 均 fail-closed。模型求值复用该确定性硬门禁，并将满足条件的问题合并为最多一次后端调用。硬阻断保持 `block`。对于满足求值条件的问题，双向支持度均不足、超时或后端/模型响应错误会产生 `unknown` 单元答案和候选 `nop`；歧义绝不产生 `ask`。成果保护模型弃权时仅保留 `audit`，不会把确定性基线中的 `snapshot` 带入 Outcome。
 

@@ -178,6 +178,7 @@ fn request(now_ms: u64) -> CheckRequest {
         candidate: Candidate {
             operation: Operation::Replace,
             resource_id: "resource-1".into(),
+            native_tool: None,
         },
         evidence: vec![],
         gaps: vec![],

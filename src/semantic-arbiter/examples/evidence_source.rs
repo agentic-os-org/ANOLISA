@@ -74,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         candidate: Candidate {
             operation: Operation::Replace,
             resource_id: "resource-example".into(),
+            native_tool: None,
         },
         evidence: vec![],
         gaps: vec![],
