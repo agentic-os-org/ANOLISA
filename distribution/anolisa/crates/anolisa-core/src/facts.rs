@@ -565,6 +565,7 @@ pub fn lifecycle_facts_from_snapshot(
         pending_journal,
         active_adapter_claims,
         owned_files_verified: snapshot_owned_files_verified,
+        owned_runtime_prepare: false,
     })
 }
 

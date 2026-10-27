@@ -339,7 +339,7 @@ fn repair_attempt(
     let manifest_reconciliation = manifest_drifted.then_some("component manifest drift");
 
     let provider = DelegatedProvider::new(query, transaction);
-    let facts = match observe_repair_facts(
+    let mut facts = match observe_repair_facts(
         target,
         scope,
         native_package.as_deref(),
@@ -378,6 +378,18 @@ fn repair_attempt(
             });
         }
     };
+
+    // Generated runtimes are outside the immutable raw file inventory. Explicit
+    // repair replays a verified candidate even when the mapped files are healthy.
+    if matches!(&facts.record, anolisa_core::planner::RecordFacts::Active(record)
+        if matches!(record.binding, ProviderBinding::Owned { .. }))
+    {
+        let path = common::installed_component_manifest_path(&layout, target, &command)?;
+        facts.owned_runtime_prepare = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| anolisa_core::ComponentManifest::from_toml_str(&text).ok())
+            .is_some_and(|manifest| manifest.prepare.is_some());
+    }
 
     let lifecycle_plan = plan(&Intent::Repair, &facts)
         .map_err(|error| plan_error_to_cli(error, target, &command))?;

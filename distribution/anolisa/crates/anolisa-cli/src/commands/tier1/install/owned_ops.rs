@@ -354,7 +354,15 @@ impl OwnedOps for RawReplayOps<'_> {
     }
 
     fn provision_runtime_deps(&mut self) -> Result<StepSuccess, OwnedOpError> {
-        Self::not_wired("runtime-dependency provisioning")
+        let prepared = self.prepared()?;
+        let manifest = anolisa_core::ComponentManifest::from_toml_str(&prepared.manifest_toml)
+            .map_err(|err| OwnedOpError(format!("invalid candidate manifest: {err}")))?;
+        super::prepare::run_candidate_prepare(
+            &manifest,
+            self.prepared_files.as_ref(),
+            self.layout,
+        )?;
+        Ok(StepSuccess::clean())
     }
 
     fn run_hook(&mut self, kind: HookKind) -> Result<StepSuccess, OwnedOpError> {
@@ -1636,6 +1644,7 @@ impl OwnedOps for RawInstallOps<'_> {
             self.layout,
         )
         .map_err(|err| OwnedOpError(err.reason()))?;
+        super::prepare::run_candidate_prepare(manifest, self.prepared_files.as_ref(), self.layout)?;
         Ok(StepSuccess::with_warnings(warnings))
     }
 

@@ -2064,4 +2064,23 @@ mod tests {
         validate_min_anolisa_version_against(&manifest, "sec-core", source, "0.3.0")
             .expect("later releases must keep passing");
     }
+
+    #[test]
+    fn min_anolisa_version_gate_protects_candidate_preparation() {
+        // Official 0.3.19 ignores the new prepare field; it must reject the
+        // optional component instead of reporting an unprepared install as ready.
+        let manifest = contract_manifest(Some("0.3.20"));
+        let source = InstallContractSource::EmbeddedArtifact;
+        assert!(
+            validate_min_anolisa_version_against(
+                &manifest,
+                "sec-core-skill-score",
+                source,
+                "0.3.19"
+            )
+            .is_err()
+        );
+        validate_min_anolisa_version_against(&manifest, "sec-core-skill-score", source, "0.3.20")
+            .expect("candidate preparation is supported from 0.3.20");
+    }
 }
