@@ -7,6 +7,115 @@ failures=0
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+# EM_BPF does not identify the host ABI. Assert the dispatcher inside the ELF
+# function symbol, including its map relocations, without scanning BTF/debug data.
+python3 - "$repo_root/src/agentsight/crates/ebpf-ifc-engine" <<'PY'
+import hashlib
+import pathlib
+import re
+import struct
+import sys
+
+
+def git_blob(data):
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+
+def rename_dispatcher(data, arch):
+    assert data[:6] == b"\x7fELF\x02\x01", "expected ELF64 little-endian"
+    header = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
+    assert header[0] == 1 and header[1] == 247, "expected relocatable EM_BPF"
+    shoff, shsize, shnum, shstrndx = header[5], header[10], header[11], header[12]
+    assert shsize == 64
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shsize)
+                for i in range(shnum)]
+
+    def section_data(section):
+        start, size = section[4:6]
+        assert start + size <= len(data), "section exceeds ELF bounds"
+        return data[start:start + size]
+
+    def string(table, offset):
+        return table[offset:table.index(b"\0", offset)].decode("ascii")
+
+    names = section_data(sections[shstrndx])
+    symtabs = [(i, section) for i, section in enumerate(sections) if section[1] == 2]
+    assert len(symtabs) == 1
+    symtab_index, symtab = symtabs[0]
+    assert symtab[9] == 24
+    strings = section_data(sections[symtab[6]])
+    symbols = [struct.unpack_from("<IBBHQQ", section_data(symtab), offset)
+               for offset in range(0, symtab[5], 24)]
+    functions = [symbol for symbol in symbols
+                 if symbol[1] & 15 == 2 and string(strings, symbol[0]) == "guard_rename_enter"]
+    assert len(functions) == 1, "missing/duplicate guard_rename_enter function"
+    _, _, _, section_index, address, size = functions[0]
+    section = sections[section_index]
+    assert string(names, section[0]) == "tracepoint/raw_syscalls/sys_enter"
+    start = address - section[3]
+    assert size > 0 and start >= 0 and start + size <= section[5] and size % 8 == 0
+    code = section_data(section)[start:start + size]
+    instructions = list(struct.iter_unpack("<BBhi", code))
+    # clang 17 -O2 emits direct JEQ/JNE immediates (verified by disassembly),
+    # each immediately following a ctx->id load through the saved r6 pointer.
+    assert instructions[0] == (0xbf, 0x16, 0, 0), "ctx is not saved in r6"
+    comparisons = []
+    for index, (opcode, registers, offset, immediate) in enumerate(instructions):
+        if opcode in (0x15, 0x55) and immediate:
+            assert index > 0
+            assert instructions[index - 1] == (0x79, 0x60 | (registers & 15), 8, 0), \
+                "nonzero compare is not against ctx->id"
+            comparisons.append(immediate)
+    expected = {"x86_64": {316, 82, 264}, "aarch64": {276, 38}}[arch]
+    assert set(comparisons) == expected and len(comparisons) == len(expected), \
+        f"{arch} guard_rename_enter comparisons {comparisons}, expected {sorted(expected)}"
+
+    map_helpers = []
+    for relocation_section in sections:
+        if relocation_section[1] not in (4, 9) or relocation_section[7] != section_index:
+            continue
+        assert relocation_section[6] == symtab_index
+        fmt = "<QQq" if relocation_section[1] == 4 else "<QQ"
+        assert relocation_section[9] == struct.calcsize(fmt)
+        for entry in struct.iter_unpack(fmt, section_data(relocation_section)):
+            offset, info = entry[:2]
+            if not start <= offset < start + size:
+                continue
+            symbol = symbols[info >> 32]
+            if string(strings, symbol[0]) != "te_rename_context":
+                continue
+            assert info & 0xffffffff == 1, "expected R_BPF_64_64 map relocation"
+            index = (offset - start) // 8
+            assert instructions[index][0:2] == (0x18, 0x01), "map is not loaded into r1"
+            calls = [insn for insn in instructions[index + 2:] if insn[0] == 0x85]
+            assert calls and calls[0][1] == 0
+            map_helpers.append(calls[0][3])
+    assert map_helpers == [3, 2], "rename context must be deleted then updated"
+    return comparisons
+
+
+engine = pathlib.Path(sys.argv[1])
+constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
+                           (engine.parents[1] / "scripts/build-enforcer.sh").read_text(), re.M))
+for arch, opposite in (("x86_64", "aarch64"), ("aarch64", "x86_64")):
+    for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+        path = engine / "prebuilt" / arch / name
+        data = path.read_bytes()
+        variant = "PREBUILT_BPF" if name == "process.bpf.o" else "INODE_BPF"
+        assert git_blob(data) == constants[f"ACTPLANE_STAGED_{arch.upper()}_{variant}_BLOB"], \
+            f"stale artifact inventory: {path}"
+        rename_dispatcher(data, arch)
+        # Opposite-ABI immediates outside the function must not affect the test.
+        rename_dispatcher(data + struct.pack("<III", 276, 38, 316), arch)
+        try:
+            rename_dispatcher(data, opposite)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"wrong-architecture object accepted: {path}")
+        print(f"Verified {arch} {name} guard_rename_enter function and relocations")
+PY
+
 # Execute the real build.rs with both target ABIs on this host, without Cargo
 # cross-linking. Missing or unsupported artifacts must never trigger make.
 rustc --edition=2021 "$repo_root/src/agentsight/crates/ebpf-ifc-engine/build.rs" \

@@ -1328,6 +1328,7 @@ enum TracepointNeed {
     RecvAddr,
     FileIpcAdvanced,
     MmapAdvanced,
+    RenameCompat,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1341,6 +1342,24 @@ struct TracepointSpec {
 /// Tracepoint programs. The loader attaches only the subset required by the
 /// loaded hook set instead of attaching the entire object by default.
 const TRACEPOINTS: &[TracepointSpec] = &[
+    TracepointSpec {
+        name: "guard_rename_enter",
+        category: "raw_syscalls",
+        event: "sys_enter",
+        need: TracepointNeed::RenameCompat,
+    },
+    TracepointSpec {
+        name: "guard_rename_exit",
+        category: "raw_syscalls",
+        event: "sys_exit",
+        need: TracepointNeed::RenameCompat,
+    },
+    TracepointSpec {
+        name: "guard_rename_task_exit",
+        category: "sched",
+        event: "sched_process_exit",
+        need: TracepointNeed::RenameCompat,
+    },
     TracepointSpec {
         name: "handle_fork",
         category: "sched",
@@ -1793,6 +1812,7 @@ const LSM_PROGS: &[(&str, &str)] = &[
     ("enforce_path_truncate", "path_truncate"),
     ("enforce_path_unlink", "path_unlink"),
     ("enforce_path_rename", "path_rename"),
+    ("enforce_path_rename_legacy", "path_rename"),
     ("enforce_socket_connect", "socket_connect"),
     ("enforce_socket_recvmsg", "socket_recvmsg"),
     ("enforce_task_kill", "task_kill"),
@@ -1943,7 +1963,18 @@ impl HookBudget {
     }
 }
 
+fn rename_compat_needed_for_arity(budget: HookBudget, arity: u32) -> bool {
+    budget.features & FEAT_BLOCK_FILE != 0 && !budget.file_open_only && arity == 4
+}
+
+fn rename_compat_needed(budget: HookBudget) -> bool {
+    path_rename_arity().is_ok_and(|arity| rename_compat_needed_for_arity(budget, arity))
+}
+
 fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
+    if spec.need == TracepointNeed::RenameCompat {
+        return rename_compat_needed(budget);
+    }
     if budget.suppress_dataflow_tracepoints {
         return (budget.file_open_only && budget.has_connect() && spec.name == "trace_connect")
             || matches!(
@@ -1953,6 +1984,7 @@ fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
     }
     match spec.need {
         TracepointNeed::Core => true,
+        TracepointNeed::RenameCompat => rename_compat_needed(budget),
         TracepointNeed::CoreExec => false,
         TracepointNeed::ExecArgs => true,
         TracepointNeed::FileOpen => budget.has_file_flow() || budget.has_open_rules(),
@@ -1996,7 +2028,8 @@ fn lsm_needed(
         | "enforce_file_truncate"
         | "enforce_path_truncate"
         | "enforce_path_unlink"
-        | "enforce_path_rename" => block_file,
+        | "enforce_path_rename"
+        | "enforce_path_rename_legacy" => block_file,
         _ => false,
     }
 }
@@ -2029,8 +2062,17 @@ fn lsm_needed_for_budget(
     )
 }
 
+fn rename_program_selected(name: &str) -> bool {
+    match name {
+        "enforce_path_rename" => path_rename_arity().is_ok_and(|arity| arity == 5),
+        "enforce_path_rename_legacy" => path_rename_arity().is_ok_and(|arity| arity == 4),
+        _ => true,
+    }
+}
+
 fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
     lsm_active
+        && rename_program_selected(name)
         && (name != "enforce_file_truncate" || lsm_prog_hook(name).is_none_or(lsm_hook_available))
         && lsm_needed_for_budget(
             name,
@@ -2082,6 +2124,48 @@ fn lsm_hook_available(hook: &str) -> bool {
         missing
     });
     !missing.contains(&hook)
+}
+
+// Vendor kernels backport hook signatures independently of their release number.
+// Refuse unknown BTF shapes instead of reading a guessed context slot.
+fn path_rename_arity() -> io::Result<u32> {
+    static ARITY: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
+    ARITY
+        .get_or_init(|| unsafe {
+            let btf = libbpf_sys::btf__load_vmlinux_btf();
+            if btf.is_null() || libbpf_sys::libbpf_get_error(btf.cast()) != 0 {
+                return Err("cannot read kernel BTF for path_rename".into());
+            }
+            let result = (|| {
+                let id = libbpf_sys::btf__find_by_name_kind(
+                    btf,
+                    c"bpf_lsm_path_rename".as_ptr(),
+                    libbpf_sys::BTF_KIND_FUNC,
+                );
+                if id < 0 {
+                    return Err("kernel BTF has no bpf_lsm_path_rename".into());
+                }
+                let func = libbpf_sys::btf__type_by_id(btf, id as u32);
+                if func.is_null() {
+                    return Err("invalid path_rename BTF function".into());
+                }
+                let proto = libbpf_sys::btf__type_by_id(btf, (*func).__bindgen_anon_1.type_);
+                if proto.is_null()
+                    || ((*proto).info >> 24) & 0x1f != libbpf_sys::BTF_KIND_FUNC_PROTO
+                {
+                    return Err("invalid path_rename BTF prototype".into());
+                }
+                match (*proto).info & 0xffff {
+                    arity @ (4 | 5) => Ok(arity),
+                    arity => Err(format!("unsupported path_rename BTF arity {arity}")),
+                }
+            })();
+            libbpf_sys::btf__free(btf);
+            result
+        })
+        .as_ref()
+        .copied()
+        .map_err(|message| err(message.clone()))
 }
 
 fn load_exec_tail_programs(bpf: &mut Ebpf) -> io::Result<()> {
@@ -3126,6 +3210,9 @@ impl Loader {
         let has_block_file = hook_budget.features & FEAT_BLOCK_FILE != 0;
         let has_block_connect = hook_budget.features & FEAT_BLOCK_CONNECT != 0;
 
+        if enforce && has_block_file && !hook_budget.file_open_only {
+            path_rename_arity()?;
+        }
         load_exec_tail_programs(&mut bpf)?;
         let mut pending_links: Vec<(String, FdLink)> = Vec::new();
         let mut tracepoints_held = false;
@@ -3166,6 +3253,9 @@ impl Loader {
         if enforce {
             let btf = Btf::from_sys_fs().map_err(|e| err(format!("btf: {e}")))?;
             for (name, hook) in LSM_PROGS {
+                if !rename_program_selected(name) {
+                    continue;
+                }
                 if !lsm_needed_for_budget(
                     name,
                     has_block_exec,
@@ -4434,6 +4524,51 @@ mod tests {
             false,
             false,
             budget,
+        ));
+    }
+
+    #[test]
+    fn legacy_rename_context_is_independent_of_dataflow_profile() {
+        let budget = HookBudget::for_pinned_reserve(HookReserve::agent_file_guard());
+        assert!(budget.suppress_dataflow_tracepoints);
+        assert!(!budget.has_file_flow());
+        assert!(rename_compat_needed_for_arity(budget, 4));
+        assert!(!rename_compat_needed_for_arity(budget, 5));
+        assert!(!rename_compat_needed_for_arity(HookBudget::default(), 4));
+        assert!(!rename_compat_needed_for_arity(
+            HookBudget::for_pinned_reserve(HookReserve::file_enforcement()),
+            4,
+        ));
+        for name in [
+            "guard_rename_enter",
+            "guard_rename_exit",
+            "guard_rename_task_exit",
+        ] {
+            let spec = TRACEPOINTS
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("compatibility tracepoint");
+            assert_eq!(spec.need, TracepointNeed::RenameCompat);
+            assert_eq!(
+                tracepoint_needed(spec, budget),
+                rename_compat_needed(budget)
+            );
+        }
+        assert!(lsm_needed(
+            "enforce_path_rename_legacy",
+            false,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(lsm_needed(
+            "enforce_path_unlink",
+            false,
+            true,
+            false,
+            false,
+            false
         ));
     }
 
