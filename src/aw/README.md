@@ -2,272 +2,77 @@
 
 [中文版](README_zh.md)
 
-AW provides shared Hook orchestration, managed MCP integration, and policy updates for Agents and SDK applications.
-One configuration selects Agent targets and composes security checks, tool output
-compression, and custom rules. Adapters connect native execution to these shared
-contracts while the Agent retains its model configuration, interface, and permissions.
-The current release is a Linux Preview; available capabilities depend on the Adapter
-and launch mode.
+AW provides unified Hook orchestration, managed MCP integration and hot policy updates for Agents and SDK applications.
+One configuration composes security checks before tool execution, output compression afterward and custom rules.
+Supported resident entrypoints can update policy after tasks drain while keeping the host process running.
+Agents retain their models, interfaces and permissions. AW is available as a Linux Preview.
 
 ## Shared capabilities
 
-| Capability | What AW provides | Integration boundary |
-| --- | --- | --- |
-| Unified Hooks | Compose custom rules and Providers such as sec-core and Tokenless around tool execution, with tool selection, ordered steps, deadlines, and audit. | The Adapter translates native events and adopts supported effects. Select security checks for the tools they cover and retain native permission checks. |
-| Managed MCP | Bring MCP tools into the same before/after policy path, with invocation identity, lifecycle ownership, and result handling. | Register tools through a supported managed factory or tool integration. Each Adapter defines the supported transport, identity evidence, and result slots. |
-| Policy hot updates | Validate and explicitly apply policy changes to an idle instance while retaining its host process. | Ordinary Qoder SDK and QwenPaw support idle updates between fully drained tasks. Restricted `--reloadable`/PID attach modes retain their own limits; other ordinary Adapters require restart. |
+| Capability | What you can do |
+| --- | --- |
+| Hook orchestration | Select rules by target and tool, compose sec-core, Tokenless and custom Hooks, and share step ordering, execution deadlines and audit. |
+| Managed MCP | Apply the same policies at supported actual tool-call boundaries, checking invocation identity and approved arguments. |
+| Policy updates | Explicitly apply a new policy to a supported idle instance so subsequent tasks use the new revision. |
 
-Define targets in one `aw.yaml` and select one with
-`aw run --config aw.yaml --agent <target>`. CLI integrations install native Hooks;
-SDK applications use the documented managed factories or plugins. New Adapters
-reuse the shared configuration, Provider protocol, and lifecycle contracts and
-can add native capabilities incrementally. Required unsupported capabilities
-fail admission; each Adapter's supported effects and launch modes remain explicit.
+Adapters connect native events and adopt supported effects; Providers implement policies.
+Core works independently. Install and enable the corresponding Providers for security checks and compression.
+Tool result replacement is limited to authorized slots, and native Agent permission checks retain precedence.
 
-The [capability support matrix](../../docs/user-guide/en/aw/capabilities.md)
-records all 16 Hook names, managed MCP and policy-update coverage by Adapter and
-mode, with implemented boundaries and planned work separated. Policy updates
-share one framework contract; each Adapter supplies its verified switching boundary.
+<a id="install-and-use"></a>
 
-See [custom Hooks and SDK integration](../../docs/developer-guide/en/aw/native-agents.md),
-[managed MCP](docs/design/en/adapters/claude-mcp.md), and
-[policy updates](../../docs/user-guide/en/aw/configuration.md#update-a-prewarmed-instance)
-for the current integration contracts.
+## Installation and first run
 
-## Install and use
+Get and install a Preview package using the [installation guide](../../docs/user-guide/en/aw/installation.md).
+AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
+Install and sign in to your Agent first, then generate configuration with `aw config init`.
 
-AW ships as Preview packages and is not yet available through `anolisa install` or
-RPM. Follow the [installation guide](../../docs/user-guide/en/aw/installation.md)
-to install core or all-in-one, generate a configuration with `aw config init`,
-and run it.
-
-An existing AW installation can install an unpacked local bundle with
-`aw install --prefix ABS_DIR --bundle ABS_DIR`, edit it with `aw config`, and
-remove its owned files with `aw uninstall --prefix ABS_DIR --yes`. Native Hook
-registration uses `aw agent connect --config FILE --agent TARGET`. The legacy
-native `aw install --config ... --agent ...` remains compatible. The standalone
-`aw-package` executable has been removed; the Rust library remains. Every bundle
-includes `aw` at its root for first installation, using an explicit absolute
-`--bundle` path. Named components, direct URLs and system package backends are not
-supported by this Preview installer.
-
-Use `--dry-run` to inspect install or removal plans without creating files.
-`aw uninstall PACKAGE --prefix ABS_DIR --yes` removes selected packages after
-checking dependencies, file ownership and running references. New operations
-commit a local package database; `aw recover` resumes cleanup or rolls back an
-interrupted operation. User scope is the default. Root-managed raw installs
-require `sudo aw install ... --scope system`; privileges never select that scope
-implicitly. RPM/DEB support remains separate.
-
-Canonical removal asks for confirmation only with interactive stdin and stderr.
-Scripts and JSON output must use `aw uninstall --prefix ABS_DIR --yes` (or `-y`).
-Confirmation never overrides package checks or system permissions.
-
-Use `aw list --installed --prefix ABS_DIR` to list packages recorded in an
-installation and `aw doctor --prefix ABS_DIR` to check their files. Both commands
-are read-only and accept `--json`. Without `--prefix`, they read the current
-user's installed-package database. An explicit prefix follows its recorded
-database, including a system installation readable by an ordinary user. Old
-Preview installations still need an explicit prefix; queries do not import their
-`.aw-packages` records. A successful package write archives those old records
-and registers the prefix only when the recorded AW executable matches the
-current command. Otherwise, `runtime_unknown` blocks migration before writes;
-install the new AW build in a separate prefix. See
-[installed packages and file checks](../../docs/user-guide/en/aw/operations.md#installed-packages-and-file-checks).
+The example below uses an installed, signed-in Qoder. `AW_PREFIX` is the installation directory
+selected in the guide; both `qodercli` and `aw` must be on `PATH`.
 
 ```bash
-aw validate --config "$HOME/aw/aw.yaml"
-aw run --config "$HOME/aw/aw.yaml" --agent qoder
+export AW_HOME="$HOME/aw"
+install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
+  --qoder "$(command -v qodercli)"
+aw validate --config "$AW_HOME/aw.yaml"
+cd "$AW_HOME/workspace"
+aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
-Set `spec.agents.<target>.shutdown_grace_ms` when an Agent needs more than the
-default two-second grace before forced cleanup after the launcher forwards a
-termination signal. See
-[shutdown grace](../../docs/user-guide/en/aw/configuration.md#set-the-agent-shutdown-grace-period)
-for the bounded wait and application cleanup responsibilities.
-
-Use `aw validate --config next.yaml --against current.yaml` to check policy-only
-edits offline. See [configuration](../../docs/user-guide/en/aw/configuration.md#compare-policy-edits);
-this does not update a running instance.
-
-Ordinary Qoder SDK and QwenPaw workers support explicit idle policy updates
-without restarting. After all Queries/replies, native callbacks and private leases
-have drained, an update selects the policy for new task snapshots; strict Post and
-managed MCP remain active. Managed Qoder `startDaemon()` and QwenPaw App startup
-confirm readiness before the first task. Provision Hook files, apply the complete
-policy with `aw update --config aw.yaml --agent TARGET`, then dispatch work.
-Use `--instance ID` when a target has multiple instances. The control plane
-serializes updates and task dispatch; active tasks make updates return `busy`.
-
-Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
-Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App, or
-Qoder SDK 1.0.56 / Worker 1.1.78.
-Edit the same configuration file, then explicitly apply it.
-`aw update --config aw.yaml --agent TARGET` selects the
-unique target instance, retains its process and rejects busy instances; see
-[prewarmed instances](../../docs/user-guide/en/aw/configuration.md#update-a-prewarmed-instance).
-
-The local service remains available after the Agent exits. Query it and stop it
-when finished.
+In Qoder, ask it to read the current directory with a tool and follow its native permission prompts.
+The local service remains reusable after the Agent exits. Inspect and stop it when finished.
 
 ```bash
-aw status --config "$HOME/aw/aw.yaml"
-aw stop --config "$HOME/aw/aw.yaml"
+aw status --config "$AW_HOME/aw.yaml"
+aw stop --config "$AW_HOME/aw.yaml"
 ```
 
-The same operations are available as `aw service status` and `aw service stop`.
-`aw service serve` runs a foreground service; it does not install a system unit.
-Use `aw service --help` for options and `aw --version` for the CLI crate version.
+<a id="hook-support"></a>
+<a id="adapter-capability-coverage"></a>
 
-Use `aw --help`, `aw config --help`, and `aw config validate --help` to
-discover the implemented command tree. Public commands also accept `-h`;
-`aw -V` reports the CLI version. Help must be the final option, and unknown
-or repeated options fail before work starts. Options such as `--json` remain
-command-local. See [command help](../../docs/user-guide/en/aw/operations.md#command-help-and-arguments).
+## Supported entrypoints
 
-Use `aw commands` to list implemented public syntax, or `aw commands --json`
-for versioned command metadata. `aw completion bash` prints a completion script;
-Zsh, Fish, PowerShell and Elvish are also supported. Scripts are not installed
-automatically. See [command discovery](../../docs/user-guide/en/aw/operations.md#command-discovery-and-completion).
-
-Configuration validation reports steps projected out for each declared target,
-helping check security coverage in shared multi-target files.
-Local package install/uninstall, `config init`, `config validate`, and offline configuration edits
-accept `--json` for a versioned management result. Human summaries remain the
-default; existing service and protocol JSON is unchanged. See
-[management reports](../../docs/user-guide/en/aw/operations.md#management-reports) for supported commands and failure semantics.
-
-These management commands accept local `--quiet`, `--verbose` and
-`--color auto|always|never` for human output. They cannot accompany `--json`;
-native output and protocol streams remain unchanged. Package reports distinguish
-commit, cancellation, incomplete recovery and cleanup warnings without inferring
-rollback from an exit code. See
-[terminal output](../../docs/user-guide/en/aw/operations.md#terminal-output).
-
-Core works independently. The Tokenless package includes RTK and TOON encoding;
-security checks require a running sec-core backend. Enable these optional
-capabilities in the configuration. AW does not install Agents or configure model credentials.
-
-Use event and step `match.tools` to select which tool calls invoke each Provider.
-Unmatched steps retain a skipped audit record; generated sec-core checks select
-Qoder `Bash` and OpenClaw `exec` and block selected calls when checking fails.
-See [tool selection](../../docs/user-guide/en/aw/configuration.md#select-tools-for-a-hook-step).
-
-For an independently started Qoder TUI or QwenPaw App, use
-`aw agent connect --config current.yaml --agent TARGET --pid PID` before its first request;
-add `--remove` to detach at idle. Native startup and process ownership stay with
-the caller. QwenPaw peers need startup profile inputs that native `.env` cannot
-override; an unconfirmed peer blocks attachment. See [native attachment](../../docs/user-guide/en/aw/configuration.md#attach-to-an-already-started-native-process)
-for exclusive profiles, confirmation and cleanup requirements.
+AW currently integrates Qoder CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
+Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
+SDK applications explicitly use managed factories.
+The [capability matrix](../../docs/user-guide/en/aw/capabilities.md) compares result handling,
+MCP and policy updates by Adapter and launch mode, with links to supported versions and setup.
 
 ## Documentation
 
 | Task | Guide |
 | --- | --- |
-| Choose capabilities and get started | [AW user guide](../../docs/user-guide/en/aw/index.md) |
-| Compare Hook, MCP and hot-update support | [Capability support matrix](../../docs/user-guide/en/aw/capabilities.md) |
-| Install packages, generate configuration, and run for the first time | [Install AW](../../docs/user-guide/en/aw/installation.md) |
-| Select an Agent, enable Providers, and edit configuration | [Configure AW](../../docs/user-guide/en/aw/configuration.md) |
-| Compress tool output | [Tokenless](../../docs/user-guide/en/aw/tokenless.md) |
-| Enable command security checks | [Security checks](../../docs/user-guide/en/aw/security.md) |
-| View Agent activity | [Connect AgentSight](../../docs/user-guide/en/aw/observability.md) |
-| Inspect status, upgrade, uninstall, and troubleshoot | [Operations](../../docs/user-guide/en/aw/operations.md) |
-| Build and package on customer machines | [Build AW from source](../../contribute/en/aw/building.md) |
-| Write rules or integrate Providers and SDKs | [AW developer guide](../../docs/developer-guide/en/aw/index.md) |
+| Install and complete a first run | [AW user manual](../../docs/user-guide/en/aw/index.md) |
+| Select an Agent, configure rules and update policy | [Configuration and launch](../../docs/user-guide/en/aw/configuration.md) |
+| Enable output compression or security checks | [Tokenless](../../docs/user-guide/en/aw/tokenless.md), [sec-core](../../docs/user-guide/en/aw/security.md) |
+| Inspect runtime records | [AgentSight](../../docs/user-guide/en/aw/observability.md) |
+| Inspect status, manage packages and troubleshoot | [Operations](../../docs/user-guide/en/aw/operations.md) |
+| Write Providers, integrate SDKs or understand the architecture | [Developer guide](../../docs/developer-guide/en/aw/index.md) |
 
-User documentation lives in `docs/user-guide/{en,zh}/aw/` and
-integration references in `docs/developer-guide/{en,zh}/aw/`. Component protocol
-designs remain in this directory's `docs/design/`.
+<a id="code-architecture"></a>
+<a id="development-and-validation"></a>
 
-<a id="hook-support"></a>
-
-## Adapter capability coverage
-
-The shared capabilities above describe AW's product scope. The table below tracks
-each Adapter's tool event/effect coverage, generated from the
-[regression matrix](tests/regression-matrix.json) and checked by CI contract tests.
-`✓` marks a declared, covered effect; `—` marks an unsupported effect.
-Check MCP integration, strict Post failure handling, resident lifecycle, and hot
-updates in the [capability support matrix](../../docs/user-guide/en/aw/capabilities.md).
-The [native Agent integration reference](../../docs/developer-guide/en/aw/native-agents.md)
-defines supported tool types and text replacement boundaries.
-
-Each ordinary managed Qoder SDK Query owns a child scope; daemon shutdown drains
-its Queries and original callbacks. An explicit application factory provides a
-private lease per managed MCP handler. Ordinary QwenPaw App launches use a task
-scope and one private execution lease per managed Agent reply. Tools explicitly
-consume these environments; see [Private execution leases](docs/design/en/adapters/private-execution.md).
-
-Both ordinary resident paths admit strict after steps with
-`on_error: withhold_result`, preventing unverified result delivery and subsequent
-dispatch. Tool side effects that occurred before Post remain in effect. Use the
-[shared security example](crates/aw-service/examples/aw.sdk-security.yaml) with
-`--agent qoder-sdk` or `--agent qwenpaw`. Resident policy changes use explicit
-idle updates between closed Queries or fully drained replies; `--reloadable` keeps a separate path without strict Post
-or private execution leases.
-
-<!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
-| --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | ✓ | ✓ |
-| `pi` | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | — |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
-<!-- aw-regression-matrix:end -->
-
-Qoder SDK 1.0.56 / Worker 1.1.78 requires the bridge daemon and Query factories
-to admit the native runtime and register per-Query callbacks through
-`aw run`; `--reloadable` enables explicit policy updates for idle existing Queries,
-returning busy during requests and native cleanup. See the [SDK worker guide](../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker).
-It supports before observation/denial, after observation and ordinary resident
-Post withholding; external attach and result replacement remain unsupported.
-
-
-A Tokenless retry suggestion blocks the original call. The Agent must make a new
-call through security and native permission checks. Replacement applies only to
-supported text slots. AW does not provide an OS sandbox or cross-Agent approvals.
-See [Contributing](CONTRIBUTING.md) for real SDK and model-session acceptance coverage.
-
-## Code architecture
-
-![AW user workflow and component architecture](../../docs/images/aw/architecture.png)
-
-The root is a virtual workspace. `crates/` contains ten framework crates; repository-root `providers/`
-is the shared implementation space. Providers may also be developed and shipped
-from independent repositories; see [Provider collaboration](../../providers/README.md). Hook requests
-flow from `aw-service` to `aw-host`, which calls Providers through `aw-exec`.
-`aw-core` exposes a separate plan API; the service reuses only its Journal.
-
-`aw-cli` owns command parsing and presentation, calling the `aw-package` library
-for installation and configuration and `aw-service` for runtime operations.
-
-The [architecture overview](docs/design/en/architecture.md)
-explains crate ownership and runtime flow. The [design index](docs/design/en/README.md)
-organizes protocol details in call order.
-
-## Development and validation
-
-Run the AW CI checks from the repository root.
-
-```bash
-python3 src/aw/scripts/check.py
-```
-
-Qoder CLI and QwenPaw App/API each exercise real sec-core allow, scan denial,
-backend failure and timeout blocking in disposable containers. Qoder uses the
-nightly account Secret; QwenPaw uses a local deterministic model. See
-[CI coverage](CONTRIBUTING.md#daily-ci-and-nightly-integration) for the full boundary.
-
-- [Development environment and tests](CONTRIBUTING.md)
-
-[Resident Pi and Claude SDK hosts](docs/design/en/adapters/resident-sdk.md) use one configuration and separate `--agent` targets, with task-owned bindings and strict callback failure handling.
-
-The [managed Claude MCP factory](docs/design/en/adapters/claude-mcp.md) preserves business handlers and adopts Tokenless output before SDK serialization, with explicit task/call identity and strict failure handling.
-
-Resident Pi/Claude clients reclaim completed invocation details and support repeated executions.
-`spec.daemon.limits` configures concurrent resources; see the
-[configuration reference](../../docs/user-guide/en/aw/configuration.md#concurrent-service-budgets).
+The [architecture overview](docs/design/en/architecture.md) describes framework and Provider ownership and call paths.
+See [Contributing](CONTRIBUTING.md) for source builds, tests and CI entrypoints.

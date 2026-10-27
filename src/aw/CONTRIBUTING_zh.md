@@ -57,13 +57,13 @@ Rust、Python 和 JavaScript（`.js`、`.mjs`、`.cjs`）源码、脚本和 fixt
 统一限制为 699 行，达到 600 行提示。仅已有 `crates/aw-contracts/src/validation.rs` 保留固定的
 711 行上限。按职责拆分并保留入口与断言，不给测试 fixture 豁免。
 依赖/布局检查位于 [check_layout.py](scripts/check_layout.py)，编译测试清单位于
-[check_inventory.py](scripts/check_inventory.py)，矩阵与 README 一致性检查位于
+[check_inventory.py](scripts/check_inventory.py)，矩阵与用户指南一致性检查位于
 [check_matrix.py](scripts/check_matrix.py)。
 
-更新支持能力后，在 `src/aw` 重新生成两份 README 的表格并运行门禁：
+更新支持能力后，在 `src/aw` 重新生成两份能力指南的表格并运行门禁。
 
 ```bash
-python3 scripts/check_matrix.py --write-readmes
+python3 scripts/check_matrix.py --write-docs
 python3 scripts/check.py
 ```
 

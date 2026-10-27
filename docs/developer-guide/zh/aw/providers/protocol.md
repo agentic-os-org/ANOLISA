@@ -6,7 +6,7 @@
 
 `aw-provider` 定义实验性的 `aw-provider/v1alpha1` 接口，供外部策略程序使用，
 并离线检查消息和请求的能力。它将统一配置衔接到 Provider 合同，本身不启动进程、
-安装 Agent Hook 或建立运行时绑定。原生接入由 `aw-adapter` 实现、`aw-cli` 编排，支持范围见[组件 README](../../../../../src/aw/README_zh.md#adapter-能力覆盖)。
+安装 Agent Hook 或建立运行时绑定。原生接入由 `aw-adapter` 实现、`aw-cli` 编排，支持范围见[能力矩阵](../../../../user-guide/zh/aw/capabilities.md#hook-与-mcp)。
 
 ## 交付边界
 

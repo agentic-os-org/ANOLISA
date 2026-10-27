@@ -107,8 +107,10 @@ after-event coverage are listed in the [native Agent reference](native-agents.md
 
 ## Events, effects and tool selection
 
-The configuration recognizes these 16 names. Their descriptions define the
-vocabulary; runtime support is the narrower surface described above.
+The configuration recognizes these 16 names. Public Provider dispatch currently
+covers only `tool.before` and `tool.after`; the other fourteen names are reserved.
+See the [capability matrix](../../../user-guide/en/aw/capabilities.md#hooks-and-mcp)
+for Adapter effect support.
 
 | Event | Meaning |
 | --- | --- |

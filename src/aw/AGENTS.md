@@ -120,8 +120,9 @@ Maintain the paired [capability support reference](../../docs/user-guide/en/aw/c
 in the same PR as any support change. Record the Adapter, supported version and
 launch mode, execution boundary, limitations and runnable acceptance evidence.
 Keep implemented, experimental, vocabulary-only and planned states distinct.
-The generated README grid remains the event/effect catalog; the support reference
-covers MCP, lifecycle and update modes. Update both when their claims change.
+The support reference contains the generated event/effect catalog alongside
+MCP boundaries and update modes. Keep README summaries short and link to this
+reference for Adapter details.
 Recognition of any of the 16 event names, an internal lifecycle notification,
 or a model-response identity tap does not establish a public Provider Hook.
 
@@ -137,8 +138,8 @@ internal process identity and update target selection distinct. Prewarmed worker
 need readiness before their first task. The control plane may pause dispatch for
 updates; retain the runtime busy gate and avoid adding active-task switching
 without an explicit contract. Post-activation audit failure must stop dispatch
-rather than report an unchanged old policy. Current support
-and the staged roadmap remain in the capability reference.
+rather than report an unchanged old policy. Document current support in the
+capability reference; keep proposed development order in design documents.
 
 Update these together in the same change:
 
@@ -153,9 +154,9 @@ Update these together in the same change:
    `crates/aw-cli/tests/regression/native.rs` for new native payloads. The
    shared PreTool and PostTool tests iterate the matrix without a fallback
    dialect, so an unimplemented fixture fails.
-4. Run `python3 scripts/check_matrix.py --write-readmes` from this directory and
-   document native adoption limits in both READMEs. Maintain the roadmap
-   separately from supported capabilities.
+4. Run `python3 scripts/check_matrix.py --write-docs` from this directory and
+   document native adoption limits in both capability references. README files
+   summarize shared capabilities and link to these references.
 5. Add pinned native commands, required reports, an owner and the exact acceptance
    boundary to `tests/native-matrix.json`. Unit suites declare counts; custom
    suites declare JSON result files with exact case names or observed counts.
@@ -163,7 +164,7 @@ Update these together in the same change:
    Agent must be accounted for; new integrations cannot silently opt out of nightly.
 6. Run `python3 scripts/check.py`. The gate compares the compiled catalog with
    the matrix and schema, resolves case names against real libtest executables,
-   rejects missing or ignored cases and checks both README grids.
+   rejects missing or ignored cases and checks both user-guide grids.
 
 Use deterministic service/CLI/Provider fixtures on every relevant push. Keep
 real SDK/CLI adoption checks explicit and pinned; describe which native seam

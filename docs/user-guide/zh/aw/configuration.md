@@ -172,7 +172,7 @@ Claude SDK、Pi 接入仍属规划；其他普通 Adapter 继续使用启动时�
 公共更新操作通过 `--agent` 和 `--instance` 选择已有实例。PID 启动接入继续由
 `aw agent connect` 和已有 `aw install --pid ... [--remove]` 兼容入口提供，两种更新路径
 均保留进程关联和存活检查。便捷选择器 `aw update --pid` 延后，与各 Adapter 的更新支持
-独立。此表只描述空闲策略更新；通用 Hook 支持仍见[能力矩阵](../../../../src/aw/README_zh.md#hook-支持)。
+独立。此表只描述空闲策略更新；通用 Hook 支持仍见[能力矩阵](capabilities.md#hook-与-mcp)。
 
 独立的受限桥接路径继续可用：
 

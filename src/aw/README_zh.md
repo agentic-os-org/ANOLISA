@@ -3,231 +3,75 @@
 [English](README.md)
 
 AW 为 Agent 和 SDK 应用提供统一 Hook 编排、受管 MCP 接入和策略热更新。
-通过一份配置选择 Agent 目标，组合安全检查、工具输出压缩和自定义规则。
-Adapter 将原生执行接入这些公共合同，Agent 继续管理自己的模型、界面和权限。
-当前为 Linux Preview；可用能力由 Adapter 和启动模式共同决定。
+通过一份配置组合工具执行前的安全检查、执行后的输出压缩和自定义规则。
+支持的常驻入口可在任务排空后更新策略，保留宿主进程。
+Agent 继续管理自己的模型、界面和权限。当前提供 Linux Preview。
 
 ## 通用能力
 
-| 能力 | AW 提供什么 | 接入边界 |
-| --- | --- | --- |
-| 统一 Hook | 在工具执行前后组合用户规则与 sec-core、Tokenless 等 Provider，统一工具选择、步骤顺序、期限和审计。 | Adapter 转换原生事件并采纳支持的效果。安全检查按其覆盖的工具选择，保留原生权限检查。 |
-| 受管 MCP | 将 MCP 工具纳入同一套调用前后策略链，管理调用身份、生命周期归属和结果处理。 | 通过支持的受管工厂或工具接点注册。各 Adapter 明确支持的传输、身份证据和结果位置。 |
-| 策略热更新 | 校验后显式向空闲实例应用策略变更，保留宿主进程。 | 普通 Qoder SDK 和 QwenPaw 支持任务完整排空后的空闲更新。受限 `--reloadable` / PID attach 模式保留各自限制；其他普通 Adapter 需重启。 |
+| 能力 | 用户能做什么 |
+| --- | --- |
+| Hook 编排 | 按目标和工具选择规则，组合 sec-core、Tokenless 与自定义 Hook，统一步骤顺序、执行期限和审计。 |
+| 受管 MCP | 在支持的实际工具调用处执行同一套策略，检查调用身份及获准参数。 |
+| 策略更新 | 向支持的空闲实例显式应用新策略，让后续任务使用新版本。 |
 
-在一份 `aw.yaml` 中定义目标，通过
-`aw run --config aw.yaml --agent <target>` 选择启动。
-CLI 接入安装原生 Hook；SDK 应用使用文档指定的受管工厂或插件。
-新增 Adapter 复用公共配置、Provider 协议和生命周期合同，逐步补齐原生能力。
-配置要求的能力尚未支持时，准入明确拒绝；每个 Adapter 分别声明支持的效果和启动模式。
+Adapter 接通原生事件并采纳支持的效果，Provider 实现具体策略。
+core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
+工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
 
-[能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)按 Adapter 和启动模式记录
-16 个 Hook、受管 MCP 与策略热更新的支持情况，分别列出已实现边界与后续计划。
-策略热更新复用统一框架合同，各 Adapter 提供经过验证的安全切换边界。
+<a id="安装与使用"></a>
 
-当前接入合同见[自定义 Hook 与 SDK 接入](../../docs/developer-guide/zh/aw/native-agents.md)、
-[受管 MCP](docs/design/zh/adapters/claude-mcp.md)和
-[策略更新](../../docs/user-guide/zh/aw/configuration.md#更新预热实例)。
+## 安装与首次运行
 
-## 安装与使用
+从[安装指南](../../docs/user-guide/zh/aw/installation.md)获取 Preview 包并安装。
+当前使用独立安装包；`anolisa install aw` 和 RPM 安装入口尚未提供。
+先安装并登录所选 Agent，再用 `aw config init` 生成配置。
 
-AW 使用 Preview 包分发，尚未接入 `anolisa install` 或 RPM。
-从[安装指南](../../docs/user-guide/zh/aw/installation.md)下载并安装 core
-或 all-in-one，用 `aw config init` 生成配置后运行。
-
-已有 AW 后，可用 `aw install --prefix ABS_DIR --bundle ABS_DIR` 安装解压后的本地
-软件包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR --yes` 移除其拥有的文件。
-原生 Hook 注册使用 `aw agent connect --config FILE --agent TARGET`。
-旧的原生 `aw install --config ... --agent ...` 保持兼容。独立 `aw-package` 命令已删除，
-Rust 库保留。每个 bundle 根目录携带 `aw` 用于首次安装，必须显式提供绝对 `--bundle` 路径。
-此 Preview 安装器尚不支持按组件名、直接 URL 或系统包后端安装。
-
-用 `--dry-run` 查看安装或卸载计划，不创建文件。
-`aw uninstall PACKAGE --prefix ABS_DIR --yes` 在检查依赖、文件归属和运行引用后，
-移除指定包。新操作会提交本地包数据库；`aw recover` 清理已提交但中断的操作，或回滚
-尚未提交的操作。默认使用当前用户的数据库。root 管理的 raw 安装必须显式使用
-`sudo aw install ... --scope system`，权限不会自动选择 system。RPM/DEB 暂未接入。
-
-新卸载入口仅在 stdin 和 stderr 都是交互终端时询问确认。
-脚本或 JSON 输出必须使用 `aw uninstall --prefix ABS_DIR --yes`（或 `-y`）。
-确认不覆盖包检查或系统权限。
-
-使用 `aw list --installed --prefix ABS_DIR` 列出安装记录中的包，使用
-`aw doctor --prefix ABS_DIR` 检查这些包的文件。两个命令只读，都支持 `--json`。
-省略 `--prefix` 时读取当前用户的已安装包数据库。显式指定安装目录时，查询会按该目录
-记录的位置读取数据库，普通用户也可查询可读的 system 安装。旧 Preview 安装仍需显式
-指定目录；查询不会导入 `.aw-packages` 安装记录。只有记录中的 AW 可执行文件与当前命令
-一致时，成功的软件包写入才会存档旧记录并登记目录；否则在写入前以 `runtime_unknown`
-阻断迁移，请把新 AW 安装到另一目录。详见
-[已安装包与文件检查](../../docs/user-guide/zh/aw/operations.md#已安装包与文件检查)。
+下面以已安装、登录的 Qoder 为例。`AW_PREFIX` 是安装指南中选定的安装目录，
+`qodercli` 和 `aw` 应已加入 `PATH`。
 
 ```bash
-aw validate --config "$HOME/aw/aw.yaml"
-aw run --config "$HOME/aw/aw.yaml" --agent qoder
+export AW_HOME="$HOME/aw"
+install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
+  --qoder "$(command -v qodercli)"
+aw validate --config "$AW_HOME/aw.yaml"
+cd "$AW_HOME/workspace"
+aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
-launcher 转发退出信号后，Agent 需要超过默认两秒的强制清理前宽限期时，可设置
-`spec.agents.<target>.shutdown_grace_ms`。有界等待和应用清理职责见
-[退出宽限期](../../docs/user-guide/zh/aw/configuration.md#设置-agent-退出宽限期)。
-
-用 `aw validate --config next.yaml --against current.yaml` 离线检查仅涉及策略的修改，
-详见[配置](../../docs/user-guide/zh/aw/configuration.md#比较策略修改)；
-此命令不更新运行中的实例。
-
-普通 Qoder SDK 和 QwenPaw worker 支持显式空闲策略更新，无需重启。全部 Query/reply、
-原生回调和私有租约完全清理后，更新为新任务快照选择策略，保留严格 Post 和受管 MCP。
-受管 Qoder `startDaemon()` 和 QwenPaw App startup 在首个任务前确认就绪。先准备 Hook
-文件，再执行 `aw update --config aw.yaml --agent TARGET` 应用完整策略，成功后派发任务。
-同一目标有多个实例时使用 `--instance ID`。管控侧串行化更新与任务派发；活跃任务使更新返回 `busy`。
-
-通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2.post1 /
-AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / Worker 1.1.78
-预装实验性空闲更新桥接。
-直接编辑同一份配置文件，再显式应用。
-`aw update --config aw.yaml --agent TARGET` 选择目标的唯一实例，
-保留宿主进程，忙碌实例返回 busy；见[预热实例更新](../../docs/user-guide/zh/aw/configuration.md#更新预热实例)。
-
-退出 Agent 后，本地服务仍可查询，使用结束后显式停止。
+进入 Qoder 后，请它用工具读取当前目录，并按原生提示处理权限确认。
+退出 Agent 后，本地服务仍可复用。使用结束后查询并停止它。
 
 ```bash
-aw status --config "$HOME/aw/aw.yaml"
-aw stop --config "$HOME/aw/aw.yaml"
+aw status --config "$AW_HOME/aw.yaml"
+aw stop --config "$AW_HOME/aw.yaml"
 ```
 
-上述操作也可使用 `aw service status` 和 `aw service stop`。
-`aw service serve` 在前台运行服务，不安装系统服务单元。
-使用 `aw service --help` 查看参数，`aw --version` 查看 CLI crate 版本。
+<a id="hook-支持"></a>
+<a id="adapter-能力覆盖"></a>
 
-通过 `aw --help`、`aw config --help`、`aw config validate --help` 逐级查看
-已实现的命令。公开命令也支持 `-h`，`aw -V` 显示 CLI 版本。
-帮助选项须放在最后；未知或重复参数会在开始操作前报错。
-`--json` 等参数只在对应命令有效，详见[命令帮助](../../docs/user-guide/zh/aw/operations.md#命令帮助与参数)。
+## 支持范围
 
-使用 `aw commands` 查看已实现的公开命令，`aw commands --json` 获取带版本的
-命令元数据。`aw completion bash` 输出补全脚本，也支持 Zsh、Fish、PowerShell
-和 Elvish；不会自动安装脚本。详见[命令发现与补全](../../docs/user-guide/zh/aw/operations.md#命令发现与补全)。
-
-配置验证按每个已声明 target 报告投影排除的步骤，便于核对多 target 共享配置的安全覆盖。
-本地包安装/卸载、`config init`、`config validate` 和离线配置编辑支持 `--json`，返回带版本的管理结果。
-默认仍为人类摘要，已有服务和协议 JSON 保持不变。
-
-这些管理命令支持局部 `--quiet`、`--verbose` 和 `--color auto|always|never`，
-用于人类输出，不能与 `--json` 同用；原生输出与协议流保持不变。
-包报告区分提交、取消、恢复不完整和清理警告，不从退出码推断回滚。
-详见[终端输出](../../docs/user-guide/zh/aw/operations.md#终端输出)。
-支持范围与失败语义见[管理结果](../../docs/user-guide/zh/aw/operations.md#管理结果)。
-
-core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需要启动 sec-core
-后端；这些能力都要通过配置启用。AW 不安装 Agent，也不配置模型凭据。
-
-通过事件和步骤的 `match.tools` 选择哪些工具调用进入各个 Provider。
-未匹配步骤保留跳过审计记录；生成的 sec-core 检查选择 Qoder `Bash` 和
-OpenClaw `exec`，选中调用的检查失败时阻断。见
-[工具选择](../../docs/user-guide/zh/aw/configuration.md#为-hook-步骤选择工具)。
-
-对于独立启动的 Qoder TUI 或 QwenPaw App，在首请求前执行
-`aw agent connect --config current.yaml --agent TARGET --pid PID`；添加 `--remove`
-可在空闲时移除挂载。原生启动与进程生命周期仍由调用者管理。QwenPaw peer 的启动
-profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会阻止挂载。独占 profile、加载确认
-和清理要求见[原生接入](../../docs/user-guide/zh/aw/configuration.md#接入已启动的原生进程)。
+当前接入 Qoder CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
+Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需要显式接入受管工厂。
+[能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)按 Adapter 和启动模式说明
+结果处理、MCP 与策略更新的差异，并链接支持版本与接线步骤。
 
 ## 文档导航
 
 | 任务 | 文档 |
 | --- | --- |
-| 选择能力和开始使用 | [AW 用户指南](../../docs/user-guide/zh/aw/index.md) |
-| 对比 Hook、MCP 和热更新支持情况 | [能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md) |
-| 安装包、生成配置和首次运行 | [安装 AW](../../docs/user-guide/zh/aw/installation.md) |
-| 选择 Agent、启用 Provider 和修改配置 | [配置 AW](../../docs/user-guide/zh/aw/configuration.md) |
-| 压缩工具输出 | [Tokenless](../../docs/user-guide/zh/aw/tokenless.md) |
-| 启用命令安全检查 | [安全检查](../../docs/user-guide/zh/aw/security.md) |
-| 查看 Agent 运行记录 | [接入 AgentSight](../../docs/user-guide/zh/aw/observability.md) |
-| 查询状态、升级、卸载和排错 | [运行维护](../../docs/user-guide/zh/aw/operations.md) |
-| 客户本地编译和打包 | [从源码构建 AW](../../contribute/zh/aw/building.md) |
-| 编写规则、集成 Provider 或 SDK | [AW 开发指南](../../docs/developer-guide/zh/aw/index.md) |
+| 安装并完成首次运行 | [AW 用户手册](../../docs/user-guide/zh/aw/index.md) |
+| 选择 Agent、配置规则和更新策略 | [配置与启动](../../docs/user-guide/zh/aw/configuration.md) |
+| 启用输出压缩或安全检查 | [Tokenless](../../docs/user-guide/zh/aw/tokenless.md)、[sec-core](../../docs/user-guide/zh/aw/security.md) |
+| 查看运行记录 | [AgentSight](../../docs/user-guide/zh/aw/observability.md) |
+| 查询状态、管理安装包与排错 | [运行维护](../../docs/user-guide/zh/aw/operations.md) |
+| 编写 Provider、接入 SDK 或理解架构 | [开发指南](../../docs/developer-guide/zh/aw/index.md) |
 
-用户手册集中在 `docs/user-guide/{en,zh}/aw/`，接入参考在
-`docs/developer-guide/{en,zh}/aw/`。组件协议设计保留在本目录的 `docs/design/`。
+<a id="代码架构"></a>
+<a id="开发与验证"></a>
 
-<a id="hook-支持"></a>
-
-## Adapter 能力覆盖
-
-上面的通用能力说明 AW 的产品范围；下表按 Adapter 列出工具事件和效果的覆盖情况，
-由[回归矩阵](tests/regression-matrix.json)生成，并由 CI 契约测试核对。
-`✓` 表示已声明且有契约覆盖的效果，`—` 表示尚未支持。
-MCP 接入、严格 Post 失败处理、常驻生命周期和热更新见
-[能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)。
-[原生 Agent 接入参考](../../docs/developer-guide/zh/aw/native-agents.md)说明支持的工具类型与文本替换范围。
-
-普通受管 Qoder SDK Query 各自持有子 scope；daemon 退出时排空所属 Query 和原始回调。
-显式应用工厂为每次受管 MCP handler 调用提供私有租约。普通 QwenPaw App 启动为每个
-受管 Agent reply 分配任务 scope 和一个私有执行租约。工具显式消费这些环境，见
-[私有执行租约](docs/design/zh/adapters/private-execution.md)。
-
-两种普通 resident 路径均准入严格 After 的 `on_error: withhold_result`，阻止未核验
-结果交付和后续派发。Post 之前已经发生的工具副作用继续生效。
-[统一安全示例](crates/aw-service/examples/aw.sdk-security.yaml) 通过
-`--agent qoder-sdk` 或 `--agent qwenpaw` 选择目标。resident 策略变更支持在 Query 完整关闭或 reply 完整排空后显式空闲更新；
-`--reloadable` 保留独立的空闲更新路径，不提供严格 Post 和私有执行租约。
-
-<!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
-| --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | ✓ | ✓ |
-| `pi` | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | — |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
-<!-- aw-regression-matrix:end -->
-
-Qoder SDK 1.0.56 / Worker 1.1.78 使用 Bridge 的 daemon 和 Query 工厂校验
-原生运行时，通过 `aw run` 显式注册每个 Query 的回调，
-可通过 `--reloadable` 显式启用已有 Query 的空闲策略更新；忙碌或清理未完成时返回 busy。
-参见 [SDK Worker 指南](../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)。
-支持调用前观察/拒绝、调用后观察和普通 resident Post 结果扣留，外部 attach 与结果
-替换仍不支持。
-
-
-Tokenless 重试建议会阻止原调用，Agent 需发起新调用并重新经过安全和原生权限检查。
-结果替换仅适用于受支持的文本位置；AW 不提供 OS 沙箱或跨 Agent 审批。
-真实 SDK 和模型会话的验收范围见[贡献指南](CONTRIBUTING_zh.md)。
-
-## 代码架构
-
-![AW 用户流程与组件架构](../../docs/images/aw/architecture_zh.png)
-
-根目录是纯 workspace。`crates/` 保存 10 个框架 crate，仓库根 `providers/` 收录可独立协作的
-具体实现。Provider 也可以在外部仓库开发、单独分发，见[协作入口](../../providers/README_zh.md)。
-Hook 请求由 `aw-service` 交给 `aw-host`，通过 `aw-exec` 调用 Provider；
-`aw-core` 提供独立的计划执行接口，服务只复用它的 Journal。
-
-`aw-cli` 负责命令解析和呈现，调用 `aw-package` 库完成安装与配置，调用
-`aw-service` 完成运行时操作。
-
-[架构总览](docs/design/zh/architecture.md)说明各包职责与运行顺序，
-[设计索引](docs/design/zh/README.md)按调用流程组织详细协议。
-
-## 开发与验证
-
-从仓库根目录运行 AW 的 CI 检查。
-
-```bash
-python3 src/aw/scripts/check.py
-```
-
-Qoder CLI 和 QwenPaw App/API 各自通过临时容器中的真实 sec-core 验证正常放行、
-扫描拒绝、后端异常和超时阻断。Qoder 使用 nightly 账号 Secret，QwenPaw 使用
-本地确定性模型。完整验收边界见 [CI 看护](CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
-
-- [开发环境和测试](CONTRIBUTING_zh.md)
-
-[Pi / Claude 常驻宿主](docs/design/zh/adapters/resident-sdk.md) 使用一份配置和不同 `--agent`，按任务绑定并严格处理回调失败。
-
-[Claude MCP 公共工厂](docs/design/zh/adapters/claude-mcp.md) 保留业务 handler，在 SDK 序列化前采纳 Tokenless 输出，明确任务/调用身份并严格处理故障。
-
-Pi/Claude 常驻客户端回收已完成调用明细，支持连续 execution。spec.daemon.limits 配置并发资源，
-详见[配置参考](../../docs/user-guide/zh/aw/configuration.md#服务并发预算)。
+[架构总览](docs/design/zh/architecture.md)说明框架与 Provider 的职责和调用流程。
+源码构建、测试与 CI 入口见[贡献指南](CONTRIBUTING_zh.md)。

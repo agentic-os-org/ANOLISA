@@ -212,7 +212,7 @@ and the existing `aw install --pid ... [--remove]` alias. Process association an
 liveness checks protect both update paths. A convenience `aw update --pid`
 selector is deferred; it is independent of Adapter update support. These entries
 cover idle policy updates only; general Hook support remains in the
-[capability matrix](../../../../src/aw/README.md#hook-support).
+[capability matrix](capabilities.md#hooks-and-mcp).
 
 The separate restricted bridge also remains available:
 

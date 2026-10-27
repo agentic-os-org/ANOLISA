@@ -9,7 +9,7 @@ external policy programs and checks their messages and requested capabilities
 offline. It connects the unified configuration to a Provider contract without
 starting a process, installing an Agent Hook or establishing a runtime binding.
 Native integration belongs to `aw-adapter`, orchestrated by `aw-cli`; see the
-[component README](../../../../../src/aw/README.md#adapter-capability-coverage) for supported capabilities.
+[capability matrix](../../../../user-guide/en/aw/capabilities.md#hooks-and-mcp) for supported capabilities.
 
 ## Delivery boundary
 

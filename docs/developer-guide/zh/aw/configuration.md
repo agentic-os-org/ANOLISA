@@ -89,7 +89,9 @@ Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 Agen
 
 ## 事件、效果与工具选择
 
-配置识别以下 16 个名称。这里定义事件词汇，运行支持以上述较小范围为准。
+配置识别以下 16 个名称。当前公共 Provider 只派发 `tool.before` 和 `tool.after`，
+其余 14 个名称为预留词汇。各 Adapter 的效果支持见
+[能力矩阵](../../../user-guide/zh/aw/capabilities.md#hook-与-mcp)。
 
 | 事件 | 含义 |
 | --- | --- |

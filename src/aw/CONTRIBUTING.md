@@ -69,13 +69,13 @@ have a 699-line ceiling, with an advisory at 600 lines. Only the existing
 and preserve entrypoints and assertions; do not exempt test fixtures.
 Dependency/layout checks are in [check_layout.py](scripts/check_layout.py),
 compiled inventories in [check_inventory.py](scripts/check_inventory.py), and
-matrix/README consistency in [check_matrix.py](scripts/check_matrix.py).
+matrix/user-guide consistency in [check_matrix.py](scripts/check_matrix.py).
 
-After changing supported capabilities, regenerate both README grids and run the
+After changing supported capabilities, regenerate both user-guide grids and run the
 gate from `src/aw`:
 
 ```bash
-python3 scripts/check_matrix.py --write-readmes
+python3 scripts/check_matrix.py --write-docs
 python3 scripts/check.py
 ```
 
