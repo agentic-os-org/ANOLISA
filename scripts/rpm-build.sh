@@ -19,6 +19,10 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${SCRIPT_DIR}/rpmbuild"
 RPMBUILD="${RPMBUILD:-rpmbuild}"
 
+# Component-local packaging may use an empty namespace. This script builds the
+# established ANOLISA distribution profile and its embedded contracts.
+export AWPRJ=anolisa
+
 # Source directories
 SHELL_DIR="${ROOT_DIR}/deprecated/copilot-shell"
 SEC_DIR="${ROOT_DIR}/src/agent-sec-core"

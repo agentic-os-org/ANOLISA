@@ -279,7 +279,11 @@ runs:
       shell: bash
       run: |
         mkdir -p /tmp/archives
-        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+        SOURCE_EXCLUDES=()
+        case "${{ inputs.component }}" in
+          tokenless|agent-memory) SOURCE_EXCLUDES+=(--exclude="${ARCHIVE_NAME}/target") ;;
+        esac
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" "${SOURCE_EXCLUDES[@]}" \
           -C /tmp/build "${ARCHIVE_NAME}"
 
     - name: Verify tokenless component contract in archive

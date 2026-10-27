@@ -20,7 +20,7 @@ In RPM spec files, use the datadir macro rather than hard-coding
 %global anolisa_component sec-core
 
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/%{anolisa_component}
-install -m 0644 .anolisa/component.toml \
+install -m 0644 packaging/anolisa/component.toml \
   %{buildroot}%{_datadir}/anolisa/components/%{anolisa_component}/component.toml
 
 %files
@@ -60,6 +60,18 @@ The adapter payload tree remains separate:
 The component contract is component-level metadata. It may describe adapters,
 services, health checks, files, backend compatibility, and future lifecycle
 behavior, so it should not live inside the adapter namespace.
+
+## Source Location
+
+Component contract sources live under each component's `packaging/anolisa/`.
+Separate `raw/` and `rpm/` inputs where those channels have different contracts;
+shared contracts remain single-source. Version templates generate build outputs
+under `target/packaging/anolisa/`. Source archives retain the templates and
+component Make rules needed to regenerate those outputs.
+
+This source convention does not change the raw archive member
+`.anolisa/component.toml` or the installed datadir location. A layout `source`
+entry names an archive member, not a path in the source checkout.
 
 ## User And Raw Installs
 
