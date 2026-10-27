@@ -113,7 +113,7 @@ runs:
         mkdir -p "$VENDOR_STAGING"
 
         if [ "${{ inputs.component }}" = "agent-sec-core" ]; then
-          bash "$BUILD_DIR/scripts/package-v2-rpm-vendor.sh" "$BUILD_DIR" "$VENDOR_STAGING"
+          bash "$BUILD_DIR/packaging/rpm/package-v2-vendor.sh" "$BUILD_DIR" "$VENDOR_STAGING"
         else
           while IFS= read -r cargo_root; do
             cd "$cargo_root"

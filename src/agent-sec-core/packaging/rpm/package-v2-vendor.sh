@@ -2,8 +2,8 @@
 # Build the architecture-independent Source1 payload for the V2 RPM.
 set -euo pipefail
 
-source_root=${1:?"usage: package-v2-rpm-vendor.sh <source-root> <vendor-staging>"}
-vendor_staging=${2:?"usage: package-v2-rpm-vendor.sh <source-root> <vendor-staging>"}
+source_root=${1:?"usage: package-v2-vendor.sh <source-root> <vendor-staging>"}
+vendor_staging=${2:?"usage: package-v2-vendor.sh <source-root> <vendor-staging>"}
 
 for workspace in v2 linux-sandbox; do
     workspace_dir="$source_root/$workspace"

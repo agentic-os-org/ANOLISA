@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 BUILD="$TMP/build"
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" \
-    "$ROOT" "$ROOT/.anolisa/component.toml")"
+    "$ROOT" "$ROOT/packaging/anolisa/component.toml")"
 
 install -d -m 0755 \
     "$BUILD/v2/bin" \
@@ -88,7 +88,7 @@ for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health agent-sec-p
     test "$(stat -c '%a' "$STAGE/bin/$binary")" = "755"
 done
 test ! -e "$STAGE/lib/anolisa/sec-core/python3.11/site-packages"
-cmp "$ROOT/.anolisa/component.toml" "$STAGE/.anolisa/component.toml"
+cmp "$ROOT/packaging/anolisa/component.toml" "$STAGE/.anolisa/component.toml"
 grep -Fq 'WantedBy=multi-user.target' \
     "$STAGE/share/anolisa/sec-core/agent-sec-core.service.in"
 

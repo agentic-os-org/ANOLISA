@@ -60,14 +60,14 @@ jobs:
           artifact="$(find src/agent-sec-core/target/raw -name 'sec-core-*-linux-x86_64.tar.gz' -print -quit)"
           test -n "$artifact"
           version="$(python3 src/agent-sec-core/packaging/raw/verify_release.py \
-            src/agent-sec-core src/agent-sec-core/.anolisa/component.toml)"
+            src/agent-sec-core src/agent-sec-core/packaging/anolisa/component.toml)"
           repo_root="$(mktemp -d /tmp/sec-core-raw-repo.XXXXXX)"
           repo="$repo_root/v1"
           mkdir -p "$repo"
           artifact_name="$(basename "$artifact")"
           cp "$artifact" "$repo/$artifact_name"
           sha256="$(sha256sum "$repo/$artifact_name" | cut -d ' ' -f 1)"
-          manifest_digest="sha256:$(sha256sum src/agent-sec-core/.anolisa/component.toml | cut -d ' ' -f 1)"
+          manifest_digest="sha256:$(sha256sum src/agent-sec-core/packaging/anolisa/component.toml | cut -d ' ' -f 1)"
 
           cp distribution/anolisa/manifests/components-v2.toml "$repo/components-v2.toml"
 

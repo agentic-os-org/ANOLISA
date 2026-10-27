@@ -315,7 +315,7 @@ jobs:
           test -f "$source1"
           cp "$source0" "$source1" "$HOME/rpmbuild/SOURCES/"
           # Read the spec from Source0 so rpmbuild uses only packaged inputs.
-          tar -xzOf "$source0" "agent-sec-core-${VERSION}/agent-sec-core.spec.v2.in" \
+          tar -xzOf "$source0" "agent-sec-core-${VERSION}/packaging/rpm/agent-sec-core.spec.v2.in" \
             | sed "s/@VERSION@/${VERSION}/g" > "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
           dnf builddep -y --spec "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
           rpmbuild -bb --define "_topdir $HOME/rpmbuild" \
@@ -358,8 +358,11 @@ jobs:
           grep -qx 'Group=root' /usr/lib/systemd/system/agent-sec-core.service
           systemd-analyze verify /usr/lib/systemd/system/agent-sec-core.service
           test "$(stat -c %a /etc/agent-sec/skillsec.json)" = 600
-          echo "=== Verify component manifest ==="
-          test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }
+          echo "=== Verify sec-core does not own the ANOLISA manifest ==="
+          rpm_files=$(rpm -ql agent-sec-core agent-sec-plugins agent-sec-skills)
+          if printf '%s\n' "$rpm_files" | grep -Fxq /usr/share/anolisa/components/sec-core/component.toml; then
+            echo "ERROR: sec-core RPMs must not own ANOLISA's component manifest"; exit 1
+          fi
           echo "=== Assert no V1 Python site-packages ==="
           if [ -e /opt/agent-sec/lib/python3.11/site-packages ]; then
             echo "ERROR: V1 site-packages present in V2 RPM"; exit 1;

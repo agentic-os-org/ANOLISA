@@ -86,8 +86,11 @@ git -C "$SOURCE_REPO" worktree lock --reason 'sec-core prebuilt package build' \
     "$FIXED_WORKTREE"
 
 COMPONENT_ROOT="$FIXED_WORKTREE/src/agent-sec-core"
+CONTRACT_DIR="$COMPONENT_ROOT/packaging/anolisa"
+# Historical tagged sources retain their original contract directory.
+[ -d "$CONTRACT_DIR" ] || CONTRACT_DIR="$COMPONENT_ROOT/.anolisa"
 COMPONENT_VERSION="$(python3 "$COMPONENT_ROOT/packaging/raw/verify_release.py" \
-    "$COMPONENT_ROOT" "$COMPONENT_ROOT/.anolisa/component.toml")"
+    "$COMPONENT_ROOT" "$CONTRACT_DIR/component.toml")"
 [ "$VERSION" = "$COMPONENT_VERSION" ] || \
     die "requested version $VERSION does not match sec-core $COMPONENT_VERSION"
 if [ -e "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then

@@ -7,9 +7,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const SYSTEM_DIRS: [&str; 2] = [
+const SYSTEM_DIRS: [&str; 4] = [
     "/usr/share/anolisa/skills/*",
     "/usr/local/share/anolisa/skills/*",
+    "/usr/share/agent-sec-core/skills/*",
+    "/usr/local/share/agent-sec-core/skills/*",
 ];
 const HOME_DIRS: [&str; 8] = [
     ".local/share/anolisa/skills/*",
@@ -97,7 +99,10 @@ mod tests {
             .into_iter()
             .map(PathBuf::from)
             .collect();
-        assert_eq!(paths.len(), 2 + 2 * HOME_DIRS.len());
+        assert_eq!(paths.len(), SYSTEM_DIRS.len() + 2 * HOME_DIRS.len());
+        for system in SYSTEM_DIRS {
+            assert!(paths.contains(&PathBuf::from(system)));
+        }
         for home in [&home, &absent] {
             for relative in HOME_DIRS {
                 assert!(paths.contains(&home.join(relative)));

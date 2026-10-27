@@ -58,13 +58,21 @@ Installing the CLI from YUM makes it available on sudo's system path. Adoption
 records the RPM in system state so the adapter manager can read the installed
 component contract.
 
-Developers building from source should use the repository-level entry point:
+The repository convenience workflow remains available:
 
 ```bash
 ./scripts/build-all.sh --component sec-core
 ```
 
-Before installing files, the source-build entry point checks Node.js 20 or
+To build V2 and install it system-wide from the component directory:
+
+```bash
+cd src/agent-sec-core
+make build
+sudo make install
+```
+
+Before installing files, the repository script checks Node.js 20 or
 newer, Python 3, bubblewrap, GnuPG, and `jq`. It uses `sudo` to install the
 Rust CLI, sandbox, and host-level daemon; default-mode integration resources
 remain in user paths. Python hooks use the host `python3`; the Qoder plugin

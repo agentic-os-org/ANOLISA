@@ -645,6 +645,9 @@ CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；�
 领域状态默认 `/var/lib/agent-sec/skillsec`，root 所有、0700，当前 signing-key.pk8 为 0600。
 `/etc/agent-sec/skillsec.json` 或 --skillsec-config 可注入 stateDir、精确 managedSkillDirs、
 scanners 和 parsers，以及默认开启的 enableDefaultSkillDirs；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+公开 file-only `make install` / `make install-core` 生成的 system unit 使用
+`--skillsec-config CONFIGDIR/skillsec.json`，读取本次安装的配置；`DESTDIR` 只用于暂存，
+不进入服务参数。RPM/raw 原有 unit 继续使用 native 配置默认值，配置和状态的安全校验不变。
 默认授权包含系统目录及本地 `/etc/passwd` 的所有有效账户 HOME 下标准 Skill 目录，不按 UID 或
 登录 shell 排除账户，不采信客户端环境。禁用默认目录不影响显式配置或 SkillFS；账户变化重启后生效。
 DPROC-SG-007 的可执行边界为 `apps/asc-daemon/src/skill_sec/defaults.rs` 及 capability 的 `tests/scope.rs`。

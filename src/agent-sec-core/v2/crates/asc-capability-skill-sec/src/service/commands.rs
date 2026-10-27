@@ -98,6 +98,8 @@ fn readonly_system_skip(
             [
                 "/usr/share/anolisa/skills",
                 "/usr/local/share/anolisa/skills",
+                "/usr/share/agent-sec-core/skills",
+                "/usr/local/share/agent-sec-core/skills",
             ]
             .iter()
             .any(|path| parent == Path::new(path))

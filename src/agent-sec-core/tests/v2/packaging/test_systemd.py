@@ -47,23 +47,16 @@ def test_v2_stages_root_system_unit(tmp_path):
     ):
         assert setting in content.splitlines()
     assert not (tmp_path / "usr/lib/sysusers.d/agent-sec-core.conf").exists()
-    spec = (ROOT / "agent-sec-core.spec.v2.in").read_text()
+    spec = (ROOT / "packaging/rpm/agent-sec-core.spec.v2.in").read_text()
     assert "%systemd_postun_with_restart agent-sec-core.service" in spec
-    assert (
-        '[ "$1" -eq 1 ] || [ -e /usr/lib/systemd/user/agent-sec-core.service ]' in spec
-    )
-    assert (
-        "/usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || :"
-        in spec
-    )
+    assert '[ "$1" -eq 1 ] || [ -e /usr/lib/systemd/user/agent-sec-core.service ]' in spec
+    assert "/usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || :" in spec
     assert "systemd_user_" not in spec and "_userunitdir" not in spec
     assert "systemd-sysusers" not in spec
     assert "%pre -n agent-sec-cli" not in spec
-    makefile = (ROOT / "Makefile").read_text()
+    makefile = (ROOT / "packaging/install.mk").read_text()
     targets = [
-        line
-        for line in makefile.splitlines()
-        if line.startswith("install-all-for-rpmbuild-v2:")
+        line for line in makefile.splitlines() if line.startswith("install-all-for-rpmbuild-v2:")
     ]
     assert any("install-systemd-system" in line for line in targets)
     assert all("install-systemd-user" not in line for line in targets)
@@ -103,14 +96,12 @@ def test_shared_manifest_staging(tmp_path):
         capture_output=True,
         text=True,
     )
-    installed = (
-        tmp_path / "install/usr/share/anolisa/components/sec-core/component.toml"
-    )
+    installed = tmp_path / "install/usr/share/anolisa/components/sec-core/component.toml"
     staged = tmp_path / "build/share/anolisa/components/sec-core/component.toml"
     assert (
         installed.read_bytes()
         == staged.read_bytes()
-        == (ROOT / ".anolisa/component.toml").read_bytes()
+        == (ROOT / "packaging/anolisa/component.toml").read_bytes()
     )
     component = tomllib.loads(installed.read_text())["component"]
     assert component["services"][0]["scope"] == "system"

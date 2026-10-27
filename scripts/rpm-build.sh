@@ -191,7 +191,8 @@ build_copilot_shell() {
 # Only the CLI/daemon layer differs between V1 and V2, so both callers stage the
 # same component payload here and then add their own layer. Keeping the trees
 # separate matters: the V1 tarball must keep its original payload inventory, so
-# nothing V2-specific may leak into this helper.
+# no V2 runtime binaries may leak into this helper. Shared packaging
+# modules are included because both source trees use the same root Makefile.
 #
 # Note: rust-toolchain.toml is intentionally excluded from the tarball. The
 # source file pins a Rust version that rpmbuild environments may not have, so by
@@ -209,8 +210,10 @@ stage_sec_core_payload() {
     cp -rp "${SEC_DIR}/cosh-extension/"* "$pkg_dir/cosh-extension/"
     cp -p "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
     cp "${SEC_DIR}/Makefile" "$pkg_dir/"
+    # The root entrypoint includes component-owned delivery modules.
     tar -cf - -C "${SEC_DIR}" \
-        .anolisa/ | tar -xf - -C "$pkg_dir/"
+        --exclude='__pycache__' \
+        packaging/ | tar -xf - -C "$pkg_dir/"
     [ -f "${SEC_DIR}/LICENSE" ] && cp "${SEC_DIR}/LICENSE" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
 
@@ -318,7 +321,7 @@ build_agent_sec_core_v2() {
     log "Building RPM: agent-sec-core (V2)"
     log "=========================================="
 
-    local spec_in="${SEC_DIR}/agent-sec-core.spec.v2.in"
+    local spec_in="${SEC_DIR}/packaging/rpm/agent-sec-core.spec.v2.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -390,7 +393,7 @@ build_agent_sec_core_v2() {
     local vendor_tarball="${pkg_name}-${version}-vendor.tar.gz"
     local vendor_staging="${tmp_dir}/vendor"
     log "Step 3/4: Creating vendor tarball ${vendor_tarball}..."
-    bash "${SEC_DIR}/scripts/package-v2-rpm-vendor.sh" "$pkg_dir" "$vendor_staging"
+    bash "${SEC_DIR}/packaging/rpm/package-v2-vendor.sh" "$pkg_dir" "$vendor_staging"
     tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball}" -C "$vendor_staging" .
     rm -rf "$tmp_dir"
 
