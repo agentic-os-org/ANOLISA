@@ -76,6 +76,13 @@ SQLite completion serializes JSON before taking the connection lock. Capacity se
 `octet_length` on stored JSON columns to read their byte lengths without fetching and scanning whole
 payloads while holding that lock. Delivery remains synchronous; these changes shorten its critical
 sections rather than introducing another persistence queue.
+
+Pending-match fingerprints are cached as fixed-size digests on the parsed request and reused after
+idle or crash snapshots. Routing, source timestamp, encoding and body replacement invalidate the
+cache. Raw delivery hashes its retained serialized body; semantic delivery hashes parsed JSON
+through a streaming writer. Non-LLM records are rejected before this hashing work. Neither path
+retains an extra payload copy, and match-key bytes remain compatible.
+
 Completed-event JSON reserves from the retained-payload estimate and releases excess serializer
 capacity. SQLite message columns borrow `RawValue` arrays from that JSON when the full message array
 is needed; incremental subsets retain their existing serialization and exact field content.
