@@ -3,7 +3,6 @@
 
 pub mod config_edit;
 mod configuration;
-pub mod package;
 mod store;
 
 pub use store::{database, description, open_bundle, plan, transaction};

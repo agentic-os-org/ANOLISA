@@ -1,0 +1,138 @@
+{
+  "format": 1,
+  "packages": [],
+  "constraints": [
+    {
+      "kind": "unix_socket",
+      "value": "${SOCKET}"
+    },
+    {
+      "kind": "search_path",
+      "value": "${PROVIDERS_DIR}/tokenless"
+    }
+  ],
+  "providers": {
+    "security": {
+      "protocol": "aw-provider/v1alpha1",
+      "transport": {
+        "type": "stdio",
+        "location": "agent",
+        "argv": [
+          "${PROVIDERS_DIR}/sec-core/aw-provider-sec-core",
+          "--cli",
+          "${SEC_CORE_CLI}",
+          "--socket",
+          "${SOCKET}"
+        ]
+      },
+      "timeout_ms": 2000,
+      "max_output_bytes": 4096,
+      "config": {
+        "version": 1,
+        "mode": "block",
+        "unmapped_tool": "error",
+        "tools": {
+          "Bash": {
+            "language": "bash",
+            "input_pointer": "/command"
+          },
+          "exec": {
+            "language": "bash",
+            "input_pointer": "/command"
+          }
+        }
+      }
+    },
+    "tokenless": {
+      "protocol": "aw-provider/v1alpha1",
+      "transport": {
+        "type": "stdio",
+        "location": "agent",
+        "argv": [
+          "${PROVIDERS_DIR}/tokenless/aw-provider-tokenless",
+          "--cli",
+          "${TOKENLESS_CLI}",
+          "--data-dir",
+          "${STATE}/tokenless",
+          "--rtk",
+          "${RTK_BINARY}",
+          "--rtk-sha256",
+          "${RTK_SHA256}"
+        ]
+      },
+      "timeout_ms": 2000,
+      "max_output_bytes": 1048576,
+      "config": {
+        "version": 1
+      },
+      "view": {
+        "protocol": "aw-provider-view/v1alpha1",
+        "implementation": "tokenless",
+        "transport": {
+          "type": "stdio",
+          "location": "agent",
+          "argv": [
+            "${PROVIDERS_DIR}/tokenless/aw-provider-tokenless",
+            "--view",
+            "--cli",
+            "${TOKENLESS_CLI}",
+            "--data-dir",
+            "${STATE}/tokenless"
+          ]
+        }
+      }
+    }
+  },
+  "events": {
+    "tool.before": {
+      "enabled": true,
+      "required": true,
+      "steps": [
+        {
+          "id": "scan-code",
+          "match": {"tools": ["native:qoder:Bash", "native:openclaw:exec"]},
+          "provider": "security",
+          "operation": "scan_code",
+          "effects": [
+            "observe",
+            "block"
+          ],
+          "on_error": "block"
+        },
+        {
+          "id": "rewrite-command",
+          "provider": "tokenless",
+          "operation": "pre_tool",
+          "effects": [
+            "block"
+          ],
+          "on_error": "report"
+        }
+      ]
+    },
+    "tool.after": {
+      "enabled": true,
+      "required": true,
+      "steps": [
+        {
+          "id": "observe-completion",
+          "provider": "security",
+          "operation": "observe_tool",
+          "effects": [
+            "observe"
+          ],
+          "on_error": "report"
+        },
+        {
+          "id": "compress-result",
+          "provider": "tokenless",
+          "operation": "post_tool",
+          "effects": [
+            "replace_result"
+          ],
+          "on_error": "report"
+        }
+      ]
+    }
+  }
+}
