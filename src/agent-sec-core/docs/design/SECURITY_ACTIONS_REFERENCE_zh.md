@@ -321,6 +321,14 @@ failed item 导致 `success=false, exit_code=1`，但 `error_type` 为空，因�
 verdict 值域严格为 `pass/warn/deny/error`；finding severity 只为 `warn/deny`。built-in
 regex rules 当前可能只产生 pass/warn，但 deny 是 custom/LLM rule 的合法值，不能删除。
 
+regex 模式扫描 Python 时，除 Python 规则外，还从 `os.system`、`os.popen` 以及受支持的
+`subprocess` 执行 API 中提取在第一个参数位置通过位置参数或对应关键字参数传入的直接
+字符串命令，并复用 Bash 规则扫描该命令。关键字参数按 API 的 Python 签名匹配：`os.system` 使用
+`command`，`os.popen`、`subprocess.getoutput` 和 `subprocess.getstatusoutput` 使用 `cmd`，
+其余受支持的 `subprocess` API 使用 `args`。结果保留 Bash 规则原生的 `rule_id`、severity、
+描述和 evidence，顶层 `language` 仍为 `python`。变量、拼接字符串、带前缀字符串、argv
+列表、别名调用和其它动态表达式不执行 Shell 规则复用。
+
 ### 7.3 Success/error
 
 | 情况 | success | exit_code | error_type |
