@@ -41,9 +41,20 @@ SkillFS。
 # 推荐包安装
 sudo anolisa --install-mode system install skillfs
 
-# 开发者源码构建
-cd src/skillfs
-cargo +1.86.0 build --release
+```
+
+### 源码构建（开发者）
+
+在 Linux 的仓库根目录执行：
+
+```bash
+make -C src/skillfs build
+```
+
+可执行文件位于 `src/skillfs/target/release/skillfs`。构建完成后，如需安装到系统：
+
+```bash
+sudo make -C src/skillfs install
 ```
 
 ## Source 布局

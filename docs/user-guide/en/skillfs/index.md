@@ -42,9 +42,21 @@ it cannot mount SkillFS.
 # Recommended package install
 sudo anolisa --install-mode system install skillfs
 
-# Source build for developers
-cd src/skillfs
-cargo +1.86.0 build --release
+```
+
+### Source build (developers)
+
+From the repository root on Linux:
+
+```bash
+make -C src/skillfs build
+```
+
+The executable is `src/skillfs/target/release/skillfs`. To install it
+system-wide after building:
+
+```bash
+sudo make -C src/skillfs install
 ```
 
 ## Source Layout

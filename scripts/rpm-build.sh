@@ -827,7 +827,7 @@ build_skillfs() {
     log "Building RPM: skillfs"
     log "=========================================="
 
-    local spec_in="${SKILLFS_DIR}/skillfs.spec.in"
+    local spec_in="${SKILLFS_DIR}/packaging/rpm/skillfs.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1

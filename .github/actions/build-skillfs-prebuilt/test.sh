@@ -40,10 +40,9 @@ grep -Fq 'profile gnu2.28-x86_64 does not match target linux/aarch64' "$TEMPORAR
 # Use an isolated repository so tag tests never modify the checkout's release tags.
 fixture="$TEMPORARY/source"
 install -d "$fixture/src/skillfs/docs" "$fixture/src/skillfs/packaging"
-cp "$REPO_ROOT/src/skillfs/Cargo.toml" "$REPO_ROOT/src/skillfs/component.toml" "$fixture/src/skillfs/"
-cp -r "$REPO_ROOT/src/skillfs/.anolisa" "$fixture/src/skillfs/"
+cp "$REPO_ROOT/src/skillfs/Cargo.toml" "$fixture/src/skillfs/"
+cp -r "$REPO_ROOT/src/skillfs/packaging" "$fixture/src/skillfs/"
 cp -r "$REPO_ROOT/src/skillfs/docs/skills" "$fixture/src/skillfs/docs/"
-cp -r "$REPO_ROOT/src/skillfs/packaging/raw" "$fixture/src/skillfs/packaging/"
 git -C "$fixture" init -q
 git -C "$fixture" config user.name 'Packaging test'
 git -C "$fixture" config user.email 'packaging-test@localhost'

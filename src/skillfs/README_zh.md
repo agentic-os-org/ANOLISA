@@ -112,7 +112,7 @@ release environment 审批流程。
 ### 构建
 
 ```bash
-cargo build --release
+make build
 ```
 
 ### 常用命令

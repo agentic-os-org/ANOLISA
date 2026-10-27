@@ -123,7 +123,7 @@ existing release environment approval.
 ### Build
 
 ```bash
-cargo build --release
+make build
 ```
 
 ### Common Commands

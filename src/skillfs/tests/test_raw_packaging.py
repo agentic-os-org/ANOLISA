@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 COMPONENT = Path(__file__).resolve().parents[1]
-CONTRACT = COMPONENT / ".anolisa/component.toml"
+CONTRACT = COMPONENT / "packaging/anolisa/raw/component.toml"
 PACKER = COMPONENT / "packaging/raw/package.sh"
 
 
@@ -25,8 +25,15 @@ class SkillfsPackagingTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.source = self.root / "source"
         shutil.copytree(COMPONENT / "docs/skills", self.source / "docs/skills")
-        for name in ("Cargo.toml", "component.toml", "LICENSE", "README.md"):
+        for name in ("Cargo.toml", "LICENSE", "README.md"):
             shutil.copyfile(COMPONENT / name, self.source / name)
+        shutil.copyfile(COMPONENT / "Makefile", self.source / "Makefile")
+        shutil.copytree(
+            COMPONENT / "packaging",
+            self.source / "packaging",
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
         self.contract = CONTRACT
         self.manifest = tomllib.loads(CONTRACT.read_text())
         self.version = self.manifest["component"]["version"]
@@ -48,8 +55,9 @@ class SkillfsPackagingTests(unittest.TestCase):
         )
 
     def pack(self, output: str = "output", **overrides: str) -> subprocess.CompletedProcess[str]:
+        command = overrides.pop("COMMAND", "package")
         return subprocess.run(
-            [str(PACKER), "package"],
+            [str(PACKER), command],
             env={
                 **os.environ,
                 "SKILLFS_SOURCE_DIR": str(self.source),
@@ -97,6 +105,18 @@ class SkillfsPackagingTests(unittest.TestCase):
                     self.assertIn("share/anolisa/runtime/skills/skillfs/SKILL.md", members)
                     self.assertTrue(all(not member.issym() for member in members.values()))
 
+    def test_legacy_stage_reuses_component_inventory(self) -> None:
+        payload = self.root / "legacy-stage"
+        result = self.pack(COMMAND="stage", DESTDIR=str(payload), RAW_CONTRACT="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for entry in self.manifest["component"]["layout"]["files"]:
+            self.assertTrue((payload / entry["source"]).exists(), entry["source"])
+        self.assertEqual((payload / "bin/skillfs").read_bytes(), self.binary.read_bytes())
+        self.assertEqual(
+            (payload / "share/doc/skillfs/LICENSE").read_bytes(),
+            (COMPONENT / "LICENSE").read_bytes(),
+        )
+
     def test_reproducible_archive(self) -> None:
         first = self.pack("first")
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -114,7 +134,7 @@ class SkillfsPackagingTests(unittest.TestCase):
         self.assertIn("contract identity", result.stderr)
 
     def test_rpm_version_mismatch(self) -> None:
-        rpm = self.source / "component.toml"
+        rpm = self.source / "packaging/anolisa/rpm/component.toml"
         rpm.write_text(rpm.read_text().replace(self.version, "99.0.0"))
         result = self.pack()
         self.assertNotEqual(result.returncode, 0)

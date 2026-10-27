@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="${SKILLFS_SOURCE_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BIN_DIR="${BIN_DIR:-$SOURCE_ROOT/target/release}"
-CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/.anolisa/component.toml}"
+CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/packaging/anolisa/raw/component.toml}"
 TARGET_OS="${TARGET_OS:-linux}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 BUILD_METADATA="${SKILLFS_BUILD_METADATA:-$BIN_DIR/skillfs-build.toml}"
@@ -17,6 +17,10 @@ die() {
 }
 
 case "$COMMAND" in stage | package) ;; *) die "usage: $0 {stage|package}" ;; esac
+# Raw manifests describe the legacy archive tree, not arbitrary install layouts.
+if [ "${AWPRJ+x}" = x ] && [ "$AWPRJ" != anolisa ]; then
+    die "raw payload requires AWPRJ=anolisa; use make install DESTDIR=<temporary-root> for independent layouts"
+fi
 case "$TARGET_OS/$TARGET_ARCH" in
     linux/x86_64 | linux/aarch64) ;;
     *) die "unsupported skillfs target: $TARGET_OS/$TARGET_ARCH" ;;
@@ -42,13 +46,11 @@ stage_payload() {
     if [ -d "$stage" ] && [ -n "$(find "$stage" -mindepth 1 -print -quit)" ]; then
         die "staging directory must be empty: $stage"
     fi
-    local skills="$stage/share/anolisa/runtime/skills/skillfs"
-    install -d -m 0755 "$stage/.anolisa" "$stage/bin" "$skills" "$stage/share/doc/skillfs"
+    install -d -m 0755 "$stage/.anolisa"
     install -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
-    install -m 0755 "$BIN_DIR/skillfs" "$stage/bin/skillfs"
-    cp -pr "$SOURCE_ROOT/docs/skills/skillfs-mount/." "$skills/"
-    # LICENSE is a source symlink in the monorepo; install copies its bytes.
-    install -m 0644 "$SOURCE_ROOT/LICENSE" "$SOURCE_ROOT/README.md" "$stage/share/doc/skillfs/"
+    make -s -C "$SOURCE_ROOT" install-core-files install-skills-files \
+        SOURCE_DIR="$SOURCE_ROOT" BINARY="$BIN_DIR/skillfs" DESTDIR="$stage" \
+        BINDIR=/bin DOCDIR=/share/doc/skillfs SKILLDIR=/share/anolisa/runtime/skills/skillfs
     find "$stage" -type d -exec chmod 0755 {} +
     find "$stage" -type f -exec chmod 0644 {} +
     chmod 0755 "$stage/bin/skillfs"
