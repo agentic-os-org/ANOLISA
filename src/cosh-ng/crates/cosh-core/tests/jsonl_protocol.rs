@@ -616,6 +616,26 @@ fn user_message_returns_assistant_and_result() {
         .unwrap();
     let result = msgs.iter().find(|m| m["type"] == "result").unwrap();
     assert_eq!(result["session_id"], init["session_id"]);
+    assert_eq!(result["subtype"], "success");
+    assert_eq!(result["is_error"], false);
+    assert!(
+        result.get("result").is_none(),
+        "success must not invent assistant text"
+    );
+}
+
+#[test]
+fn one_shot_success_omits_placeholder_result() {
+    let home = tempfile::tempdir().expect("temp home");
+    let msgs = run_with_input_at_home_args(home.path(), &["hello"], &[]);
+    let result = msgs.iter().find(|m| m["type"] == "result").unwrap();
+
+    assert_eq!(result["subtype"], "success");
+    assert_eq!(result["is_error"], false);
+    assert!(
+        result.get("result").is_none(),
+        "success must not invent assistant text"
+    );
 }
 
 #[test]

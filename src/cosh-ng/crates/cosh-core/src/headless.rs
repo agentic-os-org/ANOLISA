@@ -235,7 +235,7 @@ pub async fn run(
                 let result_msg = OutputMessage::Result {
                     subtype: Some("success".to_string()),
                     is_error: false,
-                    result: Some("completed".to_string()),
+                    result: None,
                     errors: None,
                     error_code: None,
                     max_turns: None,
@@ -761,7 +761,7 @@ where
                     let result_msg = OutputMessage::Result {
                         subtype: Some("success".to_string()),
                         is_error: false,
-                        result: Some("completed".to_string()),
+                        result: None,
                         errors: None,
                         error_code: None,
                         max_turns: None,

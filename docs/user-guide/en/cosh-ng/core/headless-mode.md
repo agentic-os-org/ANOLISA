@@ -77,8 +77,10 @@ history only in memory; such a session is not resumable.
 Successful turns end with a result like:
 
 ```json
-{"type":"result","subtype":"success","is_error":false,"result":"completed","session_id":"...","duration_ms":1234}
+{"type":"result","subtype":"success","is_error":false,"session_id":"...","duration_ms":1234}
 ```
+
+The optional `result` field is omitted on success.
 
 Failures use `is_error: true` and include `errors`; session load and persistence
 failures also include `session_error_code` and `session_error_phase`. Invalid
