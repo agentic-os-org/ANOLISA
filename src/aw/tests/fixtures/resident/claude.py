@@ -1,10 +1,12 @@
 """Real resident SDK/CLI tasks, isolated local model endpoints and native Hooks."""
 
 import asyncio
+import gc
 import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import threading
 from contextlib import aclosing
 from http.server import ThreadingHTTPServer
@@ -15,6 +17,91 @@ from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage
 ROOT = Path(os.environ["AW_TEST_ROOT"])
 SOURCE = Path(os.environ["AW_TEST_CLAUDE_FIXTURE"])
 RESULTS = []
+
+
+async def lifecycle():
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    baseline_tasks = asyncio.all_tasks()
+    unhandled = []
+    resource_checks = []
+    config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
+
+    def observe_exception(current_loop, context):
+        error = context.get("exception")
+        unhandled.append(
+            {"message": context.get("message"), "exception": type(error).__name__}
+        )
+        if previous is None:
+            current_loop.default_exception_handler(context)
+        else:
+            previous(current_loop, context)
+
+    async def drain_finalizers():
+        # Collection schedules async-generator closes; keep the observer installed
+        # while those tasks and their completion callbacks run.
+        for _ in range(6):
+            gc.collect()
+            await asyncio.sleep(0.05)
+
+    async def assert_idle(index):
+        await drain_finalizers()
+        assert not unhandled, (index, "unretrieved cleanup exceptions", unhandled)
+        remaining = [
+            pending for pending in asyncio.all_tasks()
+            if pending not in baseline_tasks and not pending.done()
+        ]
+        assert not remaining, (index, "SDK tasks survived client close", remaining)
+        pids = [
+            json.loads(path.read_text())["pid"]
+            for path in ROOT.glob("*/sdk-process.json")
+        ]
+        assert all(not Path(f"/proc/{pid}").exists() for pid in pids), (index, pids)
+        status = json.loads(
+            subprocess.check_output(
+                [config["executable"], "status", "--config", str(ROOT / "aw.json")],
+                timeout=5,
+            )
+        )["result"]
+        usage = status["resources"]["usage"]
+        assert status["bindings"] == 1 and status["events"] == 0, status
+        assert all(usage[name] == 0 for name in ("invocations", "correlations", "calls")), status
+        resource_checks.append(
+            {"task": index, "live_tasks": 0, "sdk_processes_absent": pids,
+             "bindings": status["bindings"], "events": status["events"], "usage": usage}
+        )
+
+    loop.set_exception_handler(observe_exception)
+    try:
+        for index in range(18):
+            await task(index, "allow")
+        await asyncio.gather(*(task(18 + index, "allow") for index in range(3)))
+        await task(21, "deny")
+        for index, mode in ((22, "before-error"), (24, "after-error")):
+            await task(index, mode)
+            await assert_idle(index)
+            # A fresh client in this same worker must remain usable after failure.
+            await task(index + 1, "allow")
+            await assert_idle(index + 1)
+    finally:
+        try:
+            await drain_finalizers()
+        finally:
+            loop.set_exception_handler(previous)
+    assert not unhandled, ("unretrieved cleanup exceptions", unhandled)
+    assert len({item["instance"] for item in RESULTS}) == 26
+    (ROOT / "result.json").write_text(
+        json.dumps(
+            {
+                "tasks": 26,
+                "cases": RESULTS,
+                "fault_recovery_tasks": [23, 25],
+                "unhandled_async_errors": unhandled,
+                "resource_checks": resource_checks,
+                "passed": True,
+            }
+        )
+    )
 
 
 async def task(index, mode, consumer="response"):
@@ -196,13 +283,7 @@ async def main():
         assert not (ROOT / "0/effect").exists()
         (ROOT / "result.json").write_text(json.dumps({"tasks": 1, "passed": True}))
         return
-    for index in range(20):
-        await task(index, "allow")
-    await asyncio.gather(*(task(20 + index, "allow") for index in range(3)))
-    for index, mode in enumerate(("deny", "before-error", "after-error"), 23):
-        await task(index, mode)
-    assert len({item["instance"] for item in RESULTS}) == 26
-    (ROOT / "result.json").write_text(json.dumps({"tasks": 26, "cases": RESULTS, "passed": True}))
+    await lifecycle()
 
 
 asyncio.run(main())

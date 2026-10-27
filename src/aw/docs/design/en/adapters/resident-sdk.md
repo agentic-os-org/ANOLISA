@@ -111,7 +111,10 @@ A multi-message iterable is rejected before native input: CLI coalescing makes i
 terminal count ambiguous. Use sequential queries for successive turns.
 SDK `session_store`, mirroring and resume materialization retain SDK ownership:
 AW constructs its transport after materialization and disconnects before SDK cleanup.
-Closed or inherited clients cannot reconnect. Options are copied.
+Closed or inherited clients cannot reconnect. Each transport retains one reader;
+once closing starts, it rejects reconnect and new reads before native CLI launch,
+even if cleanup fails. Create a new client for a fresh scope and transport.
+Options are copied.
 
 The relay binds a random loopback port with a per-client secret path. It forwards
 original authentication and model request bytes, projects response tool IDs, and
@@ -259,8 +262,14 @@ configuration v1alpha1 and Provider v1alpha1 stay unchanged.
 Resident entrypoints reject enabled AgentSight evidence before publishing ready;
 `evidence.mode: off` remains supported. Both Claude message consumers drain
 callbacks before ResultMessage and reject EOF without that terminal message.
-The native inventory retains both consumers, interrupted EOF, Pi cancellation
-during tool execution and worker rejection after teardown timeout.
+Claude owns and explicitly closes its response and transport iterators during
+teardown. Dispatch identity is restored only in the reader task that installed
+it. The pinned SDK transport receives cancellation before native process cleanup,
+so its GeneratorExit handler cannot defer closure to process exit. Unexpected
+reader and cleanup failures remain visible within the existing cleanup deadline.
+The native inventory retains both consumers, interrupted EOF, repeated Hook
+failures followed by fresh-client tasks in one worker, Pi cancellation during
+tool execution and worker rejection after teardown timeout.
 
 Task cwd/environment come from trusted integration factories and also configure
 Provider execution. Do not forward tenant-controlled loader variables or executable

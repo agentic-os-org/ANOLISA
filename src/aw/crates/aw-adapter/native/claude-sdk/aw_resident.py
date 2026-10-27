@@ -317,13 +317,14 @@ class ManagedClient(ClaudeSDKClient):
             raise RuntimeError("AW requires one response consumer for the active task")
         self._aw_receiving = True
         try:
-            async for message in super().receive_messages():
-                if self._aw_bridge.failure:
-                    await self._aw_bridge.stop_task()
-                    raise CallbackFailure(self._aw_bridge.failure)
-                if isinstance(message, ResultMessage):
-                    await self._aw_complete()
-                yield message
+            async with aclosing(super().receive_messages()) as messages:
+                async for message in messages:
+                    if self._aw_bridge.failure:
+                        await self._aw_bridge.stop_task()
+                        raise CallbackFailure(self._aw_bridge.failure)
+                    if isinstance(message, ResultMessage):
+                        await self._aw_complete()
+                    yield message
             if self._aw_bridge.failure:
                 await self._aw_bridge.stop_task()
                 raise CallbackFailure(self._aw_bridge.failure)

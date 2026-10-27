@@ -82,7 +82,9 @@ connect/query/receive_response/interrupt/disconnect，并在 finally 关闭。
 顺序 query 复用原生进程与会话，并发任务使用独立客户端。每次 query 接受字符串，或恰好一个用户消息的有限 AsyncIterable。多消息输入在发送前被拒绝，
 因为 CLI 合并消息后无法可靠计数终态；连续轮次使用逐次 query。
 SDK session_store、存储镜像和 resume 临时目录仍由 SDK 管理：AW 在恢复准备后创建传输，
-断开子进程后再由 SDK 清理。关闭或跨 fork 继承的客户端不能重连，工厂复制 options。
+断开子进程后再由 SDK 清理。关闭或跨 fork 继承的客户端不能重连。每个 transport 持有
+一个 reader；开始关闭后即拒绝重连和新读取，检查发生在原生 CLI 启动前，清理失败也继续
+保持关闭。新任务需要新的 scope 和 transport 时创建新客户端。工厂复制 options。
 
 转发层使用随机 loopback 端口和每客户端秘密路径，转发原鉴权和请求字节，投射响应工具 ID，
 并在工具结果进入下一次请求前核对采纳状态，不记录凭据和模型内容。
@@ -190,7 +192,11 @@ launcher 向自有组转发退出信号，并在目标的 `shutdown_grace_ms` �
 
 常驻入口在发布 ready 前拒绝启用的 AgentSight evidence，`evidence.mode: off` 继续支持。
 Claude 两种消息消费方式均在回调排空后交付 ResultMessage，缺少终态消息的 EOF 会报错。
-原生清单保留双消费端、EOF 中断、Pi 工具执行中取消与退出超时后拒绝复用 worker 的验收。
+Claude 显式持有并关闭响应与 transport 迭代器。调用身份上下文仅由设置它的 reader task
+恢复。固定版本 SDK 的 transport 迭代器在原生进程清理前接收取消，避免其 GeneratorExit
+处理等待进程退出而延后关闭。意外的 reader 与清理错误在现有清理期限内继续向外传播。
+原生清单保留双消费端、EOF 中断、同一 worker 多次 Hook 故障后的新客户端任务恢复、
+Pi 工具执行中取消与退出超时后拒绝复用 worker 的验收。
 
 任务 cwd/environment 由受信公共工厂提供，并用于 Provider 执行。禁止将租户可控的
 加载变量或可执行文件搜索路径直接传入该环境；租户隔离需要单独合同。

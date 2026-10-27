@@ -758,6 +758,10 @@
     "qoder-sdk-private-fence": {
       "target": "aw-cli/test/qoder_sdk",
       "test": "installed_bridge_fences_queries_after_private_cleanup_failure"
+    },
+    "claude-response-cleanup": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "managed_response_iterators_close_before_native_teardown"
     }
   },
   "agents": {
@@ -837,7 +841,8 @@
         "invocation-enable-race",
         "invocation-legacy-used",
         "invocation-retire-close-race",
-        "scope-native-skips"
+        "scope-native-skips",
+        "claude-response-cleanup"
       ],
       "security": [
         "security-retry",
