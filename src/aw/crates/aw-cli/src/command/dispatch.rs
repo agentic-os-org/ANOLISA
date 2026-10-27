@@ -180,6 +180,7 @@ fn config(command: Config) -> Result<Exit> {
     let (action, flags, output): (_, BTreeMap<_, _>, _) = match command {
         Config::Validate(value) => return super::validation::run(value),
         Config::Init(value) => {
+            let value = *value;
             let mut args = options([
                 ("prefix", Some(value.prefix.prefix)),
                 ("config", Some(value.config)),
@@ -188,11 +189,15 @@ fn config(command: Config) -> Result<Exit> {
                 ("node", value.node),
                 ("openclaw", value.openclaw),
                 ("provider", value.provider),
-                ("socket", value.socket),
+                ("template", value.template),
                 ("check", value.check),
                 ("effect", value.effect),
                 ("reason-code", value.reason_code),
             ]);
+            args.flags.insert(
+                "--template-vars".into(),
+                serde_json::to_string(&value.template_var)?,
+            );
             args.native = value.arguments;
             return configure(args, value.prefix.output);
         }

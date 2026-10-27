@@ -1,10 +1,7 @@
 //! Unified CLI generates configurations without a Provider package.
 
-use aw_package::Payload;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command,
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -22,39 +19,7 @@ impl Fixture {
             .unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let bundle = root.join("bundle");
-        let mut files = BTreeMap::new();
-        let name = "bin/aw";
-        let path = bundle.join("payload").join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::copy("/bin/true", &path).unwrap();
-        files.insert(
-            name.to_string(),
-            Payload {
-                sha256: aw_package::digest(&path).unwrap(),
-                mode: 0o755,
-            },
-        );
-        fs::write(
-            bundle.join("package.json"),
-            serde_json::to_vec(&json!({
-                "schema_version":1,"package_id":"aw-core","version":"1.0.0",
-                "os":"linux","arch":std::env::consts::ARCH,
-                "files":files,"dependencies":[]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
         let prefix = root.join("prefix");
-        let state_home = root.join("package-state");
-        let paths = aw_package::database::DatabasePaths::user(Some(&state_home), None).unwrap();
-        let addition = aw_package::plan::install(&paths, &bundle, &prefix).unwrap();
-        aw_package::plan::execute(
-            &paths,
-            &addition,
-            &std::sync::atomic::AtomicBool::new(false),
-        )
-        .unwrap();
         Self { directory, prefix }
     }
     fn command(&self) -> Command {
@@ -172,5 +137,92 @@ fn legacy_socket_and_mismatched_provider_options_never_silently_drop_security() 
         let f = Fixture::new();
         assert!(!f.command().args(args).output().unwrap().status.success());
         assert!(!f.config().exists());
+    }
+}
+
+#[test]
+fn explicit_template_preserves_literal_variables_and_rejects_invalid_inputs() {
+    let f = Fixture::new();
+    let template = f.directory.path().join("provider-template.json");
+    let definition = json!({"format":1,"providers":{"custom":{"transport":{"type":"stdio","location":"agent","argv":["/bin/true","${ARG}","${PREFIX}"]},"timeout_ms":1000,"max_output_bytes":32}},"events":{"tool.before":{"enabled":true,"required":true,"steps":[{"id":"custom","provider":"custom","effects":["observe"],"on_error":"report"}]}}});
+    fs::write(&template, serde_json::to_vec(&definition).unwrap()).unwrap();
+    let literal = "literal ; $(touch NEVER) ${STATE} = tail";
+    let output = f
+        .command()
+        .arg("--template")
+        .arg(&template)
+        .arg("--template-var")
+        .arg(format!("ARG={literal}"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        f.read()["spec"]["providers"]["custom"]["transport"]["argv"],
+        json!(["/bin/true", literal, f.prefix])
+    );
+    fs::remove_file(f.config()).unwrap();
+    for variables in [
+        vec![],
+        vec!["ARG=one", "ARG=two"],
+        vec!["PREFIX=/other"],
+        vec!["ARG"],
+    ] {
+        let mut command = f.command();
+        command.arg("--template").arg(&template);
+        for variable in variables {
+            command.args(["--template-var", variable]);
+        }
+        assert!(!command.output().unwrap().status.success());
+        assert!(!f.config().exists());
+    }
+    let mut bad = definition;
+    bad["packages"] = json!(["other-provider"]);
+    bad["file_hashes"] = json!({"HASH":{"package":"other-provider","path":"../outside"}});
+    fs::write(&template, serde_json::to_vec(&bad).unwrap()).unwrap();
+    assert!(!f
+        .command()
+        .arg("--template")
+        .arg(template)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(!f.config().exists());
+}
+
+#[test]
+fn native_or_unregistered_aw_initializes_without_package_database() {
+    for existing in [false, true] {
+        let f = Fixture::new();
+        let root = f.directory.path().canonicalize().unwrap();
+        let prefix = root.join("native-prefix");
+        if existing {
+            fs::create_dir(&prefix).unwrap();
+        }
+        let state_home = root.join("empty-state-home");
+        let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+            .args(["config", "init", "--prefix"])
+            .arg(&prefix)
+            .arg("--config")
+            .arg(root.join("aw.yaml"))
+            .arg("--state-dir")
+            .arg(root.join("state"))
+            .args(["--qoder", "/bin/true"])
+            .env("XDG_STATE_HOME", &state_home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(f.read()["spec"]["providers"], json!({}));
+        assert!(!prefix.join(".local-packages").exists());
+        assert!(!prefix.join(".local-install.lock").exists());
+        assert!(!state_home.exists());
     }
 }

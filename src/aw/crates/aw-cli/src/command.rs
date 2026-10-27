@@ -44,7 +44,7 @@ enum Command {
     },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
-    /// Install a local software bundle, or retain legacy native Hook connection
+    /// Install a local software bundle, or connect native Hooks
     Install(Install),
     /// Remove selected packages or an entire installation, preserving unknown files
     Uninstall(package::Uninstall),
@@ -121,8 +121,8 @@ enum Config {
     AddNativeSource(package::AddNativeSource),
     /// Remove a reference while retaining the original native source
     RemoveNativeSource(package::RemoveNativeSource),
-    /// Create a configuration from installed Preview packages
-    Init(Configure),
+    /// Create an offline configuration with optional Provider templates
+    Init(Box<Configure>),
     /// Print configuration JSON, including private Provider values
     Show(Show),
     /// Check configuration; optionally compare a policy update's scope

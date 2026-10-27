@@ -2,6 +2,7 @@
 
 use crate::{filesystem as paths, require, Result};
 mod installed;
+mod template;
 mod templates;
 
 use serde_json::Value;
@@ -32,17 +33,12 @@ pub struct Settings<'a> {
 pub enum Policy<'a> {
     /// No business policy or Provider calls.
     None,
-    /// PostTool compression using the installed Tokenless Provider.
-    Tokenless,
-    /// sec-core tool-before checks followed by Tokenless PostTool compression.
-    SecCoreTokenless {
-        /// Existing daemon socket; configuration generation never starts it.
-        socket: &'a Path,
-    },
-    /// Optional installed sec-core Provider using an existing system daemon.
-    SecCore {
-        /// Existing daemon socket; configuration generation never starts it.
-        socket: &'a Path,
+    /// Explicit distributor or Provider document; AW never selects a business preset.
+    Template {
+        /// Generic template with package requirements, Providers and events.
+        definition: Value,
+        /// Literal values used for named template placeholders.
+        variables: std::collections::BTreeMap<String, String>,
     },
     /// A command returning a JSON boolean; AW constructs protocol replies.
     Command {
@@ -76,39 +72,17 @@ pub(crate) fn configure_using(
         node,
         openclaw,
     } = settings;
-    let mut names = vec!["aw-core"];
-    if matches!(policy, Policy::Tokenless | Policy::SecCoreTokenless { .. }) {
-        names.push("aw-provider-tokenless");
-    }
-    if matches!(
-        policy,
-        Policy::SecCore { .. } | Policy::SecCoreTokenless { .. }
-    ) {
-        names.push("aw-provider-sec-core");
-    }
-
+    let requirements = template::required_packages(policy)?;
+    let names: Vec<_> = requirements.iter().map(String::as_str).collect();
     let selection = installed::Selection::read(prefix, &names)?;
-    let installed = &selection.packages;
-    require(
-        installed.contains_key("aw-core"),
-        "install AW core before configuring",
-    )?;
-    if matches!(
-        policy,
-        Policy::SecCore { .. } | Policy::SecCoreTokenless { .. }
-    ) {
+    for name in &requirements {
         require(
-            installed.contains_key("aw-provider-sec-core"),
-            "install the sec-core Provider before selecting its template",
-        )?;
-    }
-    if matches!(policy, Policy::Tokenless | Policy::SecCoreTokenless { .. }) {
-        require(
-            installed.contains_key("aw-provider-tokenless"),
-            "install the Tokenless Provider before selecting its template",
+            selection.packages.contains_key(name),
+            format!("install required template package: {name}"),
         )?;
     }
     selection.verify(prefix)?;
+    template::verify_files(policy, &selection.packages)?;
     for path in [*config, *state] {
         paths::absolute(path)?;
     }
@@ -133,10 +107,6 @@ pub(crate) fn configure_using(
         "configuration and state must be outside the immutable prefix",
     )?;
     socket_length("AW state", &state.join("aw.sock"))?;
-    if let Policy::SecCore { socket } | Policy::SecCoreTokenless { socket } = policy {
-        paths::absolute(socket)?;
-        socket_length("sec-core", socket)?;
-    }
     require(
         qoder.is_some() || openclaw.is_some(),
         "select at least one Agent entrypoint",
@@ -158,26 +128,7 @@ pub(crate) fn configure_using(
             entrypoint(Path::new(program), libc::X_OK, "executable")?;
         }
     }
-    let mut value = document(settings)?;
-    if let Some(component) = installed.get("aw-provider-tokenless") {
-        let name = "libexec/aw/providers/tokenless/rtk";
-        require(
-            std::env::join_paths([prefix.join("libexec/aw/providers/tokenless")]).is_ok(),
-            "managed RTK directory cannot be represented in PATH",
-        )?;
-        let payload = component.files.get(name).ok_or_else(|| {
-            crate::Error::Invalid("installed Tokenless package record lacks managed RTK".into())
-        })?;
-        value["spec"]["providers"]["tokenless"]["transport"]["argv"]
-            .as_array_mut()
-            .ok_or_else(|| crate::Error::Invalid("Tokenless argv must be an array".into()))?
-            .extend([
-                serde_json::json!("--rtk"),
-                serde_json::json!(prefix.join(name)),
-                serde_json::json!("--rtk-sha256"),
-                serde_json::json!(payload.sha256),
-            ]);
-    }
+    let value = templates::document(settings, Some(&selection.packages))?;
     let yaml = serde_yaml_ng::to_string(&value)?;
     aw_config::Validator::new()
         .and_then(|validator| validator.parse(yaml.as_bytes()))
@@ -199,7 +150,7 @@ fn socket_length(name: &str, path: &Path) -> Result<()> {
 /// # Errors
 /// Rejects inconsistent Agent inputs or invalid command template parameters.
 pub fn document(settings: &Settings<'_>) -> Result<Value> {
-    templates::document(settings)
+    templates::document(settings, None)
 }
 
 fn entrypoint(path: &Path, access: i32, permission: &str) -> Result<()> {

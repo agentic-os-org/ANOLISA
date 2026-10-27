@@ -1,4 +1,4 @@
-//! Typed local-package and offline-edit options, independent of runtime state.
+//! Typed Provider-extension and offline-edit options, independent of runtime state.
 
 use clap::Args;
 
@@ -84,11 +84,14 @@ pub(super) struct Configure {
     )]
     pub openclaw: Option<String>,
     /// Provider template; none is the default
-    #[arg(long, value_parser = ["none", "tokenless", "sec-core", "sec-core+tokenless", "command"])]
+    #[arg(long, value_parser = ["none", "command"], conflicts_with = "template")]
     pub provider: Option<String>,
-    /// Absolute backend socket, only for the sec-core templates
+    /// Explicit distributor or Provider configuration template
     #[arg(long, value_name = "ABS_FILE")]
-    pub socket: Option<String>,
+    pub template: Option<String>,
+    /// Literal template variable NAME=VALUE; PREFIX and STATE are supplied by AW
+    #[arg(long, value_name = "NAME=VALUE", requires = "template")]
+    pub template_var: Vec<String>,
     /// Absolute program for the command template; generation never executes it
     #[arg(long, value_name = "ABS_PROGRAM")]
     pub check: Option<String>,

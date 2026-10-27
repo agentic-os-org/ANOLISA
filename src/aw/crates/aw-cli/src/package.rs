@@ -22,42 +22,68 @@ fn configure(flags: &BTreeMap<String, String>, check_args: Vec<String>) -> Resul
         .map(String::as_str)
         .unwrap_or("none");
     let command_flags = ["--check", "--effect", "--reason-code"];
-    if (flags.contains_key("--socket") && !matches!(selection, "sec-core" | "sec-core+tokenless"))
-        || ((command_flags.iter().any(|name| flags.contains_key(*name)) || !check_args.is_empty())
-            && selection != "command")
+    if (command_flags.iter().any(|name| flags.contains_key(*name)) || !check_args.is_empty())
+        && selection != "command"
     {
-        return Err(Error::Invalid("Provider options require an explicit matching --provider; use --provider sec-core with --socket".into()));
+        return Err(Error::Invalid(
+            "command options require --provider command".into(),
+        ));
     }
-    let mut argv = Vec::new();
-    let policy = match selection {
-        "none" => Policy::None,
-        "tokenless" => Policy::Tokenless,
-        "sec-core+tokenless" => Policy::SecCoreTokenless {
-            socket: required("--socket")?,
-        },
-        "sec-core" => Policy::SecCore {
-            socket: required("--socket")?,
-        },
-        "command" => {
-            argv.push(required("--check")?.to_string_lossy().into_owned());
-            argv.extend(check_args);
-            Policy::Command {
-                argv: &argv,
-                effect: flags
-                    .get("--effect")
-                    .ok_or_else(|| Error::Invalid("missing --effect".into()))?,
-                reason_code: flags
-                    .get("--reason-code")
-                    .ok_or_else(|| Error::Invalid("missing --reason-code".into()))?,
+    let template = flags
+        .get("--template")
+        .map(|file| -> Result<_> {
+            let path = Path::new(file);
+            if !path.is_absolute() {
+                return Err(Error::Invalid("template must be an absolute file".into()));
             }
-        }
-        _ => {
-            return Err(Error::Invalid(
-                "--provider must be none, sec-core, tokenless, sec-core+tokenless or command"
+            let definition = config::definition(file)?;
+            let values: Vec<String> = flags
+                .get("--template-vars")
+                .map(|value| serde_json::from_str(value))
+                .transpose()?
+                .unwrap_or_default();
+            let mut variables = BTreeMap::new();
+            for item in values {
+                let (name, value) = item.split_once('=').ok_or_else(|| {
+                    Error::Invalid("template variables must be NAME=VALUE".into())
+                })?;
+                if variables
+                    .insert(name.to_owned(), value.to_owned())
+                    .is_some()
+                {
+                    return Err(Error::Invalid(format!(
+                        "duplicate template variable: {name}"
+                    )));
+                }
+            }
+            Ok(Policy::Template {
+                definition,
+                variables,
+            })
+        })
+        .transpose()?;
+    let mut argv = Vec::new();
+    let policy =
+        match selection {
+            "none" => template.unwrap_or(Policy::None),
+            "command" => {
+                argv.push(required("--check")?.to_string_lossy().into_owned());
+                argv.extend(check_args);
+                Policy::Command {
+                    argv: &argv,
+                    effect: flags
+                        .get("--effect")
+                        .ok_or_else(|| Error::Invalid("missing --effect".into()))?,
+                    reason_code: flags
+                        .get("--reason-code")
+                        .ok_or_else(|| Error::Invalid("missing --reason-code".into()))?,
+                }
+            }
+            _ => return Err(Error::Invalid(
+                "--provider must be none or command; use --template for supplied Provider presets"
                     .into(),
-            ))
-        }
-    };
+            )),
+        };
     aw_package::configure(&Settings {
         prefix,
         config: required("--config")?,
@@ -69,7 +95,10 @@ fn configure(flags: &BTreeMap<String, String>, check_args: Vec<String>) -> Resul
     })?;
     Ok(Outcome::Configured {
         config: required("--config")?.into(),
-        provider_template: selection.into(),
+        provider_template: flags
+            .get("--template")
+            .cloned()
+            .unwrap_or_else(|| selection.into()),
     })
 }
 

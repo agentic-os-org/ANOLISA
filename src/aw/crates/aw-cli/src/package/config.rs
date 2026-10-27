@@ -97,7 +97,7 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
     }))
 }
 
-fn definition(path: &str) -> Result<serde_json::Value> {
+pub(super) fn definition(path: &str) -> Result<serde_json::Value> {
     // A FIFO must not block before the regular-file check can reject it.
     let file = File::options()
         .read(true)
