@@ -341,9 +341,9 @@ fn flush(
     // content did not move by a single byte. Without this snapshot each of
     // those files was re-read *and* re-sent to the embedding provider, so a
     // `chmod -R` over a large tree burned embedding quota linearly in the
-    // subtree size. `full_scan` already dedups on mtime; this brings the
-    // incremental path in line with it. The mutex is held only for the
-    // lookups — never across the body reads or the embedding calls below.
+    // subtree size. `full_scan` uses the same `(mtime, size)` fingerprint.
+    // The mutex is held only for the lookups — never across the body reads
+    // or the embedding calls below.
     let known: HashMap<String, IndexStat> = {
         let store = store.lock().unwrap_or_else(|e| e.into_inner());
         statted
@@ -485,9 +485,11 @@ fn full_scan(
                 None => continue,
             };
             let mtime = super::store::mtime_ms_of(&meta);
-            // Skip if already indexed with same mtime
-            if let Some(known) = store.mtime_for(&rel) {
-                if known == mtime {
+            // Match the incremental fingerprint: timestamps alone can survive
+            // a rewrite, for example when a restored file retains its mtime.
+            // Same-mtime, same-size rewrites remain undetected.
+            if let Some(known) = store.index_stat_for(&rel) {
+                if known.mtime_ms == mtime && known.size == meta.len() {
                     seen.insert(rel.clone());
                     continue;
                 }

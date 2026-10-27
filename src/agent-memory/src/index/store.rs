@@ -34,10 +34,10 @@ pub(crate) const SCHEMA_VERSION: i64 = 5;
 
 /// What the index currently records for one path.
 ///
-/// The watcher reads this back before touching a file, so an event that did
-/// not change the content — a directory `chmod`/`touch` expanded into its
-/// whole subtree, or a write that restores identical bytes — costs neither a
-/// body read nor an embedding call.
+/// The incremental watcher checks this before reading a body. A matching
+/// `(mtime_ms, size)` with an existing vector can avoid another body read and
+/// embedding call. Full scans use the same fingerprint to skip an upsert,
+/// but read the body first and backfill missing vectors separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexStat {
     /// Last modification time in milliseconds, as stored at index time.
@@ -1117,7 +1117,7 @@ impl BM25Store {
             .ok()
     }
 
-    /// Everything the watcher needs to decide whether `rel_path` changed:
+    /// Index metadata used by incremental updates and full scans:
     /// the stored `(mtime_ms, size)` plus whether a vector row exists.
     /// `None` means the path is not indexed at all.
     ///
