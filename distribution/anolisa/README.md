@@ -128,6 +128,18 @@ The lifecycle planner separates ANOLISA-owned files from native-package
 authority and records crash-recovery intent before side effects. Component
 metadata is declared through `component.toml`.
 
+ANOLISA ships the RPM integration contracts in `share/anolisa/components/`.
+Component RPMs supply their runtime, plugins and skills independently; they do
+not need to install ANOLISA metadata. RPM install/adopt saves the distribution
+contract as a state snapshot for adapter management, while raw artifacts keep
+their own release-specific contract. `bash scripts/package-manifests.sh /absolute/manifests.tar.gz`
+assembles the data bundle consumed by `scripts/install-anolisa.sh`.
+Prebuilt archives and native npm packages include the same registry beside
+`bin/anolisa`; keep their `bin/` and `share/` trees together. A manually copied
+single binary needs the installer data bundle for RPM adapter management.
+The installer refuses to overwrite registry contracts still owned by older
+component RPMs; upgrade those packages first.
+
 The raw backend re-fetches the distribution index on every resolve and fails
 when the repository is unreachable. Legacy `cache_ttl_secs` and
 `offline_fallback` keys in `repo.toml` are still accepted for compatibility,

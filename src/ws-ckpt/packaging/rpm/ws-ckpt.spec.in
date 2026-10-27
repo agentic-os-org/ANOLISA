@@ -52,7 +52,6 @@ install -d -m 0755 %{buildroot}/etc/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes
@@ -72,7 +71,6 @@ find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
     \( -type d -name __pycache__ -o -type d -name tests \
        -o -type f -name '*.pyc' -o -type f -name '.coverage' \) \
     -exec rm -rf {} +
-install -p -m 0644 packaging/anolisa/rpm/component.toml %{buildroot}%{_datadir}/anolisa/components/ws-ckpt/component.toml
 install -p -m 0644 scripts/openclaw/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
 install -p -m 0644 scripts/openclaw/lib-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
 install -p -m 0755 scripts/openclaw/detect-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
@@ -95,7 +93,6 @@ install -p -m 0755 scripts/hermes/uninstall-hermes.sh %{buildroot}%{_datadir}/an
 %dir %{_datadir}/anolisa/runtime/skills
 %{_datadir}/anolisa/runtime/skills/ws-ckpt/
 %{_datadir}/anolisa/runtime/ws-ckpt/
-%{_datadir}/anolisa/components/ws-ckpt/
 %{_datadir}/anolisa/adapters/ws-ckpt/
 
 %post

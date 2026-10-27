@@ -26,7 +26,7 @@
 //!   * **Delegated managed/adopted** — U5: `dnf update` through the
 //!     delegated executor, then re-observe and refresh the cached
 //!     observation. dnf picks the target version. After the record refresh
-//!     persisted, the package-owned contract snapshot is refreshed too
+//!     persisted, the distribution-owned contract snapshot is refreshed too
 //!     ([`complete_delegated_update`]); a refresh failure demotes the
 //!     operation to `partial` instead of overstating it as `ok`.
 //!   * **Delegated observed** — U6: refuses; management consent (`adopt`)
@@ -3073,7 +3073,7 @@ pub(crate) mod tests {
         assert_eq!(record.status, LifecycleStatus::Installed);
     }
 
-    /// Publish a package-owned contract in the FHS package datadir plus the
+    /// Publish a distribution-owned contract in the FHS package datadir plus the
     /// stale pre-update snapshot an earlier install left behind, as an RPM
     /// upgrade of the package would leave them.
     pub(crate) fn seed_package_contract_and_stale_snapshot(
@@ -3161,7 +3161,7 @@ pub(crate) mod tests {
                 ObjectStatus::Installed,
             ),
         );
-        // A stale snapshot without a package-owned contract: nothing
+        // A stale snapshot without a distribution-owned contract: nothing
         // authoritative exists to refresh from, so it must stay untouched.
         let layout = common::resolve_layout(&c);
         let snapshot =

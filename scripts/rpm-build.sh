@@ -20,7 +20,7 @@ BUILD_DIR="${SCRIPT_DIR}/rpmbuild"
 RPMBUILD="${RPMBUILD:-rpmbuild}"
 
 # Component-local packaging may use an empty namespace. This script builds the
-# established ANOLISA distribution profile and its embedded contracts.
+# established ANOLISA runtime layout; discovery contracts belong to the distribution.
 export AWPRJ=anolisa
 
 # Source directories
@@ -611,12 +611,8 @@ build_tokenless() {
 
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
     # Note: third_party/rtk must be included — it's built separately via --manifest-path
-    # Adapter config files (manifest.json, package.json, openclaw.plugin.json, plugin.yaml)
-    # and the component contract (component.toml) are excluded because they are
-    # generated from .in templates by stamp-adapter-templates during rpmbuild
-    # %build (make build-openclaw-plugin). Excluding them ensures the RPM build
-    # always regenerates from the authoritative .in template, preventing stale
-    # contracts from shipping (see GH-1470).
+    # Adapter configs are generated from their versioned templates during the
+    # RPM build. ANOLISA discovery contracts are delivered by ANOLISA itself.
     tar -cf - -C "$TOKEN_DIR" \
         --exclude='target' \
         --exclude='.git' \
@@ -695,7 +691,7 @@ build_agent_memory() {
     # source archive — the spec's %install copies the prebuilt bundle
     # rather than running npm during rpmbuild (no network in mock).
     log "Step 1/4: Building OpenClaw TS plugin..."
-    cd "$MEM_DIR" && make build-openclaw-plugin generate-component-contract
+    cd "$MEM_DIR" && make build-openclaw-plugin
 
     # The source-archive top-level dir must match `%setup -n %{name}-%{version}`
     # in the spec, so the unpacked tree lines up with the CI-produced
@@ -722,9 +718,6 @@ build_agent_memory() {
         --exclude='.tsbuildinfo' \
         --exclude='tests' \
         . | tar -xf - -C "$pkg_dir"
-
-    install -p -m 0644 "$MEM_DIR/target/packaging/anolisa/rpm/component.toml" \
-        "$pkg_dir/packaging/anolisa/rpm/component.toml"
 
     # Vendor tarball for --offline cargo build. Must run BEFORE copying
     # .cargo/config.toml into the source tarball so the vendored-sources
@@ -1013,30 +1006,8 @@ build_cosh_ng() {
 
     local pkg_name
     pkg_name=$(parse_spec_name "$spec_in")
-    local component_name
-    component_name=$(awk '
-        $0 == "[component]" { in_component = 1; next }
-        in_component && /^\[/ { exit }
-        in_component && /^name = / {
-            value = $0
-            sub(/^name = "/, "", value)
-            sub(/"$/, "", value)
-            print value
-            exit
-        }
-    ' "${COSH_DIR}/packaging/anolisa/rpm/component.toml")
-    if [ "$component_name" != "$pkg_name" ]; then
-        err "cosh-ng identity mismatch: RPM name '${pkg_name}', component name '${component_name}'"
-        return 1
-    fi
-    if ! grep -Fqx "Provides:       anolisa-component(${component_name})" "$spec_in"; then
-        err "cosh-ng spec must provide anolisa-component(${component_name})"
-        return 1
-    fi
-    local manifest_path="%{_datadir}/anolisa/components/${component_name}/component.toml"
-    if ! grep -Fq "install -m 0644 packaging/anolisa/rpm/component.toml %{buildroot}${manifest_path}" "$spec_in" \
-        || ! grep -Fqx "$manifest_path" "$spec_in"; then
-        err "cosh-ng spec must install and own ${manifest_path}"
+    if grep -Eq '^[^#]*anolisa/components/' "$spec_in"; then
+        err "cosh-ng RPM must not install or own ANOLISA discovery contracts"
         return 1
     fi
     local gateway_unit="%{_unitdir}/cosh-gateway@.service"
@@ -1064,7 +1035,7 @@ build_cosh_ng() {
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"
 
-    # Include the component-owned packaging metadata consumed by the RPM spec.
+    # Include the component packaging rules; ANOLISA supplies its own discovery data.
     tar -cf - -C "$COSH_DIR" \
         --exclude='target' \
         --exclude='.git' \

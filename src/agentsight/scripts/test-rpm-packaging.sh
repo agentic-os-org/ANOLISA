@@ -524,11 +524,27 @@ cat > "$complete_list" <<'EOF'
 /usr/lib/systemd/system/agentsight.service
 /usr/lib/systemd/system/agentsight-enforcer.service
 /etc/agentsight/config.json
-/usr/share/anolisa/components/agentsight/component.toml
 EOF
 
 bash "$repo_root/src/agentsight/packaging/rpm/verify-rpm-package.sh" \
     --file-list "$complete_list"
+
+# Neither the registry directory nor an individual contract belongs to this RPM.
+for registry_path in \
+    /usr/share/anolisa/components \
+    /usr/share/anolisa/components/agentsight/component.toml; do
+    registry_list="$tmp_dir/registry-rpm-files.txt"
+    cp "$complete_list" "$registry_list"
+    printf '%s\n' "$registry_path" >> "$registry_list"
+    if bash "$repo_root/src/agentsight/packaging/rpm/verify-rpm-package.sh" \
+        --file-list "$registry_list" >"$tmp_dir/registry.out" 2>"$tmp_dir/registry.err"; then
+        printf 'RPM file list containing registry path unexpectedly passed: %s\n' "$registry_path" >&2
+        failures=$((failures + 1))
+    elif ! grep -Fq 'Component RPMs must not own ANOLISA discovery contracts' "$tmp_dir/registry.err"; then
+        printf 'missing registry ownership diagnostic: %s\n' "$registry_path" >&2
+        failures=$((failures + 1))
+    fi
+done
 
 incomplete_list="$tmp_dir/incomplete-rpm-files.txt"
 grep -v -E 'agentsight-enforcer($|\.service$)' "$complete_list" > "$incomplete_list"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble one verified ANOLISA CLI binary into a reproducible release archive.
+# Assemble the verified CLI and its integration registry into a release archive.
 set -euo pipefail
 
 die() {
@@ -53,8 +53,13 @@ cleanup() {
 trap cleanup EXIT
 
 STAGE="$WORK/stage"
-install -d -m 0755 "$STAGE" "$OUTPUT_DIR"
-install -p -m 0755 "$BIN_DIR/anolisa" "$STAGE/anolisa"
+install -d -m 0755 "$STAGE/bin" "$OUTPUT_DIR"
+install -p -m 0755 "$BIN_DIR/anolisa" "$STAGE/bin/anolisa"
+for component in cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory; do
+    install -d -m 0755 "$STAGE/share/anolisa/components/$component"
+    install -p -m 0644 "$SOURCE_ROOT/manifests/components/$component/component.toml" \
+        "$STAGE/share/anolisa/components/$component/component.toml"
+done
 ARTIFACT="anolisa-$VERSION-$TARGET_OS-$TARGET_ARCH.tar.gz"
 TEMP_ARTIFACT="$OUTPUT_DIR/.$ARTIFACT.tmp.$$"
 LC_ALL=C tar \

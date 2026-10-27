@@ -11,7 +11,8 @@
   "os": ["linux"],
   "cpu": ["x64"],
   "files": [
-    "bin/"
+    "bin/",
+    "share/"
   ],
   "preferUnplugged": true
 }

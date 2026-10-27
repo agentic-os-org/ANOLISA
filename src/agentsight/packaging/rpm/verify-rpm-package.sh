@@ -26,6 +26,11 @@ if [[ ! -f "$file_list" ]]; then
     exit 2
 fi
 
+if grep -E '^/usr/share/anolisa/components(/|$)' "$file_list" >/dev/null; then
+    echo 'Component RPMs must not own ANOLISA discovery contracts' >&2
+    exit 1
+fi
+
 required_paths=(
     "/usr/local/bin/agentsight"
     "/usr/local/bin/agentsight-enforcer"
@@ -33,7 +38,6 @@ required_paths=(
     "/usr/lib/systemd/system/agentsight.service"
     "/usr/lib/systemd/system/agentsight-enforcer.service"
     "/etc/agentsight/config.json"
-    "/usr/share/anolisa/components/agentsight/component.toml"
 )
 
 missing=0

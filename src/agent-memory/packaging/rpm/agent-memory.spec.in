@@ -137,12 +137,6 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
 
 install -m 0644 adapters/agent-memory/manifest.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/
-# Install the agent-memory RPM component contract (publishing/plugin
-# metadata) at the component-level path declared by the ANOLISA
-# component-contract model:
-# %{_datadir}/anolisa/components/<component>/component.toml.
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/agent-memory
-install -m 0644 packaging/anolisa/rpm/component.toml %{buildroot}%{_datadir}/anolisa/components/agent-memory/
 install -m 0755 adapters/agent-memory/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
 install -m 0755 adapters/agent-memory/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
 install -m 0755 adapters/agent-memory/openclaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
@@ -159,9 +153,6 @@ install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_data
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/agent-memory
 %attr(0644,root,root) %{_datadir}/anolisa/agent-memory/default.toml
-%dir %{_datadir}/anolisa/components
-%dir %{_datadir}/anolisa/components/agent-memory
-%attr(0644,root,root) %{_datadir}/anolisa/components/agent-memory/component.toml
 %dir %{_datadir}/anolisa/mcp-servers
 %attr(0644,root,root) %{_datadir}/anolisa/mcp-servers/agent-memory.json
 %{_userunitdir}/anolisa-memory@.service

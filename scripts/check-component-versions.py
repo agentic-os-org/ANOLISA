@@ -26,6 +26,10 @@ TOML_CONTRACTS = (
         "src/agent-sec-core/openclaw-plugin/package.json",
         "src/agent-sec-core/packaging/anolisa/component.toml",
     ),
+    (
+        "src/agent-sec-core/v2/Cargo.toml",
+        "distribution/anolisa/manifests/components/sec-core/component.toml",
+    ),
     ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/rpm/component.toml"),
     ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/raw/component.toml"),
     ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/raw/component.macos.toml"),

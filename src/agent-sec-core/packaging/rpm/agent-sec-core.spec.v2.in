@@ -70,9 +70,6 @@ own. Agent Hook migration is delivered separately.
 %dir %{_sysconfdir}/agent-sec
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/agent-sec/skillsec.json
 %dir %{_datadir}/anolisa
-%dir %{_datadir}/anolisa/components
-%dir %{_datadir}/anolisa/components/sec-core
-%{_datadir}/anolisa/components/sec-core/component.toml
 %license LICENSE
 
 %post -n agent-sec-cli

@@ -233,11 +233,7 @@ runs:
           sudo apt-get update
           sudo apt-get install -y jq
         fi
-        make -C /tmp/build/${ARCHIVE_NAME} build-openclaw-plugin generate-component-contract
-        CONTRACT="/tmp/build/${ARCHIVE_NAME}/target/packaging/anolisa/rpm/component.toml"
-        if [ -f "$CONTRACT" ]; then
-          install -m 0644 "$CONTRACT" "/tmp/build/${ARCHIVE_NAME}/packaging/anolisa/rpm/component.toml"
-        fi
+        make -C /tmp/build/${ARCHIVE_NAME} build-openclaw-plugin
 
     # Run the adapter unit suite on nightly and release packaging paths as
     # well as PR CI, so a failing plugin cannot ship inside an RPM.

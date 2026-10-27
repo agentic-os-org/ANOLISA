@@ -21,6 +21,16 @@ BuildRequires:  cargo >= 1.93
 BuildRequires:  gcc
 BuildRequires:  make
 
+# These older payload owners install the registry files now supplied by ANOLISA.
+# An absent component is allowed; an installed old owner must upgrade with us.
+Conflicts:      cosh-ng < 0.28.1
+Conflicts:      tokenless < 0.9.1
+Conflicts:      agentsight < 0.15.1
+Conflicts:      skillfs < 0.5.5
+Conflicts:      ws-ckpt < 0.6.1
+Conflicts:      agent-memory < 0.2.12
+Conflicts:      agent-sec-cli < 1.1.2
+
 # Runtime: the `anolisa` CLI stages/downloads OS components on demand and has
 # no hard runtime dependencies. `curl` and `tar` are used by the install
 # helper script; they are practically always present on a base install.
@@ -78,16 +88,12 @@ install -m 0755 target/release/anolisa %{buildroot}%{_bindir}/anolisa
 install -d %{buildroot}%{_sysconfdir}/anolisa
 install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 
-# -- manifests (osbase) --
-# NOTE: data files under %{_datadir_anolisa} are intentionally NOT installed.
-# Component manifests are downloaded from the distribution backend at install
-# time and the CLI fetches + caches the distribution index from the mirror at
-# runtime, so a datadir copy of either would never be read. Re-enable the
-# block below if you need to bundle the osbase manifests into the RPM.
-#install -d %{buildroot}%{_datadir_anolisa}/manifests/osbase
-#cp -pR manifests/osbase/. %{buildroot}%{_datadir_anolisa}/manifests/osbase/
-#find %{buildroot}%{_datadir_anolisa}/manifests -type d -exec chmod 0755 {} \;
-#find %{buildroot}%{_datadir_anolisa}/manifests -type f -exec chmod 0644 {} \;
+# -- distribution-owned component integration contracts --
+for component in cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory; do
+    install -d %{buildroot}%{_datadir_anolisa}/components/$component
+    install -m 0644 manifests/components/$component/component.toml \
+        %{buildroot}%{_datadir_anolisa}/components/$component/component.toml
+done
 
 # -- templates (execution policy is consumed by the CLI's scope gate) --
 #install -d %{buildroot}%{_datadir_anolisa}/templates
@@ -103,8 +109,8 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 %{_bindir}/anolisa
 %dir %{_sysconfdir}/anolisa
 %config(noreplace) %{_sysconfdir}/anolisa/repo.toml
-# Data files under %%{_datadir_anolisa} are not shipped in this build.
-#%%{_datadir_anolisa}
+%dir %{_datadir_anolisa}
+%{_datadir_anolisa}/components/
 
 #%files doc
 #%%license %%{_docdir}/%%{name}/LICENSE

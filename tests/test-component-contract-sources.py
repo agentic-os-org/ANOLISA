@@ -119,16 +119,16 @@ class ContractSourcePublishing(unittest.TestCase):
                 self.assertIn(f"{component}/packaging/anolisa/rpm/component.toml", names)
                 self.assertFalse(any(name.startswith(f"{component}/target") for name in names))
 
-    def test_memory_source_export_requests_and_exports_rpm_metadata(self) -> None:
+    def test_memory_source_export_builds_plugin_without_component_owned_metadata(self) -> None:
         source = self.work / "build" / "agent-memory"
         (source / "packaging/anolisa/rpm").mkdir(parents=True)
         executable = self.work / "bin"
         executable.mkdir()
         (executable / "jq").write_text("#!/bin/sh\nexit 0\n")
         (executable / "make").write_text(
-            '#!/bin/sh\n[ "$4" = generate-component-contract ] || exit 91\n'
-            'mkdir -p "$2/target/packaging/anolisa/rpm"\n'
-            'printf \'version = "0.3.0"\\n\' > "$2/target/packaging/anolisa/rpm/component.toml"\n'
+            '#!/bin/sh\n[ "$#" -eq 3 ] && [ "$3" = build-openclaw-plugin ] || exit 91\n'
+            'mkdir -p "$2/adapters/agent-memory/openclaw/dist"\n'
+            'printf \'// prebuilt plugin\\n\' > "$2/adapters/agent-memory/openclaw/dist/index.js"\n'
         )
         for command in executable.iterdir():
             command.chmod(0o755)
@@ -138,10 +138,8 @@ class ContractSourcePublishing(unittest.TestCase):
         )
         result = self.run_script(action_script("Build OpenClaw plugin (agent-memory)"))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(
-            (source / "packaging/anolisa/rpm/component.toml").read_text(),
-            'version = "0.3.0"\n',
-        )
+        self.assertTrue((source / "adapters/agent-memory/openclaw/dist/index.js").is_file())
+        self.assertFalse((source / "packaging/anolisa/rpm/component.toml").exists())
 
     def test_prebuilt_actions_select_contracts_only_in_the_selected_source(self) -> None:
         for component in ("cosh-ng", "agentsight", "skillfs", "ws-ckpt", "agent-sec-core"):

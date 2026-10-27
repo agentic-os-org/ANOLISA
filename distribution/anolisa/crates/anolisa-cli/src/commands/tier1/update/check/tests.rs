@@ -1793,6 +1793,38 @@ fn update_check_target_profile_parses_default_components() {
 }
 
 #[test]
+fn registry_only_native_tree_preserves_layout_profiles_and_errors() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let layout = FsLayout::system(Some(tmp.path().join("layout")));
+    let packaged_root = tmp.path().join("native/share/anolisa");
+    std::fs::create_dir_all(packaged_root.join("components")).expect("mkdir registry");
+    let local = layout.datadir.join(PROFILES_SUBDIR).join("site.toml");
+    std::fs::create_dir_all(local.parent().expect("profile parent")).expect("mkdir profiles");
+    std::fs::write(
+        &local,
+        "schema_version = 1\nname = \"site\"\ndefault_components = [\"tokenless\"]\n",
+    )
+    .expect("write layout profile");
+    let probe = crate::packaged::PackagedDataProbe::from_inputs(Some(packaged_root.clone()), None);
+    let profile = load_target_profile_by_name(&layout, "site", &probe)
+        .expect("layout profile remains discoverable");
+    assert_eq!(profile.default_components, vec!["tokenless"]);
+
+    let preferred = packaged_root.join(PROFILES_SUBDIR).join("site.toml");
+    std::fs::create_dir_all(preferred.parent().expect("packaged parent")).expect("mkdir packaged");
+    std::fs::write(&preferred, "this is not TOML [").expect("write invalid profile");
+    let error = load_target_profile_by_name(&layout, "site", &probe)
+        .expect_err("invalid packaged profile cannot fall back");
+    assert!(error.to_string().contains("invalid"));
+
+    std::fs::remove_file(&preferred).expect("remove invalid file");
+    std::fs::create_dir(&preferred).expect("directory blocks profile");
+    let error = load_target_profile_by_name(&layout, "site", &probe)
+        .expect_err("unreadable packaged profile cannot fall back");
+    assert!(error.to_string().contains("cannot read target profile"));
+}
+
+#[test]
 fn update_check_target_profile_rejects_traversal() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));

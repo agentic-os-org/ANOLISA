@@ -1384,6 +1384,19 @@ fn load_target_profile_by_name(
     }
     searched.push(packaged_path);
 
+    // Native packages may ship only the integration registry. Preserve the
+    // existing layout's site profiles when that packaged file is absent.
+    if packaged_root != layout.datadir {
+        let layout_path = layout
+            .datadir
+            .join(PROFILES_SUBDIR)
+            .join(format!("{name}.toml"));
+        if let Some(profile) = try_read_profile(&layout_path, name)? {
+            return Ok(profile);
+        }
+        searched.push(layout_path);
+    }
+
     // Only the release default has a compiled-in fallback; any other name that
     // reached here genuinely has no profile on disk.
     if name == DEFAULT_TARGET_PROFILE_NAME {

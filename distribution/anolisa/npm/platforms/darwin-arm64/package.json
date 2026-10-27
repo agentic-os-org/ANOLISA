@@ -11,7 +11,8 @@
   "os": ["darwin"],
   "cpu": ["arm64"],
   "files": [
-    "bin/"
+    "bin/",
+    "share/"
   ],
   "preferUnplugged": true
 }

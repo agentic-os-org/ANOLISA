@@ -146,11 +146,6 @@ install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
 # Install adapter bundle (common hooks/spec + openclaw)
 install -m 0644 adapters/tokenless/manifest.json %{buildroot}%{_adapterdir_tokenless}/
-# Install the tokenless RPM component contract (publishing/plugin metadata)
-# at the component-level path declared by the ANOLISA component-contract
-# model: %{_datadir}/anolisa/components/<component>/component.toml.
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/tokenless
-install -m 0644 target/packaging/anolisa/component.toml %{buildroot}%{_datadir}/anolisa/components/tokenless/
 install -m 0644 adapters/tokenless/common/tool-ready-spec.json %{buildroot}%{_adapterdir_tokenless}/common/
 install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh %{buildroot}%{_adapterdir_tokenless}/common/
 install -m 0644 adapters/tokenless/common/cosh-extension.json %{buildroot}%{_adapterdir_tokenless}/common/
@@ -271,8 +266,6 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %doc %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
 %dir %{_datadir}/anolisa
-%dir %{_datadir}/anolisa/components
-%dir %{_datadir}/anolisa/components/tokenless
 %if "%{_adapterdir_tokenless}" == "%{_datadir}/anolisa/adapters/tokenless"
 %dir %{_datadir}/anolisa/adapters
 %endif
@@ -313,7 +306,6 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_adapterdir_tokenless}/qwencode/hooks
 %dir %{_adapterdir_tokenless}/qwencode/scripts
 %attr(0644,root,root) %{_adapterdir_tokenless}/manifest.json
-%attr(0644,root,root) %{_datadir}/anolisa/components/tokenless/component.toml
 %attr(0644,root,root) %{_adapterdir_tokenless}/common/tool-ready-spec.json
 %attr(0644,root,root) %{_adapterdir_tokenless}/common/cosh-extension.json
 %attr(0755,root,root) %{_adapterdir_tokenless}/common/tokenless-env-fix.sh

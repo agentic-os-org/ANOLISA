@@ -34,6 +34,7 @@ for (const target of TARGETS) {
     ),
   );
   assert.equal('bin' in platformManifest, false);
+  assert.ok(platformManifest.files.includes('share/'));
 }
 
 assert.equal(targetForSelector('linux-arm64').pkg_suffix, 'linux-arm64');
@@ -112,4 +113,5 @@ assert.deepEqual(
 // Run native launcher fixtures on the package's supported operating systems.
 if (process.platform === 'linux' || process.platform === 'darwin') {
   await import('./postinstall.test.js');
+  await import('./contracts.test.js');
 }

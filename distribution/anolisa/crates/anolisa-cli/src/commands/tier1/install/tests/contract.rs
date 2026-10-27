@@ -6,6 +6,35 @@ use crate::commands::common;
 use tempfile::tempdir;
 
 #[test]
+fn distribution_registry_contracts_parse_with_complete_layouts() {
+    let registry =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/components");
+    for component in [
+        "cosh-ng",
+        "sec-core",
+        "agentsight",
+        "tokenless",
+        "skillfs",
+        "ws-ckpt",
+        "agent-memory",
+    ] {
+        let manifest = anolisa_core::ComponentManifest::from_file(
+            &registry.join(component).join("component.toml"),
+        )
+        .expect("distribution contract must parse");
+        assert_eq!(manifest.component.name, component);
+        assert!(!manifest.install.files.is_empty(), "{component} layout");
+        for adapter in &manifest.adapters {
+            let rpm = adapter.backends.rpm.as_ref().expect("RPM adapter metadata");
+            assert!(
+                !rpm.managed_packages.is_empty(),
+                "{component} package inventory"
+            );
+        }
+    }
+}
+
+#[test]
 fn adopt_snapshots_datadir_contract() {
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
@@ -228,5 +257,73 @@ fn snapshot_datadir_contract_writes_provenance() {
     assert_eq!(
         prov.source_path,
         anolisa_platform::fs_layout::FsLayout::component_contract_path(&layout.datadir, "sec-core"),
+    );
+}
+
+#[test]
+fn refresh_and_inspect_use_the_packaged_distribution_registry() {
+    use anolisa_core::adapter::contract::{infer_contract_datadir_root, read_snapshot_provenance};
+
+    let (tmp, ctx) = system_ctx_with_raw_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let packaged = tmp.path().join("distribution/share/anolisa");
+    let source =
+        anolisa_platform::fs_layout::FsLayout::component_contract_path(&packaged, "sec-core");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir registry");
+    let contract = component_manifest_toml("sec-core", "1.1.0", &["system"]);
+    std::fs::write(&source, &contract).expect("write distribution contract");
+    let ctx = ctx.with_packaged_data_root(packaged.clone());
+
+    let before =
+        inspect_datadir_contract_drift(&layout, "sec-core", COMMAND, ctx.packaged_data_probe());
+    assert!(before.drifted, "missing snapshot must be refreshed");
+    let outcome =
+        refresh_datadir_contract_snapshot(&layout, "sec-core", COMMAND, ctx.packaged_data_probe());
+    assert!(outcome.failure_detail().is_none(), "{:?}", outcome.warnings);
+    assert!(outcome.warnings.is_empty());
+    let snapshot = common::installed_component_manifest_path(&layout, "sec-core", COMMAND)
+        .expect("snapshot path");
+    assert_eq!(
+        std::fs::read_to_string(&snapshot).expect("snapshot"),
+        contract
+    );
+    let provenance = read_snapshot_provenance(&snapshot).expect("provenance");
+    assert_eq!(provenance.source_path, source);
+    assert_eq!(provenance.datadir_root, packaged);
+    assert_eq!(
+        infer_contract_datadir_root("sec-core", &snapshot, std::slice::from_ref(&packaged)),
+        Some(packaged.clone())
+    );
+    assert_eq!(
+        infer_contract_datadir_root("sec-core", &snapshot, std::slice::from_ref(&layout.datadir)),
+        None
+    );
+    let after =
+        inspect_datadir_contract_drift(&layout, "sec-core", COMMAND, ctx.packaged_data_probe());
+    assert!(!after.drifted);
+    assert!(after.warnings.is_empty());
+}
+
+#[test]
+fn unreadable_distribution_contract_does_not_fall_through_to_another_root() {
+    let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let package_datadir = layout.package_datadir().expect("package datadir");
+    let blocked = anolisa_platform::fs_layout::FsLayout::component_contract_path(
+        &package_datadir,
+        "sec-core",
+    );
+    std::fs::create_dir_all(&blocked).expect("directory cannot be read as contract");
+    let contract = component_manifest_toml("sec-core", "1.1.0", &["system"]);
+    seed_datadir_contract(&layout, "sec-core", &contract);
+
+    let result =
+        refresh_datadir_contract_snapshot(&layout, "sec-core", COMMAND, ctx.packaged_data_probe());
+    assert!(result.error_detail().is_some());
+    let snapshot = common::installed_component_manifest_path(&layout, "sec-core", COMMAND)
+        .expect("snapshot path");
+    assert!(
+        !snapshot.exists(),
+        "an unreadable authority must not be masked"
     );
 }

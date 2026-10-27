@@ -254,7 +254,7 @@ install-all-for-rpmbuild-v2: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild-v2: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) install-systemd-system ## Install all (V2 RPM build)
+install-all-for-rpmbuild-v2: install-cli-v2 $(filter-out install-component-manifest,$(RPM_INSTALL_COMMON_TARGETS)) install-systemd-system ## Install all (V2 RPM build)
 
 .PHONY: install-systemd-system
 install-systemd-system: ## Stage V2 system unit and preserve existing settings

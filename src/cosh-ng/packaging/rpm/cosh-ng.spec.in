@@ -79,9 +79,6 @@ install -d %{buildroot}%{_docdir}/%{name}
 install -m 0644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 
-# Install anolisa component manifest
-install -d %{buildroot}%{_datadir}/anolisa/components/cosh-ng
-install -m 0644 packaging/anolisa/rpm/component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-ng/component.toml
 
 # Install the managed Task checkpoint workflow for the outer COSH Agent.
 bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
@@ -97,7 +94,6 @@ bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
 %{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
 %{_unitdir}/cosh-gateway@.service
-%{_datadir}/anolisa/components/cosh-ng/component.toml
 %{_skilldir_cosh}/manage-task-checkpoints/
 
 %preun
