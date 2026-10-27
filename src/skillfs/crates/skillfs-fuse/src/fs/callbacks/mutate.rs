@@ -1442,6 +1442,33 @@ impl SkillFs {
                             );
                         }
                     }
+                    (
+                        PathType::SkillDir { skill_name }
+                        | PathType::InboxSkillDir { skill_name }
+                        | PathType::NestedSkillDir { skill_name, .. },
+                        PathType::Passthrough { .. }
+                        | PathType::InboxPassthrough { .. }
+                        | PathType::NestedPassthrough { .. },
+                    ) => {
+                        if self
+                            .store_entry_backs_manifest(skill_name, &old_physical.join("SKILL.md"))
+                        {
+                            // Discovery stops at a skill's own marker; a
+                            // directory moved inside it leaves the loadable set.
+                            if skillfs_core::store::is_loadable_categorized_skill(
+                                &self.source_base(),
+                                &new_physical,
+                            ) {
+                                self.update_store_after_skill_rename(
+                                    skill_name,
+                                    &newname.to_string_lossy(),
+                                    &new_physical,
+                                );
+                            } else {
+                                self.store.write().remove(skill_name);
+                            }
+                        }
+                    }
                     _ => {
                         // File-level rename inside a skill — trigger re-parse
                         // if SKILL.md is involved.
