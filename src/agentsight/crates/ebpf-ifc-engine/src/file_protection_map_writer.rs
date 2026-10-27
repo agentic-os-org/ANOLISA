@@ -1,0 +1,256 @@
+//! Map writer contract and value types shared by structured-policy generations.
+
+use std::fmt;
+use std::io;
+use std::num::NonZeroU32;
+
+/// Fixed capacities compiled into each structured file-protection BPF map.
+pub const FILE_PROTECTION_MAP_CAPACITY: usize = 4096;
+/// Maximum normalized targets representable by one policy binding.
+pub const FILE_PROTECTION_MAX_TARGETS: usize = 64;
+/// Linux directory-entry basename limit represented by the map ABI.
+pub const FILE_PROTECTION_NAME_MAX: usize = 255;
+
+/// Nonzero immutable generation associated with one staged topology.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FileProtectionGeneration(NonZeroU32);
+
+impl FileProtectionGeneration {
+    /// Creates a generation, rejecting zero because it cannot identify staged state.
+    pub fn new(value: u32) -> io::Result<Self> {
+        NonZeroU32::new(value).map(Self).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "generation must be nonzero")
+        })
+    }
+
+    /// Returns the map ABI value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// statx-derived identity used by path-based policy maps.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TreePathIdentity {
+    /// Inode number.
+    pub ino: u64,
+    /// Kernel-format device number.
+    pub dev: u32,
+    /// Mount ID from `STATX_MNT_ID`; zero is reserved for underlying-directory keys.
+    pub mnt_id: u32,
+}
+
+/// Guard payload retained in events and activation records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TreeGuard {
+    /// Delete/rename/tree guard flags.
+    pub flags: u32,
+    /// Stable lowered rule or structured target identifier.
+    pub rule_id: u32,
+}
+
+/// One exact basename slot under an underlying parent-directory identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FileProtectionSlot {
+    /// Parent directory identity.
+    pub parent: TreePathIdentity,
+    /// Basename bytes; bytes after `name_len` are zero.
+    pub name: [u8; FILE_PROTECTION_NAME_MAX + 1],
+    /// Basename byte length.
+    pub name_len: u32,
+}
+
+impl FileProtectionSlot {
+    /// Builds a verifier-compatible exact slot key.
+    pub fn new(parent: TreePathIdentity, name: &str) -> io::Result<Self> {
+        let bytes = name.as_bytes();
+        if bytes.is_empty() || bytes.len() > FILE_PROTECTION_NAME_MAX || bytes.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file protection basename must be 1..=255 NUL-free bytes",
+            ));
+        }
+        let mut stored = [0; FILE_PROTECTION_NAME_MAX + 1];
+        stored[..bytes.len()].copy_from_slice(bytes);
+        Ok(Self {
+            parent,
+            name: stored,
+            name_len: bytes.len() as u32,
+        })
+    }
+}
+
+/// Masks attached to one exact path slot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileProtectionSlotValue {
+    /// Explicit direct targets at this slot.
+    pub direct_mask: u64,
+    /// Exact exclusions owned by directory-root bits.
+    pub exact_exclude_mask: u64,
+    /// Subtree exclusion boundaries owned by directory-root bits.
+    pub subtree_exclude_mask: u64,
+}
+
+/// Per-target operation bits and stable event identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileProtectionTargetValue {
+    /// Delete, ordinary-write, and target-kind flags interpreted by BPF.
+    pub flags: u32,
+    /// Stable normalized target id in `1..=64`.
+    pub target_id: u32,
+    /// Event guard carrying the same stable target identity.
+    pub guard: TreeGuard,
+}
+
+/// Activation payload published only after every generation key is staged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileProtectionDomainValue {
+    /// Number of normalized targets represented by the masks.
+    pub target_count: u32,
+    /// Directory-tree target bits.
+    pub tree_mask: u64,
+    /// Targets requesting delete protection.
+    pub delete_mask: u64,
+    /// Targets requesting ordinary write protection.
+    pub ordinary_write_mask: u64,
+    /// Stable logical policy-set identity selected by userspace.
+    pub protection_set_id: u64,
+    /// Fail-closed fallback event identity.
+    pub guard: TreeGuard,
+}
+
+/// Entries required from each production map for one generation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileProtectionMapCounts {
+    /// Canonical roots, aliases, and submount roots.
+    pub roots: usize,
+    /// Underlying directory anchors.
+    pub directories: usize,
+    /// Stable direct directory targets and configured ancestors.
+    pub stable_paths: usize,
+    /// Exact target and exclusion basename slots.
+    pub slots: usize,
+    /// Per-target operation records.
+    pub targets: usize,
+    /// Activation records; currently zero or one.
+    pub domains: usize,
+}
+
+impl FileProtectionMapCounts {
+    pub(super) fn validate(self) -> io::Result<()> {
+        for (name, count) in [
+            ("te_policy_roots", self.roots),
+            ("te_policy_dirs", self.directories),
+            ("te_policy_stable", self.stable_paths),
+            ("te_policy_slots", self.slots),
+            ("te_policy_targets", self.targets),
+            ("te_policy_domains", self.domains),
+        ] {
+            if count > FILE_PROTECTION_MAP_CAPACITY {
+                return Err(io::Error::other(format!(
+                    "{name} requires {count} entries, exceeding fixed capacity {FILE_PROTECTION_MAP_CAPACITY}"
+                )));
+            }
+        }
+        if self.targets > FILE_PROTECTION_MAX_TARGETS {
+            return Err(io::Error::other(format!(
+                "structured file protection supports at most {FILE_PROTECTION_MAX_TARGETS} targets"
+            )));
+        }
+        if self.domains > 1 {
+            return Err(io::Error::other(
+                "one generation can activate at most one domain record",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Narrow writer seam used by pinned maps and in-memory transaction tests.
+pub trait FileProtectionMapWriter: fmt::Debug {
+    /// Returns `(existing entries, maximum entries)` for a named map.
+    fn usage(&mut self, map: &'static str) -> io::Result<(usize, usize)>;
+    /// Inserts one canonical, alias, or submount root mask.
+    fn insert_root(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        root_mask: u64,
+    ) -> io::Result<()>;
+    /// Removes one root key.
+    fn remove_root(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one underlying-directory root mask.
+    fn insert_directory(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        root_mask: u64,
+    ) -> io::Result<()>;
+    /// Removes one underlying-directory key.
+    fn remove_directory(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one stable direct directory or configured ancestor mask.
+    fn insert_stable_path(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        target_mask: u64,
+    ) -> io::Result<()>;
+    /// Removes one stable-path key.
+    fn remove_stable_path(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one exact basename slot.
+    fn insert_slot(
+        &mut self,
+        key: FileProtectionSlot,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        value: FileProtectionSlotValue,
+    ) -> io::Result<()>;
+    /// Removes one exact basename slot.
+    fn remove_slot(
+        &mut self,
+        key: FileProtectionSlot,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one stable target record.
+    fn insert_target(
+        &mut self,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        value: FileProtectionTargetValue,
+    ) -> io::Result<()>;
+    /// Removes one target record.
+    fn remove_target(
+        &mut self,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        target_id: u32,
+    ) -> io::Result<()>;
+    /// Activates a generation after every path record is staged.
+    fn activate(
+        &mut self,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        value: FileProtectionDomainValue,
+    ) -> io::Result<()>;
+    /// Deactivates only when the currently active generation matches.
+    fn deactivate(&mut self, domain: u32, generation: FileProtectionGeneration) -> io::Result<()>;
+}

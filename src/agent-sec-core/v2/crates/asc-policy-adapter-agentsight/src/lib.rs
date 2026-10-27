@@ -15,7 +15,12 @@ mod translate;
 
 pub use plan::{
     ACTPLANE_POLICY_MEDIA_TYPE, AGENTSIGHT_BINDING_PLAN_FORMAT,
-    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AgentSightBindingPlan, AgentSightPolicyPlan,
-    AgentSightScopePlan, AgentSightSourceBinding,
+    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AGENTSIGHT_FILE_PROTECTION_POLICY_VERSION,
+    AGENTSIGHT_STRUCTURED_BINDING_PLAN_FORMAT, AGENTSIGHT_STRUCTURED_BINDING_PLAN_SCHEMA_VERSION,
+    AgentSightBindingPlan, AgentSightFileProtectionExclusion,
+    AgentSightFileProtectionExclusionKind, AgentSightFileProtectionPolicy,
+    AgentSightFileProtectionTarget, AgentSightFileProtectionTargetKind,
+    AgentSightFileProtectionTopologyMode, AgentSightFileProtections, AgentSightPolicyPlan,
+    AgentSightScopePlan, AgentSightSourceBinding, AgentSightStructuredBindingPlan,
 };
 pub use translate::AgentSightAdapter;

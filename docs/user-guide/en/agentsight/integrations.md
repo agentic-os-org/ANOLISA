@@ -145,6 +145,34 @@ not attached — the engine still reports the match as a violation with `effect=
 check the engine profile (`ACTPLANE_HOOK_PROFILE` / `ACTPLANE_PINNED_PROFILE`) and the kernel's LSM
 configuration.
 
+### Structured file protection: phase-one boundaries
+
+The `file_protection_policy` payload protects exact file entries or directory trees, including
+future children, with per-target exact-entry and directory-subtree exclusions. `delete` and
+`ordinary_write` are independent protections. Check `/api/enforcement/health` for
+`file_entry_delete_protection`, `directory_tree_delete_protection`, `ordinary_write_protection`,
+and `static_mount_topology` before applying the corresponding policy. The ActPlane backend
+requires explicit `policy_mode: "enforce"` for structured policies; omitted mode, `audit`, and
+`observe` are rejected before topology preparation or kernel changes. This restriction does not
+change legacy DSL handling.
+
+- Ordinary-write protection blocks `write` and `pwrite` through protected paths, including
+  descriptors opened before activation. Reads and opening a writable descriptor remain allowed.
+- Ancestry walks are bounded to 256 steps each, including mount transitions. If no protection
+  can be established within that budget, classification is UNKNOWN: ordinary writes are allowed,
+  while deletion and rename fail closed. Deep descendants can therefore be writable; an explicit
+  file target or a nearby directory-tree root can still establish protection at the same depth.
+- An otherwise unprotected hardlink outside the policy scope can still write the same inode and
+  change the protected file's content. Protect that alias explicitly when needed. Removing the
+  outside hardlink is allowed because it does not remove the protected directory entry.
+- `truncate`, `ftruncate`, `O_TRUNC`, shared writable `mmap`/`mprotect`, and `fallocate` hole punching
+  are outside this protection contract, even for protected files. io_uring/AIO and chmod/chown are
+  also outside the phase-one coverage guarantee; `complete_content_protection` remains false.
+- Mount topology is fixed at apply time. Existing supported bind aliases/submounts are resolved,
+  but later mount/bind/unmount changes and dynamic overlay changes are not supported.
+
+This is bounded operation protection, not a guarantee that protected content is immutable.
+
 ## cosh: ask in natural language
 
 AgentSight ships a conversational Skill for cosh, so Token and audit questions can be asked in the

@@ -369,6 +369,44 @@ fn corrupt_payload_route_and_target_are_rejected_before_modification() {
 }
 
 #[test]
+fn structured_prepared_payload_rejects_mixed_missing_and_malformed_representations() {
+    let client = AgentSightClient::with_dependencies(Wire::new([]), Identity::default());
+    let original = client.prepare_apply(&structured_plan(7)).unwrap();
+    for variant in 0..4 {
+        let mut input = original.clone();
+        let mut payload: Value = serde_json::from_slice(&input.content).unwrap();
+        let request_bytes = serde_json::from_value::<Vec<u8>>(payload["request"].clone()).unwrap();
+        let mut request: Value = serde_json::from_slice(&request_bytes).unwrap();
+        match variant {
+            0 => request["policy_dsl"] = json!("source AGENT = exec \"**\""),
+            1 => {
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("file_protection_policy");
+            }
+            2 => request["file_protection_policy"]["version"] = json!(2),
+            _ => {
+                request["file_protection_policy"]["targets"][0]["exclusions"] = json!([{
+                    "path":"/etc/agent/config.yaml/child",
+                    "kind":"exact_entry"
+                }]);
+            }
+        }
+        let request = serde_json::to_vec(&request).unwrap();
+        payload["requestDigest"] = json!(format!("sha256:{:x}", Sha256::digest(&request)));
+        payload["request"] = json!(request);
+        input.content = serde_json::to_vec(&payload).unwrap();
+        let wire = Wire::new([]);
+        let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
+        let error = client.create(&input).error.unwrap();
+        assert_eq!(error.kind, FailureKind::Rejected);
+        assert_eq!(error.code, "AGENTSIGHT_INVALID_PREPARED");
+        assert!(wire.requests().is_empty());
+    }
+}
+
+#[test]
 fn update_never_deletes_its_new_target_and_rejects_duplicate_cleanup() {
     let wire = Wire::new([]);
     let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());

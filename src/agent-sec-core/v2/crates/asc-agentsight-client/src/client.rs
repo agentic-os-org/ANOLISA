@@ -22,8 +22,11 @@ pub use reconciliation::{
     AGENTSIGHT_PREPARED_APPLY_FORMAT, AgentSightClientFactory, DEFAULT_AGENTSIGHT_ROUTE,
 };
 
-const BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v2";
-const BINDING_PLAN_SCHEMA_VERSION: u16 = 2;
+const LEGACY_BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v2";
+const LEGACY_BINDING_PLAN_SCHEMA_VERSION: u16 = 2;
+const STRUCTURED_BINDING_PLAN_FORMAT: &str = "agentsight.binding.v3";
+const STRUCTURED_BINDING_PLAN_SCHEMA_VERSION: u16 = 3;
+const FILE_PROTECTION_POLICY_VERSION: u16 = 1;
 const ACTPLANE_POLICY_MEDIA_TYPE: &str = "application/vnd.actplane.dsl.v1";
 const MAX_PLAN_BYTES: usize = 1024 * 1024;
 const BINDING_ID_NAME_PREFIX: &str = "urn:agentseccore:agentsight-binding:";
@@ -179,7 +182,10 @@ impl<T, R> AgentSightClient<T, R>
 where
     T: AgentSightTransport,
 {
-    fn require_file_delete_capability(&self) -> Result<(), AgentSightClientError> {
+    fn require_capabilities(
+        &self,
+        request: &ApplyBindingRequest,
+    ) -> Result<(), AgentSightClientError> {
         let response = self.send(&AgentSightHttpRequest {
             method: AgentSightHttpMethod::Get,
             path: ENFORCEMENT_HEALTH_PATH.to_owned(),
@@ -196,8 +202,38 @@ where
         if health.backend != "actplane" {
             return Err(rejected("AGENTSIGHT_UNSUPPORTED_BACKEND"));
         }
-        if !health.capabilities.file_delete_guard {
-            return Err(rejected("AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE"));
+        let Some(policy) = request.file_protection_policy.as_ref() else {
+            if !health.capabilities.file_delete_guard {
+                return Err(rejected("AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE"));
+            }
+            return Ok(());
+        };
+        if !health.capabilities.static_mount_topology {
+            return Err(rejected("AGENTSIGHT_STATIC_MOUNT_TOPOLOGY_UNAVAILABLE"));
+        }
+        let requires_exact_delete = policy.targets.iter().any(|target| {
+            target.kind == FileProtectionTargetKind::ExactFile && target.protections.delete
+        });
+        if requires_exact_delete && !health.capabilities.file_entry_delete_protection {
+            return Err(rejected(
+                "AGENTSIGHT_FILE_ENTRY_DELETE_PROTECTION_UNAVAILABLE",
+            ));
+        }
+        let requires_tree_delete = policy.targets.iter().any(|target| {
+            target.kind == FileProtectionTargetKind::DirectoryTree && target.protections.delete
+        });
+        if requires_tree_delete && !health.capabilities.directory_tree_delete_protection {
+            return Err(rejected(
+                "AGENTSIGHT_DIRECTORY_TREE_DELETE_PROTECTION_UNAVAILABLE",
+            ));
+        }
+        if policy
+            .targets
+            .iter()
+            .any(|target| target.protections.ordinary_write)
+            && !health.capabilities.ordinary_write_protection
+        {
+            return Err(rejected("AGENTSIGHT_ORDINARY_WRITE_PROTECTION_UNAVAILABLE"));
         }
         Ok(())
     }
@@ -228,8 +264,19 @@ struct EnforcementHealth {
 }
 
 #[derive(Debug, Deserialize)]
+// Each independent wire capability must default false when an older server omits it.
+#[allow(clippy::struct_excessive_bools)]
 struct EnforcementCapabilities {
+    #[serde(default)]
     file_delete_guard: bool,
+    #[serde(default)]
+    file_entry_delete_protection: bool,
+    #[serde(default)]
+    directory_tree_delete_protection: bool,
+    #[serde(default)]
+    ordinary_write_protection: bool,
+    #[serde(default)]
+    static_mount_topology: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,8 +289,62 @@ struct ApplyBindingRequest {
     process_start_time: u64,
     policy_id: String,
     policy_revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     policy_dsl: String,
     policy_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_protection_policy: Option<FileProtectionPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct FileProtectionPolicy {
+    version: u16,
+    topology_mode: FileProtectionTopologyMode,
+    targets: Vec<FileProtectionTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FileProtectionTopologyMode {
+    StaticAtApply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct FileProtectionTarget {
+    path: String,
+    kind: FileProtectionTargetKind,
+    protections: FileProtections,
+    exclusions: Vec<FileProtectionExclusion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FileProtectionTargetKind {
+    ExactFile,
+    DirectoryTree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct FileProtections {
+    delete: bool,
+    ordinary_write: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct FileProtectionExclusion {
+    path: String,
+    kind: FileProtectionExclusionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FileProtectionExclusionKind {
+    ExactEntry,
+    DirectorySubtree,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,11 +379,20 @@ struct RemoteError {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AgentSightBindingPlan {
+struct LegacyAgentSightBindingPlan {
     schema_version: u16,
     source: AgentSightSourceBinding,
     policy: AgentSightPolicyPlan,
     scope: AgentSightScopePlan,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StructuredAgentSightBindingPlan {
+    schema_version: u16,
+    source: AgentSightSourceBinding,
+    scope: AgentSightScopePlan,
+    file_protection_policy: FileProtectionPolicy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -323,12 +433,21 @@ struct DecodedPlan {
     policy_id: ResourceId,
     policy_revision: Revision,
     root_pid: i32,
-    policy_dsl: String,
+    policy: DecodedPolicy,
     process: asc_policy_types::process_discovery::ProcessIdentity,
+}
+
+enum DecodedPolicy {
+    LegacyDsl(String),
+    Structured(FileProtectionPolicy),
 }
 
 impl DecodedPlan {
     fn request(&self, process_start_time: u64) -> ApplyBindingRequest {
+        let (policy_dsl, file_protection_policy) = match &self.policy {
+            DecodedPolicy::LegacyDsl(policy_dsl) => (policy_dsl.clone(), None),
+            DecodedPolicy::Structured(policy) => (String::new(), Some(policy.clone())),
+        };
         ApplyBindingRequest {
             binding_id: self.target_binding_id.to_string(),
             // No Agent identity is supplied by the product Binding. The generic
@@ -339,35 +458,68 @@ impl DecodedPlan {
             process_start_time,
             policy_id: self.policy_id.to_string(),
             policy_revision: self.policy_revision.get().to_string(),
-            policy_dsl: self.policy_dsl.clone(),
+            policy_dsl,
             policy_mode: "enforce".to_owned(),
+            file_protection_policy,
         }
     }
 }
 
 fn decode_plan(plan: &TargetBindingPlan) -> Result<DecodedPlan, AgentSightClientError> {
-    if plan.format != BINDING_PLAN_FORMAT {
-        return Err(rejected("AGENTSIGHT_UNSUPPORTED_PLAN_FORMAT"));
-    }
     if plan.content.len() > MAX_PLAN_BYTES {
         return Err(rejected("AGENTSIGHT_INVALID_PLAN"));
     }
-    let plan: AgentSightBindingPlan =
-        serde_json::from_slice(&plan.content).map_err(|_| rejected("AGENTSIGHT_INVALID_PLAN"))?;
-    if plan.schema_version != BINDING_PLAN_SCHEMA_VERSION {
+    match plan.format.as_str() {
+        LEGACY_BINDING_PLAN_FORMAT => decode_legacy_plan(&plan.content),
+        STRUCTURED_BINDING_PLAN_FORMAT => decode_structured_plan(&plan.content),
+        _ => Err(rejected("AGENTSIGHT_UNSUPPORTED_PLAN_FORMAT")),
+    }
+}
+
+fn decode_legacy_plan(content: &[u8]) -> Result<DecodedPlan, AgentSightClientError> {
+    let plan: LegacyAgentSightBindingPlan =
+        serde_json::from_slice(content).map_err(|_| rejected("AGENTSIGHT_INVALID_PLAN"))?;
+    if plan.schema_version != LEGACY_BINDING_PLAN_SCHEMA_VERSION {
         return Err(rejected("AGENTSIGHT_UNSUPPORTED_PLAN_SCHEMA"));
     }
+    if plan.policy.media_type != ACTPLANE_POLICY_MEDIA_TYPE || plan.policy.content.is_empty() {
+        return Err(rejected("AGENTSIGHT_UNSUPPORTED_POLICY_ARTIFACT"));
+    }
+    decode_plan_parts(
+        plan.source,
+        plan.scope,
+        DecodedPolicy::LegacyDsl(plan.policy.content),
+    )
+}
+
+fn decode_structured_plan(content: &[u8]) -> Result<DecodedPlan, AgentSightClientError> {
+    let plan: StructuredAgentSightBindingPlan =
+        serde_json::from_slice(content).map_err(|_| rejected("AGENTSIGHT_INVALID_PLAN"))?;
+    if plan.schema_version != STRUCTURED_BINDING_PLAN_SCHEMA_VERSION {
+        return Err(rejected("AGENTSIGHT_UNSUPPORTED_PLAN_SCHEMA"));
+    }
+    validate_file_protection_policy(&plan.file_protection_policy)
+        .map_err(|()| rejected("AGENTSIGHT_INVALID_PLAN"))?;
+    decode_plan_parts(
+        plan.source,
+        plan.scope,
+        DecodedPolicy::Structured(plan.file_protection_policy),
+    )
+}
+
+fn decode_plan_parts(
+    source: AgentSightSourceBinding,
+    scope: AgentSightScopePlan,
+    policy: DecodedPolicy,
+) -> Result<DecodedPlan, AgentSightClientError> {
     let AgentSightSourceBinding {
         binding_id,
         binding_revision,
         policy_id,
         policy_revision,
         scope_id: _scope_id,
-    } = plan.source;
-    if plan.policy.media_type != ACTPLANE_POLICY_MEDIA_TYPE || plan.policy.content.is_empty() {
-        return Err(rejected("AGENTSIGHT_UNSUPPORTED_POLICY_ARTIFACT"));
-    }
-    let AgentSightScopePlan::ProcessTree { root_pid, process } = plan.scope;
+    } = source;
+    let AgentSightScopePlan::ProcessTree { root_pid, process } = scope;
     if root_pid <= 0
         || u32::try_from(root_pid).ok() != Some(process.pid)
         || process.start_time == 0
@@ -382,9 +534,70 @@ fn decode_plan(plan: &TargetBindingPlan) -> Result<DecodedPlan, AgentSightClient
         policy_id,
         policy_revision,
         root_pid,
-        policy_dsl: plan.policy.content,
+        policy,
         process,
     })
+}
+
+fn validate_request_policy(request: &ApplyBindingRequest) -> Result<(), ()> {
+    match request.file_protection_policy.as_ref() {
+        None if !request.policy_dsl.trim().is_empty() => Ok(()),
+        Some(policy) if request.policy_dsl.is_empty() => validate_file_protection_policy(policy),
+        _ => Err(()),
+    }
+}
+
+fn validate_file_protection_policy(policy: &FileProtectionPolicy) -> Result<(), ()> {
+    if policy.version != FILE_PROTECTION_POLICY_VERSION
+        || policy.targets.is_empty()
+        || policy.targets.len() > 64
+    {
+        return Err(());
+    }
+    for (target_index, target) in policy.targets.iter().enumerate() {
+        if !valid_literal_path(&target.path)
+            || (!target.protections.delete && !target.protections.ordinary_write)
+            || (target.kind == FileProtectionTargetKind::ExactFile && !target.exclusions.is_empty())
+            || policy.targets[..target_index]
+                .iter()
+                .any(|existing| existing.path == target.path)
+        {
+            return Err(());
+        }
+        for (exclusion_index, exclusion) in target.exclusions.iter().enumerate() {
+            if !valid_literal_path(&exclusion.path)
+                || !strict_descendant(&target.path, &exclusion.path)
+                || target.exclusions[..exclusion_index]
+                    .iter()
+                    .any(|existing| existing.path == exclusion.path)
+            {
+                return Err(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_literal_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.starts_with('/')
+        && path.len() <= 4096
+        && !path.contains('\0')
+        && !path.contains(['*', '?', '[', ']', '{', '}', '\\'])
+        && !path.contains("//")
+        && (path == "/" || !path.ends_with('/'))
+        && !path
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+}
+
+fn strict_descendant(root: &str, candidate: &str) -> bool {
+    if root == "/" {
+        return candidate != "/";
+    }
+    candidate
+        .strip_prefix(root)
+        .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn target_binding_id(binding_id: &ResourceId, binding_revision: Revision) -> Uuid {

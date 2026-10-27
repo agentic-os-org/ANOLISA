@@ -86,14 +86,20 @@ import re
 import sys
 
 root, tools, source = map(pathlib.Path, sys.argv[1:])
+(source / "bpf/src").mkdir(parents=True)
 constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
                            (root / "scripts/build-enforcer.sh").read_text(), re.M))
 (root / "Cargo.toml").write_text(f'rev = "{constants["ACTPLANE_REVISION"]}"\n' * 2)
 engine = root / "crates/ebpf-ifc-engine"
 (engine / "prebuilt").mkdir(parents=True)
+(engine / "src").mkdir()
 for name in ("process.bpf.c", "process.h", "taint.h", "taint_engine.bpf.h",
              "capability.bpf.h", "channel.bpf.h"):
     (engine / name).write_text(name)
+(engine / "src/lib.rs").write_bytes(b"staged-bpf-lib")
+for name in ("file_protection_generation.rs", "file_protection_generation_tests.rs",
+             "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
+    (engine / "src" / name).write_text(name)
 (engine / "prebuilt/process.bpf.o").write_bytes(b"full-object")
 (engine / "prebuilt/process-inode-only.bpf.o").write_bytes(b"inode-object")
 (source / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
@@ -105,12 +111,27 @@ if command == "rev-parse":
     print(constants["ACTPLANE_REVISION"])
 elif command == "checkout":
     # Model the source reset performed by the real cache checkout/reset.
-    (pathlib.Path(source) / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
+    source = pathlib.Path(source)
+    (source / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
+    for name in ("lib.rs", "file_protection_generation.rs",
+                 "file_protection_generation_tests.rs",
+                 "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
+        (source / "bpf/src" / name).unlink(missing_ok=True)
     print("fixture Git diagnostic")
 elif command == "hash-object":
     path = pathlib.Path(source) / args[0]
-    key = {"lib.rs": "PATCHED_BPF_LIB", "build.rs": "PATCHED_BPF_BUILD",
-           "Makefile": "PATCHED_BPF_MAKEFILE", "process-inode-only.bpf.o": "STAGED_INODE_BPF"}.get(path.name)
+    keys = {
+        "build.rs": "PATCHED_BPF_BUILD",
+        "Makefile": "PATCHED_BPF_MAKEFILE",
+        "file_protection_generation.rs": "STAGED_FILE_PROTECTION_GENERATION",
+        "file_protection_generation_tests.rs": "STAGED_FILE_PROTECTION_GENERATION_TESTS",
+        "file_protection_map_writer.rs": "STAGED_FILE_PROTECTION_MAP_WRITER",
+        "file_protection_pinned_maps.rs": "STAGED_FILE_PROTECTION_PINNED_MAPS",
+        "process-inode-only.bpf.o": "STAGED_INODE_BPF",
+    }
+    key = keys.get(path.name)
+    if path.name == "lib.rs":
+        key = "STAGED_BPF_LIB" if path.exists() and path.read_bytes() == b"staged-bpf-lib" else "PATCHED_BPF_LIB"
     if key is None:
         key = "PREBUILT_BPF" if path.read_bytes() == b"upstream-object" else "STAGED_PREBUILT_BPF"
     print(constants["ACTPLANE_" + key + "_BLOB"])
@@ -145,7 +166,12 @@ PY
 fixture_env=(env -u ENFORCER_BIN -u CARGO_BUILD_TARGET -u ACTPLANE_REBUILD_BPF
     "PATH=$tmp_dir/tools:$PATH" "CARGO=$tmp_dir/tools/cargo"
     "CARGO_TARGET_DIR=$tmp_dir/cargo parent" "ACTPLANE_SOURCE_DIR=$tmp_dir/actplane")
-first_bin="$("${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" 2>"$tmp_dir/build.err")"
+if ! first_bin="$("${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" 2>"$tmp_dir/build.err")"; then
+    while IFS= read -r line; do
+        printf '%s\n' "$line" >&2
+    done < "$tmp_dir/build.err"
+    exit 1
+fi
 second_bin="$("${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" 2>>"$tmp_dir/build.err")"
 [[ "$first_bin" = /* && "$second_bin" = /* && "$first_bin" != "$second_bin" ]]
 [[ "$first_bin" != *$'\n'* && "$second_bin" != *$'\n'* ]]

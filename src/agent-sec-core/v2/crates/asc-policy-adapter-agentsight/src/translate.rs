@@ -4,7 +4,9 @@ use std::fmt::Write as _;
 
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::{
-    Action, Category, Comparison, Condition, Effect, Resource, Scalar, Value,
+    Action, Category, Comparison, Condition, Effect, FileProtectionExclusionKind,
+    FileProtectionPolicy, FileProtectionTargetKind, FileProtectionTopology, Resource, Scalar,
+    Value,
 };
 use asc_policy_types::binding::BindingScope;
 use asc_policy_types::binding::PreparedBinding;
@@ -15,8 +17,13 @@ use asc_policy_types::target::{
 
 use crate::plan::{
     ACTPLANE_POLICY_MEDIA_TYPE, AGENTSIGHT_BINDING_PLAN_FORMAT,
-    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AgentSightBindingPlan, AgentSightPolicyPlan,
-    AgentSightScopePlan, AgentSightSourceBinding,
+    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AGENTSIGHT_FILE_PROTECTION_POLICY_VERSION,
+    AGENTSIGHT_STRUCTURED_BINDING_PLAN_FORMAT, AGENTSIGHT_STRUCTURED_BINDING_PLAN_SCHEMA_VERSION,
+    AgentSightBindingPlan, AgentSightFileProtectionExclusion,
+    AgentSightFileProtectionExclusionKind, AgentSightFileProtectionPolicy,
+    AgentSightFileProtectionTarget, AgentSightFileProtectionTargetKind,
+    AgentSightFileProtectionTopologyMode, AgentSightFileProtections, AgentSightPolicyPlan,
+    AgentSightScopePlan, AgentSightSourceBinding, AgentSightStructuredBindingPlan,
 };
 
 // ActPlane's PAT=64 kernel ABI reserves one byte for the trailing NUL.
@@ -43,33 +50,113 @@ impl AgentSightAdapter {
             Ok(scope) => scope,
             Err(rejection) => return Ok(TranslationOutcome::Rejected(rejection)),
         };
-        let policy_dsl = match compile_policy(binding) {
-            Ok(policy_dsl) => policy_dsl,
-            Err(rejection) => return Ok(TranslationOutcome::Rejected(rejection)),
-        };
+        match binding.policy.template.spec_version.as_str() {
+            "0.1" => translate_legacy_binding(binding, scope),
+            "0.2" => translate_structured_binding(binding, scope),
+            _ => Ok(rejected("INVALID_BINDING")),
+        }
+    }
+}
 
-        let target_plan = AgentSightBindingPlan {
-            schema_version: AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION,
-            source: AgentSightSourceBinding {
-                binding_id: binding.binding_id.clone(),
-                binding_revision: binding.binding_revision,
-                policy_id: binding.policy.policy_id.clone(),
-                policy_revision: binding.policy.revision,
-                scope_id: binding.scope.scope_id.clone(),
-            },
-            policy: AgentSightPolicyPlan {
-                media_type: ACTPLANE_POLICY_MEDIA_TYPE.to_owned(),
-                content: policy_dsl,
-            },
-            scope,
-        };
-        let content =
-            serde_json::to_vec(&target_plan).map_err(|_| fault("ADAPTER_SERIALIZATION_FAILED"))?;
-        let plan = TargetBindingPlan {
-            format: AGENTSIGHT_BINDING_PLAN_FORMAT.to_owned(),
-            content,
-        };
-        Ok(TranslationOutcome::Translated(plan))
+fn translate_legacy_binding(
+    binding: &PreparedBinding,
+    scope: AgentSightScopePlan,
+) -> Result<TranslationOutcome, AdapterFault> {
+    let policy_dsl = match compile_policy(binding) {
+        Ok(policy_dsl) => policy_dsl,
+        Err(rejection) => return Ok(TranslationOutcome::Rejected(rejection)),
+    };
+    let target_plan = AgentSightBindingPlan {
+        schema_version: AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION,
+        source: translate_source(binding),
+        policy: AgentSightPolicyPlan {
+            media_type: ACTPLANE_POLICY_MEDIA_TYPE.to_owned(),
+            content: policy_dsl,
+        },
+        scope,
+    };
+    serialize_plan(AGENTSIGHT_BINDING_PLAN_FORMAT, &target_plan)
+}
+
+fn translate_structured_binding(
+    binding: &PreparedBinding,
+    scope: AgentSightScopePlan,
+) -> Result<TranslationOutcome, AdapterFault> {
+    let Some(file_protection) = binding.policy.template.file_protection.as_ref() else {
+        return Ok(rejected("INVALID_BINDING"));
+    };
+    let target_plan = AgentSightStructuredBindingPlan {
+        schema_version: AGENTSIGHT_STRUCTURED_BINDING_PLAN_SCHEMA_VERSION,
+        source: translate_source(binding),
+        scope,
+        file_protection_policy: translate_file_protection(file_protection),
+    };
+    serialize_plan(AGENTSIGHT_STRUCTURED_BINDING_PLAN_FORMAT, &target_plan)
+}
+
+fn serialize_plan(
+    format: &str,
+    plan: &impl serde::Serialize,
+) -> Result<TranslationOutcome, AdapterFault> {
+    let content = serde_json::to_vec(plan).map_err(|_| fault("ADAPTER_SERIALIZATION_FAILED"))?;
+    Ok(TranslationOutcome::Translated(TargetBindingPlan {
+        format: format.to_owned(),
+        content,
+    }))
+}
+
+fn translate_source(binding: &PreparedBinding) -> AgentSightSourceBinding {
+    AgentSightSourceBinding {
+        binding_id: binding.binding_id.clone(),
+        binding_revision: binding.binding_revision,
+        policy_id: binding.policy.policy_id.clone(),
+        policy_revision: binding.policy.revision,
+        scope_id: binding.scope.scope_id.clone(),
+    }
+}
+
+fn translate_file_protection(policy: &FileProtectionPolicy) -> AgentSightFileProtectionPolicy {
+    AgentSightFileProtectionPolicy {
+        version: AGENTSIGHT_FILE_PROTECTION_POLICY_VERSION,
+        topology_mode: match policy.topology {
+            FileProtectionTopology::StaticAtApply => {
+                AgentSightFileProtectionTopologyMode::StaticAtApply
+            }
+        },
+        targets: policy
+            .targets
+            .iter()
+            .map(|target| AgentSightFileProtectionTarget {
+                path: target.path.clone(),
+                kind: match target.kind {
+                    FileProtectionTargetKind::ExactFile => {
+                        AgentSightFileProtectionTargetKind::ExactFile
+                    }
+                    FileProtectionTargetKind::DirectoryTree => {
+                        AgentSightFileProtectionTargetKind::DirectoryTree
+                    }
+                },
+                protections: AgentSightFileProtections {
+                    delete: target.protections.delete,
+                    ordinary_write: target.protections.ordinary_write,
+                },
+                exclusions: target
+                    .exclusions
+                    .iter()
+                    .map(|exclusion| AgentSightFileProtectionExclusion {
+                        path: exclusion.path.clone(),
+                        kind: match exclusion.kind {
+                            FileProtectionExclusionKind::ExactEntry => {
+                                AgentSightFileProtectionExclusionKind::ExactEntry
+                            }
+                            FileProtectionExclusionKind::DirectorySubtree => {
+                                AgentSightFileProtectionExclusionKind::DirectorySubtree
+                            }
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 

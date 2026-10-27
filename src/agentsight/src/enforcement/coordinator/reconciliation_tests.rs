@@ -218,6 +218,7 @@ fn request(id: &str) -> ApplyPolicy {
         policy_revision: "revision-1".into(),
         policy_dsl: "label AGENT".into(),
         policy_mode: None,
+        file_protection_policy: None,
     }
 }
 
@@ -274,6 +275,7 @@ fn credential_binding(request: &ApplyCredentialPolicy, domain_id: u32) -> Bindin
                 request.policy.taint_ttl_secs
             ),
             policy_mode: Some(request.policy.mode),
+            file_protection_policy: None,
         },
         domain_id,
     )
