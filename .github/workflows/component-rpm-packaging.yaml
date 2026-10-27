@@ -1,0 +1,58 @@
+name: Component RPM packaging
+
+on:
+  push:
+    paths:
+      - 'src/**/packaging/**'
+      - 'src/**/tests/*rpm*.py'
+      - 'src/agentsight/scripts/benchmark/tests/test_delivery.py'
+      - 'src/cosh-ng/tests/test-package-rpm.sh'
+      - 'scripts/rpm-build.sh'
+      - 'tests/test-component-*.py'
+      - 'tests/test-root-makefile.py'
+      - 'Makefile'
+      - '.github/workflows/*rpm*.yaml'
+  pull_request:
+    paths:
+      - 'src/**/packaging/**'
+      - 'src/**/tests/*rpm*.py'
+      - 'src/agentsight/scripts/benchmark/tests/test_delivery.py'
+      - 'src/cosh-ng/tests/test-package-rpm.sh'
+      - 'scripts/rpm-build.sh'
+      - 'tests/test-component-*.py'
+      - 'tests/test-root-makefile.py'
+      - 'Makefile'
+      - '.github/workflows/*rpm*.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-layout:
+    runs-on: ubuntu-24.04
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      - name: Install packaging test tools
+        run: |
+          sed -i -e 's/cloud.aliyuncs/aliyun/g' /etc/yum.repos.d/*.repo
+          dnf install -y bash binutils coreutils diffutils file findutils git \
+            gzip make python3 rpm-build systemd-rpm-macros tar
+
+      - uses: actions/checkout@v4
+
+      - name: Verify component packaging interfaces and source exports
+        run: |
+          python3 tests/test-root-makefile.py
+          python3 tests/test-component-delivery-layout.py
+          python3 tests/test-component-contract-sources.py
+
+      - name: Verify RPM package groups and staged file ownership
+        run: |
+          make -s test-packaging
+          install -d -m 0700 /var/lib/cosh-ng-rpm-test
+          COSH_RPM_TEST_SAFE_DIR=/var/lib/cosh-ng-rpm-test bash src/cosh-ng/tests/test-package-rpm.sh
+
+      - name: Check shared builder syntax
+        run: bash -n scripts/rpm-build.sh

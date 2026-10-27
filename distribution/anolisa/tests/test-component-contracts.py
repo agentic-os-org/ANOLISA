@@ -7,6 +7,8 @@ import fnmatch
 import hashlib
 import os
 import re
+import runpy
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -50,7 +52,7 @@ def contract(component: str) -> dict:
     return tomllib.loads((REGISTRY / component / "component.toml").read_text())
 
 
-def file_patterns(spec: str) -> dict[str, list[str]]:
+def file_patterns(spec: str, *, builddir: Path | None = None) -> dict[str, list[str]]:
     """Read actual role inventories, excluding directory-only ownership entries."""
     name = re.search(r"^Name:\s+(\S+)", spec, re.M).group(1)
     macros = {
@@ -67,7 +69,21 @@ def file_patterns(spec: str) -> dict[str, list[str]]:
         re.M | re.S,
     ):
         args, body = match.groups()
-        package = name if not args else args[3:] if args.startswith("-n ") else f"{name}-{args}"
+        arguments = shlex.split(args or "")
+        if "-f" in arguments:
+            position = arguments.index("-f")
+            if builddir is None or position + 1 == len(arguments):
+                raise AssertionError("RPM generated file list requires its install build directory")
+            body += "\n" + (builddir / arguments[position + 1]).read_text()
+            del arguments[position : position + 2]
+        if not arguments:
+            package = name
+        elif len(arguments) == 2 and arguments[0] == "-n":
+            package = arguments[1]
+        elif len(arguments) == 1:
+            package = f"{name}-{arguments[0]}"
+        else:
+            raise AssertionError("Unexpected RPM file-list arguments: " + str(arguments))
         paths = []
         for line in body.splitlines():
             if line.startswith(("%dir", "%defattr", "%license", "%doc", "#")):
@@ -219,6 +235,75 @@ class ComponentContracts(unittest.TestCase):
             self.assertIn(
                 'preflight_component_contract_owners "$FINAL_DATADIR" /usr/share/anolisa', installer
             )
+
+    def test_contracts_keep_complete_layout_and_current_adapter_roles(self) -> None:
+        for component in COMPONENTS:
+            with self.subTest(component=component):
+                data = contract(component)
+                self.assertEqual(data["component"]["name"], component)
+                self.assertTrue(data["component"]["layout"]["files"])
+                self.assertIn("health_check", data["component"])
+                self.assertNotIn("@VERSION@", (REGISTRY / component / "component.toml").read_text())
+        adapters = contract("tokenless")["adapters"]
+        self.assertEqual(len(adapters), 11)
+        self.assertTrue({"dsh", "opencode"}.issubset({item["framework"] for item in adapters}))
+        self.assertEqual(
+            {item["framework"] for item in contract("sec-core")["adapters"]},
+            {"openclaw", "hermes", "codex", "qoder", "qwencode", "cosh"},
+        )
+        self.assertEqual(contract("agentsight")["adapters"][0]["framework"], "dsh")
+
+    def test_adapter_bundle_files_are_owned_by_declared_rpm_roles(self) -> None:
+        if not (REPOSITORY / "src/tokenless").is_dir():
+            self.skipTest("component RPM sources are outside this standalone source archive")
+        for component in COMPONENTS:
+            data = contract(component)
+            spec = (REPOSITORY / "src" / SPECS[component]).read_text()
+            if component == "tokenless":
+                fixture = runpy.run_path(str(REPOSITORY / "src/tokenless/tests/test_rpm_split.py"))[
+                    "install_fixture"
+                ]
+                with tempfile.TemporaryDirectory(prefix="rpm-contract-") as temporary:
+                    builddir, _, _ = fixture(Path(temporary), spec)
+                    inventories = file_patterns(spec, builddir=builddir)
+            else:
+                inventories = file_patterns(spec)
+            health_binary = data["component"]["health_check"]["binary"]
+            self.assertTrue(health_binary.startswith("{bindir}/"))
+            # The RPM inventory fixture uses /usr/bin; ANOLISA's runtime
+            # layout expands {bindir} according to its own install mode.
+            rpm_binary = health_binary.replace("{bindir}", "/usr/bin", 1)
+            self.assertTrue(any(rpm_binary in paths for paths in inventories.values()), rpm_binary)
+            for adapter in data.get("adapters", []):
+                with self.subTest(component=component, framework=adapter["framework"]):
+                    rpm = adapter["backends"]["rpm"]
+                    self.assertTrue(rpm["resource_root"].startswith("/"))
+                    self.assertNotIn("{datadir}", rpm["resource_root"])
+                    packages = rpm["managed_packages"]
+                    self.assertTrue(
+                        packages, "compatibility metadata alone cannot supply plugin files"
+                    )
+                    for package in packages:
+                        self.assertIn(package, inventories)
+                    root = rpm["resource_root"]
+                    root = root.replace("{datadir}", "/usr/share/anolisa").replace(
+                        "{component}", component
+                    )
+                    entry = adapter.get("bundle", {}).get("entry", "")
+                    bundle = f"{root.rstrip('/')}/{entry}".rstrip("/")
+                    owners = {
+                        package
+                        for package, paths in inventories.items()
+                        if any(
+                            fnmatch.fnmatch(bundle, path)
+                            or bundle.startswith(path.rstrip("/") + "/")
+                            for path in paths
+                        )
+                    }
+                    self.assertTrue(owners.intersection(packages), (bundle, owners, packages))
+                    self.assertNotIn(
+                        data.get("backends", {}).get("rpm", {}).get("package", component), owners
+                    )
 
     def test_rpm_installs_registry_without_component_payloads(self) -> None:
         spec = (ROOT / "anolisa.spec.in").read_text()
