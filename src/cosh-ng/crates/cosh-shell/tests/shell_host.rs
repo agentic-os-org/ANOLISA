@@ -105,6 +105,10 @@ fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
         ("HISTSIZE", "1000"),
         ("HISTFILESIZE", "1000"),
         ("PROMPT_COMMAND", ""),
+        // glibc gettext lets LANGUAGE override LC_ALL unless the locale is
+        // C/POSIX; an empty LANGUAGE is treated as unset, so pin it empty to
+        // keep bash job-status and error text English on localized hosts.
+        ("LANGUAGE", ""),
     ] {
         if !config
             .env_overrides
