@@ -137,8 +137,33 @@ check_tree_destinations() {
 }
 
 group="${1:-all}"
-[ "$#" -le 1 ] || { printf 'ERROR: usage: %s [all|core|plugins]\n' "$0" >&2; exit 1; }
-case "$group" in all|core|plugins) ;; *) printf 'ERROR: unsupported install group: %s\n' "$group" >&2; exit 1;; esac
+[ "$#" -le 1 ] || { printf 'ERROR: usage: %s [all|core|plugins|uninstall]\n' "$0" >&2; exit 1; }
+case "$group" in all|core|plugins|uninstall) ;; *) printf 'ERROR: unsupported install group: %s\n' "$group" >&2; exit 1;; esac
+if [ "$group" = uninstall ]; then
+    # Never recursively remove a shared prefix or a system directory.
+    for directory in "$ADAPTERDIR" "$EXTENSIONDIR"; do
+        case "$directory" in
+            /|/usr|/usr/local|/etc|"$PREFIX"|"$BINDIR"|"$LIBEXECDIR"|"$DATADIR")
+                printf 'ERROR: refusing to remove shared directory: %s\n' "$directory" >&2; exit 1 ;;
+        esac
+        check_destination "$root$directory" directory
+    done
+    check_destination "$root$BINDIR/tokenless" file
+    check_destination "$root$BINDIR/rtk" rtk-link
+    check_destination "$root$LIBEXECDIR/rtk" file
+    check_destination "$root$DATADIR/LICENSE" file
+    rm -f "$root$BINDIR/tokenless" "$root$LIBEXECDIR/rtk" "$root$LIBEXECDIR/toon" "$root$DATADIR/LICENSE"
+    if [ -L "$root$BINDIR/rtk" ] && [ "$(readlink "$root$BINDIR/rtk")" = "$LIBEXECDIR/rtk" ]; then
+        rm -f "$root$BINDIR/rtk"
+    fi
+    if [ -L "$root$BINDIR/toon" ]; then
+        case "$(readlink "$root$BINDIR/toon")" in
+            */anolisa/tokenless/toon|*/anolisa/libexec/tokenless/toon) rm -f "$root$BINDIR/toon" ;;
+        esac
+    fi
+    rm -rf "$root$ADAPTERDIR" "$root$EXTENSIONDIR"
+    exit 0
+fi
 BIN_DIR="${BIN_DIR:-$COMPONENT_ROOT/target/release}"
 RTK_BIN="${RTK_BIN:-$COMPONENT_ROOT/third_party/rtk/target/release/rtk}"
 if [ "$group" != plugins ]; then

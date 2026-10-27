@@ -54,6 +54,19 @@ sudo yum install anolisa tokenless
 sudo anolisa --install-mode system adopt tokenless
 ```
 
+RPM 构建生成以下可以分别选择的软件包：
+
+| 软件包 | 内容与用途 |
+|---|---|
+| `tokenless-core` | CLI 与 RTK；直接使用 CLI 时安装此包即可 |
+| `tokenless-plugins` | 全部框架 plugin、hooks、共享资源和生命周期脚本；精确依赖匹配的 core |
+| `tokenless` | 兼容包，精确依赖相同 version/release 的两个职责子包；自身没有业务载荷 |
+
+已有 `tokenless` 安装继续通过兼容包升级，保留接入资源。不使用 ANOLISA 管理时，
+可以只安装 `tokenless-core`，或安装 `tokenless-plugins`（同时安装 core），再以
+框架用户运行所需框架自带的安装脚本。安装 plugins 不会自动启用它们。
+raw、npm 和源码安装保留原有交付格式。
+
 `adopt` 会把直接安装的 RPM 记录进系统状态，使 Adapter 命令能使用它的组件契约。
 升级与卸载都通过 `yum` 进行，详见[故障排查 · YUM/RPM 安装](troubleshooting.md#yumrpm-安装)。
 

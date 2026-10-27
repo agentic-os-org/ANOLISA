@@ -69,7 +69,7 @@ install-cosh-extension:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 	bash packaging/payload.sh extension "$(ADAPTER_SRC_DIR)" "$(DESTDIR)$(COSH_EXTENSION_DIR)" legacy
 
-uninstall:
+uninstall-legacy:
 	rm -f $(DESTDIR)$(BINDIR)/tokenless
 	rm -f $(DESTDIR)$(LIBEXECDIR)/rtk
 	$(clean-stale-toon)

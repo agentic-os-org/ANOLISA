@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -288,6 +289,18 @@ class TestStampedRequirementsPipeline(unittest.TestCase):
     component's output ("pins wheel filename version(s) ['0.9.0-rc.1'] in a
     form pip rejects"), so no prerelease raw package could be assembled.
     """
+
+    def test_generated_raw_contract_keeps_legacy_compatibility(self) -> None:
+        root, stamped = _stamp_templates("9.8.7")
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        with (root / "target/packaging/anolisa/component.toml").open("rb") as stream:
+            contract = tomllib.load(stream)
+        self.assertEqual(contract["component"]["contract"]["min_anolisa_version"], "0.1.16")
+        self.assertEqual(len(contract["adapters"]), 11)
+        for adapter in contract["adapters"]:
+            self.assertNotIn("backends", adapter, adapter["framework"])
+        self.assertEqual(_verify_stamped_tree(root).returncode, 0)
 
     def test_plugin_stamping_does_not_generate_anolisa_contract(self) -> None:
         root, stamped = _stamp_templates("9.8.7", generate_contract=False)

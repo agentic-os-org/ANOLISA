@@ -11,7 +11,8 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+# RPM adapters need split-package file inventory aggregation (ANOLISA 0.3.15+).
+min_anolisa_version = "0.3.15"
 
 [component.platform]
 # min_kernel is intentionally omitted: tokenless has no kernel capability
@@ -63,6 +64,14 @@ source = "adapters/common/"
 target = "{datadir}/adapters/{component}/common/"
 mode = "0644"
 
+# The adapter manifest describes every framework target and is read from the
+# installed adapter root, so it is laid beside the adapter bundles. The RPM
+# channel ships the same file at the same relative path.
+[[component.layout.files]]
+source = "adapters/manifest.json"
+target = "{datadir}/adapters/{component}/manifest.json"
+mode = "0644"
+
 [component.health_check]
 type = "binary_version"
 binary = "{bindir}/tokenless"
@@ -70,38 +79,68 @@ timeout_secs = 5
 
 [[adapters]]
 framework = "openclaw"
-kind = "third-party"
 adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/openclaw"
 dest = "{datadir}/adapters/{component}/openclaw/"
 detect = { binary = "openclaw" }
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/openclaw/"
+managed_packages = ["tokenless-plugins"]
+
 [adapters.bundle]
 entry = "openclaw.plugin.json"
 
 [[adapters]]
+framework = "dsh"
+adapter_type = "plugin"
+plugin_id = "anolisa-tokenless"
+source = "adapters/dsh"
+dest = "{datadir}/adapters/{component}/dsh/"
+detect = { binary = "dsh" }
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/dsh/"
+managed_packages = ["tokenless-plugins"]
+
+[adapters.bundle]
+entry = "package.json"
+
+[adapters.compat]
+framework_version = ">=0.1.0-rc.2 <0.2.0"
+
+[[adapters]]
 framework = "hermes"
-kind = "third-party"
 adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/hermes"
 dest = "{datadir}/adapters/{component}/hermes/"
 detect = { binary = "hermes" }
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/hermes/"
+managed_packages = ["tokenless-plugins"]
+
 [adapters.bundle]
 entry = "plugin.yaml"
 
 [[adapters]]
 framework = "qwenpaw"
-kind = "third-party"
 adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/qwenpaw"
 dest = "{datadir}/adapters/{component}/qwenpaw/"
 detect = { binary = "qwenpaw" }
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/qwenpaw/"
+managed_packages = ["tokenless-plugins"]
+
 [adapters.bundle]
+# QwenPaw plugin manifest. The built-in qwenpaw driver hands the bundle to
+# `qwenpaw plugin install`, which copies it, validates plugin.py and installs
+# requirements.txt into QwenPaw's own Python environment.
 entry = "plugin.json"
 
 [[adapters]]
@@ -110,6 +149,10 @@ adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/qoder"
 dest = "{datadir}/adapters/{component}/qoder/"
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/qoder/"
+managed_packages = ["tokenless-plugins"]
 
 [adapters.bundle]
 # Qoder-native plugin manifest inside the bundle directory. The built-in
@@ -127,6 +170,10 @@ plugin_id = "tokenless"
 source = "adapters/qwenwork"
 dest = "{datadir}/adapters/{component}/qwenwork/"
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/qwenwork/"
+managed_packages = ["tokenless-plugins"]
+
 [adapters.bundle]
 entry = ".qoder-plugin/plugin.json"
 
@@ -136,6 +183,10 @@ adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/claude-code"
 dest = "{datadir}/adapters/{component}/claude-code/"
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/claude-code/"
+managed_packages = ["tokenless-plugins"]
 
 [adapters.bundle]
 entry = ".claude-plugin/marketplace.json"
@@ -147,8 +198,40 @@ plugin_id = "tokenless"
 source = "adapters/codex"
 dest = "{datadir}/adapters/{component}/codex/"
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/codex/"
+managed_packages = ["tokenless-plugins"]
+
 [adapters.bundle]
 entry = ".codex-plugin/plugin.json"
+
+# ANOLISA manages the local-plugin link through receipts. Bundled lifecycle
+# scripts remain available for standalone installs across distribution channels.
+# Keep plugin_id and the entry extension aligned with plugins/tokenless.js in
+# the standalone scripts and documentation when changing this contract.
+[[adapters]]
+framework = "opencode"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/opencode"
+dest = "{datadir}/adapters/{component}/opencode/"
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/opencode/"
+managed_packages = ["tokenless-plugins"]
+
+[adapters.bundle]
+entry = "plugin.js"
+
+[[adapters.notices]]
+when = "post_enable"
+level = "info"
+text = "Restart OpenCode to load the Tokenless plugin."
+
+[[adapters.notices]]
+when = "post_disable"
+level = "warning"
+text = "Restart OpenCode to unload the Tokenless plugin."
 
 [[adapters]]
 framework = "cosh"
@@ -156,6 +239,10 @@ adapter_type = "extension"
 plugin_id = "tokenless"
 source = "extensions/tokenless"
 dest = "{datadir}/extensions/{component}/"
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/extensions/tokenless/"
+managed_packages = ["tokenless-plugins"]
 
 [adapters.bundle]
 entry = "cosh-extension.json"
@@ -173,5 +260,12 @@ plugin_id = "tokenless"
 source = "adapters/qwencode"
 dest = "{datadir}/adapters/{component}/qwencode/"
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/tokenless/qwencode/"
+managed_packages = ["tokenless-plugins"]
+
 [adapters.bundle]
 entry = "qwen-extension.json"
+
+[backends.rpm]
+package = "tokenless"

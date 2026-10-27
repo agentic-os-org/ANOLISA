@@ -111,6 +111,7 @@ done
 for relative in manifest.json common/cosh-extension.json common/tool-ready-spec.json; do
     printf '{}\n' > "$ADAPTERS/$relative"
 done
+printf '%s\n' '{"component":"tokenless","version":"test","targets":{}}' > "$ADAPTERS/manifest.json"
 printf 'export {};\n' > "$ADAPTERS/openclaw/dist/index.js"
 printf 'export {};\n' > "$ADAPTERS/dsh/dist/index.js"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$ADAPTERS/common/tokenless-env-fix.sh"
@@ -171,6 +172,48 @@ make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" PREFIX="$
 test -x "$TMP/namespaced/libexec/anolisa/tokenless/rtk"
 test -f "$TMP/namespaced/share/anolisa/adapters/tokenless/manifest.json"
 
+# Registration and uninstall follow the same resolved paths as file installation.
+make -s -C "$SOURCE" adapter-scan PREFIX="$TMP/direct" | grep -Fq 'component: tokenless vtest'
+make -s -C "$SOURCE" cosh-extension-install PREFIX="$TMP/direct" \
+    COSH_EXTENSION_DIR="$TMP/cosh host/tokenless"
+test -f "$TMP/cosh host/tokenless/cosh-extension.json"
+make -s -C "$SOURCE" cosh-extension-uninstall PREFIX="$TMP/direct" \
+    COSH_EXTENSION_DIR="$TMP/cosh host/tokenless"
+test ! -e "$TMP/cosh host/tokenless"
+make -s -C "$SOURCE" uninstall PREFIX="$TMP/direct"
+test ! -e "$TMP/direct/bin/tokenless"
+test ! -e "$TMP/direct/bin/rtk"
+test ! -e "$TMP/direct/libexec/tokenless/rtk"
+test ! -e "$TMP/direct/share/tokenless/adapters"
+test ! -e "$TMP/direct/share/tokenless/cosh-extension"
+
+# An absent source must not destroy an existing host registration.
+mkdir -p "$TMP/cosh-preserve"
+printf 'keep\n' > "$TMP/cosh-preserve/existing"
+if make -s -C "$SOURCE" cosh-extension-install PREFIX="$TMP/missing" \
+    COSH_EXTENSION_DIR="$TMP/cosh-preserve" >/dev/null 2>&1; then
+    printf 'ERROR: missing adapter resources accepted\n' >&2; exit 1
+fi
+test -f "$TMP/cosh-preserve/existing"
+
+# setup dispatches build, prebuilt install, then framework registration.
+cat > "$TMP/setup-make" <<'SETUPMAKE'
+#!/usr/bin/env bash
+set -e
+printf '%s\n' "$1" >> "$SETUP_LOG"
+case "$1" in
+    build|adapter-install) ;;
+    install) exec make -s -C "$SETUP_SOURCE" install \
+        BIN_DIR="$SETUP_BIN" RTK_BIN="$SETUP_BIN/rtk" ;;
+    *) exit 1 ;;
+esac
+SETUPMAKE
+chmod 0755 "$TMP/setup-make"
+export SETUP_LOG="$TMP/setup.log" SETUP_SOURCE="$SOURCE" SETUP_BIN="$TMP/bin"
+make -s -C "$SOURCE" setup MAKE="$TMP/setup-make" PREFIX="$TMP/setup-prefix"
+test "$(cat "$SETUP_LOG")" = "$(printf 'build\ninstall\nadapter-install')"
+test -f "$TMP/setup-prefix/share/tokenless/adapters/manifest.json"
+
 for target in stage-package stage-package-core stage-package-plugin stage-package-skills install-skills; do
     if make -s -n -C "$SOURCE" "$target" >/dev/null 2>&1; then
         printf 'ERROR: unsupported install/staging target exists: %s\n' "$target" >&2; exit 1
@@ -195,6 +238,13 @@ done
 test -L "$TMP/user-prefix/bin/rtk"
 test -f "$TMP/user-data/tokenless/adapters/common/tool-ready-spec.json"
 test -f "$TMP/user-data/tokenless/cosh-extension/cosh-extension.json"
+HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data" make -s -C "$SOURCE" adapter-scan \
+    INSTALL_PROFILE=user PREFIX="$TMP/user-prefix" | grep -Fq 'component: tokenless vtest'
+HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data" make -s -C "$SOURCE" uninstall \
+    INSTALL_PROFILE=user PREFIX="$TMP/user-prefix"
+test ! -e "$TMP/user-prefix/bin/tokenless"
+test ! -e "$TMP/user-data/tokenless/adapters"
+test ! -e "$TMP/user-data/tokenless/cosh-extension"
 mv "$ADAPTERS/openclaw/dist/index.js" "$TMP/group-plugin.saved"
 make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/core-only"
 test -x "$TMP/core-only/usr/bin/tokenless"
@@ -261,7 +311,7 @@ grep -Fq 'raw packages require AWPRJ=anolisa' "$TMP/raw-error"
 legacy_plan="$(make -s -n -C "$ROOT" install-legacy INSTALL_PROFILE=user PREFIX="$TMP/legacy")"
 grep -Fq 'cargo build --release' <<< "$legacy_plan"
 grep -Fq "install -p -m 0755 target/release/tokenless $TMP/legacy/bin/" <<< "$legacy_plan"
-grep -Fxq 'setup: install-legacy adapter-install' "$ROOT/Makefile"
+grep -Fxq 'setup:' "$ROOT/Makefile"
 
 # Model the two guarded RPM ownership entries without requiring rpmbuild.
 python3 - "$ROOT/packaging/rpm/tokenless.spec.in" <<'PY'

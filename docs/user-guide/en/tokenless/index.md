@@ -57,6 +57,22 @@ sudo yum install anolisa tokenless
 sudo anolisa --install-mode system adopt tokenless
 ```
 
+The RPM build produces these separately selectable packages:
+
+| Package | Contents and use |
+|---|---|
+| `tokenless-core` | CLI and RTK; sufficient for direct CLI use |
+| `tokenless-plugins` | All framework plugins, hooks, common resources and lifecycle scripts; requires the exact matching core |
+| `tokenless` | Compatibility package requiring both roles at the exact same version and release; no runtime payload of its own |
+
+Existing `tokenless` installations upgrade through the compatibility package
+and retain their integration resources. To use the role packages without
+ANOLISA management, install `tokenless-core` alone or `tokenless-plugins`
+(which also installs core), then register the desired framework through its
+bundled installer as the framework user. Installing plugins does not activate
+them automatically. Raw, npm and source installation keep their existing
+delivery formats.
+
 `adopt` records the directly installed RPM in system state, so the adapter
 commands can use its component contract. Upgrades and removal go through `yum`;
 see [Troubleshooting · YUM/RPM installation](troubleshooting.md#yumrpm-installation).

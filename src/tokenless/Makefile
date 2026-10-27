@@ -505,8 +505,8 @@ dist: clean
 
 # Adapter management — invokes detect/install/uninstall action scripts per the
 # ANOLISA FHS adapter spec.  Environment variables point to installed FHS paths.
-ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
-              ANOLISA_ADAPTER_DIR=$(SHARE_DIR) \
+ADAPTER_ENV = ANOLISA_PREFIX=$(call delivery_quote,$(TOKENLESS_PREFIX)) \
+              ANOLISA_ADAPTER_DIR=$(call delivery_quote,$(TOKENLESS_ADAPTER_DIR)) \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
@@ -514,154 +514,161 @@ adapter-install: cosh-extension-install openclaw-install hermes-install qoder-in
 
 adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall opencode-uninstall qwencode-uninstall qwenpaw-uninstall
 
-adapter-scan:
+adapter-scan: validate-adapter-layout
 	@echo "=== Tokenless Adapter Manifest ==="
-	@python3 -c "import json; m=json.load(open('$(SHARE_DIR)/manifest.json')); print(f\"  component: {m['component']} v{m['version']}\"); [print(f\"  {t:12s} {c['compatibleVersions']:12s} \" + (', '.join(f'{len(v)} {k}' for k,v in c.get('capabilities',{}).items()) or 'no caps')) for t,c in m['targets'].items()]"
+	@python3 -c "import json; m=json.load(open(__import__('sys').argv[1])); print(f\"  component: {m['component']} v{m['version']}\"); [print(f\"  {t:12s} {c['compatibleVersions']:12s} \" + (', '.join(f'{len(v)} {k}' for k,v in c.get('capabilities',{}).items()) or 'no caps')) for t,c in m['targets'].items()]" $(call delivery_quote,$(TOKENLESS_ADAPTER_DIR)/manifest.json)
 
 # --- Copilot Shell (cosh) — extension format ---
 # cosh uses cosh-extension.json (not adapter scripts) for auto-discovery.
 # The extension directory deploys hooks/commands/spec from adapter resources.
 
-cosh-extension-install:
+cosh-extension-install: validate-adapter-layout
+	@test -f "$(TOKENLESS_ADAPTER_DIR)/common/cosh-extension.json" && \
+	    test -d "$(TOKENLESS_ADAPTER_DIR)/common/hooks" && \
+	    test -d "$(TOKENLESS_ADAPTER_DIR)/common/commands" || \
+	    { echo "ERROR: tokenless adapter resources not found: $(TOKENLESS_ADAPTER_DIR)" >&2; exit 1; }
 	@echo "==> Installing tokenless cosh extension..."
-	@rm -rf $(COSH_EXTENSION_DIR)
-	@install -d -m 0755 $(COSH_EXTENSION_DIR)/hooks $(COSH_EXTENSION_DIR)/commands
-	cp -pr $(SHARE_DIR)/common/hooks/. $(COSH_EXTENSION_DIR)/hooks/
-	cp -pr $(SHARE_DIR)/common/commands/. $(COSH_EXTENSION_DIR)/commands/
-	install -p -m 0644 $(SHARE_DIR)/common/cosh-extension.json $(COSH_EXTENSION_DIR)/
-	find $(COSH_EXTENSION_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
-	@echo "==> tokenless cosh extension installed to $(COSH_EXTENSION_DIR)"
+	@rm -rf "$(TOKENLESS_COSH_EXTENSION_DIR)"
+	@install -d -m 0755 "$(TOKENLESS_COSH_EXTENSION_DIR)/hooks" "$(TOKENLESS_COSH_EXTENSION_DIR)/commands"
+	cp -pr "$(TOKENLESS_ADAPTER_DIR)/common/hooks/." "$(TOKENLESS_COSH_EXTENSION_DIR)/hooks/"
+	cp -pr "$(TOKENLESS_ADAPTER_DIR)/common/commands/." "$(TOKENLESS_COSH_EXTENSION_DIR)/commands/"
+	install -p -m 0644 "$(TOKENLESS_ADAPTER_DIR)/common/cosh-extension.json" "$(TOKENLESS_COSH_EXTENSION_DIR)"/
+	find "$(TOKENLESS_COSH_EXTENSION_DIR)" -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+	@echo "==> tokenless cosh extension installed to $(TOKENLESS_COSH_EXTENSION_DIR)"
 
-cosh-extension-uninstall:
+cosh-extension-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling tokenless cosh extension..."
-	rm -rf $(COSH_EXTENSION_DIR)
-	@echo "==> tokenless cosh extension removed from $(COSH_EXTENSION_DIR)"
+	rm -rf "$(TOKENLESS_COSH_EXTENSION_DIR)"
+	@echo "==> tokenless cosh extension removed from $(TOKENLESS_COSH_EXTENSION_DIR)"
 
 # --- OpenClaw ---
 
-openclaw-install:
+openclaw-install: validate-adapter-layout
 	@echo "==> Installing tokenless OpenClaw plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash $(SHARE_DIR)/openclaw/scripts/detect.sh
-	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash $(SHARE_DIR)/openclaw/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash "$(TOKENLESS_ADAPTER_DIR)/openclaw/scripts/detect.sh"
+	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash "$(TOKENLESS_ADAPTER_DIR)/openclaw/scripts/install.sh"
 
-openclaw-uninstall:
+openclaw-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling tokenless OpenClaw plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash $(SHARE_DIR)/openclaw/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash "$(TOKENLESS_ADAPTER_DIR)/openclaw/scripts/uninstall.sh"
 
 # --- Hermes Agent ---
-HERMES_ADAPTER_DIR = $(SHARE_DIR)/hermes
+HERMES_ADAPTER_DIR = $(TOKENLESS_ADAPTER_DIR)/hermes
 
-hermes-install:
+hermes-install: validate-adapter-layout
 	@echo "==> Installing Hermes Agent plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash $(HERMES_ADAPTER_DIR)/scripts/detect.sh || true
-	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash $(HERMES_ADAPTER_DIR)/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash "$(HERMES_ADAPTER_DIR)/scripts/detect.sh" || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash "$(HERMES_ADAPTER_DIR)/scripts/install.sh"
 
-hermes-uninstall:
+hermes-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling Hermes Agent plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash $(HERMES_ADAPTER_DIR)/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash "$(HERMES_ADAPTER_DIR)/scripts/uninstall.sh"
 
 # --- Qoder CLI ---
-QODER_ADAPTER_DIR = $(SHARE_DIR)/qoder
+QODER_ADAPTER_DIR = $(TOKENLESS_ADAPTER_DIR)/qoder
 
-qoder-install:
+qoder-install: validate-adapter-layout
 	@echo "==> Installing tokenless Qoder CLI plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash $(QODER_ADAPTER_DIR)/scripts/detect.sh || true
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash $(QODER_ADAPTER_DIR)/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash "$(QODER_ADAPTER_DIR)/scripts/detect.sh" || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash "$(QODER_ADAPTER_DIR)/scripts/install.sh"
 
-qoder-uninstall:
+qoder-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling tokenless Qoder CLI plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash $(QODER_ADAPTER_DIR)/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash "$(QODER_ADAPTER_DIR)/scripts/uninstall.sh"
 
 # Explicit opt-in only; bulk adapter actions must not modify desktop plugins.
-qwenwork-install:
+qwenwork-install: validate-adapter-layout
 	@echo "==> Sideloading tokenless for QwenWork (macOS)..."
-	@bash "$(SHARE_DIR)/qwenwork/scripts/install.sh"
+	@bash "$(TOKENLESS_ADAPTER_DIR)/qwenwork/scripts/install.sh"
 
-qwenwork-uninstall:
+qwenwork-uninstall: validate-adapter-layout
 	@echo "==> Removing the tokenless QwenWork sideload..."
-	@bash "$(SHARE_DIR)/qwenwork/scripts/uninstall.sh"
+	@bash "$(TOKENLESS_ADAPTER_DIR)/qwenwork/scripts/uninstall.sh"
 
 # --- Claude Code ---
 # Plugin is sourced from SHARE_DIR (FHS-installed adapter resources). When
 # claude is not available the scripts gracefully no-op so `make adapter-install`
 # stays usable on machines without Claude Code.
-CLAUDE_CODE_ADAPTER_DIR = $(SHARE_DIR)/claude-code
+CLAUDE_CODE_ADAPTER_DIR = $(TOKENLESS_ADAPTER_DIR)/claude-code
 
-claude-code-install:
+claude-code-install: validate-adapter-layout
 	@echo "==> Installing Claude Code plugin..."
 	@# detect.sh exits 1 (installable) or 2 (missing prereq); we tolerate both
 	@# and let install.sh make the final call (it gracefully no-ops without claude CLI).
 	@# This pre-install probe runs on a steady-state machine and its output is
 	@# informational only, so skip detect.sh's first-run settling retries and
 	@# the plugin registry re-lists that ride out the GH #3082 index lag.
-	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code TOKENLESS_DETECT_RETRIES=0 TOKENLESS_DETECT_PLUGIN_RELISTS=0 bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh || true
-	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code TOKENLESS_DETECT_RETRIES=0 TOKENLESS_DETECT_PLUGIN_RELISTS=0 bash "$(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh" || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash "$(CLAUDE_CODE_ADAPTER_DIR)/scripts/install.sh"
 
-claude-code-uninstall:
+claude-code-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling Claude Code plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash "$(CLAUDE_CODE_ADAPTER_DIR)/scripts/uninstall.sh"
 
 # --- Codex ---
-CODEX_ADAPTER_DIR = $(SHARE_DIR)/codex
+CODEX_ADAPTER_DIR = $(TOKENLESS_ADAPTER_DIR)/codex
 
-codex-install:
+codex-install: validate-adapter-layout
 	@echo "==> Installing Codex plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/detect.sh || true
-	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash "$(CODEX_ADAPTER_DIR)/scripts/detect.sh" || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash "$(CODEX_ADAPTER_DIR)/scripts/install.sh"
 
-codex-uninstall:
+codex-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling Codex plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash "$(CODEX_ADAPTER_DIR)/scripts/uninstall.sh"
 
 # --- OpenCode ---
-OPENCODE_ADAPTER_DIR = $(SHARE_DIR)/opencode
+OPENCODE_ADAPTER_DIR = $(TOKENLESS_ADAPTER_DIR)/opencode
 
-opencode-install:
+opencode-install: validate-adapter-layout
 	@echo "==> Installing OpenCode plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/detect.sh || true
-	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash "$(OPENCODE_ADAPTER_DIR)/scripts/detect.sh" || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash "$(OPENCODE_ADAPTER_DIR)/scripts/install.sh"
 
-opencode-uninstall:
+opencode-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling OpenCode plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash "$(OPENCODE_ADAPTER_DIR)/scripts/uninstall.sh"
 
 # --- Qwen Code ---
-QWENCODE_ADAPTER_DIR = $(SHARE_DIR)/qwencode
+QWENCODE_ADAPTER_DIR = $(TOKENLESS_ADAPTER_DIR)/qwencode
 
-qwencode-install:
+qwencode-install: validate-adapter-layout
 	@echo "==> Installing Qwen Code plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash $(QWENCODE_ADAPTER_DIR)/scripts/detect.sh || true
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash $(QWENCODE_ADAPTER_DIR)/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash "$(QWENCODE_ADAPTER_DIR)/scripts/detect.sh" || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash "$(QWENCODE_ADAPTER_DIR)/scripts/install.sh"
 
-qwencode-uninstall:
+qwencode-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling Qwen Code plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash $(QWENCODE_ADAPTER_DIR)/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash "$(QWENCODE_ADAPTER_DIR)/scripts/uninstall.sh"
 
 # --- QwenPaw ---
-QWENPAW_ADAPTER_DIR = $(SHARE_DIR)/qwenpaw
+QWENPAW_ADAPTER_DIR = $(TOKENLESS_ADAPTER_DIR)/qwenpaw
 
-qwenpaw-install:
+qwenpaw-install: validate-adapter-layout
 	@echo "==> Installing QwenPaw plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/detect.sh || true
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/install.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash "$(QWENPAW_ADAPTER_DIR)/scripts/detect.sh" || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash "$(QWENPAW_ADAPTER_DIR)/scripts/install.sh"
 
-qwenpaw-uninstall:
+qwenpaw-uninstall: validate-adapter-layout
 	@echo "==> Uninstalling QwenPaw plugin..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/uninstall.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash "$(QWENPAW_ADAPTER_DIR)/scripts/uninstall.sh"
 
 # One-step setup: build + install + all adapters
-setup: install-legacy adapter-install
+setup:
+	+$(MAKE) build
+	+$(MAKE) install
+	+$(MAKE) adapter-install
 	@echo ""
 	@echo "============================================"
 	@echo "  Token-Less setup complete!"
 	@echo "============================================"
 	@echo "  Binaries (FHS):"
-	@echo "    tokenless -> $(BIN_DIR)/tokenless"
-	@echo "    rtk       -> $(LIB_DIR)/rtk"
+	@echo "    tokenless -> $(TOKENLESS_BINDIR)/tokenless"
+	@echo "    rtk       -> $(TOKENLESS_LIBEXECDIR)/rtk"
 	@echo "  Extension (cosh):"
-	@echo "    $(COSH_EXTENSION_DIR)/"
+	@echo "    $(TOKENLESS_COSH_EXTENSION_DIR)/"
 	@echo "  Adapter (FHS):"
-	@echo "    $(SHARE_DIR)/"
+	@echo "    $(TOKENLESS_ADAPTER_DIR)/"
 	@echo "  Registered:"
 	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, opencode, qwencode, qwenpaw"
 	@echo ""
@@ -684,7 +691,7 @@ help:
 	@echo "  build-openclaw-plugin  Compile OpenClaw plugin TS -> dist/index.js"
 	@echo "  install           Copy all prebuilt files; no build or host registration"
 	@echo "  install-legacy    Build and install using the legacy user/system profile"
-	@echo "  uninstall         Remove files from the legacy install profile"
+	@echo "  uninstall         Remove files installed by make install"
 	@echo "  test              Run all tests"
 	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
 	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
@@ -719,7 +726,7 @@ help:
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  qwenpaw-install   Install QwenPaw plugin via qwenpaw CLI"
 	@echo "  qwenpaw-uninstall Uninstall QwenPaw plugin"
-	@echo "  setup             Full setup: build + install-legacy + register adapters"
+	@echo "  setup             Full setup: build + install + register adapters"
 	@echo "  npm-package       Build and package the current host"
 	@echo "  npm-package-all   Package target/npm-prebuilt target directories"
 	@echo "  npm-publish       Build and publish all npm packages"
@@ -734,8 +741,8 @@ help:
 	@echo "  PREFIX           Install prefix (system: /usr/local; user: owned HOME/.local)"
 	@echo "  BINDIR           Binary install path"
 	@echo "  LIBEXECDIR       Helper binary install path"
-	@echo "  SHARE_DIR        Legacy adapter resources path (install-legacy)"
-	@echo "  COSH_EXTENSION_DIR  Legacy Cosh extension path (install-legacy)"
+	@echo "  SHARE_DIR        Override adapter resources for framework registration"
+	@echo "  COSH_EXTENSION_DIR  Override the Cosh registration directory"
 	@echo "  BIN_DIR          Prebuilt tokenless directory (raw packages also require rtk)"
 	@echo "  TARGET_OS        Raw target OS: linux or macos"
 	@echo "  TARGET_ARCH      Raw target arch: x86_64 or aarch64"
@@ -754,6 +761,20 @@ DELIVERY_ENV = env $(foreach name,$(DELIVERY_INPUTS) COMPONENT_ROOT,-u $(name)) 
 	$(call delivery_quote,COMPONENT_ROOT=$(DELIVERY_COMPONENT_ROOT)) \
 	$(foreach name,$(DELIVERY_INPUTS),$(if $(filter command line environment,$(origin $(name))),$(call delivery_quote,$(name)=$($(name)))))
 
+
+# Framework registration consumes the same resolved layout as file installation.
+# A Cosh user registration remains under its host-specific configuration directory.
+tokenless_layout_value = $(shell $(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" --print-layout | sed -n 's/^$(1)=//p')
+TOKENLESS_ADAPTER_DIR = $(if $(filter command line environment,$(origin SHARE_DIR)),$(SHARE_DIR),$(call tokenless_layout_value,ADAPTERDIR))
+TOKENLESS_PREFIX = $(call tokenless_layout_value,PREFIX)
+TOKENLESS_BINDIR = $(call tokenless_layout_value,BINDIR)
+TOKENLESS_LIBEXECDIR = $(call tokenless_layout_value,LIBEXECDIR)
+TOKENLESS_COSH_EXTENSION_DIR = $(if $(filter command line environment,$(origin COSH_EXTENSION_DIR)),$(COSH_EXTENSION_DIR),$(if $(filter user,$(call tokenless_layout_value,INSTALL_PROFILE)),$(HOME)/.copilot-shell/extensions/tokenless,$(call tokenless_layout_value,EXTENSIONDIR)))
+
+.PHONY: validate-adapter-layout
+validate-adapter-layout:
+	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" --print-layout >/dev/null
+
 .PHONY: layout install install-core install-plugins test-packaging
 layout:
 	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" --print-layout
@@ -767,5 +788,9 @@ install-core:
 install-plugins:
 	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" plugins
 
+uninstall:
+	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" uninstall
+
 test-packaging:
 	@bash "$(DELIVERY_COMPONENT_ROOT)/tests/test-system-install.sh"
+	@python3 "$(DELIVERY_COMPONENT_ROOT)/tests/test_rpm_split.py"

@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d /tmp/tokenless-toon-cleanup-test.XXXXXX)"
+TMP="$(cd "$TMP" && pwd -P)"
 RTK_DIR="$ROOT/third_party/rtk"
 RTK_BIN="$RTK_DIR/target/release/rtk"
 RTK_STUBBED=false

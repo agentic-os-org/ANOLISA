@@ -1079,7 +1079,7 @@ and makes no cloud requests.
 | `make opencode-uninstall` | Remove OpenCode local plugin |
 | `make qwenpaw-install` | Install QwenPaw plugin via the qwenpaw CLI |
 | `make qwenpaw-uninstall` | Remove QwenPaw plugin |
-| `make setup` | Legacy setup: build + `install-legacy` + register all adapters |
+| `make setup` | Build, install, and register all adapters |
 
 Override install paths:
 
