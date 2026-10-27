@@ -22,9 +22,9 @@ website/.generated/
 website/build/
 # target/ is already covered by **/target/ (Rust rule above)
 *.o
-# Vendored ActPlane CO-RE BPF object must be committed so `cargo build`
-# needs no BPF toolchain (clang/libbpf/vmlinux.h) in CI/workspace builds.
-!/src/agentsight/crates/ebpf-ifc-engine/prebuilt/process.bpf.o
+# Target-specific ActPlane CO-RE objects ship without a BPF build toolchain.
+!/src/agentsight/crates/ebpf-ifc-engine/prebuilt/x86_64/*.bpf.o
+!/src/agentsight/crates/ebpf-ifc-engine/prebuilt/aarch64/*.bpf.o
 *.a
 *.so
 *.dylib

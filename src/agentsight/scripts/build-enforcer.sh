@@ -21,8 +21,22 @@ ACTPLANE_BASE_BPF_BUILD_BLOB="ae2345ecd26bbf47a6f7dae228ed08ec7e83bcbc"
 ACTPLANE_PATCHED_BPF_BUILD_BLOB="c3ba506d246d3139b8ee148d942db6ba4159b1b9"
 ACTPLANE_BASE_BPF_MAKEFILE_BLOB="eddb4267ba5a10e7f94ad64f19323040368813c1"
 ACTPLANE_PATCHED_BPF_MAKEFILE_BLOB="b354320bf25dacc72af1a60419f81ea0a173eb1f"
-ACTPLANE_STAGED_PREBUILT_BPF_BLOB="999b37639c50c6daa9495e8d45c7f993b9c9681d"
-ACTPLANE_STAGED_INODE_BPF_BLOB="83cd4269b7ac4c19bf553ba6b186ee6ead24f7ce"
+ACTPLANE_STAGED_BPF_LIB_BLOB="927c410976d831fc80fdf29136d146c3c1711933"
+ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_BLOB="2db3b30c0040bb5b74f4563d5dca82681c9ccfbc"
+ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB="8ebcbcdd6789beb06b9ab4c8117ffa1e432411ce"
+ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB="5fe0141270841077659b9b0c70a8db80835bc1da"
+ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB="e11e83684fdfd1842a1ce5727065e5e4b1953508"
+ACTPLANE_STAGED_BPF_BUILD_BLOB="96307e2008f25a33f3b67f382b491dd5d8f511d9"
+ACTPLANE_STAGED_X86_64_PREBUILT_BPF_BLOB="597d8a809cdea6aba9379871e6ace5814751ca93"
+ACTPLANE_STAGED_X86_64_INODE_BPF_BLOB="115417374e51395fc8318ec1e8f40d1496fa1e85"
+ACTPLANE_STAGED_AARCH64_PREBUILT_BPF_BLOB="0f5bcbe7e57a3768d34d9212e95a75fcae038d85"
+ACTPLANE_STAGED_AARCH64_INODE_BPF_BLOB="d66e20bb956fc8209932c0631cbb6d855885b5f7"
+ACTPLANE_STAGED_PROCESS_BPF_BLOB="fe5918f351c9120c1805e7e2e22df37fcad59539"
+ACTPLANE_STAGED_PROCESS_HEADER_BLOB="d88dc90495f4cdeec439c9a94f77b2903800d3bb"
+ACTPLANE_STAGED_TAINT_HEADER_BLOB="30e8700562ec1eb122811ad0e4ce0bf6f1ee3414"
+ACTPLANE_STAGED_TAINT_ENGINE_HEADER_BLOB="c129ac485b4c895943132b502ea3e4020d81b5fe"
+ACTPLANE_STAGED_CAPABILITY_HEADER_BLOB="8b8ada2d22b5f0c1a8449edcd5e0eeeac36e5aa2"
+ACTPLANE_STAGED_CHANNEL_HEADER_BLOB="164bae4635f9660d3153a1983b5bb37043173c10"
 ACTPLANE_PREBUILT_BPF_BLOB="0ef15841f84be784774024ad844e70bc6124a753"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -63,6 +77,35 @@ case "$#" in
         ;;
     *) echo 'usage: build-enforcer.sh [--target TARGET]' >&2; exit 1 ;;
 esac
+case "$BUILD_TARGET" in
+    x86_64-unknown-linux-gnu)
+        BPF_TARGET_ARCH=x86_64
+        ACTPLANE_STAGED_PREBUILT_BPF_BLOB=$ACTPLANE_STAGED_X86_64_PREBUILT_BPF_BLOB
+        ACTPLANE_STAGED_INODE_BPF_BLOB=$ACTPLANE_STAGED_X86_64_INODE_BPF_BLOB
+        ;;
+    aarch64-unknown-linux-gnu)
+        BPF_TARGET_ARCH=aarch64
+        ACTPLANE_STAGED_PREBUILT_BPF_BLOB=$ACTPLANE_STAGED_AARCH64_PREBUILT_BPF_BLOB
+        ACTPLANE_STAGED_INODE_BPF_BLOB=$ACTPLANE_STAGED_AARCH64_INODE_BPF_BLOB
+        ;;
+    *) echo "unsupported enforcer target: $BUILD_TARGET" >&2; exit 1 ;;
+esac
+
+attest_kernel_sources() {
+    for entry in \
+        "process.bpf.c:$ACTPLANE_STAGED_PROCESS_BPF_BLOB" \
+        "process.h:$ACTPLANE_STAGED_PROCESS_HEADER_BLOB" \
+        "taint.h:$ACTPLANE_STAGED_TAINT_HEADER_BLOB" \
+        "taint_engine.bpf.h:$ACTPLANE_STAGED_TAINT_ENGINE_HEADER_BLOB" \
+        "capability.bpf.h:$ACTPLANE_STAGED_CAPABILITY_HEADER_BLOB" \
+        "channel.bpf.h:$ACTPLANE_STAGED_CHANNEL_HEADER_BLOB"; do
+        actual=$(git -C "$AGENTSIGHT_ROOT" hash-object "$1/${entry%%:*}")
+        if [ "$actual" != "${entry#*:}" ]; then
+            echo "kernel source failed attestation: $1/${entry%%:*}" >&2
+            exit 1
+        fi
+    done
+}
 
 DECLARED_REVISION_COUNT=$(grep -F -c "rev = \"$ACTPLANE_REVISION\"" "$AGENTSIGHT_ROOT/Cargo.toml" || true)
 if [ "$DECLARED_REVISION_COUNT" -ne 2 ]; then
@@ -241,19 +284,39 @@ fi
 # Makefile are copied alongside for auditability; ACTPLANE_REBUILD_BPF remains
 # forbidden for this release build.
 VENDORED_ENGINE_DIR="$AGENTSIGHT_ROOT/crates/ebpf-ifc-engine"
-STAGED_PREBUILT_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/prebuilt/process.bpf.o")
-STAGED_INODE_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/prebuilt/process-inode-only.bpf.o")
-if [ "$STAGED_PREBUILT_BLOB" != "$ACTPLANE_STAGED_PREBUILT_BPF_BLOB" ] \
+VENDORED_PREBUILT_DIR="$VENDORED_ENGINE_DIR/prebuilt/$BPF_TARGET_ARCH"
+STAGED_PREBUILT_DIR="$SOURCE_DIR/bpf/prebuilt/$BPF_TARGET_ARCH"
+attest_kernel_sources "$VENDORED_ENGINE_DIR"
+STAGED_BPF_BUILD_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/build.rs")
+STAGED_BPF_LIB_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/lib.rs")
+STAGED_GENERATION_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_generation.rs")
+STAGED_GENERATION_TESTS_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_generation_tests.rs")
+STAGED_MAP_WRITER_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_map_writer.rs")
+STAGED_PINNED_MAPS_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_pinned_maps.rs")
+STAGED_PREBUILT_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_PREBUILT_DIR/process.bpf.o")
+STAGED_INODE_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_PREBUILT_DIR/process-inode-only.bpf.o")
+if [ "$STAGED_BPF_BUILD_BLOB" != "$ACTPLANE_STAGED_BPF_BUILD_BLOB" ] \
+    || [ "$STAGED_BPF_LIB_BLOB" != "$ACTPLANE_STAGED_BPF_LIB_BLOB" ] \
+    || [ "$STAGED_GENERATION_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_BLOB" ] \
+    || [ "$STAGED_GENERATION_TESTS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB" ] \
+    || [ "$STAGED_MAP_WRITER_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB" ] \
+    || [ "$STAGED_PINNED_MAPS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB" ] \
+    || [ "$STAGED_PREBUILT_BLOB" != "$ACTPLANE_STAGED_PREBUILT_BPF_BLOB" ] \
     || [ "$STAGED_INODE_BLOB" != "$ACTPLANE_STAGED_INODE_BPF_BLOB" ]; then
-    echo "vendored ebpf-ifc-engine prebuilt objects failed source attestation" >&2
+    echo "vendored ebpf-ifc-engine sources or prebuilt objects failed source attestation" >&2
     exit 1
 fi
 for engine_file in process.bpf.c process.h taint.h taint_engine.bpf.h capability.bpf.h channel.bpf.h; do
     cp "$VENDORED_ENGINE_DIR/$engine_file" "$SOURCE_DIR/bpf/$engine_file"
 done
-cp "$VENDORED_ENGINE_DIR/prebuilt/process.bpf.o" "$SOURCE_DIR/bpf/prebuilt/process.bpf.o"
-cp "$VENDORED_ENGINE_DIR/prebuilt/process-inode-only.bpf.o" \
-    "$SOURCE_DIR/bpf/prebuilt/process-inode-only.bpf.o"
+for engine_file in lib.rs file_protection_generation.rs file_protection_generation_tests.rs file_protection_map_writer.rs file_protection_pinned_maps.rs; do
+    cp "$VENDORED_ENGINE_DIR/src/$engine_file" "$SOURCE_DIR/bpf/src/$engine_file"
+done
+cp "$VENDORED_ENGINE_DIR/build.rs" "$SOURCE_DIR/bpf/build.rs"
+mkdir -p "$STAGED_PREBUILT_DIR"
+cp "$VENDORED_PREBUILT_DIR/process.bpf.o" "$STAGED_PREBUILT_DIR/process.bpf.o"
+cp "$VENDORED_PREBUILT_DIR/process-inode-only.bpf.o" \
+    "$STAGED_PREBUILT_DIR/process-inode-only.bpf.o"
 
 SOURCE_DIR=$(CDPATH= cd -- "$SOURCE_DIR" && pwd)
 mkdir -p "$TARGET_ROOT"
@@ -270,19 +333,28 @@ CARGO_TARGET_DIR="$PRIVATE_TARGET" "$CARGO" build --release -p agentsight-enforc
     --config "patch.\"$ACTPLANE_REPOSITORY\".ebpf-ifc-engine.path=\"$SOURCE_DIR/bpf\""
 
 ACTUAL_BPF_LIB_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/lib.rs)
+ACTUAL_GENERATION_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_generation.rs)
+ACTUAL_GENERATION_TESTS_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_generation_tests.rs)
+ACTUAL_MAP_WRITER_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_map_writer.rs)
+ACTUAL_PINNED_MAPS_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_pinned_maps.rs)
 ACTUAL_BPF_BUILD_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/build.rs)
 ACTUAL_BPF_MAKEFILE_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/Makefile)
-if [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ] \
-    || [ "$ACTUAL_BPF_BUILD_BLOB" != "$ACTPLANE_PATCHED_BPF_BUILD_BLOB" ] \
+if [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_STAGED_BPF_LIB_BLOB" ] \
+    || [ "$ACTUAL_GENERATION_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_BLOB" ] \
+    || [ "$ACTUAL_GENERATION_TESTS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB" ] \
+    || [ "$ACTUAL_MAP_WRITER_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB" ] \
+    || [ "$ACTUAL_PINNED_MAPS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB" ] \
+    || [ "$ACTUAL_BPF_BUILD_BLOB" != "$ACTPLANE_STAGED_BPF_BUILD_BLOB" ] \
     || [ "$ACTUAL_BPF_MAKEFILE_BLOB" != "$ACTPLANE_PATCHED_BPF_MAKEFILE_BLOB" ]; then
     echo "attested ActPlane sources mutated during the build" >&2
     exit 1
 fi
+attest_kernel_sources "$SOURCE_DIR/bpf"
 
 # Artifact-level assertion: the objects embedded by the enforcer must still be
 # the pinned files after the build.
-STAGED_BLOB=$(git -C "$SOURCE_DIR" hash-object "$SOURCE_DIR/bpf/prebuilt/process.bpf.o")
-STAGED_INODE_BLOB=$(git -C "$SOURCE_DIR" hash-object "$SOURCE_DIR/bpf/prebuilt/process-inode-only.bpf.o")
+STAGED_BLOB=$(git -C "$SOURCE_DIR" hash-object "$STAGED_PREBUILT_DIR/process.bpf.o")
+STAGED_INODE_BLOB=$(git -C "$SOURCE_DIR" hash-object "$STAGED_PREBUILT_DIR/process-inode-only.bpf.o")
 if [ "$STAGED_BLOB" != "$ACTPLANE_STAGED_PREBUILT_BPF_BLOB" ] \
     || [ "$STAGED_INODE_BLOB" != "$ACTPLANE_STAGED_INODE_BPF_BLOB" ]; then
     echo "attested prebuilt objects mutated during the build" >&2
@@ -291,8 +363,8 @@ fi
 
 ENFORCER_BIN="$PRIVATE_DIR/agentsight-enforcer"
 python3 - "$PRIVATE_TARGET/$BUILD_TARGET/release/agentsight-enforcer" "$ENFORCER_BIN" \
-    "$SOURCE_DIR/bpf/prebuilt/process.bpf.o" \
-    "$SOURCE_DIR/bpf/prebuilt/process-inode-only.bpf.o" <<'PY'
+    "$STAGED_PREBUILT_DIR/process.bpf.o" \
+    "$STAGED_PREBUILT_DIR/process-inode-only.bpf.o" <<'PY'
 import hashlib
 import pathlib
 import sys

@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 use crate::SubscriberClass;
 
+pub(crate) const STRUCTURED_FILE_PROTECTION_UNSUPPORTED: &str =
+    "structured file protection policies are not implemented by this backend";
+
 /// Failures produced while managing a policy binding.
 #[derive(Debug, Error)]
 pub enum BackendError {
@@ -32,6 +35,16 @@ pub enum BackendError {
     /// Kernel attachment or runtime state management failed.
     #[error("kernel enforcement failed: {0}")]
     KernelFailure(String),
+}
+
+pub(crate) fn validate_apply_policy_payload(request: &ApplyPolicy) -> Result<(), BackendError> {
+    request
+        .validate_payload()
+        .map_err(|error| BackendError::CompileFailure(error.to_string()))
+}
+
+pub(crate) fn structured_file_protection_unsupported() -> BackendError {
+    BackendError::CompileFailure(STRUCTURED_FILE_PROTECTION_UNSUPPORTED.into())
 }
 
 /// Privileged policy lifecycle and violation source.

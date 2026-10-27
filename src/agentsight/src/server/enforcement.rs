@@ -839,6 +839,7 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
         policy_revision: FILE_POLICY_REVISION.into(),
         policy_dsl,
         policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy: None,
     })
 }
 
@@ -1911,6 +1912,7 @@ mod tests {
             policy_revision: "7".into(),
             policy_dsl: "fixture".into(),
             policy_mode: Some(PolicyMode::Audit),
+            file_protection_policy: None,
         };
         let active = Binding {
             request: request.clone(),
@@ -2180,6 +2182,7 @@ mod tests {
             policy_revision: "revision-1".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: None,
+            file_protection_policy: None,
         };
         let binding = public_binding(Binding {
             request,

@@ -2,16 +2,21 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, ApplyPolicy, CredentialExfiltrationPolicy, DestinationScope, PolicyMode,
-    SecurityEvent, SecurityEventKind,
+    ApplyCredentialPolicy, ApplyPolicy, CredentialExfiltrationPolicy, DestinationScope,
+    FILE_PROTECTION_POLICY_VERSION, FileProtectionExclusion, FileProtectionExclusionKind,
+    FileProtectionPolicy, FileProtectionTarget, FileProtectionTargetKind,
+    FileProtectionTopologyMode, FileProtections, PolicyMode, SecurityEvent, SecurityEventKind,
 };
-use agentsight_enforcer::{ActPlaneBackend, EnforcementBackend, SubscriberClass};
+use agentsight_enforcer::{ActPlaneBackend, BackendError, EnforcementBackend, SubscriberClass};
+use ebpf_ifc_engine::{INODE_GUARD_RENAME, INODE_GUARD_TREE, INODE_GUARD_UNLINK};
 use uuid::Uuid;
 
 const WORKER: &str = r#"
@@ -109,6 +114,214 @@ impl Drop for Worker {
     }
 }
 
+const TREE_WORKER: &str = r#"
+import ctypes, mmap, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+openfds = {}
+for line in sys.stdin:
+    parts = line.rstrip('\n').split('\t')
+    op = parts[0]
+    try:
+        if op == 'touch':
+            with open(parts[1], 'wb') as f:
+                f.write(b'fixture')
+        elif op == 'create_empty':
+            os.close(os.open(parts[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        elif op == 'mkdir':
+            os.mkdir(parts[1])
+        elif op == 'bind':
+            os.makedirs(parts[2], exist_ok=True)
+            rc = libc.mount(parts[1].encode(), parts[2].encode(), None, 4096, None)
+            if rc != 0:
+                value = ctypes.get_errno()
+                raise OSError(value, os.strerror(value))
+        elif op == 'unlink':
+            os.unlink(parts[1])
+        elif op == 'openfd':
+            openfds[parts[1]] = os.open(parts[1], os.O_RDWR)
+        elif op == 'writefd':
+            os.write(openfds[parts[1]], b'-writefd')
+        elif op == 'pwritefd':
+            os.pwrite(openfds[parts[1]], b'pwritefd', 0)
+        elif op == 'readfd':
+            os.pread(openfds[parts[1]], 4096, 0)
+        elif op == 'write':
+            with open(parts[1], 'ab') as f:
+                f.write(b'-write')
+        elif op == 'pwrite':
+            fd = os.open(parts[1], os.O_RDWR)
+            try:
+                os.pwrite(fd, b'pwrite', 0)
+            finally:
+                os.close(fd)
+        elif op == 'read':
+            with open(parts[1], 'rb') as f:
+                f.read()
+        elif op == 'truncate':
+            os.truncate(parts[1], 1)
+        elif op == 'otrunc':
+            os.close(os.open(parts[1], os.O_WRONLY | os.O_TRUNC))
+        elif op == 'mmap_write':
+            with open(parts[1], 'r+b') as f:
+                with mmap.mmap(f.fileno(), 0, flags=mmap.MAP_SHARED,
+                               prot=mmap.PROT_READ | mmap.PROT_WRITE) as mapped:
+                    mapped[0:1] = b'M'
+                    mapped.flush()
+        elif op == 'rmdir':
+            os.rmdir(parts[1])
+        elif op == 'rename':
+            os.rename(parts[1], parts[2])
+        elif op in ('exchange', 'noreplace'):
+            flags = 2 if op == 'exchange' else 1
+            rc = libc.renameat2(-100, parts[1].encode(), -100, parts[2].encode(), flags)
+            if rc != 0:
+                value = ctypes.get_errno()
+                raise OSError(value, os.strerror(value))
+        elif op == 'exit':
+            break
+        else:
+            raise ValueError(op)
+        print('ok', flush=True)
+    except OSError as e:
+        print('errno=' + str(e.errno), flush=True)
+for fd in openfds.values():
+    os.close(fd)
+"#;
+
+struct TreeWorker {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+}
+
+impl TreeWorker {
+    fn spawn() -> Self {
+        let mut command = Command::new("python3");
+        Self::spawn_command(&mut command)
+    }
+
+    fn spawn_private_mount() -> Self {
+        let mut command = Command::new("unshare");
+        command.args(["--mount", "--propagation", "private", "python3"]);
+        Self::spawn_command(&mut command)
+    }
+
+    fn spawn_command(command: &mut Command) -> Self {
+        let mut child = command
+            .args(["-u", "-c", TREE_WORKER])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn tree test process");
+        Self {
+            input: child.stdin.take().expect("child stdin"),
+            output: BufReader::new(child.stdout.take().expect("child stdout")),
+            child,
+        }
+    }
+
+    fn pid(&self) -> i32 {
+        self.child.id() as i32
+    }
+
+    fn start_time(&self) -> u64 {
+        fs::read_to_string(format!("/proc/{}/stat", self.pid()))
+            .expect("process stat")
+            .rsplit_once(") ")
+            .expect("comm terminator")
+            .1
+            .split_whitespace()
+            .nth(19)
+            .expect("start time")
+            .parse()
+            .expect("numeric start time")
+    }
+
+    fn snapshot(path: &str) -> Option<(u64, u64, Vec<u8>)> {
+        fs::metadata(path).ok().map(|metadata| {
+            let content = if metadata.is_file() {
+                fs::read(path).expect("snapshot content")
+            } else {
+                let mut entries: Vec<_> = fs::read_dir(path)
+                    .expect("snapshot directory")
+                    .map(|entry| entry.expect("directory entry").file_name())
+                    .collect();
+                entries.sort();
+                let descendants: Vec<_> = entries
+                    .iter()
+                    .map(|name| {
+                        let child = std::path::Path::new(path).join(name);
+                        (
+                            name,
+                            Self::snapshot(child.to_str().expect("ASCII fixture path")),
+                        )
+                    })
+                    .collect();
+                format!("{descendants:?}").into_bytes()
+            };
+            (metadata.dev(), metadata.ino(), content)
+        })
+    }
+
+    fn run(&mut self, operation: &str, paths: &[&str]) -> String {
+        let before: Vec<_> = paths.iter().map(|path| Self::snapshot(path)).collect();
+        write!(self.input, "{operation}").expect("worker operation");
+        for path in paths {
+            write!(self.input, "\t{path}").expect("worker path");
+        }
+        writeln!(self.input).expect("worker command");
+        self.input.flush().expect("flush command");
+        let mut result = String::new();
+        self.output.read_line(&mut result).expect("worker result");
+        let result = result.trim().to_owned();
+        let after: Vec<_> = paths.iter().map(|path| Self::snapshot(path)).collect();
+        if result.starts_with("errno=") {
+            if operation == "touch" && before[0].is_none() {
+                assert_eq!(
+                    after[0].as_ref().map(|entry| entry.2.as_slice()),
+                    Some(b"".as_slice()),
+                    "creation must complete before the first write is denied"
+                );
+            } else {
+                assert_eq!(before, after, "denied {operation} changed inode/content");
+            }
+        } else if result == "ok" {
+            match operation {
+                "rename" | "noreplace" => {
+                    assert!(after[0].is_none(), "rename left source behind");
+                    assert_eq!(after[1], before[0], "rename lost source identity/content");
+                }
+                "exchange" => {
+                    assert_eq!(after[0], before[1], "exchange source identity/content");
+                    assert_eq!(after[1], before[0], "exchange target identity/content");
+                }
+                "unlink" | "rmdir" => assert!(after[0].is_none()),
+                "touch" | "create_empty" | "mkdir" => assert!(after[0].is_some()),
+                "bind" => assert!(after[1].is_some()),
+                "read" | "readfd" | "openfd" => assert_eq!(after, before),
+                "write" | "pwrite" | "writefd" | "pwritefd" | "truncate" | "otrunc"
+                | "mmap_write" => {
+                    assert_eq!(
+                        after[0].as_ref().map(|entry| (entry.0, entry.1)),
+                        before[0].as_ref().map(|entry| (entry.0, entry.1))
+                    );
+                    assert_ne!(after[0], before[0]);
+                }
+                _ => panic!("unexpected operation {operation}"),
+            }
+        }
+        result
+    }
+}
+
+impl Drop for TreeWorker {
+    fn drop(&mut self) {
+        let _ = writeln!(self.input, "exit");
+        let _ = self.input.flush();
+        let _ = self.child.wait();
+    }
+}
+
 struct Files {
     root: PathBuf,
     pin_root: PathBuf,
@@ -149,18 +362,1313 @@ impl Drop for Files {
     }
 }
 
+struct TreeFiles {
+    outer: PathBuf,
+    root: PathBuf,
+    outside: PathBuf,
+    pin_root: PathBuf,
+}
+
+impl TreeFiles {
+    fn new() -> Self {
+        let name = format!("ap-tree-{}", &Uuid::new_v4().simple().to_string()[..10]);
+        let outer = PathBuf::from("/tmp").join(&name);
+        let root = outer.join("protected");
+        let outside = outer.join("outside");
+        let pin_root = PathBuf::from("/sys/fs/bpf").join(name);
+        fs::create_dir_all(root.join("nested")).expect("protected tree");
+        fs::create_dir(&outside).expect("outside directory");
+        fs::write(root.join("existing"), b"existing").expect("existing descendant");
+        fs::write(root.join("nested/child"), b"nested").expect("nested descendant");
+        fs::write(outside.join("marker"), b"marker").expect("binding marker");
+        unsafe {
+            std::env::set_var("ACTPLANE_PINNED_PROFILE", "agent-file-guard");
+            std::env::set_var("ACTPLANE_BPF_PIN_ROOT", &pin_root);
+        }
+        Self {
+            outer,
+            root,
+            outside,
+            pin_root,
+        }
+    }
+
+    fn text(path: &std::path::Path) -> &str {
+        path.to_str().expect("ASCII fixture path")
+    }
+}
+
+impl Drop for TreeFiles {
+    fn drop(&mut self) {
+        let hash = self
+            .pin_root
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+        for kind in ["append", "install", "runtime"] {
+            let _ = fs::remove_file(format!("/run/agentsight/actplane.{kind}.{hash:016x}.lock"));
+        }
+        let _ = fs::remove_dir_all(&self.pin_root);
+        let _ = fs::remove_dir_all(&self.outer);
+    }
+}
+
+fn kernel_dev(metadata: &fs::Metadata) -> u32 {
+    (libc::major(metadata.dev()) << 20) | libc::minor(metadata.dev())
+}
+
+fn update_guard_map(pin_root: &std::path::Path, map: &str, key: &[u8], value: &[u8]) {
+    let mut command = Command::new("bpftool");
+    command
+        .args(["map", "update", "pinned"])
+        .arg(pin_root.join("maps").join(map))
+        .args(["key", "hex"]);
+    for byte in key {
+        command.arg(format!("{byte:02x}"));
+    }
+    command.args(["value", "hex"]);
+    for byte in value {
+        command.arg(format!("{byte:02x}"));
+    }
+    let status = command.status().expect("run bpftool map update");
+    assert!(status.success(), "bpftool map update failed");
+}
+
+fn guard_value(flags: u32, domain: u32, rule_id: u32) -> Vec<u8> {
+    [flags, domain, rule_id, 0]
+        .into_iter()
+        .flat_map(u32::to_ne_bytes)
+        .collect()
+}
+
+fn tree_domain_value(generation: u32, flags: u32, domain: u32, rule_id: u32) -> Vec<u8> {
+    let mut value = [generation, 0]
+        .into_iter()
+        .flat_map(u32::to_ne_bytes)
+        .collect::<Vec<_>>();
+    value.extend_from_slice(&guard_value(flags, domain, rule_id));
+    value
+}
+
+fn policy_path_key(path: &std::path::Path, domain: u32) -> (fs::File, Vec<u8>) {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .expect("hold policy path");
+    let metadata = file.metadata().expect("held path metadata");
+    let mut stat: libc::statx = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_INO | libc::STATX_MNT_ID,
+            &mut stat,
+        )
+    };
+    assert_eq!(rc, 0, "statx held path");
+    assert_ne!(stat.stx_mask & libc::STATX_MNT_ID, 0, "mount ID required");
+    let mnt_id = u32::try_from(stat.stx_mnt_id).expect("kernel mount ID fits u32");
+    let mut key = Vec::with_capacity(24);
+    key.extend_from_slice(&metadata.ino().to_ne_bytes());
+    key.extend_from_slice(&kernel_dev(&metadata).to_ne_bytes());
+    key.extend_from_slice(&mnt_id.to_ne_bytes());
+    key.extend_from_slice(&domain.to_ne_bytes());
+    key.extend_from_slice(&1u32.to_ne_bytes());
+    (file, key)
+}
+
+fn update_tree_guard(
+    pin_root: &std::path::Path,
+    path: &std::path::Path,
+    map: &str,
+    flags: u32,
+    domain: u32,
+    rule_id: u32,
+) -> fs::File {
+    // Hold identities through cleanup; production registration must do this too.
+    let (file, key) = policy_path_key(path, domain);
+    let metadata = file.metadata().expect("held directory metadata");
+    assert!(metadata.is_dir(), "tree anchors must be directories");
+    let value = guard_value(flags, domain, rule_id);
+    update_guard_map(pin_root, map, &key, &value);
+    let mut identity = key.clone();
+    identity[12..16].copy_from_slice(&0u32.to_ne_bytes());
+    if map == "te_tree_roots" {
+        let mut anchor = value;
+        anchor.extend_from_slice(&key);
+        update_guard_map(pin_root, "te_tree_dirs", &identity, &anchor);
+    } else {
+        update_guard_map(pin_root, map, &identity, &value);
+    }
+    file
+}
+
+fn directory_tree_guard() {
+    let files = TreeFiles::new();
+    let mut worker = TreeWorker::spawn();
+    let backend = ActPlaneBackend::open().expect("tree guard runtime");
+    let events = backend.subscribe(Uuid::new_v4(), SubscriberClass::Required);
+    let marker = files.outside.join("marker");
+    let binding_id = Uuid::new_v4();
+    let binding = backend
+        .apply(ApplyPolicy {
+            binding_id,
+            agent_id: "tree-test".into(),
+            session_id: None,
+            root_pid: worker.pid(),
+            process_start_time: worker.start_time(),
+            policy_id: "tree-guard-prototype".into(),
+            policy_revision: "1".into(),
+            policy_dsl: format!(
+                "source AGENT = exec \"**\"\nrule marker:\n block unlink file \"{}\" if AGENT\n because \"seed runtime domain\"\n",
+                TreeFiles::text(&marker)
+            ),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: None,
+        })
+        .expect("apply domain seed policy");
+    let domain = binding.domain_id.expect("runtime domain");
+    let root_metadata = fs::metadata(&files.root).expect("root metadata");
+    let _root_handle = update_tree_guard(
+        &files.pin_root,
+        &files.root,
+        "te_tree_roots",
+        INODE_GUARD_UNLINK | INODE_GUARD_RENAME | INODE_GUARD_TREE,
+        domain,
+        100,
+    );
+    let outer_metadata = fs::metadata(&files.outer).expect("outer metadata");
+    let _outer_handle = update_tree_guard(
+        &files.pin_root,
+        &files.outer,
+        "te_path_ancestors",
+        INODE_GUARD_UNLINK | INODE_GUARD_RENAME,
+        domain,
+        200,
+    );
+    update_guard_map(
+        &files.pin_root,
+        "te_tree_domains",
+        &domain.to_ne_bytes(),
+        &tree_domain_value(1, INODE_GUARD_UNLINK | INODE_GUARD_RENAME, domain, 100),
+    );
+
+    let existing = files.root.join("existing");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&existing)]),
+        "errno=1"
+    );
+    events
+        .recv_timeout(Duration::from_secs(3))
+        .expect("existing unlink audit event");
+    let future = files.root.join("future");
+    assert_eq!(worker.run("touch", &[TreeFiles::text(&future)]), "ok");
+    assert_eq!(worker.run("write", &[TreeFiles::text(&future)]), "ok");
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&future)]), "errno=1");
+    events
+        .recv_timeout(Duration::from_secs(3))
+        .expect("future unlink audit event");
+    let empty = files.root.join("empty");
+    assert_eq!(worker.run("mkdir", &[TreeFiles::text(&empty)]), "ok");
+    assert_eq!(worker.run("rmdir", &[TreeFiles::text(&empty)]), "errno=1");
+    events
+        .recv_timeout(Duration::from_secs(3))
+        .expect("rmdir audit event");
+    let internal_src = files.root.join("internal-src");
+    let internal_dst = files.root.join("nested/internal-dst");
+    fs::write(&internal_src, b"move").expect("internal source");
+    let internal_result = worker.run(
+        "rename",
+        &[
+            TreeFiles::text(&internal_src),
+            TreeFiles::text(&internal_dst),
+        ],
+    );
+    if internal_result != "ok" {
+        let event = events
+            .recv_timeout(Duration::from_secs(3))
+            .expect("internal rename audit event");
+        panic!("internal rename returned {internal_result}: {event:?}");
+    }
+
+    let replace_src = files.root.join("replace-src");
+    let replace_dst = files.root.join("replace-dst");
+    fs::write(&replace_src, b"source").expect("replace source");
+    fs::write(&replace_dst, b"destination").expect("replace destination");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[TreeFiles::text(&replace_src), TreeFiles::text(&replace_dst)]
+        ),
+        "errno=1"
+    );
+    events
+        .recv_timeout(Duration::from_secs(3))
+        .expect("replace audit event");
+
+    let moved_in_src = files.outside.join("moved-in");
+    let moved_in_dst = files.root.join("moved-in");
+    fs::write(&moved_in_src, b"move in").expect("move-in source");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&moved_in_src),
+                TreeFiles::text(&moved_in_dst)
+            ]
+        ),
+        "ok"
+    );
+    let moved_out = files.outside.join("moved-out");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[TreeFiles::text(&moved_in_dst), TreeFiles::text(&moved_out)]
+        ),
+        "errno=1"
+    );
+    events
+        .recv_timeout(Duration::from_secs(3))
+        .expect("move-out audit event");
+
+    let exchange_a = files.root.join("exchange-a");
+    let exchange_b = files.root.join("exchange-b");
+    fs::write(&exchange_a, b"a").expect("exchange a");
+    fs::write(&exchange_b, b"b").expect("exchange b");
+    let exchange_result = worker.run(
+        "exchange",
+        &[TreeFiles::text(&exchange_a), TreeFiles::text(&exchange_b)],
+    );
+    if exchange_result != "ok" {
+        let event = events
+            .recv_timeout(Duration::from_secs(3))
+            .expect("internal exchange audit event");
+        panic!("internal exchange returned {exchange_result}: {event:?}");
+    }
+    let exchange_outside = files.outside.join("exchange-outside");
+    fs::write(&exchange_outside, b"outside").expect("outside exchange");
+    assert_eq!(
+        worker.run(
+            "exchange",
+            &[
+                TreeFiles::text(&exchange_a),
+                TreeFiles::text(&exchange_outside)
+            ]
+        ),
+        "errno=1"
+    );
+
+    let renamed_root = files.outer.join("protected-renamed");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[TreeFiles::text(&files.root), TreeFiles::text(&renamed_root)]
+        ),
+        "errno=1"
+    );
+    let renamed_outer = PathBuf::from(format!("{}-renamed", files.outer.display()));
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&files.outer),
+                TreeFiles::text(&renamed_outer)
+            ]
+        ),
+        "errno=1"
+    );
+
+    let outside_free = files.outside.join("free");
+    fs::write(&outside_free, b"free").expect("outside free file");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&outside_free)]),
+        "ok"
+    );
+
+    for (name, contents) in [("cross-a", b"a"), ("nested/cross-b", b"b")] {
+        fs::write(files.root.join(name), contents).expect("cross-parent exchange fixture");
+    }
+    let cross_a = files.root.join("cross-a");
+    let cross_b = files.root.join("nested/cross-b");
+    assert_eq!(
+        worker.run(
+            "exchange",
+            &[TreeFiles::text(&cross_a), TreeFiles::text(&cross_b)]
+        ),
+        "ok"
+    );
+    assert_eq!(
+        worker.run(
+            "exchange",
+            &[
+                TreeFiles::text(&exchange_outside),
+                TreeFiles::text(&exchange_a)
+            ]
+        ),
+        "errno=1"
+    );
+    let nested_child = files.root.join("nested/child");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&nested_child)]),
+        "errno=1"
+    );
+    let new_dir = files.root.join("new-dir");
+    assert_eq!(worker.run("mkdir", &[TreeFiles::text(&new_dir)]), "ok");
+    let new_child = new_dir.join("child");
+    assert_eq!(worker.run("touch", &[TreeFiles::text(&new_child)]), "ok");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&new_child)]),
+        "errno=1"
+    );
+    let out_dir = files.outside.join("out-dir");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[TreeFiles::text(&new_dir), TreeFiles::text(&out_dir)]
+        ),
+        "errno=1"
+    );
+    let outside_source = files.outside.join("overwrite-source");
+    fs::write(&outside_source, b"outside source").expect("outside overwrite source");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&outside_source),
+                TreeFiles::text(&replace_dst)
+            ]
+        ),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&replace_src),
+                TreeFiles::text(&outside_source)
+            ]
+        ),
+        "errno=1"
+    );
+    let baseline_a = files.outside.join("baseline-a");
+    let baseline_b = files.outside.join("baseline-b");
+    fs::write(&baseline_a, b"baseline a").expect("noreplace source");
+    fs::write(&baseline_b, b"baseline b").expect("noreplace destination");
+    assert_eq!(
+        worker.run(
+            "noreplace",
+            &[TreeFiles::text(&baseline_a), TreeFiles::text(&baseline_b)]
+        ),
+        "errno=17"
+    );
+    assert_eq!(
+        worker.run(
+            "noreplace",
+            &[TreeFiles::text(&replace_src), TreeFiles::text(&replace_dst)]
+        ),
+        "errno=17"
+    );
+    let mut deep = files.root.clone();
+    for depth in 1..=260 {
+        deep.push("d");
+        fs::create_dir(&deep).expect("deep directory");
+        if ![33, 64, 128, 260].contains(&depth) {
+            continue;
+        }
+        let child = deep.join("file");
+        assert_eq!(worker.run("touch", &[TreeFiles::text(&child)]), "ok");
+        assert_eq!(worker.run("unlink", &[TreeFiles::text(&child)]), "errno=1");
+        let empty = deep.join("empty");
+        assert_eq!(worker.run("mkdir", &[TreeFiles::text(&empty)]), "ok");
+        assert_eq!(worker.run("rmdir", &[TreeFiles::text(&empty)]), "errno=1");
+        let destination = files.outside.join(format!("deep-out-{depth}"));
+        assert_eq!(
+            worker.run(
+                "rename",
+                &[TreeFiles::text(&child), TreeFiles::text(&destination)]
+            ),
+            "errno=1"
+        );
+        let renamed = deep.join("renamed");
+        assert_eq!(
+            worker.run(
+                "rename",
+                &[TreeFiles::text(&child), TreeFiles::text(&renamed)]
+            ),
+            if depth < 256 { "ok" } else { "errno=1" }
+        );
+    }
+    let hardlink = files.outside.join("hardlink");
+    fs::hard_link(&future, &hardlink).expect("outside tree hardlink");
+    let original = TreeWorker::snapshot(TreeFiles::text(&future));
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&hardlink)]), "ok");
+    assert_eq!(TreeWorker::snapshot(TreeFiles::text(&future)), original);
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&future)]), "errno=1");
+    let symlink = files.outside.join("symlink");
+    std::os::unix::fs::symlink(&future, &symlink).expect("outside tree symlink");
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&symlink)]), "ok");
+    assert_eq!(TreeWorker::snapshot(TreeFiles::text(&future)), original);
+    let parent_alias = files.outside.join("parent-alias");
+    std::os::unix::fs::symlink(&files.root, &parent_alias).expect("symlink parent alias");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&parent_alias.join("future"))]),
+        "errno=1"
+    );
+    fs::remove_file(parent_alias).expect("remove own parent alias before recursive snapshots");
+
+    let mut unbound = TreeWorker::spawn();
+    let unbound_file = files.root.join("unbound-file");
+    fs::write(&unbound_file, b"unbound").expect("unbound fixture");
+    assert_eq!(
+        unbound.run("unlink", &[TreeFiles::text(&unbound_file)]),
+        "ok"
+    );
+    let root_ino = fs::metadata(&files.root).expect("root still exists").ino();
+    assert_eq!(root_ino, root_metadata.ino());
+    assert_eq!(
+        fs::metadata(&files.outer)
+            .expect("ancestor still exists")
+            .ino(),
+        outer_metadata.ino()
+    );
+
+    backend
+        .detach(binding_id)
+        .expect("detach tree guard prototype");
+    for map in [
+        "te_tree_roots",
+        "te_tree_dirs",
+        "te_path_ancestors",
+        "te_tree_domains",
+    ] {
+        let output = Command::new("bpftool")
+            .args(["-j", "map", "dump", "pinned"])
+            .arg(files.pin_root.join("maps").join(map))
+            .output()
+            .expect("inspect detached tree map");
+        assert!(output.status.success(), "dump {map}");
+        let entries: serde_json::Value = serde_json::from_slice(&output.stdout).expect("map JSON");
+        assert_eq!(entries, serde_json::json!([]), "detach left stale {map}");
+    }
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&future)]), "ok");
+    assert_eq!(worker.run("rmdir", &[TreeFiles::text(&empty)]), "ok");
+}
+
+fn structured_write_only_policy_allows_deep_deletes() {
+    let files = TreeFiles::new();
+    let write_target = files.root.join("write-only-target");
+    fs::write(&write_target, b"protected content").expect("write-only fixture");
+
+    let mut deep = files.outside.clone();
+    for _ in 0..260 {
+        deep.push("d");
+        fs::create_dir(&deep).expect("deep unrelated directory");
+    }
+    let deep_unlink = deep.join("unlink");
+    let deep_empty = deep.join("empty");
+    let deep_rename_source = deep.join("rename-source");
+    let shallow_rename_destination = files.outer.join("renamed-from-deep");
+    let shallow_rename_source = files.outer.join("rename-into-deep");
+    let deep_rename_destination = deep.join("rename-destination");
+    let deep_exchange = deep.join("exchange-deep");
+    let shallow_exchange = files.outer.join("exchange-shallow");
+    fs::write(&deep_unlink, b"unlink").expect("deep unlink fixture");
+    fs::create_dir(&deep_empty).expect("deep empty directory");
+    fs::write(&deep_rename_source, b"deep source").expect("deep rename source");
+    fs::write(&shallow_rename_source, b"shallow source").expect("shallow rename source");
+    fs::write(&deep_exchange, b"deep exchange").expect("deep exchange endpoint");
+    fs::write(&shallow_exchange, b"shallow exchange").expect("shallow exchange endpoint");
+
+    let mut worker = TreeWorker::spawn();
+    let backend = ActPlaneBackend::open().expect("write-only structured runtime");
+    let binding_id = Uuid::new_v4();
+    backend
+        .apply(ApplyPolicy {
+            binding_id,
+            agent_id: "structured-write-only-kernel-test".into(),
+            session_id: None,
+            root_pid: worker.pid(),
+            process_start_time: worker.start_time(),
+            policy_id: "structured-write-only-kernel".into(),
+            policy_revision: "1".into(),
+            policy_dsl: String::new(),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: Some(FileProtectionPolicy {
+                version: FILE_PROTECTION_POLICY_VERSION,
+                topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                targets: vec![FileProtectionTarget {
+                    path: TreeFiles::text(&write_target).into(),
+                    kind: FileProtectionTargetKind::ExactFile,
+                    protections: FileProtections {
+                        delete: false,
+                        ordinary_write: true,
+                    },
+                    exclusions: vec![],
+                }],
+            }),
+        })
+        .expect("apply strict structured write-only policy");
+
+    for operation in ["write", "pwrite"] {
+        assert_eq!(
+            worker.run(operation, &[TreeFiles::text(&write_target)]),
+            "errno=1",
+            "write-only target must deny {operation}"
+        );
+    }
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&deep_unlink)]),
+        "ok",
+        "write-only domains must not classify unrelated deep unlink"
+    );
+    assert_eq!(
+        worker.run("rmdir", &[TreeFiles::text(&deep_empty)]),
+        "ok",
+        "write-only domains must not classify unrelated deep rmdir"
+    );
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&deep_rename_source),
+                TreeFiles::text(&shallow_rename_destination),
+            ]
+        ),
+        "ok",
+        "write-only domains must not classify an unrelated deep rename source"
+    );
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&shallow_rename_source),
+                TreeFiles::text(&deep_rename_destination),
+            ]
+        ),
+        "ok",
+        "write-only domains must not classify an unrelated deep rename destination"
+    );
+    assert_eq!(
+        worker.run(
+            "exchange",
+            &[
+                TreeFiles::text(&deep_exchange),
+                TreeFiles::text(&shallow_exchange),
+            ]
+        ),
+        "ok",
+        "write-only domains must not classify unrelated exchange endpoints"
+    );
+
+    backend
+        .detach(binding_id)
+        .expect("detach structured write-only binding");
+}
+
+fn structured_policy_classifier() {
+    let files = TreeFiles::new();
+    let mut worker = TreeWorker::spawn_private_mount();
+    let bind_alias = files.outside.join("bind-alias");
+    assert_eq!(
+        worker.run(
+            "bind",
+            &[TreeFiles::text(&files.root), TreeFiles::text(&bind_alias)]
+        ),
+        "ok"
+    );
+    let external_mount_source = files.outside.join("external-source");
+    let protected_submount = files.root.join("nested/mounted");
+    fs::create_dir(&external_mount_source).expect("create external mount source");
+    fs::write(external_mount_source.join("entry"), b"mounted").expect("mounted entry");
+    assert_eq!(
+        worker.run(
+            "bind",
+            &[
+                TreeFiles::text(&external_mount_source),
+                TreeFiles::text(&protected_submount),
+            ]
+        ),
+        "ok"
+    );
+    let real_parent = files.outer.join("real");
+    let real_tree = real_parent.join("tree");
+    fs::create_dir_all(&real_tree).expect("create canonical symlink target tree");
+    let intermediate_alias = files.outside.join("alias");
+    std::os::unix::fs::symlink(&real_parent, &intermediate_alias)
+        .expect("create intermediate target symlink");
+    let authored_alias_tree = intermediate_alias.join("tree");
+    let alias_mount_source = files.outside.join("alias-mount-source");
+    let alias_submount = real_tree.join("mounted");
+    fs::create_dir(&alias_mount_source).expect("create aliased-tree mount source");
+    fs::write(alias_mount_source.join("entry"), b"mounted through alias")
+        .expect("create aliased-tree mounted entry");
+    assert_eq!(
+        worker.run(
+            "bind",
+            &[
+                TreeFiles::text(&alias_mount_source),
+                TreeFiles::text(&alias_submount),
+            ]
+        ),
+        "ok"
+    );
+    let excluded = files.root.join("excluded");
+    let overlap = excluded.join("overlap");
+    let second_root = files.outer.join("second-root");
+    fs::create_dir_all(&overlap).expect("excluded overlap tree");
+    fs::create_dir(&second_root).expect("second protected root");
+    let exact_parent = files.outer.join("exact-parent");
+    fs::create_dir(&exact_parent).expect("create exact parent");
+    let exact = exact_parent.join("exact");
+    let exact_exclusion = files.root.join("excluded-exact");
+    let future_excluded_dir = files.root.join("future-cache");
+    let nested_direct = excluded.join("direct");
+    let overlap_file = overlap.join("protected");
+    let delete_only_file = second_root.join("delete-only");
+    let write_only = exact_parent.join("write-only");
+    let ordinary_out_of_scope = exact_parent.join("ordinary-out-of-scope");
+    let mut explicit_parent = files.outside.clone();
+    for _ in 0..260 {
+        explicit_parent = explicit_parent.join("p");
+    }
+    let deep_exact = explicit_parent.join("exact");
+    let deep_root = explicit_parent.join("nearby-root");
+    fs::create_dir_all(&deep_root).expect("deep explicit tree");
+    fs::write(&deep_exact, b"deep exact").expect("deep exact fixture");
+    let deep_child = deep_root.join("child");
+    fs::write(&deep_child, b"deep child").expect("deep child fixture");
+    for (path, content) in [
+        (&exact, b"exact".as_slice()),
+        (&exact_exclusion, b"excluded".as_slice()),
+        (&nested_direct, b"direct".as_slice()),
+        (&overlap_file, b"overlap".as_slice()),
+        (&delete_only_file, b"delete-only".as_slice()),
+        (&write_only, b"write-only".as_slice()),
+        (&ordinary_out_of_scope, b"out-of-scope".as_slice()),
+    ] {
+        fs::write(path, content).expect("classifier fixture file");
+    }
+    let write_hardlink = files.outside.join("write-hardlink");
+    fs::hard_link(&write_only, &write_hardlink).expect("pre-existing outside exact hardlink");
+    let tree_entry = files.root.join("existing");
+    let tree_hardlink = files.outside.join("tree-hardlink");
+    fs::hard_link(&tree_entry, &tree_hardlink).expect("pre-existing outside tree hardlink");
+    assert_eq!(
+        worker.run("openfd", &[TreeFiles::text(&write_only)]),
+        "ok",
+        "the descriptor must predate policy activation"
+    );
+
+    let protected =
+        |path: &std::path::Path, kind, delete, ordinary_write, exclusions| FileProtectionTarget {
+            path: TreeFiles::text(path).into(),
+            kind,
+            protections: FileProtections {
+                delete,
+                ordinary_write,
+            },
+            exclusions,
+        };
+    let backend = ActPlaneBackend::open().expect("structured classifier runtime");
+    let capabilities = backend.health().expect("structured health").capabilities;
+    assert!(capabilities.file_entry_delete_protection);
+    assert!(capabilities.directory_tree_delete_protection);
+    assert!(capabilities.ordinary_write_protection);
+    assert!(capabilities.static_mount_topology);
+    assert!(!capabilities.dynamic_mount_topology);
+    assert!(!capabilities.complete_content_protection);
+    let events = backend.subscribe(Uuid::new_v4(), SubscriberClass::Required);
+    let binding_id = Uuid::new_v4();
+    for mode in [None, Some(PolicyMode::Audit), Some(PolicyMode::Observe)] {
+        let error = backend
+            .apply(ApplyPolicy {
+                binding_id,
+                agent_id: "structured-kernel-test".into(),
+                session_id: None,
+                root_pid: worker.pid(),
+                process_start_time: worker.start_time(),
+                policy_id: "structured-classifier-kernel".into(),
+                policy_revision: "1".into(),
+                policy_dsl: String::new(),
+                policy_mode: mode,
+                file_protection_policy: Some(FileProtectionPolicy {
+                    version: FILE_PROTECTION_POLICY_VERSION,
+                    topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                    targets: vec![protected(
+                        &write_only,
+                        FileProtectionTargetKind::ExactFile,
+                        true,
+                        true,
+                        vec![],
+                    )],
+                }),
+            })
+            .expect_err("non-enforcing structured request must fail");
+        assert!(matches!(error, BackendError::CompileFailure(message)
+            if message.contains("requires explicit policy_mode=enforce")));
+        assert!(backend.bindings().expect("no partial binding").is_empty());
+        assert_eq!(worker.run("write", &[TreeFiles::text(&write_only)]), "ok");
+    }
+    let binding = backend
+        .apply(ApplyPolicy {
+            binding_id,
+            agent_id: "structured-kernel-test".into(),
+            session_id: None,
+            root_pid: worker.pid(),
+            process_start_time: worker.start_time(),
+            policy_id: "structured-classifier-kernel".into(),
+            policy_revision: "1".into(),
+            policy_dsl: String::new(),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: Some(FileProtectionPolicy {
+                version: FILE_PROTECTION_POLICY_VERSION,
+                topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                targets: vec![
+                    protected(
+                        &exact,
+                        FileProtectionTargetKind::ExactFile,
+                        true,
+                        false,
+                        vec![],
+                    ),
+                    protected(
+                        &files.root,
+                        FileProtectionTargetKind::DirectoryTree,
+                        true,
+                        true,
+                        vec![
+                            FileProtectionExclusion {
+                                path: TreeFiles::text(&exact_exclusion).into(),
+                                kind: FileProtectionExclusionKind::ExactEntry,
+                            },
+                            FileProtectionExclusion {
+                                path: TreeFiles::text(&excluded).into(),
+                                kind: FileProtectionExclusionKind::DirectorySubtree,
+                            },
+                            FileProtectionExclusion {
+                                path: TreeFiles::text(&future_excluded_dir).into(),
+                                kind: FileProtectionExclusionKind::DirectorySubtree,
+                            },
+                        ],
+                    ),
+                    protected(
+                        &authored_alias_tree,
+                        FileProtectionTargetKind::DirectoryTree,
+                        true,
+                        true,
+                        vec![],
+                    ),
+                    protected(
+                        &nested_direct,
+                        FileProtectionTargetKind::ExactFile,
+                        true,
+                        true,
+                        vec![],
+                    ),
+                    protected(
+                        &overlap,
+                        FileProtectionTargetKind::DirectoryTree,
+                        true,
+                        false,
+                        vec![],
+                    ),
+                    protected(
+                        &second_root,
+                        FileProtectionTargetKind::DirectoryTree,
+                        true,
+                        false,
+                        vec![],
+                    ),
+                    protected(
+                        &write_only,
+                        FileProtectionTargetKind::ExactFile,
+                        false,
+                        true,
+                        vec![],
+                    ),
+                    protected(
+                        &ordinary_out_of_scope,
+                        FileProtectionTargetKind::ExactFile,
+                        false,
+                        true,
+                        vec![],
+                    ),
+                    protected(
+                        &deep_exact,
+                        FileProtectionTargetKind::ExactFile,
+                        true,
+                        true,
+                        vec![],
+                    ),
+                    protected(
+                        &deep_root,
+                        FileProtectionTargetKind::DirectoryTree,
+                        true,
+                        true,
+                        vec![],
+                    ),
+                ],
+            }),
+        })
+        .expect("apply structured classifier policy");
+    assert!(binding.domain_id.is_some());
+
+    assert_eq!(worker.run("read", &[TreeFiles::text(&exact)]), "ok");
+    assert_eq!(worker.run("write", &[TreeFiles::text(&exact)]), "ok");
+    assert_eq!(worker.run("readfd", &[TreeFiles::text(&write_only)]), "ok");
+    assert_eq!(
+        worker.run("writefd", &[TreeFiles::text(&write_only)]),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run("pwritefd", &[TreeFiles::text(&write_only)]),
+        "errno=1"
+    );
+    assert_eq!(worker.run("read", &[TreeFiles::text(&write_only)]), "ok");
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&write_only)]),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run("pwrite", &[TreeFiles::text(&write_only)]),
+        "errno=1"
+    );
+    for (protected_path, outside_link) in [
+        (&write_only, &write_hardlink),
+        (&tree_entry, &tree_hardlink),
+    ] {
+        let identity = fs::metadata(protected_path)
+            .expect("protected hardlink inode")
+            .ino();
+        for operation in ["write", "pwrite"] {
+            let before = fs::read(protected_path).expect("protected content before alias write");
+            assert_eq!(
+                worker.run(operation, &[TreeFiles::text(outside_link)]),
+                "ok"
+            );
+            assert_eq!(
+                fs::metadata(protected_path)
+                    .expect("protected inode after write")
+                    .ino(),
+                identity
+            );
+            assert_ne!(
+                fs::read(protected_path).expect("protected content after alias write"),
+                before
+            );
+            assert_eq!(
+                worker.run(operation, &[TreeFiles::text(protected_path)]),
+                "errno=1"
+            );
+        }
+        assert_eq!(worker.run("unlink", &[TreeFiles::text(outside_link)]), "ok");
+        assert!(protected_path.exists());
+    }
+    for operation in ["write", "pwrite"] {
+        assert_eq!(
+            worker.run(operation, &[TreeFiles::text(&bind_alias.join("existing"))]),
+            "errno=1"
+        );
+    }
+    fs::remove_file(&write_only).expect("replace exact write target");
+    fs::write(&write_only, b"replacement").expect("recreate exact write target");
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&write_only)]),
+        "errno=1",
+        "ordinary-write exact slots must survive inode replacement"
+    );
+    assert_eq!(
+        worker.run("truncate", &[TreeFiles::text(&ordinary_out_of_scope)]),
+        "ok"
+    );
+    fs::write(&ordinary_out_of_scope, b"reset").expect("reset truncate fixture");
+    assert_eq!(
+        worker.run("otrunc", &[TreeFiles::text(&ordinary_out_of_scope)]),
+        "ok"
+    );
+    fs::write(&ordinary_out_of_scope, b"reset").expect("reset mmap fixture");
+    assert_eq!(
+        worker.run("mmap_write", &[TreeFiles::text(&ordinary_out_of_scope)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run(
+            "unlink",
+            &[TreeFiles::text(&external_mount_source.join("entry"))]
+        ),
+        "errno=1"
+    );
+    for operation in ["write", "pwrite", "unlink"] {
+        assert_eq!(
+            worker.run(
+                operation,
+                &[TreeFiles::text(&alias_mount_source.join("entry"))]
+            ),
+            "errno=1",
+            "the backing source of a submount below an intermediate-symlink target must be registered"
+        );
+    }
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&exact)]), "errno=1");
+    let replacement = files.outside.join("replacement");
+    fs::write(&replacement, b"replacement").expect("replacement source");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[TreeFiles::text(&replacement), TreeFiles::text(&exact)]
+        ),
+        "errno=1"
+    );
+    let hardlink = files.outside.join("exact-hardlink");
+    fs::hard_link(&exact, &hardlink).expect("exact external hardlink");
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&hardlink)]), "ok");
+    fs::remove_file(&exact).expect("unbound fixture process replaces exact path");
+    fs::write(&exact, b"replacement inode").expect("recreate exact path");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&exact)]),
+        "errno=1",
+        "exact slot must protect a replacement inode"
+    );
+    let exact_parent_alias = files.outer.join("outside-alias");
+    std::os::unix::fs::symlink(&exact_parent, &exact_parent_alias)
+        .expect("create exact parent alias");
+    assert_eq!(
+        worker.run(
+            "unlink",
+            &[TreeFiles::text(&exact_parent_alias.join("exact"))]
+        ),
+        "errno=1"
+    );
+    fs::remove_file(&exact_parent_alias).expect("remove exact parent alias");
+    let exact_exchange = files.outside.join("exact-exchange");
+    fs::write(&exact_exchange, b"outside").expect("exact exchange peer");
+    for paths in [[&exact, &exact_exchange], [&exact_exchange, &exact]] {
+        assert_eq!(
+            worker.run(
+                "exchange",
+                &[TreeFiles::text(paths[0]), TreeFiles::text(paths[1])]
+            ),
+            "errno=1"
+        );
+    }
+    let renamed_exact_parent = files.outer.join("exact-parent-renamed");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&exact_parent),
+                TreeFiles::text(&renamed_exact_parent),
+            ]
+        ),
+        "errno=1"
+    );
+
+    let created_empty = files.root.join("created-empty");
+    assert_eq!(
+        worker.run("create_empty", &[TreeFiles::text(&created_empty)]),
+        "ok",
+        "entry creation without initialization writes remains allowed"
+    );
+    assert_eq!(worker.run("read", &[TreeFiles::text(&created_empty)]), "ok");
+    assert_eq!(
+        worker.run("openfd", &[TreeFiles::text(&created_empty)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("writefd", &[TreeFiles::text(&created_empty)]),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run("pwritefd", &[TreeFiles::text(&created_empty)]),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&created_empty)]),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run("pwrite", &[TreeFiles::text(&created_empty)]),
+        "errno=1"
+    );
+    let future = files.root.join("future");
+    assert_eq!(
+        worker.run("touch", &[TreeFiles::text(&future)]),
+        "errno=1",
+        "the create may succeed but its initialization write must not"
+    );
+    assert_eq!(worker.run("read", &[TreeFiles::text(&future)]), "ok");
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&future)]), "errno=1");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&bind_alias.join("future"))]),
+        "errno=1"
+    );
+    let empty = files.root.join("empty-structured");
+    assert_eq!(worker.run("mkdir", &[TreeFiles::text(&empty)]), "ok");
+    assert_eq!(worker.run("rmdir", &[TreeFiles::text(&empty)]), "errno=1");
+    assert_eq!(
+        worker.run("rmdir", &[TreeFiles::text(&files.root)]),
+        "errno=1"
+    );
+
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&exact_exclusion)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("pwrite", &[TreeFiles::text(&exact_exclusion)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&exact_exclusion)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("touch", &[TreeFiles::text(&exact_exclusion)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&exact_exclusion)]),
+        "ok"
+    );
+    let exclusion_replacement = files.outside.join("exclusion-replacement");
+    fs::write(&exclusion_replacement, b"replacement").expect("exclusion replacement");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&exclusion_replacement),
+                TreeFiles::text(&exact_exclusion),
+            ]
+        ),
+        "ok"
+    );
+    let moved_exclusion = files.outside.join("moved-exclusion");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&exact_exclusion),
+                TreeFiles::text(&moved_exclusion),
+            ]
+        ),
+        "ok"
+    );
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&moved_exclusion),
+                TreeFiles::text(&exact_exclusion),
+            ]
+        ),
+        "ok"
+    );
+    let excluded_future = excluded.join("future");
+    assert_eq!(
+        worker.run("touch", &[TreeFiles::text(&excluded_future)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("pwrite", &[TreeFiles::text(&excluded_future)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&excluded_future)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("mkdir", &[TreeFiles::text(&future_excluded_dir)]),
+        "ok"
+    );
+    let future_excluded_child = future_excluded_dir.join("child");
+    assert_eq!(
+        worker.run("touch", &[TreeFiles::text(&future_excluded_child)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&future_excluded_child)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("rmdir", &[TreeFiles::text(&future_excluded_dir)]),
+        "ok"
+    );
+    assert_eq!(worker.run("read", &[TreeFiles::text(&nested_direct)]), "ok");
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&nested_direct)]),
+        "errno=1",
+        "an explicit write target must override its ancestor exclusion"
+    );
+    assert_eq!(
+        worker.run("pwrite", &[TreeFiles::text(&nested_direct)]),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&nested_direct)]),
+        "errno=1"
+    );
+    assert_eq!(worker.run("write", &[TreeFiles::text(&overlap_file)]), "ok");
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&overlap_file)]),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&delete_only_file)]),
+        "ok",
+        "delete-only targets must permit ordinary writes"
+    );
+    assert_eq!(
+        worker.run("pwrite", &[TreeFiles::text(&delete_only_file)]),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("unlink", &[TreeFiles::text(&delete_only_file)]),
+        "errno=1"
+    );
+
+    let cross = files.root.join("cross-root");
+    fs::write(&cross, b"cross").expect("cross-root source");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&cross),
+                TreeFiles::text(&second_root.join("cross-root"))
+            ]
+        ),
+        "ok"
+    );
+    let protected_to_excluded = files.root.join("protected-to-excluded");
+    fs::write(&protected_to_excluded, b"protected").expect("protected move source");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&protected_to_excluded),
+                TreeFiles::text(&excluded.join("protected-to-excluded")),
+            ]
+        ),
+        "errno=1"
+    );
+    let excluded_to_protected = excluded.join("excluded-to-protected");
+    fs::write(&excluded_to_protected, b"excluded").expect("excluded move source");
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&excluded_to_protected),
+                TreeFiles::text(&files.root.join("excluded-to-protected")),
+            ]
+        ),
+        "ok"
+    );
+    let protected_exchange = files.root.join("exchange");
+    let second_exchange = second_root.join("exchange");
+    fs::write(&protected_exchange, b"one").expect("exchange one");
+    fs::write(&second_exchange, b"two").expect("exchange two");
+    assert_eq!(
+        worker.run(
+            "exchange",
+            &[
+                TreeFiles::text(&protected_exchange),
+                TreeFiles::text(&second_exchange),
+            ]
+        ),
+        "ok"
+    );
+    let outside_exchange = files.outside.join("exchange");
+    fs::write(&outside_exchange, b"outside").expect("outside exchange");
+    assert_eq!(
+        worker.run(
+            "exchange",
+            &[
+                TreeFiles::text(&protected_exchange),
+                TreeFiles::text(&outside_exchange),
+            ]
+        ),
+        "errno=1"
+    );
+    let excluded_exchange = excluded.join("exchange");
+    fs::write(&excluded_exchange, b"excluded").expect("excluded exchange");
+    for paths in [
+        [&protected_exchange, &excluded_exchange],
+        [&excluded_exchange, &protected_exchange],
+    ] {
+        assert_eq!(
+            worker.run(
+                "exchange",
+                &[TreeFiles::text(paths[0]), TreeFiles::text(paths[1])]
+            ),
+            "errno=1"
+        );
+    }
+
+    let mut deep = files.root.clone();
+    for depth in 1..=260 {
+        deep = deep.join("d");
+        assert_eq!(worker.run("mkdir", &[TreeFiles::text(&deep)]), "ok");
+        if [254, 255, 260].contains(&depth) {
+            let entry = deep.join("entry");
+            fs::write(&entry, b"depth fixture").expect("depth file");
+            for operation in ["write", "pwrite"] {
+                assert_eq!(
+                    worker.run(operation, &[TreeFiles::text(&entry)]),
+                    if depth == 254 { "errno=1" } else { "ok" },
+                    "bounded ancestry at depth {depth} for {operation}"
+                );
+            }
+            assert_eq!(
+                worker.run("unlink", &[TreeFiles::text(&entry)]),
+                "errno=1",
+                "delete remains fail-closed at depth {depth}"
+            );
+        }
+    }
+    for entry in [&deep_exact, &deep_child] {
+        for operation in ["write", "pwrite", "unlink"] {
+            assert_eq!(
+                worker.run(operation, &[TreeFiles::text(entry)]),
+                "errno=1",
+                "deep explicit target or nearby root must still match"
+            );
+        }
+    }
+
+    let observed: Vec<_> = events.try_iter().collect();
+    assert!(
+        observed
+            .iter()
+            .any(|event| event.blocked && event.rule_id.is_some()),
+        "structured denials must retain a stable target rule id"
+    );
+    assert!(
+        observed.iter().any(|event| {
+            event.operation == "ordinary_write" && event.blocked && event.rule_id.is_some()
+        }),
+        "ordinary-write denials must identify their operation and target"
+    );
+    backend
+        .detach(binding_id)
+        .expect("detach structured binding");
+    assert_eq!(worker.run("write", &[TreeFiles::text(&write_only)]), "ok");
+    assert_eq!(worker.run("unlink", &[TreeFiles::text(&exact)]), "ok");
+}
+
 fn file_guard() {
     let files = Files::new("agent-file-guard");
     let source = files.source();
     let mut worker = Worker::spawn(&source);
     let backend = ActPlaneBackend::open().expect("file guard runtime");
-    assert!(
-        backend
-            .health()
-            .expect("health")
-            .capabilities
-            .file_delete_guard
-    );
+    let capabilities = backend.health().expect("health").capabilities;
+    assert!(capabilities.file_delete_guard);
+    assert!(capabilities.file_entry_delete_protection);
+    assert!(capabilities.directory_tree_delete_protection);
+    assert!(capabilities.static_mount_topology);
+    assert!(capabilities.ordinary_write_protection);
     let events = backend.subscribe(Uuid::new_v4(), SubscriberClass::Required);
     let binding_id = Uuid::new_v4();
     backend.apply(ApplyPolicy {
@@ -175,6 +1683,7 @@ fn file_guard() {
             "source AGENT = exec \"**\"\nrule unrelated:\nnotify open file \"/tmp/never-matches\" if AGENT\nbecause \"unrelated\"\nrule protected:\nblock unlink file \"{source}\" if AGENT\nbecause \"keep fixture\"\n"
         ),
         policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy: None,
     }).expect("apply file guard");
     for operation in ["unlink", "rename"] {
         assert_eq!(worker.run(operation), "errno=1");
@@ -283,4 +1792,22 @@ fn inode_guard_and_credential_events_on_live_kernel() {
     for read_operation in ["read", "readfd", "mmap"] {
         credentials(read_operation);
     }
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn directory_tree_guard_on_live_kernel() {
+    directory_tree_guard();
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn structured_write_only_policy_on_live_kernel() {
+    structured_write_only_policy_allows_deep_deletes();
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn structured_policy_classifier_on_live_kernel() {
+    structured_policy_classifier();
 }
