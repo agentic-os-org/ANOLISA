@@ -97,6 +97,7 @@ class SmokeTest(unittest.TestCase):
         (self.root / "target/release").mkdir(parents=True)
         (self.root / "tests").mkdir()
         shutil.copyfile(ROOT / "Makefile", self.root / "Makefile")
+        shutil.copytree(ROOT / "packaging", self.root / "packaging")
         shutil.copyfile(ROOT / "tests/smoke.py", self.root / "tests/smoke.py")
         (self.root / "Cargo.toml").write_text('[package]\nversion = "0.0.0"\n')
         self.binary = self.root / "target/release/agent-memory"

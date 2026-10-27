@@ -114,12 +114,12 @@ install -p -m 0644 config/mcp-server.json %{buildroot}%{_datadir}/anolisa/mcp-se
 # Install systemd user template (opt-in via `systemctl --user enable anolisa-memory@$USER`).
 # Per-user instance because the server is stdio-bound per agent session.
 install -d -m 0755 %{buildroot}%{_userunitdir}
-install -p -m 0644 config/systemd/anolisa-memory@.service %{buildroot}%{_userunitdir}/anolisa-memory@.service
+install -p -m 0644 packaging/systemd/anolisa-memory@.service %{buildroot}%{_userunitdir}/anolisa-memory@.service
 
 # Install tmpfiles.d snippet so /run/anolisa{,/sessions} is created at
 # boot with 0700 permissions even when the unit is started by hand.
 install -d -m 0755 %{buildroot}%{_tmpfilesdir}
-install -p -m 0644 config/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
+install -p -m 0644 packaging/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
 
 # Install documentation (CHANGELOG only). The bilingual user manual moved
 # to the repository-level docs/user-guide tree and is published with the
@@ -142,7 +142,7 @@ install -m 0644 adapters/agent-memory/manifest.json %{buildroot}%{_datadir}/anol
 # component-contract model:
 # %{_datadir}/anolisa/components/<component>/component.toml.
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/agent-memory
-install -m 0644 .anolisa/component.toml %{buildroot}%{_datadir}/anolisa/components/agent-memory/
+install -m 0644 packaging/anolisa/rpm/component.toml %{buildroot}%{_datadir}/anolisa/components/agent-memory/
 install -m 0755 adapters/agent-memory/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
 install -m 0755 adapters/agent-memory/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
 install -m 0755 adapters/agent-memory/openclaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/

@@ -57,8 +57,10 @@ git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/agent-memory
 
 make build         # cargo build --release --locked
-sudo make install  # 安装到 /usr/local 下
+make install       # install to ~/.local
 ```
+
+以普通用户运行上述命令，可执行文件安装到 `~/.local/bin/agent-memory`。
 
 构建依赖：Rust ≥ 1.85（edition 2024；CI 钉到 1.89 与 monorepo 共享 toolchain）、cmake（libgit2 vendored 构建）、systemd-devel（journald 审计 fan-out）。
 
@@ -97,6 +99,13 @@ make remote-test    # 同上 + 跑测试 + clippy
 `/usr/share/anolisa/mcp-servers/agent-memory.json` 描述符列出工具名，支持自动发现的客户端可直接识别。
 
 ### OpenClaw
+
+以普通用户从源码安装后，使用以下命令注册插件，替换下文的 RPM 路径：
+
+```bash
+bash "${XDG_DATA_HOME:-$HOME/.local/share}/agent-memory/adapters/openclaw/scripts/install.sh"
+openclaw gateway restart
+```
 
 随包附带的插件把 4 个 memory contract 工具（`anolisa_memory_search`、`anolisa_memory_get`、`memory_observe`、`memory_get_context`）转发到 agent-memory：
 

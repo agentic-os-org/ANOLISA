@@ -141,7 +141,7 @@ Linux x86_64 和 ARM64 包包含主程序、配置、用户服务及已打包的
 `python3 packaging/raw/package.py --help` 列出必须显式传入的二进制目录、插件输出目录、
 目标架构、时间戳和 TOML 构建元数据。元数据以 `version`、`target_os`、`target_arch`、
 `binaries.agent-memory`（SHA256）和 `plugin.sha256` 绑定输入文件。
-打包器不构建或执行二进制；raw 安装契约由 `.anolisa/component.raw.toml.in` 和 Cargo.toml
+打包器不构建或执行二进制；raw 安装契约由 `packaging/anolisa/raw/component.toml.in` 和 Cargo.toml
 渲染，RPM 契约保持独立。两种安装模式均不会启动用户服务。
 通过 `python3 tests/test_raw_packaging.py` 运行打包回归测试。
 

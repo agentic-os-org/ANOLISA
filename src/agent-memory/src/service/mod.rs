@@ -522,7 +522,7 @@ static PROBE_SEQ: AtomicUsize = AtomicUsize::new(0);
 /// spawn — is only writable by root, yet the server always runs
 /// unprivileged:
 ///
-/// - the RPM ships `config/systemd/anolisa-memory-tmpfiles.conf`, which
+/// - the RPM ships `packaging/systemd/anolisa-memory-tmpfiles.conf`, which
 ///   creates `/run/anolisa` and `/run/anolisa/sessions` `0700 root:root`.
 ///   A non-root server can neither traverse the parent (no `x` for others)
 ///   nor create `<sid>` inside it.

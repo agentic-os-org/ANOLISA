@@ -19,9 +19,20 @@ spec = importlib.util.spec_from_file_location(
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
+adapter_spec = importlib.util.spec_from_file_location(
+    "adapter_inventory", Path(__file__).resolve().parents[1] / "stage-adapter.py"
+)
+adapter_inventory = importlib.util.module_from_spec(adapter_spec)
+adapter_spec.loader.exec_module(adapter_inventory)
+
 
 def package(args: argparse.Namespace) -> Path:
     """Validate input bytes and write a deterministic raw archive."""
+    if "AWPRJ" in os.environ and os.environ["AWPRJ"] != "anolisa":
+        raise ValueError(
+            "raw payload requires AWPRJ=anolisa; "
+            "use make install DESTDIR=<temporary-root> for independent layouts"
+        )
     root = args.source_dir
     version = release.verify(root)
     binary = args.bin_dir / "agent-memory"
@@ -47,7 +58,9 @@ def package(args: argparse.Namespace) -> Path:
         raise ValueError("agent-memory hash does not match build metadata")
     if metadata["plugin"]["sha256"] != hashlib.sha256(plugin).hexdigest():
         raise ValueError("plugin hash does not match build metadata")
-    contract = (root / ".anolisa/component.raw.toml.in").read_text().replace("@VERSION@", version)
+    contract = (
+        (root / "packaging/anolisa/raw/component.toml.in").read_text().replace("@VERSION@", version)
+    )
     platform = tomllib.loads(contract)["component"]["platform"]
     if "linux" not in platform["os"] or args.target_arch not in platform["arch"]:
         raise ValueError("raw contract does not support target")
@@ -59,18 +72,18 @@ def package(args: argparse.Namespace) -> Path:
     sources = {
         "share/anolisa/agent-memory/default.toml": "config/default.toml",
         "share/anolisa/mcp-servers/agent-memory.json": "config/mcp-server.json",
-        "share/anolisa/agent-memory/anolisa-memory@.service": "config/systemd/anolisa-memory@.service",
+        "share/anolisa/agent-memory/anolisa-memory@.service": "packaging/systemd/anolisa-memory@.service.in",
     }
-    for relative in (
-        "manifest.json",
-        "openclaw/package.json",
-        "openclaw/openclaw.plugin.json",
-        "openclaw/scripts/detect.sh",
-        "openclaw/scripts/install.sh",
-        "openclaw/scripts/uninstall.sh",
-    ):
-        path = f"adapters/agent-memory/{relative}"
-        sources[path] = path
+    for relative, source in adapter_inventory.runtime_files(
+        root / "adapters/agent-memory", args.plugin_dir
+    ).items():
+        # Keep the metadata-verified index bytes even if the build tree changes later.
+        if relative == Path("openclaw/dist/index.js"):
+            continue
+        files[f"adapters/agent-memory/{relative}"] = (
+            source.read_bytes(),
+            0o755 if source.suffix == ".sh" else 0o644,
+        )
     for destination, source in sources.items():
         files[destination] = (
             (root / source).read_bytes(),

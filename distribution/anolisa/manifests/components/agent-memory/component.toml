@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.2.17"
 
 [backends.rpm]
 package = "agent-memory"
@@ -49,6 +49,7 @@ mode = "0644"
 source = "share/anolisa/agent-memory/anolisa-memory@.service"
 target = "{userunitdir}/anolisa-memory@.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.layout.files]]
 source = "adapters/agent-memory/manifest.json"

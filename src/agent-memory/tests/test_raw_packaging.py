@@ -22,12 +22,13 @@ class RawPackaging(unittest.TestCase):
         self.work = Path(self.tmp.name)
         self.source = self.work / "source"
         self.source.mkdir()
-        for name in (".anolisa", "config", "adapters"):
+        for name in ("packaging/anolisa", "config", "adapters"):
             shutil.copytree(
                 ROOT / name,
                 self.source / name,
                 ignore=shutil.ignore_patterns("node_modules", "dist", "coverage"),
             )
+        shutil.copytree(ROOT / "packaging/systemd", self.source / "packaging/systemd")
         shutil.copy2(ROOT / "Cargo.toml", self.source / "Cargo.toml")
         self.version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
         self.bin = self.work / "private-bin"
@@ -103,6 +104,23 @@ class RawPackaging(unittest.TestCase):
                 self.assertEqual(contract["component"]["version"], self.version)
                 self.assertIn(arch, contract["component"]["platform"]["arch"])
                 self.assertFalse(contract["component"]["services"][0]["start"])
+                unit_path = "share/anolisa/agent-memory/anolisa-memory@.service"
+                unit = files[unit_path].decode()
+                self.assertEqual(
+                    unit,
+                    (self.source / "packaging/systemd/anolisa-memory@.service.in").read_text(),
+                )
+                self.assertIn("ExecStart={bindir}/agent-memory serve", unit)
+                self.assertNotIn("ExecStart=/usr/bin/agent-memory", unit)
+                unit_mapping = next(
+                    item
+                    for item in contract["component"]["layout"]["files"]
+                    if item.get("source") == unit_path
+                )
+                self.assertEqual(unit_mapping["target"], "{userunitdir}/anolisa-memory@.service")
+                self.assertEqual(unit_mapping["render"], "anolisa-paths-v1")
+                minimum = contract["component"]["contract"]["min_anolisa_version"]
+                self.assertGreaterEqual(tuple(map(int, minimum.split("."))), (0, 2, 17))
                 for item in tar.getmembers():
                     self.assertEqual((item.uid, item.gid, item.mtime), (0, 0, 1700000000))
                     executable = item.name.endswith(".sh") or item.name == "./bin/agent-memory"

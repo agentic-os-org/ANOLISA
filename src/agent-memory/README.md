@@ -168,7 +168,7 @@ plugin output directory, target, timestamp and TOML build metadata inputs.
 Metadata binds `version`, `target_os`, `target_arch`,
 `binaries.agent-memory` (SHA256) and `plugin.sha256` to the supplied files.
 The packager does not build or execute binaries. It renders the raw installation
-contract from `.anolisa/component.raw.toml.in` and Cargo.toml; the RPM contract
+contract from `packaging/anolisa/raw/component.toml.in` and Cargo.toml; the RPM contract
 remains separate. Both installation modes leave the user service stopped.
 Run `python3 tests/test_raw_packaging.py` for packaging regressions.
 

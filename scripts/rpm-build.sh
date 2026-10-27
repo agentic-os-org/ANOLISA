@@ -651,7 +651,7 @@ build_agent_memory() {
     log "Building RPM: agent-memory"
     log "=========================================="
 
-    local spec_in="${MEM_DIR}/agent-memory.spec.in"
+    local spec_in="${MEM_DIR}/packaging/rpm/agent-memory.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -691,7 +691,7 @@ build_agent_memory() {
     # source archive — the spec's %install copies the prebuilt bundle
     # rather than running npm during rpmbuild (no network in mock).
     log "Step 1/4: Building OpenClaw TS plugin..."
-    cd "$MEM_DIR" && make build-openclaw-plugin
+    cd "$MEM_DIR" && make build-openclaw-plugin generate-component-contract
 
     # The source-archive top-level dir must match `%setup -n %{name}-%{version}`
     # in the spec, so the unpacked tree lines up with the CI-produced
@@ -718,6 +718,9 @@ build_agent_memory() {
         --exclude='.tsbuildinfo' \
         --exclude='tests' \
         . | tar -xf - -C "$pkg_dir"
+
+    install -p -m 0644 "$MEM_DIR/target/packaging/anolisa/rpm/component.toml" \
+        "$pkg_dir/packaging/anolisa/rpm/component.toml"
 
     # Vendor tarball for --offline cargo build. Must run BEFORE copying
     # .cargo/config.toml into the source tarball so the vendored-sources

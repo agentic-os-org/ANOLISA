@@ -58,8 +58,11 @@ git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/agent-memory
 
 make build         # cargo build --release --locked
-sudo make install  # install to /usr/local
+make install       # install to ~/.local
 ```
+
+Run these commands as your normal user; the executable is installed to
+`~/.local/bin/agent-memory`.
 
 Build deps: Rust ≥ 1.85 (edition 2024; CI pins 1.89 to share the monorepo toolchain), cmake (libgit2 vendored), systemd-devel (journald audit fan-out).
 
@@ -98,6 +101,14 @@ Add to your MCP config:
 `/usr/share/anolisa/mcp-servers/agent-memory.json` lists tool names for auto-discovering clients.
 
 ### OpenClaw
+
+For a source installation for your user, register the plugin with this
+command instead of the RPM path shown below:
+
+```bash
+bash "${XDG_DATA_HOME:-$HOME/.local/share}/agent-memory/adapters/openclaw/scripts/install.sh"
+openclaw gateway restart
+```
 
 The bundled plugin forwards 4 memory-contract tools (`anolisa_memory_search`, `anolisa_memory_get`, `memory_observe`, `memory_get_context`) to agent-memory:
 
