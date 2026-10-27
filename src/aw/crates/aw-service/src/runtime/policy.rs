@@ -323,6 +323,14 @@ impl Runtime {
                 Error::Configuration(_) => ("configuration_rejected".into(), None),
                 Error::Io(_) => ("service_failure".into(), None),
             };
+            // A terminal write may reach disk before reporting failure. The
+            // committed Host is fenced; never append a contradictory rejection.
+            if code == "policy_activation_indeterminate" {
+                return Err(Error::Attempt {
+                    code,
+                    audit_key: key.clone(),
+                });
+            }
             let active = self.policy_revision(instance_id)?;
             self.audit.append(
                 &key,
@@ -432,7 +440,7 @@ impl Runtime {
             {
                 return Err(rejected("policy_update_cancelled"));
             }
-            self.audit.append(key, json!({"phase":"closed","status":"active",
+            self.audit.append(key, json!({"phase":"activating",
                 "previous_revision":expected,"policy_revision":host.revision(),"preparation_audit":attempt}))?;
             // Durable writes can block while the native owner exits. Do not
             // activate a prepared policy after losing its execution boundary.
@@ -446,6 +454,14 @@ impl Runtime {
             let revision = host.revision().to_owned();
             instance.host = std::sync::Arc::new(host);
             instance.bytes = bytes.to_vec();
+            if self.audit.append(key, json!({"phase":"closed","status":"active",
+                "previous_revision":expected,"policy_revision":revision,"preparation_audit":attempt})).is_err() {
+                // Fence callers already waiting on admission before releasing
+                // the gate. Recovery requires a fresh service generation.
+                instance.closing = true;
+                self.stopped.store(true, Ordering::Release);
+                return Err(rejected("policy_activation_indeterminate"));
+            }
             // Completed native correlation claims remain retained across updates;
             // an old callback cannot receive a fresh execution budget.
             Ok(

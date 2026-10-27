@@ -29,6 +29,9 @@ pub(crate) struct Audit {
     /// Test-only proof that activation reached the blocked durable-write boundary.
     #[cfg(test)]
     pub(crate) activation_appends: std::sync::atomic::AtomicUsize,
+    /// Test-only terminal-write failure: 1 before writing, 2 after writing.
+    #[cfg(test)]
+    pub(crate) activation_failure: std::sync::atomic::AtomicUsize,
 }
 
 impl Audit {
@@ -66,6 +69,8 @@ impl Audit {
             activation_gate: Mutex::new(()),
             #[cfg(test)]
             activation_appends: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            activation_failure: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -102,14 +107,28 @@ impl Audit {
             self.started_appends.fetch_add(1, Ordering::Release);
         }
         #[cfg(test)]
-        let _activation = if record["phase"] == "closed" && record["status"] == "active" {
+        let _activation = if record["phase"] == "activating" {
             self.activation_appends.fetch_add(1, Ordering::Release);
             Some(self.activation_gate.lock().unwrap())
         } else {
             None
         };
         self.mutate(|journal| {
+            #[cfg(test)]
+            let failure = if record["phase"] == "closed" && record["status"] == "active" {
+                self.activation_failure.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            #[cfg(test)]
+            if failure == 1 {
+                return Err(std::io::Error::other("terminal audit write failed").into());
+            }
             let written = journal.append(key, &record)?;
+            #[cfg(test)]
+            if failure == 2 {
+                return Err(std::io::Error::other("terminal audit acknowledgement failed").into());
+            }
             if record["phase"] == "completed" {
                 // Presentation is best effort and cannot turn a durable successful
                 // write into an event failure. Keep the journal lock until publication

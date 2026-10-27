@@ -787,6 +787,10 @@
       "target": "aw-cli/test/qoder_sdk",
       "test": "resident_reload::ordinary_queries_update_hooks_post_and_mcp_after_cleanup"
     },
+    "resident-policy-audit-fence": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::terminal_audit_failure_fences_committed_policy_without_false_rejection"
+    },
     "resident-policy-deadline": {
       "target": "aw-cli/lib/aw_cli",
       "test": "cli::hook::deadline_tests::discovery_consumes_one_transport_budget_without_renewal"
@@ -1115,6 +1119,7 @@
         "resident-policy-race",
         "resident-policy-owner-exit",
         "resident-policy-capacity",
+        "resident-policy-audit-fence",
         "resident-policy-deadline"
       ],
       "security": [
@@ -1173,6 +1178,7 @@
         "resident-policy-capacity",
         "qoder-sdk-resident-reload",
         "qoder-sdk-startup-policy-receipt",
+        "resident-policy-audit-fence",
         "resident-policy-deadline"
       ],
       "security": [

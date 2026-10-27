@@ -243,6 +243,22 @@ fn resident_claim_covers_preparation_unacknowledged_scope_and_final_cleanup() {
         f.lifecycle(LifecyclePhase::RequestEnd, "cleanup");
         let updated = f.update(&original, &candidate).unwrap();
         assert_ne!(updated["policy_revision"], original);
+        let audit = f
+            .runtime
+            .audit
+            .read(updated["audit_key"].as_str().unwrap())
+            .unwrap();
+        let records = audit["records"].as_array().unwrap();
+        assert_eq!(audit["terminal"], true);
+        assert_eq!(records[records.len() - 2]["record"]["phase"], "activating");
+        assert_eq!(records.last().unwrap()["record"]["status"], "active");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["record"]["phase"] == "closed")
+                .count(),
+            1
+        );
         rejects(
             f.call(Operation::ScopePolicy {
                 instance_id: task.instance_id.clone(),
@@ -415,9 +431,73 @@ fn owner_exit_during_activation_audit_preserves_previous_policy() {
         drop(guard);
         update.join().unwrap()
     });
+    let key = match &result {
+        Err(Error::Attempt { audit_key, .. }) => audit_key,
+        other => panic!("expected audited rejection: {other:?}"),
+    };
+    let audit = f.runtime.audit.read(key).unwrap();
+    let records = audit["records"].as_array().unwrap();
+    assert_eq!(audit["terminal"], true);
+    assert_eq!(records[records.len() - 2]["record"]["phase"], "activating");
+    assert_eq!(records.last().unwrap()["record"]["status"], "rejected");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["record"]["phase"] == "closed")
+            .count(),
+        1
+    );
+    assert!(!records
+        .iter()
+        .any(|record| record["record"]["status"] == "active"));
     rejects(result, "stale_process");
     assert_eq!(f.revision(), original);
     assert!(!Path::new("/proc").join(child.id().to_string()).exists());
+}
+
+#[test]
+fn terminal_audit_failure_fences_committed_policy_without_false_rejection() {
+    for failure in [1, 2] {
+        let f = Fixture::new("qwenpaw");
+        let original = f.revision();
+        let mut candidate = f.document.clone();
+        candidate["spec"]["execution"]["default_event_budget_ms"] = json!(3456);
+        f.runtime
+            .audit
+            .activation_failure
+            .store(failure, Ordering::Release);
+        let result = f.update(&original, &candidate);
+        let key = match &result {
+            Err(Error::Attempt { audit_key, .. }) => audit_key,
+            other => panic!("expected indeterminate activation: {other:?}"),
+        };
+        let audit = f.runtime.audit.read(key).unwrap();
+        let records = audit["records"].as_array().unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record["record"]["status"] == "rejected"));
+        assert_eq!(audit["terminal"], failure == 2);
+        assert_eq!(
+            records.last().unwrap()["record"]["phase"],
+            if failure == 1 { "activating" } else { "closed" }
+        );
+        rejects(result, "policy_activation_indeterminate");
+        assert_ne!(f.revision(), original);
+        assert!(f.runtime.stopped.load(Ordering::Acquire));
+        assert!(!f.runtime.audit.healthy());
+        rejects(f.open(), "service_stopping");
+        // A caller already past dispatch's stopped check still observes the
+        // closing fence under the same gate used by activation.
+        rejects(
+            f.runtime.lifecycle(
+                &f.id(),
+                std::process::id(),
+                LifecyclePhase::RequestStart,
+                "late-task",
+            ),
+            "unknown_or_draining_instance",
+        );
+    }
 }
 
 struct OwnerChild(std::process::Child);
