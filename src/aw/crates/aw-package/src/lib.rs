@@ -3,15 +3,11 @@
 
 pub mod config_edit;
 mod configuration;
-pub mod database;
-pub mod description;
-mod filesystem;
-mod install;
-mod manifest;
-pub mod open_bundle;
 pub mod package;
-pub mod plan;
-pub mod transaction;
+mod store;
+
+pub use store::{database, description, open_bundle, plan, transaction};
+pub(crate) use store::{filesystem, install, manifest};
 
 pub use configuration::{configure, document, Policy, Settings};
 pub use install::{

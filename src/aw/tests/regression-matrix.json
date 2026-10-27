@@ -255,15 +255,15 @@
     },
     "package-interrupted-rollback": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::sigkill_before_database_commit_rolls_back_and_replay_is_idempotent"
+      "test": "store::transaction::tests::sigkill_before_database_commit_rolls_back_and_replay_is_idempotent"
     },
     "package-interrupted-commit": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::sigkill_after_commit_and_before_cleanup_finishes_without_undoing_payload"
+      "test": "store::transaction::tests::sigkill_after_commit_and_before_cleanup_finishes_without_undoing_payload"
     },
     "package-recovery-conflict": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::recovery_keeps_user_replacements_and_keeps_the_old_writer_closed"
+      "test": "store::transaction::tests::recovery_keeps_user_replacements_and_keeps_the_old_writer_closed"
     },
     "package-runtime-lease": {
       "target": "aw-exec/test/packages",
@@ -279,7 +279,7 @@
     },
     "package-system-lock-migration": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::committed_system_lock_permissions_survive_interrupted_cleanup_and_retry"
+      "test": "store::transaction::tests::committed_system_lock_permissions_survive_interrupted_cleanup_and_retry"
     },
     "package-manager-authority": {
       "target": "aw-package/test/management",
@@ -287,23 +287,23 @@
     },
     "package-capacity-admission": {
       "target": "aw-package/lib/aw_package",
-      "test": "plan::install::tests::combined_prefix_byte_limit_blocks_append_without_preventing_later_removal"
+      "test": "store::plan::install::tests::combined_prefix_byte_limit_blocks_append_without_preventing_later_removal"
     },
     "package-journal-publication-gap": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::journal_creation_gap_retires_only_its_empty_directory_and_allows_new_operations"
+      "test": "store::transaction::tests::journal_creation_gap_retires_only_its_empty_directory_and_allows_new_operations"
     },
     "package-journal-retirement-gap": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::final_journal_unlink_gap_preserves_committed_payload_and_recovery_is_idempotent"
+      "test": "store::transaction::tests::final_journal_unlink_gap_preserves_committed_payload_and_recovery_is_idempotent"
     },
     "package-migration-retry": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::a_rolled_back_migration_does_not_reserve_future_legacy_record_bytes"
+      "test": "store::transaction::tests::a_rolled_back_migration_does_not_reserve_future_legacy_record_bytes"
     },
     "package-journal-capacity": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::journal::snapshots::tests::maximum_database_snapshots_fit_the_journal_and_preserve_exact_bytes"
+      "test": "store::transaction::journal::snapshots::tests::maximum_database_snapshots_fit_the_journal_and_preserve_exact_bytes"
     },
     "package-doctor-registration-metadata": {
       "target": "aw-package/test/database",
@@ -339,27 +339,27 @@
     },
     "package-prefix-action-capacity": {
       "target": "aw-package/lib/aw_package",
-      "test": "plan::install::tests::capacity::aggregate_journal_admission_keeps_whole_prefix_removal_possible"
+      "test": "store::plan::install::tests::capacity::aggregate_journal_admission_keeps_whole_prefix_removal_possible"
     },
     "package-metadata-action-capacity": {
       "target": "aw-package/lib/aw_package",
-      "test": "plan::install::tests::capacity::locator_and_new_parent_directories_count_toward_transaction_capacity"
+      "test": "store::plan::install::tests::capacity::locator_and_new_parent_directories_count_toward_transaction_capacity"
     },
     "package-journal-capacity-matches-planning": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::capacity::action_capacity_matches_preparation_for_locator_and_legacy_record_changes"
+      "test": "store::transaction::tests::capacity::action_capacity_matches_preparation_for_locator_and_legacy_record_changes"
     },
     "package-journal-capacity-overflow": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::capacity::journal_record_guards_reject_action_and_directory_overflow_before_publication"
+      "test": "store::transaction::tests::capacity::journal_record_guards_reject_action_and_directory_overflow_before_publication"
     },
     "package-commit-sync-retains-recovery": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::durability::failed_database_directory_sync_retains_backups_until_recovery_confirms_commit"
+      "test": "store::transaction::tests::durability::failed_database_directory_sync_retains_backups_until_recovery_confirms_commit"
     },
     "package-commit-sync-rollback": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::tests::durability::failed_commit_sync_keeps_rollback_material_if_the_old_database_returns"
+      "test": "store::transaction::tests::durability::failed_commit_sync_keeps_rollback_material_if_the_old_database_returns"
     },
     "package-legacy-runtime-rejection": {
       "target": "aw-package/test/management",
@@ -379,31 +379,31 @@
     },
     "package-journal-byte-count": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::capacity::tests::counted_journal_matches_real_serde_and_bounds_shorter_runtime_identities"
+      "test": "store::transaction::capacity::tests::counted_journal_matches_real_serde_and_bounds_shorter_runtime_identities"
     },
     "package-journal-deep-path-bytes": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::capacity::tests::deep_parent_paths_and_legacy_locator_actions_enter_the_encoded_budget"
+      "test": "store::transaction::capacity::tests::deep_parent_paths_and_legacy_locator_actions_enter_the_encoded_budget"
     },
     "package-journal-existing-parent-bytes": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::capacity::tests::existing_parents_keep_the_same_conservative_byte_reservation"
+      "test": "store::transaction::capacity::tests::existing_parents_keep_the_same_conservative_byte_reservation"
     },
     "package-journal-final-marker-bytes": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::capacity::tests::legacy_final_locator_removal_reserves_its_post_gate_before_identity"
+      "test": "store::transaction::capacity::tests::legacy_final_locator_removal_reserves_its_post_gate_before_identity"
     },
     "package-journal-future-database-growth": {
       "target": "aw-package/lib/aw_package",
-      "test": "transaction::capacity::tests::future_removal_reserves_maximum_snapshots_despite_current_database_growth"
+      "test": "store::transaction::capacity::tests::future_removal_reserves_maximum_snapshots_despite_current_database_growth"
     },
     "package-plan-byte-limit": {
       "target": "aw-package/lib/aw_package",
-      "test": "plan::capacity::tests::encoded_byte_overflow_blocks_execution_before_any_database_or_payload_write"
+      "test": "store::plan::capacity::tests::encoded_byte_overflow_blocks_execution_before_any_database_or_payload_write"
     },
     "package-plan-removal-byte-reserve": {
       "target": "aw-package/lib/aw_package",
-      "test": "plan::capacity::tests::installation_admission_reserves_the_future_whole_removal_encoded_budget"
+      "test": "store::plan::capacity::tests::installation_admission_reserves_the_future_whole_removal_encoded_budget"
     },
     "qoder-sdk-lifecycle": {
       "target": "aw-cli/test/qoder_sdk",

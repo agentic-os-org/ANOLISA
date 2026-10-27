@@ -172,7 +172,11 @@ impl Fixture {
 
     fn kill(&self, phase: &str, legacy: bool) {
         let child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "transaction::tests::crash_child", "--nocapture"])
+            .args([
+                "--exact",
+                "store::transaction::tests::crash_child",
+                "--nocapture",
+            ])
             .env("AW_PACKAGE_TRANSACTION_CHILD", &self.root)
             .env(
                 "AW_PACKAGE_TRANSACTION_LEGACY",
