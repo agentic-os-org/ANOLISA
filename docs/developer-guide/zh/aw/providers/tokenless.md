@@ -11,24 +11,25 @@ Qoder、OpenClaw、QwenPaw、Hermes、Pi、AgentScope SDK 2.0.6 及 Claude SDK �
 
 ## 安装与启用
 
-使用 [AW Preview 包](../../../../user-guide/zh/aw/installation.md)。`aw-provider-tokenless` 包含从同一源码提交
-构建的桥接程序和 Tokenless CLI，以及固定到
-`b1c0dc00649c50fbe8930f849c800d4d6ca12091` 的 RTK v0.49.0，附带 Tokenless 的
-统计和 pytest 补丁。要求匹配的 `aw-core`；`aw-all-in-one` 将完全相同的组件内容
-和回执与 core、sec-core 组合。无需 Python wheel 或 Tokenless 原生插件；Agent
-安装及其运行依赖仍由用户准备。
+使用 [AW 交付归档](../../../../user-guide/zh/aw/installation.md)。Provider
+归档只包含桥接程序、示例与模板。Tokenless 后端 CLI 和带补丁的
+RTK 0.49.0 由后端 owner 单独安装。Provider prefix 不包含后端程序或 RTK
+源码/来源回执。
 
-受管 RTK 的哈希与来源随包交付；生成器写入已校验的路径与摘要。安装前缀不能含 `:`。缺失或校验失败按 `on_error` 处理。
+通过 `RTK_BINARY` 与 `RTK_SHA256` 提供普通 RTK 可执行文件的绝对路径和
+SHA-256，这些值不会将后端所有权转交给 AW。父目录不能含 `:`。PreTool
+校验可执行文件、摘要与可信父目录；失败按 `on_error` 处理，不回退用户 RTK。
+PostTool 和只读 view 不依赖 RTK。
 
-先安装 core，再把匹配的 Tokenless 扩展安装到同一前缀；也可以将 all-in-one 安装到新
-前缀。Qoder/OpenClaw 使用 `aw config init --provider tokenless`，并提供既有
-Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生成执行前
-sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
-原有单独 `sec-core` 选项保持既有行为。
+通过普通 Makefile 安装 AW CLI；可选 Provider 桥接程序通过 Provider API
+安装到独立扩展 prefix。初始化时选择显式 Tokenless 模板，提供 `PROVIDERS_DIR`、`TOKENLESS_CLI`、
+`RTK_BINARY`、`RTK_SHA256`。组合模板另外要求 `SEC_CORE_CLI` 和 `SOCKET`。
+模板没有包要求，原生 Provider prefix 不登记 AW 记录也能使用。
+完整命令见[用户指南](../../../../user-guide/zh/aw/tokenless.md)。安装文件不启用 Provider。
 
 受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
-替换可执行路径，并将 `RTK_SHA256_FROM_RECEIPT` 替换为
-`aw list --installed --prefix "$AW_PREFIX" --json` 安装清单中 Tokenless 包的 RTK 文件 `sha256`，
+替换可执行路径，并将 `RTK_SHA256_OF_EXECUTABLE` 替换为
+单独安装的实际 RTK 可执行文件的 SHA-256，
 将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
 启动参数见 [AW 指南](../validation.md)。
 
@@ -42,7 +43,7 @@ Pi 使用 [Pi 启动指南](../agents/pi.md)中的 SDK 应用工厂；
 
 Provider 私有配置只接受 `{version: 1}`。固定 argv 为
 `aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`，可追加
-`--rtk ABS_FILE --rtk-sha256 HEX`。包配置生成器从已校验的安装内容生成这两个参数；
+`--rtk ABS_FILE --rtk-sha256 HEX`。发行模板从显式后端路径和校验和填入这两个参数；
 不含它们的手写配置沿用 Tokenless 原生依赖发现。view 命令不包含这两个参数。
 桥接通过 Protocol v2 调用 `tokenless compress`，为该子进程设置 `TOKENLESS_DATA_DIR`。CLI 统计使用 AW
 提供的 Agent、Session 和工具调用标识。CLI 统计度量选中的压缩，不证明原生采用。
@@ -208,7 +209,8 @@ cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
 ```
 
 将生成的 `providers/tokenless/target/debug/aw-provider-tokenless` 和
-`src/tokenless/target/debug/tokenless` 路径填入共用示例。干净源码的 Preview 构建器
-支持 `--component tokenless` 或 `--component all`。
+`src/tokenless/target/debug/tokenless` 路径填入共用示例。构建独立桥接归档时，
+为 distribution 的 `aw-packages` 目标选择 `COMPONENTS=tokenless`。
+Tokenless 后端与 RTK 仍由独立 core 组件交付。
 
 常驻 Claude 客户端通过 aw_claude.create_sdk_mcp_server 接入进程内 MCP 结果。公开 handler 提供可靠 is_error，成功单文本块可压缩，错误、多块、媒体和结构化结果保留 envelope。详见[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md)。Schema/BeforeModel 与 Retrieve 仍需独立能力准入和接点工作。

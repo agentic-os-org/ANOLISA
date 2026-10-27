@@ -51,4 +51,4 @@ aw doctor --prefix "$AW_PREFIX" --json
 
 `aw commands --json` 返回 `format`、`name`、`version` 和 `commands`，每项列出命令路径和可见参数。
 `required` 仅标记无条件必需参数。补全使用同一声明，支持 bash、zsh、fish、powershell、elvish。
-帮助和发现命令离线运行。版本 `aw -V` 为 CLI crate 版本，Preview 包标识由安装记录提供。
+帮助和发现命令离线运行。`aw -V` 报告 CLI crate 版本。

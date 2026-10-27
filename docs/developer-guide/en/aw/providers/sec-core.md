@@ -39,30 +39,20 @@ existing daemon. Both paths are required and absolute. `--help` prints usage.
 The process reads one EOF-terminated AW Provider JSON request on stdin and writes
 one response on stdout. It is normally launched by the Host, not interactively.
 
-## Packaged backend and explicit health diagnostics
+## External backend and explicit health diagnostics
 
-The Preview sec-core Provider package includes `agent-sec-cli`,
-`agent-sec-daemon`, and `agent-sec-daemon-health` from the same source build.
-Their hashes and executable modes are covered by the component receipt in both
-split and all-in-one installations. Official systemd/configuration templates are
-included under `share/aw/providers/sec-core/` as reference assets; installing the
-AW package does not register a service or modify `/etc`.
-
-Reuse an existing root `agent-sec-core.service` and its socket. For a new system
-backend, use the [sec-core installation guide](../../../../user-guide/en/agent-sec-core/index.md)
-and the official system package's service lifecycle. Its current component
-manifest advertises Linux x86_64; a locally built AW ARM64 package does not imply
-an official sec-core ARM64 release. The source `make install-core-v2` target can
-consume the packaged binaries through `V2_BIN_BUILD_DIR`, but overwrites its
-system binary/unit destinations and must not be run over an existing managed
-installation. Do not point a root service at a user-writable AW prefix.
+The Provider package contains the bridge, schema, examples and configuration
+resources, not `agent-sec-cli`, `agent-sec-daemon` or `agent-sec-daemon-health`.
+Install and maintain these through the [sec-core guide](../../../../user-guide/en/agent-sec-core/index.md)
+and the backend's own service lifecycle. Reuse its actual socket. Root services
+must not execute programs from user-writable installations.
 
 An installer or diagnostic consumer can explicitly query the installed helper:
 
 ```bash
-AW_SEC_PROVIDER="$AW_PREVIEW_PREFIX/libexec/aw/providers/sec-core"
+AW_SEC_PROVIDER="$AW_EXTENSION_PREFIX/libexec/aw/providers/sec-core"
 "$AW_SEC_PROVIDER/aw-provider-sec-core" --health \
-  --helper "$AW_SEC_PROVIDER/agent-sec-daemon-health" \
+  --helper "$(command -v agent-sec-daemon-health)" \
   --socket /run/agent-sec-core/daemon.sock
 ```
 
@@ -87,7 +77,7 @@ target admitted a Provider or that a scanner found no risk. This does not change
 Diagnostic success/failure does not replace each invocation's configured
 `on_error` behavior; backend loss still blocks when `on_error: block` applies.
 
-AW uninstall removes its receipt-owned helper/templates but retains the
+AW uninstall removes only its managed bridge/resources and retains the
 independently managed system service, `/etc` configuration and backend data.
 Upgrade or remove that backend through its owning system package. AW currently
 has no automatic service installation, upgrade or removal bridge.

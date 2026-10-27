@@ -73,8 +73,15 @@ cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 The bundled workspaces currently use repository-local AW library paths; Tokenless
 composition tests also depend on the sec-core bridge. These implementations cannot
 yet build outside the repository. Pinned SDKs, independent releases and artifact
-composition tests are deferred. Preview delivers core and Providers as one build
-set, with installation checking matching versions and source commits.
+composition tests are deferred. Integration builds test framework, Provider and
+backend versions together; local extensions retain independent IDs and versions.
 
-`aw-build` produces built-in component bundles. Community Providers can ship independently or use the [local package format](../reference/packages.md) with `aw install`. Bundling requires package manifest
-and installation acceptance support.
+`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` invokes the scripts in
+`distribution/packaging/aw/` to build independent core and Provider archives.
+Local Provider extension
+installation accepts verified independent `package.json` bundles in the
+[local Provider package format](../reference/packages.md), but does not
+download community Providers or resolve product names. `aw-package` keeps its
+Provider file transactions private; generic software and native packages retain
+their actual installation manager. An externally installed Provider connects through its declared
+`transport.argv`; protocol use does not require an AW-owned installation record.

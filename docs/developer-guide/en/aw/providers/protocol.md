@@ -249,7 +249,7 @@ Adapter replaces its authorized text slot and preserves the native envelope and
 failure status. This is a
 candidate, not proof that a model consumed it; AW's journal excludes the text.
 The schema additions retain the experimental v1alpha1 protocol. Deploy matching
-CLI, service and Providers from the same Preview build; older implementations
+CLI, service and Providers from the same validated build; older implementations
 reject unsupported projections/effects rather than ignoring them.
 
 ### Tokenless composition

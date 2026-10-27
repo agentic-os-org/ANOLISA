@@ -6,7 +6,8 @@ Follow the [installation guide](../../../../user-guide/en/aw/installation.md) fo
 
 ## Install local packages
 
-`aw install` accepts unpacked Preview bundles or independent packages containing `package.json` and `payload/`. `--bundle` must be absolute.
+`aw install` accepts an unpacked local Provider extension containing `package.json` and `payload/`.
+The description must declare `provider.protocol: aw-provider/v1alpha1`; `manifest.json`, AW core and ordinary backend packages are rejected. `--bundle` must be absolute.
 Set `AW_PREFIX` to your absolute installation path, then preview and execute. This example uses user scope.
 
 ```bash
@@ -17,14 +18,17 @@ aw doctor --prefix "$AW_PREFIX" --json
 aw uninstall --prefix "$AW_PREFIX" --scope user --yes
 ```
 
-Root-managed installations use `sudo` and explicit `--scope system`. Keep the same scope and prefix for core, extensions and uninstall.
-Preview Providers require core from the same build; ordinary tools can be installed independently. Exact dependencies must exist in the same prefix or arrive in the same Preview composite bundle.
-Upgrade existing components into a new prefix; the installer rejects in-place replacement.
+Root-managed installations use `sudo` and explicit `--scope system`. Keep the same scope and prefix for Provider installation and removal.
+All declared paths, including `bin/` and `share/`, are relative to this single prefix. Exact dependencies must already exist in the same prefix.
+Provider IDs and versions are independent of AW core. Upgrade an existing Provider into a new prefix; the installer rejects in-place replacement.
+
+Build AW, Providers and backends through their Makefiles and distribution scripts; RPM installation and ownership stay with the native package manager.
+These installations need no AW package record: configure Providers through explicit `transport.argv`. See the [build instructions](../../../../../contribute/en/aw/building.md).
 
 Plans list files, dependencies and blockers; blocked plans exit 1. Execution rechecks inputs. Limits are 1 GiB per file, 4 GiB and 32767 owned files per prefix, plus bounded recovery records.
 The filesystem must support `O_TMPFILE`, hard links, atomic rename and durable directory synchronization.
 
-## Database and legacy installations
+## Database and ownership
 
 | Scope | Database |
 | --- | --- |
@@ -32,11 +36,9 @@ The filesystem must support `O_TMPFILE`, hard links, atomic rename and durable d
 | system | `/var/lib/aw/packages` |
 
 `sudo` does not select system scope. Queries with `--prefix` use the database location recorded by that installation.
-`installed.json` records packages and file ownership; `transactions/` holds unfinished operations. `<prefix>/.aw-packages/aw-core.json` records the database location.
-These records are separate from AW runtime `state_dir`.
-
-Legacy Preview component records reside in `<prefix>/.aw-packages/*.json`. Queries require explicit prefix; first-write migration archives the old JSON.
-For `runtime_unknown`, retain the old installation and use a new prefix. Old installers reject the new database locator format.
+`installed.json` records Provider packages and file ownership; `transactions/` holds unfinished operations.
+`<prefix>/.local-packages/installation.json` records the database location and authority; `<prefix>/.local-install.lock` protects files in that prefix.
+These records are separate from AW runtime `state_dir`. AW accepts current Provider records without importing historical receipts, ANOLISA registrations or native RPM ownership.
 
 ## Recover failures
 

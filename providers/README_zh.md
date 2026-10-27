@@ -8,7 +8,7 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 | Provider | 能力 | 来源 |
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README_zh.md) | 命令安全检查 | 第一方 sec-core CLI 与后端 |
-| [Tokenless](tokenless/README_zh.md) | 工具输出压缩和命令建议 | 第一方 Tokenless CLI 与随包 RTK |
+| [Tokenless](tokenless/README_zh.md) | 工具输出压缩和命令建议 | 单独安装的 Tokenless CLI 与兼容 RTK |
 
 ## 协作与分发
 
@@ -31,9 +31,15 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 
 目前两个 Rust Provider 通过仓库内路径复用 AW 库，Tokenless 组合测试还使用 sec-core
 桥接库，尚不支持仓库外构建。SDK 独立发布和基于产物的组合测试留待后续。
-Preview 按同一批构建交付，安装时校验 core 与 Provider 的版本和源码提交一致。
+集成构建共同选择并验证兼容的框架、Provider 与后端版本；扩展包有独立的 ID 和版本。
 
-现有打包器支持 core、sec-core 和 Tokenless。新增目录不会自动加入安装包；
+distribution 的 `make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
+`distribution/packaging/aw/` 中的普通脚本构建独立 core、sec-core Provider、Tokenless Provider 归档。新增目录不会自动加入安装包；
 独立 Provider 自带安装方式。若要纳入统一分发，还需补包清单、构建安装逻辑及生命周期测试。
+
+AW 的本地 raw 扩展安装器只接受声明 `aw-provider/v1alpha1` 的新 `package.json`
+bundle，拒绝 `manifest.json`、core 和普通后端 bundle。运行 Provider 不要求使用这个安装器
+或其数据库：在 `transport.argv` 中配置已安装的程序即可。以 RPM 交付 Provider
+时，应声明后端 core 依赖并保留原生管理权；后端 owner 交付后端程序与服务。
 
 协议、示例和验证入口见 [Provider 开发与分发](../docs/developer-guide/zh/aw/providers/index.md)。

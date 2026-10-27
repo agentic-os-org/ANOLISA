@@ -15,7 +15,7 @@ AW 通过 `aw inspect --config ABS_FILE --json` 提供单个桌面快照，不�
 为两种入口登记相同 CLI/数据目录。
 
 `aw-provider-view/v1alpha1` 独立于 `aw-provider/v1alpha1` 和
-`aw-service/v1alpha7`，事件请求/响应 schema 保持不变。使用匹配的 Preview 二进制
+`aw-service/v1alpha7`，事件请求/响应 schema 保持不变。使用匹配的 二进制
 和配置；旧二进制可能拒绝新登记。缺失或不支持的展示能力不改变 sec-core 检查、
 after 完成观察或用户 Hook 调度。
 

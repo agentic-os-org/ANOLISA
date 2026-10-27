@@ -22,8 +22,8 @@ Logs identify failing commands; each command has a deadline and owned-process cl
 | Python gates | `python3 -B -m unittest discover -s src/aw/tests -p 'test_ci_*.py'` |
 | Host / service / CLI | From `src/aw`, `cargo test --locked -p aw-host -p aw-service -p aw-cli` |
 | Package execution | From `src/aw`, `cargo test --locked -p aw-exec --test packages` |
-| Package database / management | From `src/aw`, `cargo test --locked -p aw-package --test management --test database` |
-| Transaction recovery | From `src/aw`, `cargo test --locked -p aw-package transaction::tests` |
+| Package database / management | From `src/aw`, `cargo test --locked -p aw-package --lib store::tests` and `cargo test --locked -p aw-package --lib provider_tests` |
+| Transaction recovery | From `src/aw`, `cargo test --locked -p aw-package --lib store::transaction::tests` |
 | Provider | Independent workspace `cargo test --locked --manifest-path providers/PROVIDER/Cargo.toml` |
 
 ## Change capability support
@@ -43,6 +43,8 @@ See [native and release acceptance](../../contribute/en/aw/testing.md) for execu
 ## Layout and ownership
 
 Shared framework code lives in `crates/`; concrete Providers have independent workspaces under repository-root `providers/`.
+`make -C src/aw build` builds only the AW CLI; `make -C src/aw install` copies prebuilt files using `PREFIX`, `AWPRJ` and optional `DESTDIR`. Providers build and install through their own Makefiles. Backend composition and source archives belong to the distribution Makefile and `distribution/packaging/aw/` scripts.
+`aw install --bundle` manages local Provider extensions, not AW core or backend software. Native RPM/DEB packages retain their native owner; externally installed Providers use explicit `transport.argv` without an AW package record.
 Adapters own native dialects, CLI owns arguments, signals and resources, and service owns state, budgets and audit.
 See the [design index](docs/design/en/README.md) for architecture and [AGENTS.md](AGENTS.md#documentation-audiences-and-writing) for documentation audiences and writing rules.
 

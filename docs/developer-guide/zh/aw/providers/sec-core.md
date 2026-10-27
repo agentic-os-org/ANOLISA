@@ -36,26 +36,20 @@ aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH
 两个路径均必填且必须为绝对路径，`--help` 输出用法。进程从 stdin 读取一份以 EOF
 结束的 AW Provider JSON 请求，并向 stdout 写入一份响应。通常由 Host 启动。
 
-## 包内后台与显式健康诊断
+## 外部后台与显式健康诊断
 
-Preview sec-core Provider 包包含同一次源码构建的 `agent-sec-cli`、
-`agent-sec-daemon` 和 `agent-sec-daemon-health`。拆分包和 all-in-one 均通过
-组件回执校验它们的哈希和执行权限。官方 systemd/配置模板作为参考资产放在
-`share/aw/providers/sec-core/`；安装 AW 包不会注册服务或修改 `/etc`。
+Provider 包包含桥接程序、schema、示例和配置资源，不包含 `agent-sec-cli`、
+`agent-sec-daemon` 或 `agent-sec-daemon-health`。按
+[sec-core 指南](../../../../user-guide/zh/agent-sec-core/index.md)安装并维护这些
+程序，服务生命周期由后端负责。复用实际 socket；root 服务不能执行用户可写安装
+中的程序。
 
-已有 root `agent-sec-core.service` 时复用其 socket。新后台按照
-[sec-core 安装指南](../../../../user-guide/zh/agent-sec-core/index.md)安装，服务生命周期
-由正式系统包负责。目前组件清单声明 Linux x86_64；本地 AW ARM64 包不代表
-sec-core 已有正式 ARM64 发行。源码 `make install-core-v2` 可通过
-`V2_BIN_BUILD_DIR` 读取本包二进制，但会覆盖目标系统二进制和 unit，不能直接用于
-已有受管理安装。root 服务的执行路径不得指向用户可写的 AW 前缀。
-
-安装器或诊断消费者可显式查询包内 helper：
+安装器或诊断消费者可显式查询后端 helper：
 
 ```bash
-AW_SEC_PROVIDER="$AW_PREVIEW_PREFIX/libexec/aw/providers/sec-core"
+AW_SEC_PROVIDER="$AW_EXTENSION_PREFIX/libexec/aw/providers/sec-core"
 "$AW_SEC_PROVIDER/aw-provider-sec-core" --health \
-  --helper "$AW_SEC_PROVIDER/agent-sec-daemon-health" \
+  --helper "$(command -v agent-sec-daemon-health)" \
   --socket /run/agent-sec-core/daemon.sock
 ```
 
@@ -74,7 +68,7 @@ AW 移除 sec-core 测试绕过环境变量。helper 非零退出、无效/不�
 现有 `aw inspect`、Provider view 协议及其 unknown 字段不变。诊断结果不会替代
 每次调用的 `on_error` 配置；后台失联时 `on_error: block` 继续阻断。
 
-AW 卸载只移除本包回执拥有的 helper/模板，保留独立管理的系统服务、`/etc`
+AW 卸载只移除其管理的桥接程序/资源，保留独立管理的系统服务、`/etc`
 配置及后台数据。后台升级/移除交给拥有它的系统包；AW 暂无自动服务安装、
 升级或卸载衔接。
 

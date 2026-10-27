@@ -60,7 +60,12 @@ cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 
 目前两个 workspace 通过仓库内路径复用 AW 库，Tokenless 组合测试还依赖 sec-core
 桥接库，尚不能脱离仓库独立构建。固定版本 SDK、独立发布及产物级组合测试留待后续。
-Preview 将 core 与 Provider 作为一批构建产物交付，安装时校验版本和源码提交一致。
+集成构建共同验证框架、Provider 与后端版本；本地扩展有独立的 ID 和版本。
 
-`aw-build` 生成内置组件包；社区 Provider 可自行分发，也可按[本地包格式](../reference/packages.md)交给 `aw install` 安装。
-独立安装不影响协议接入；加入统一安装包需另补打包清单和安装验收。
+`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
+中的脚本构建独立 core 与 Provider 归档。本地 Provider 扩展安装可接受已核验的独立
+`package.json`，格式见[本地 Provider 包参考](../reference/packages.md)，不下载社区
+Provider 或解析产品名称。`aw-package` 的 Provider 文件事务保留为私有实现；
+通用软件与原生包保留实际安装管理者。外部安装的 Provider 通过配置中的 `transport.argv` 接入协议，不要求
+拥有 AW 安装记录。
+纳入发行清单需要显式打包输入和安装验收。

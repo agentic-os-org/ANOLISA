@@ -24,10 +24,16 @@ Bridge code uses [Apache-2.0](../../LICENSE); backend source is
 Build and test from the repository root:
 
 ```bash
-cargo build --locked --manifest-path providers/agent-sec-core/Cargo.toml
+make -C providers/agent-sec-core build
+make -C providers/agent-sec-core install PREFIX=/usr/local DESTDIR="$PWD/target/aw-root"
 cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml
 ```
 
-The Cargo package and binary remain `aw-provider-sec-core`. For AW Preview
-distribution, create matching packages with the
+The Cargo package and binary remain `aw-provider-sec-core`. For independent archive
+distribution, create selected packages with the
 [build guide](../../contribute/en/aw/building.md).
+
+Installation copies only the prebuilt bridge, examples, private schemas where present,
+and documents. It does not install or start the backend. Omit `DESTDIR` for a direct
+file installation with the caller's permissions; `AWPRJ` optionally namespaces private
+paths. Runtime configuration uses the resulting absolute `transport.argv`.

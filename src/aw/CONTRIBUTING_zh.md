@@ -22,8 +22,8 @@ python3 src/aw/scripts/check.py
 | Python 门禁 | `python3 -B -m unittest discover -s src/aw/tests -p 'test_ci_*.py'` |
 | Host / service / CLI | 从 `src/aw` 运行 `cargo test --locked -p aw-host -p aw-service -p aw-cli` |
 | 包执行 | 从 `src/aw` 运行 `cargo test --locked -p aw-exec --test packages` |
-| 包数据库与管理 | 从 `src/aw` 运行 `cargo test --locked -p aw-package --test management --test database` |
-| 事务恢复 | 从 `src/aw` 运行 `cargo test --locked -p aw-package transaction::tests` |
+| 包数据库与管理 | 从 `src/aw` 运行 `cargo test --locked -p aw-package --lib store::tests` 和 `cargo test --locked -p aw-package --lib provider_tests` |
+| 事务恢复 | 从 `src/aw` 运行 `cargo test --locked -p aw-package --lib store::transaction::tests` |
 | Provider | 对应独立 workspace 的 `cargo test --locked --manifest-path providers/PROVIDER/Cargo.toml` |
 
 ## 修改能力支持
@@ -43,6 +43,8 @@ python3 scripts/check.py
 ## 目录与代码边界
 
 通用框架位于 `crates/`，具体 Provider 位于仓库根 `providers/` 的独立 workspace。
+`make -C src/aw build` 只构建 AW CLI；`make -C src/aw install` 使用 `PREFIX`、`AWPRJ` 和可选 `DESTDIR` 复制预构建文件。Provider 通过各自的 Makefile 构建和安装。后端组合与源码归档由发行方 Makefile 和 `distribution/packaging/aw/` 脚本负责。
+`aw install --bundle` 管理本地 Provider 扩展，不安装 AW core 或后端软件。原生 RPM/DEB 继续由原生包管理器拥有；外部安装的 Provider 通过显式 `transport.argv` 接入，无需 AW 包记录。
 Adapter 管理原生方言；CLI 管理参数、信号和资源；service 管理状态、预算与审计。
 架构图见[设计索引](docs/design/zh/README.md)，文档读者与写作要求见 [AGENTS.md](AGENTS.md#documentation-audiences-and-writing)。
 

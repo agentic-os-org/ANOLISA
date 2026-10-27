@@ -201,8 +201,8 @@ printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config",
 `replace_result` 效果要求字符串 `text`；`block` 可携带非空、有界的 `text` 原因，其他效果拒绝该字段。响应最多包含一个
 替换，且要求输入中存在投影。缺少投影时只允许不替换的结果。Adapter 替换选定文本
 槽并保留原生 envelope 和失败状态。这是候选效果，不证明模型已消费；AW Journal 不记录文本。
-Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须来自同一 Preview
-构建；旧实现会拒绝不支持的投影或效果，不会静默忽略。
+Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须使用经共同验证的兼容版本；
+旧实现会拒绝不支持的投影或效果，不会静默忽略。
 
 ### Tokenless 组合
 
