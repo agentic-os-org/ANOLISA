@@ -82,7 +82,8 @@ raise SystemExit(result.returncode)
         "agents": {"pi": {"adapter": "pi", "argv": [node, str(root / "application.mjs")]}},
         "providers": {
             "scan": provider([scanner_provider, "--cli", str(scanner), "--socket", str(state / "unused-scanner.sock")],
-                             {"version": 1, "mode": "block", "tools": {"bash": {"language": "bash", "input_pointer": "/command"}}}),
+                             {"version": 1, "mode": "block", "unmapped_tool": "observe",
+                              "tools": {"bash": {"language": "bash", "input_pointer": "/command"}}}),
             "tokenless": provider([tokenless, "--cli", str(cli_wrapper), "--data-dir", str(state / "tokenless")], {"version": 1}),
             "record": {"transport": {"type": "stdio", "location": "agent", "argv": [python, str(fixture / "policy.py"), str(state), "normal"]},
                        "timeout_ms": 2000, "max_output_bytes": 32},
