@@ -7,6 +7,65 @@ failures=0
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+# Execute the real build.rs with both target ABIs on this host, without Cargo
+# cross-linking. Missing or unsupported artifacts must never trigger make.
+rustc --edition=2021 "$repo_root/src/agentsight/crates/ebpf-ifc-engine/build.rs" \
+    -o "$tmp_dir/engine-build"
+python3 - "$repo_root/src/agentsight/crates/ebpf-ifc-engine" "$tmp_dir" <<'PY'
+import os
+import pathlib
+import subprocess
+import sys
+
+engine, tmp = map(pathlib.Path, sys.argv[1:])
+for arch in ("x86_64", "aarch64", "riscv64"):
+    out = tmp / f"engine-out-{arch}"
+    out.mkdir()
+    env = dict(os.environ, CARGO_MANIFEST_DIR=str(engine), OUT_DIR=str(out),
+               CARGO_CFG_TARGET_ARCH=arch)
+    env.pop("ACTPLANE_REBUILD_BPF", None)
+    result = subprocess.run([str(tmp / "engine-build")], env=env, capture_output=True)
+    if arch == "riscv64":
+        assert result.returncode != 0 and b"unsupported BPF target architecture" in result.stderr
+        assert not list(out.iterdir())
+    else:
+        assert result.returncode == 0, result.stderr
+        for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+            assert (out / name).read_bytes() == (engine / "prebuilt" / arch / name).read_bytes()
+
+fixture = tmp / "rebuild-engine"
+fixture.mkdir()
+tools = tmp / "rebuild-tools"
+tools.mkdir()
+(tools / "make").write_text('''#!/usr/bin/env python3
+import pathlib, sys
+args = sys.argv[1:]
+assert "-W" in args and args[args.index("-W") + 1] == "process.bpf.c"
+arch = next(arg[5:] for arg in args if arg.startswith("ARCH="))
+output = next(arg[7:] for arg in args if arg.startswith("OUTPUT="))
+assert arch == {".output/x86_64": "x86", ".output/aarch64": "arm64"}[output]
+assert output + "/process.bpf.o" in args and "process-inode-only" in args
+root = pathlib.Path(args[args.index("-C") + 1])
+(root / output).mkdir(parents=True, exist_ok=True)
+for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+    (root / output / name).write_text(arch + name)
+''')
+(tools / "make").chmod(0o755)
+for arch, bpf_arch in (("x86_64", "x86"), ("aarch64", "arm64")):
+    env = dict(os.environ, CARGO_MANIFEST_DIR=str(fixture),
+               OUT_DIR=str(tmp / f"rebuild-out-{arch}"),
+               CARGO_CFG_TARGET_ARCH=arch,
+               PATH=str(tools) + os.pathsep + os.environ["PATH"])
+    pathlib.Path(env["OUT_DIR"]).mkdir()
+    env.pop("ACTPLANE_REBUILD_BPF", None)
+    result = subprocess.run([str(tmp / "engine-build")], env=env, capture_output=True)
+    assert result.returncode != 0 and b"copy " in result.stderr, "missing object triggered make"
+    env["ACTPLANE_REBUILD_BPF"] = "1"
+    subprocess.run([str(tmp / "engine-build")], env=env, check=True, capture_output=True)
+    for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+        assert (pathlib.Path(env["OUT_DIR"]) / name).read_text() == bpf_arch + name
+PY
+
 require_literal() {
     local file="$1"
     local expected="$2"
@@ -94,8 +153,12 @@ engine = root / "crates/ebpf-ifc-engine"
 for name in ("process.bpf.c", "process.h", "taint.h", "taint_engine.bpf.h",
              "capability.bpf.h", "channel.bpf.h"):
     (engine / name).write_text(name)
-(engine / "prebuilt/process.bpf.o").write_bytes(b"full-object")
-(engine / "prebuilt/process-inode-only.bpf.o").write_bytes(b"inode-object")
+(engine / "build.rs").write_bytes(b"staged-build")
+for arch in ("x86_64", "aarch64"):
+    (engine / "prebuilt" / arch).mkdir()
+    (engine / "prebuilt" / arch / "process.bpf.o").write_bytes(f"{arch}-full-object".encode())
+    (engine / "prebuilt" / arch / "process-inode-only.bpf.o").write_bytes(
+        f"{arch}-inode-object".encode())
 (source / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
 (tools / "git").write_text('''#!/usr/bin/env python3
 import pathlib, sys
@@ -106,14 +169,22 @@ if command == "rev-parse":
 elif command == "checkout":
     # Model the source reset performed by the real cache checkout/reset.
     (pathlib.Path(source) / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
+    (pathlib.Path(source) / "bpf/build.rs").write_bytes(b"patched-build")
     print("fixture Git diagnostic")
 elif command == "hash-object":
     path = pathlib.Path(source) / args[0]
-    key = {"lib.rs": "PATCHED_BPF_LIB", "build.rs": "PATCHED_BPF_BUILD",
-           "Makefile": "PATCHED_BPF_MAKEFILE", "process-inode-only.bpf.o": "STAGED_INODE_BPF"}.get(path.name)
-    if key is None:
-        key = "PREBUILT_BPF" if path.read_bytes() == b"upstream-object" else "STAGED_PREBUILT_BPF"
-    print(constants["ACTPLANE_" + key + "_BLOB"])
+    key = {"lib.rs": "PATCHED_BPF_LIB", "Makefile": "PATCHED_BPF_MAKEFILE"}.get(path.name)
+    if path.name == "build.rs":
+        key = {b"staged-build": "STAGED_BPF_BUILD",
+               b"patched-build": "PATCHED_BPF_BUILD"}.get(path.read_bytes())
+    elif path.suffix == ".o":
+        data = path.read_bytes()
+        key = "PREBUILT_BPF" if data == b"upstream-object" else None
+        for arch in ("x86_64", "aarch64"):
+            for variant, suffix in (("full", "PREBUILT_BPF"), ("inode", "INODE_BPF")):
+                if data == f"{arch}-{variant}-object".encode():
+                    key = f"STAGED_{arch.upper()}_{suffix}"
+    print(constants["ACTPLANE_" + key + "_BLOB"] if key else "0" * 40)
 elif command not in ("reset", "clean", "diff", "ls-files", "submodule"):
     sys.exit("unexpected fixture Git command: " + command)
 ''')
@@ -130,7 +201,16 @@ assert target.is_absolute() and target.parent.name.startswith("enforcer.")
 assert target != root / "target"
 output = target / host / "release/agentsight-enforcer"
 output.parent.mkdir(parents=True)
-output.write_bytes(str(target).encode() + b"full-object inode-object")
+arch = host.split("-")[0]
+patch_config = args[args.index("--config") + 1]
+source = pathlib.Path(patch_config.split('path="')[1].rstrip('"'))
+assert (source / "build.rs").read_bytes() == b"staged-build"
+objects = source / "prebuilt" / arch
+assert (objects / "process.bpf.o").read_bytes() == f"{arch}-full-object".encode()
+assert (objects / "process-inode-only.bpf.o").read_bytes() == f"{arch}-inode-object".encode()
+if os.environ.get("FIXTURE_WRONG_PAIR"):
+    arch = "aarch64" if arch == "x86_64" else "x86_64"
+output.write_bytes(str(target).encode() + f"{arch}-full-object {arch}-inode-object".encode())
 if os.environ.get("FIXTURE_BAD_OBJECT"):
     output.write_bytes(b"missing embedded objects")
 output.chmod(0o755)
@@ -173,13 +253,17 @@ if cmp -s "$tmp_dir/fresh-payload/agentsight-enforcer" "$second_bin"; then
     printf 'RPM staging reused a previous build without an explicit handoff\n' >&2
     exit 1
 fi
-for failure in CARGO_BUILD_TARGET=other-target FIXTURE_BAD_OBJECT=1; do
+for failure in CARGO_BUILD_TARGET=other-target ACTPLANE_REBUILD_BPF=1 FIXTURE_BAD_OBJECT=1 \
+    FIXTURE_WRONG_PAIR=1; do
     if "${fixture_env[@]}" "$failure" "$fixture_root/scripts/build-enforcer.sh" \
         >"$tmp_dir/failed-path" 2>"$tmp_dir/failed-build.err"; then
         printf 'attested build accepted %s\n' "$failure" >&2
         exit 1
     fi
     [[ ! -s "$tmp_dir/failed-path" ]]
+    if [[ "$failure" = FIXTURE_WRONG_PAIR=1 ]]; then
+        grep -Fq 'BPF object is not embedded' "$tmp_dir/failed-build.err"
+    fi
 done
 
 # Cross builds preserve the same private-output and receipt contract.
@@ -189,6 +273,18 @@ arm_bin="$("${fixture_env[@]}" EXPECTED_TARGET=aarch64-unknown-linux-gnu \
 [[ -x "$arm_bin" && -f "$arm_bin.sha256" && "$arm_bin" != "$first_bin" ]]
 python3 "$repo_root/src/agentsight/scripts/copy-enforcer.py" "$arm_bin" "$tmp_dir/arm-enforcer"
 cmp "$arm_bin" "$tmp_dir/arm-enforcer"
+# Each target embeds only its own object pair; EM_BPF alone does not identify the ABI.
+python3 - "$first_bin" "$arm_bin" <<'PY'
+import pathlib
+import sys
+
+x86, arm = (pathlib.Path(path).read_bytes() for path in sys.argv[1:])
+for variant in ("full", "inode"):
+    assert f"x86_64-{variant}-object".encode() in x86
+    assert f"aarch64-{variant}-object".encode() not in x86
+    assert f"aarch64-{variant}-object".encode() in arm
+    assert f"x86_64-{variant}-object".encode() not in arm
+PY
 if "${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" --target aarch64-apple-darwin \
     >"$tmp_dir/unsupported-path" 2>"$tmp_dir/unsupported.err"; then
     echo 'unsupported enforcer target was accepted' >&2
