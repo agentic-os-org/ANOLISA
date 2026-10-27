@@ -25,7 +25,7 @@ Agent adapters are available for:
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, response compression, and Marker-directed recovery via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, Marker-directed recovery, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
-- **OpenCode plugin** — response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's V1 local plugin API; Schema passes through without static recovery authorization.
+- **OpenCode plugin** — response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API on both supported host generations; Schema passes through without static recovery authorization.
 - **Qwen Code extension** — command rewriting and registered but hard-disabled Tool Ready; current host releases cannot replace post-tool output and skip the declared schema event.
 - **QwenPaw plugin** — schema compression, RTK command rewriting, response/TOON compression, and static-tool recovery through an AgentScope middleware registered by QwenPaw's plugin system; the plugin embeds the `anolisa_tokenless` wheel in-process.
 - **DeepSeek Harness plugin** — RTK retry suggestions, native response compression, Marker-directed recovery, and environment-error attribution through DSH's tool lifecycle.
@@ -807,17 +807,43 @@ make codex-install
 
 The V1 `tool.definition` hook lacks the session/model-call context needed for authorized static
 Schema recovery, so the Common Hook preserves definitions. Response compression and command
-rewriting remain available. Supporting OpenCode's V2 plugin API requires a separate migration.
+rewriting remain available.
+
+One `plugin.js` serves both host generations. OpenCode 2 loads its default definition
+(`id` + `setup`), and OpenCode 1.3.4 and newer load the same export's `server()` entrypoint.
+OpenCode 1.0.0 through 1.3.3 are not supported: their plugin loader calls every module export as
+a plugin function, which the object default export OpenCode 2 requires cannot satisfy. The two
+loader contracts are mutually exclusive, so the supported range starts at 1.3.4, the first
+release that reads an object default export. On a host below that floor the bundled installer
+removes a registration left over from when the release was still supported, so replacing the
+adapter source in place cannot hand the old host a module it fails to initialize; `detect.sh`
+names that stale registration. An npm package upgrade runs that reconciliation automatically,
+in a mode that clears a stale registration but never creates one. Command rewriting and shell failure evidence match
+the shell tool family the shared hooks classify — OpenCode 1 names its built-in shell tool
+`bash`, OpenCode 2 names it `shell` — instead of a single host spelling.
+
+The bundled installer recognizes a managed link by its target alone; it does not read or write
+ANOLISA receipts. It therefore also removes a registration created by `anolisa adapter enable`,
+which would leave that receipt claiming a link that is gone. To keep the link and its receipt
+together it hands the removal to `anolisa adapter disable tokenless opencode` when that CLI is
+reachable — the command is idempotent and clears both — and otherwise removes the link itself and
+reports that the receipt still needs clearing by hand. An `anolisa update` runs none of these
+scripts, so on that path the registration survives the bundle replacement until
+`anolisa adapter disable tokenless opencode` is run.
 
 The local plugin uses OpenCode's mutable tool hooks, so compressed output
 replaces the original model-visible response instead of being appended to it.
 
-| Strategy | Event | Action | Status |
-|---|---|---|---|
-| Tool Ready | `tool.execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
-| Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
-| Schema compression | `tool.definition` | Preserves schemas without static recovery authorization | — |
+| Strategy | OpenCode 1 event | OpenCode 2 registration | Action | Status |
+|---|---|---|---|---|
+| Tool Ready | `tool.execute.before` | `tool` hook `execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
+| Command rewriting | `tool.execute.before` | `tool` hook `execute.before` | Rewrites shell-family commands via RTK | ✅ Active |
+| Response + TOON compression | `tool.execute.after` | `tool` hook `execute.after` | Replaces the model-visible tool result with a smaller representation | ✅ Active |
+| Schema compression | `tool.definition` | `session` hook `context` | Preserves schemas without static recovery authorization | — |
+
+The schema path is registered on both generations. Because the shared BeforeModel request
+declares no marker-authorized recovery path, Core currently returns the declarations unchanged;
+the registration takes effect as soon as such a path is declared.
 
 Enable the installed plugin through ANOLISA, then restart OpenCode:
 
