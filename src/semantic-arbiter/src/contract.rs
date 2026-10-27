@@ -68,6 +68,75 @@ pub struct Candidate {
     pub operation: Operation,
     /// Opaque resource identity under the bound workspace.
     pub resource_id: String,
+    /// Full native call retained as untrusted data, never instructions or authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tool: Option<NativeTool>,
+}
+
+/// Native tool invocation data; the arbiter never executes or resolves its arguments.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTool {
+    /// Nonblank native name, at most 128 UTF-8 bytes.
+    pub name: String,
+    /// Complete argument object, not an extracted command or path summary.
+    pub input: serde_json::Value,
+}
+
+/// Maximum compact JSON byte length of the complete native argument object.
+pub const MAX_NATIVE_INPUT_BYTES: usize = 65_536;
+
+/// Validate and hash the complete candidate as domain-separated, recursively key-sorted JSON.
+pub fn candidate_revision(candidate: &Candidate) -> Result<String, crate::protocol::ContractError> {
+    use sha2::{Digest, Sha256};
+
+    crate::validation::candidate(candidate)?;
+    let value = serde_json::to_value(candidate)
+        .map_err(|_| crate::protocol::ContractError::InvalidInput)?;
+    let mut bytes = Vec::new();
+    canonical_json(&value, &mut bytes)?;
+    let mut hash = Sha256::new();
+    hash.update(b"semantic-arbiter/v1alpha1\0candidate\0");
+    hash.update(bytes);
+    Ok(format!("sha256:{:x}", hash.finalize()))
+}
+
+fn canonical_json(
+    value: &serde_json::Value,
+    bytes: &mut Vec<u8>,
+) -> Result<(), crate::protocol::ContractError> {
+    use crate::protocol::ContractError;
+    use serde_json::Value;
+
+    match value {
+        Value::Object(object) => {
+            // Explicit sorting keeps revisions independent of serde_json's map feature flags.
+            let mut entries: Vec<_> = object.iter().collect();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            bytes.push(b'{');
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index != 0 {
+                    bytes.push(b',');
+                }
+                serde_json::to_writer(&mut *bytes, key).map_err(|_| ContractError::InvalidInput)?;
+                bytes.push(b':');
+                canonical_json(value, bytes)?;
+            }
+            bytes.push(b'}');
+        }
+        Value::Array(array) => {
+            bytes.push(b'[');
+            for (index, value) in array.iter().enumerate() {
+                if index != 0 {
+                    bytes.push(b',');
+                }
+                canonical_json(value, bytes)?;
+            }
+            bytes.push(b']');
+        }
+        _ => serde_json::to_writer(bytes, value).map_err(|_| ContractError::InvalidInput)?,
+    }
+    Ok(())
 }
 
 /// Reference scenarios, not a dynamic registration API.

@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use tokio::time::Instant;
 
 const PRESERVATION: &str = "preservation-v1";
-const TASK_SCOPE: &str = "task-scope-v1";
+const TASK_SCOPE: &str = "task-scope-v2";
 
 fn config() -> ModelConfig {
     ModelConfig::decode(

@@ -107,10 +107,37 @@ pub(crate) fn request(value: &CheckRequest) -> Result<(), ContractError> {
     context(&Input::from(value), value.check_at_ms)
 }
 
+pub(crate) fn candidate(value: &Candidate) -> Result<(), ContractError> {
+    id(&value.resource_id)?;
+    if let Some(native) = &value.native_tool {
+        require(
+            !native.name.trim().is_empty() && native.name.len() <= 128 && native.input.is_object(),
+            ContractError::InvalidInput,
+        )?;
+        let bytes = serde_json::to_vec(&native.input).map_err(|_| ContractError::InvalidInput)?;
+        require(
+            bytes.len() <= crate::contract::MAX_NATIVE_INPUT_BYTES,
+            ContractError::MessageTooLarge,
+        )?;
+        // Include the request envelope when applying the wire recursion bound.
+        let envelope = serde_json::to_vec(&serde_json::json!({"candidate": value}))
+            .map_err(|_| ContractError::InvalidInput)?;
+        crate::wire::decode::<serde_json::Value>(&envelope)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn context(value: &Input<'_>, now_ms: u64) -> Result<(), ContractError> {
     id(value.request_id)?;
     binding(value.binding)?;
-    id(&value.candidate.resource_id)?;
+    candidate(value.candidate)?;
+    if value.candidate.native_tool.is_some() {
+        require(
+            value.binding.candidate_revision
+                == crate::contract::candidate_revision(value.candidate)?,
+            ContractError::BindingMismatch,
+        )?;
+    }
     require(
         !value.scenarios.is_empty()
             && value.scenarios.len() <= 2

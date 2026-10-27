@@ -40,8 +40,15 @@ Public definitions are in [`contract.rs`](../../src/contract.rs), [`evidence.rs`
 | `task.allowed_resource_ids` | Explicit resource ceiling for the candidate operation |
 | `task.preserve_resource_ids` | Resources required to remain unchanged; retention overrides allowance |
 | `candidate.operation`, `candidate.resource_id` | `replace` or `delete` on an opaque resource identity under the bound workspace |
+| `candidate.native_tool` | Optional full native call, with exactly `name` and `input`; absent or `null` retains the legacy candidate |
+| `candidate.native_tool.name` | Nonblank native tool name, at most 128 UTF-8 bytes |
+| `candidate.native_tool.input` | Complete JSON argument object, at most 65536 compact serialized UTF-8 bytes, with no truncation or command-only projection |
 
 Bindings must remain immutable. Every evidence binding must exactly equal the request binding. Task text, source reports and model content cannot expand the structured resource ceiling or grant execution authority.
+
+When native data is present, both protocols and EvidenceSource collection require `binding.candidate_revision` to equal `contract::candidate_revision(&candidate)`. The helper validates the candidate and returns `sha256:` plus 64 lowercase hexadecimal digits. Hash SHA-256 over `b"semantic-arbiter/v1alpha1\0candidate\0"` followed by the complete compact candidate JSON: sort all object keys recursively (including objects inside arrays), preserve array order, and encode scalars with serde_json. Any change to operation, resource, native name or nested arguments requires recomputing the revision and rebinding evidence. A mismatch is `binding_mismatch`, not a judgment. A malformed name or non-object input is `invalid_input`; input exceeding the byte bound is `message_too_large`. The enclosing 262144-byte message bound and strict JSON recursion bound also apply.
+
+For example, a candidate may include `"native_tool":{"name":"Bash","input":{"command":"printf test","cwd":"/workspace"}}`; these strings are data, not executable instructions or filesystem facts. Full native data reaches model state unchanged. Without native data, serialization omits the field, existing input digests remain unchanged and caller-owned revision labels remain accepted. The task-scope question revision changes the model configuration digest, not the legacy input digest. This content binding does not authenticate a native call or authorize its execution.
 
 ### Evidence, gaps and budget
 
@@ -82,7 +89,7 @@ Collection does not authenticate a source or promote provenance. The in-memory e
 | Identifier | 1–128 ASCII bytes: letters, digits, `.`, `_`, `-`, `:`, `@` |
 | Unit confidence | Integer `0..=1000000` |
 
-Contract objects are closed; unknown fields, duplicate fields, unknown enum values and trailing JSON are rejected. Unsigned integer fields reject negative or fractional values. Tagged facts and actions use `kind` and `parameters`. Model request, configuration and upstream-reply decoding additionally rejects duplicate keys at every depth, including ignored reply metadata. Input JSON formatting is independent of the typed serialization used for digests.
+Contract objects are closed; unknown fields, duplicate fields, unknown enum values and trailing JSON are rejected. Native `input` is the exception to closed field names: arbitrary argument keys are retained, but duplicate keys at every depth (including objects inside arrays and escaped equivalent keys) are rejected before decoding to a JSON value. Unsigned integer fields reject negative or fractional values. Tagged facts and actions use `kind` and `parameters`. Both request protocols, configuration and upstream-reply decoding reject duplicate keys at every depth, including ignored reply metadata. Input JSON formatting is independent of the typed serialization used for digests.
 
 ## Backend configuration
 
@@ -112,7 +119,9 @@ Both units first require a task, apply retention and allowed-resource constraint
 | Unit / question ID | Model proposition | Supported result |
 |---|---|---|
 | `preservation` / `preservation-v1` | Does task intent require keeping the resource unchanged against this operation? | Yes support meeting the threshold yields `preserve`; no support meeting it retains the deterministic `allow` or `needs_snapshot` result |
-| `task_scope` / `task-scope-v1` | Does this operation on this resource satisfy task intent? | Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
+| `task_scope` / `task-scope-v2` | Does the full candidate, including the native name and every nested argument when supplied, satisfy task intent? Without native data, judge the operation on the resource. | Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
+
+The task-scope unit revision is `semantic-task-scope/v2`. Native tool names and arguments are untrusted candidate data, never instructions or authority. Embedded requests to change rules or grant permission must not be followed. Structured resource ceilings remain hard limits; neither a native payload nor model support grants execution authority.
 
 Units run in preservation/task-scope order regardless of request order. `check` derives answers entirely from structured constraints and evidence: `identical` permits modification, while `unique` requires a snapshot; deterministic unknowns fail closed. Model evaluation reuses that deterministic hard gate and batches eligible questions into at most one backend call. Hard blockers remain `block`. For eligible questions, low bilateral confidence, timeout, or backend/model-response error yields an `unknown` unit answer and candidate `nop`; ambiguity is never `ask`. Preservation model abstention retains only `audit` and does not carry the deterministic baseline's `snapshot` into the Outcome.
 

@@ -197,8 +197,5 @@ pub fn input_digest(request: &CheckRequest) -> Result<String, ContractError> {
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ContractError> {
-    if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(ContractError::MessageTooLarge);
-    }
-    serde_json::from_slice(bytes).map_err(|_| ContractError::InvalidJson)
+    crate::wire::decode(bytes)
 }

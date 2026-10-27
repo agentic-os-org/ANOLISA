@@ -11,6 +11,8 @@ Agent 无关的语义判断组件，支持可配置决策模型后端与基于�
 - `describe` 以 JSON 列出支持的协议、场景、后端和消息上限。
 - `--help` 提供人可读的用法和示例；`help <command>` 解释各子命令。
 
+两种请求格式都可选携带 `candidate.native_tool: {"name":"Bash","input":{"command":"printf test"}}`。应提供完整原生参数对象，而不是提取后的命令摘要。名称须非空白且不超过 128 个 UTF-8 字节；紧凑 input JSON 最多 65536 字节。存在该字段时，使用 `contract::candidate_revision(&candidate)` 设置 `binding.candidate_revision`，证据也须保留相同绑定。带域分隔的 SHA-256 覆盖操作、资源和递归按键排序的原生数据。任务范围求值将全部参数视为不可信数据，而非指令或权限，且不执行其中任何内容。省略 `native_tool` 时保留旧序列化、输入摘要及调用方自定 revision；修订后的任务范围问题会改变模型配置摘要。
+
 场景选择使用 `preservation` 和 `task_scope`。当前 `check` 输出 `allow/block`；当前 `evaluate` 输出 `nop/allow/block`。所有操作及未来场景共用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。`ask` 表示确定性的审批决策；模型歧义不会产生 `ask`。类型、校验和 Approval Directive 投影现已预留，真实审批执行与 Adapter 准入仍待消费方集成。
 
 公共库现已提供四组显式扩展契约。`EvidenceSourceRegistry` 冻结协作式采集且受 deadline 约束的来源输出。`JudgmentUnitRegistry` 为每个封闭的现有场景保存恰好一个单元，因此消费方可以替换成果保护或任务范围单元，同时不会增加任意线协议场景，也不使用动态发现。`Evaluator::with_units` 使用同一个注册表完成问题准备、绑定单元修订的配置摘要和答案推导；`EvaluationRecord` 冻结期望响应供后续复核，中央校验会拒绝非法自定义答案。`composition::compose_outcome` 确定性组合类型化贡献，消费方侧 executor API 对类型化 Directive 执行准入、占用、分发和独立查询。生产证据源、真实 Executor、原生 Adapter 集成，以及生产级持久 claim、审计和效果核验仍待消费方集成。模型概率阈值是未经校准的决策参数，不能证明语义准确率或提供安全保证。
