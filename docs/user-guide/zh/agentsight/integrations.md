@@ -107,8 +107,8 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 AgentSight enforcement unavailable: enforcer I/O failed: No such file or directory (os error 2)
 ```
 
-采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。启动对应 unit 即可；源码构建
-请使用 `make build-all`。
+采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。需要单独启动 enforcer 守护进程。
+源码运行见[源码构建](deployment.md#源码构建)。
 
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：

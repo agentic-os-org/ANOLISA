@@ -206,9 +206,9 @@ jobs:
             )
 
             PACKAGE_DIR=$(mktemp -d)
-            "$SOURCE_ROOT/scripts/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
+            "$SOURCE_ROOT/packaging/rpm/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
             tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" "${COMPONENT}-${VERSION}"
-            echo "AGENTSIGHT_VERIFY_RPM=$SOURCE_ROOT/scripts/verify-rpm-package.sh" >> "$GITHUB_ENV"
+            echo "AGENTSIGHT_VERIFY_RPM=$SOURCE_ROOT/packaging/rpm/verify-rpm-package.sh" >> "$GITHUB_ENV"
           fi
 
           # The anolisa spec intentionally unpacks Source0 into `anolisa/`

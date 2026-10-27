@@ -135,8 +135,18 @@ sudo ./target/release/agentsight trace &
 sudo ./target/release/agentsight serve --host 0.0.0.0
 ```
 
-`make build` alone skips the enforcer and `serve` then logs `AgentSight enforcement unavailable` at
-every start.
+Capture and analysis run directly from the checkout. Risk Enforcement additionally needs the
+enforcer daemon running; building it does not start it.
+
+### Install the source build as a service
+
+To install the built runtime and manage it with systemd instead:
+
+```bash
+sudo make install-core
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentsight.service
+```
 
 ## Containers and sidecars
 

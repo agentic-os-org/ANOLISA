@@ -35,7 +35,7 @@ LLM API calls, token consumption, and process behaviors.
 %setup -q
 
 %build
-# Binary is built by scripts/rpm-build.sh prior to rpmbuild and included in the source tarball.
+# Binary is built by packaging/rpm/rpm-build.sh prior to rpmbuild and included in the source tarball.
 
 %install
 rm -rf $RPM_BUILD_ROOT

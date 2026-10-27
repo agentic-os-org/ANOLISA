@@ -37,11 +37,9 @@ sudo yum install agentsight
 cd src/agentsight && make build-all
 ```
 
-> 源码构建请用 `make build-all`，它会依次构建 Dashboard 前端、主二进制和 `agentsight-enforcer`。
-> 只跑 `make build` 会跳过 enforcer，之后每次启动 `serve` 都会打印
-> `AgentSight enforcement unavailable`。
-
 ### 3. 启动服务
+
+通过安装包部署时：
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -51,6 +49,8 @@ systemctl is-active agentsight.service
 安装包里的 unit 会启动一个守护脚本，同时拉起两个工作进程：`agentsight trace`（eBPF 采集）和
 `agentsight serve --host 0.0.0.0`（API + Dashboard）；如果装了 enforcer 包，它还会顺带拉起
 `agentsight-enforcer.service`。
+
+从源码构建时，按[源码构建](deployment.md#源码构建)中的命令直接运行 `trace` 和 `serve`。
 
 数据写入 `/var/log/sysak/.agentsight`，且使用私有 umask，因此查询服务产生的数据需要 `sudo`。
 

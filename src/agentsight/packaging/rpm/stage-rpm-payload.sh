@@ -8,16 +8,16 @@ if [[ $# -ne 1 || -z "$1" ]]; then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-project_root="${AGENTSIGHT_PROJECT_ROOT:-$(cd "$script_dir/.." && pwd)}"
+project_root="${AGENTSIGHT_PROJECT_ROOT:-$(cd "$script_dir/../.." && pwd)}"
 destination="$1"
 
 sources=(
     "target/release/agentsight"
-    "scripts/agentsight-start.sh"
-    "scripts/agentsight.service"
-    "scripts/agentsight-enforcer.service"
+    "packaging/systemd/agentsight-start.sh"
+    "packaging/systemd/agentsight.service"
+    "packaging/systemd/agentsight-enforcer.service"
     "agentsight.json"
-    "component.toml"
+    "packaging/anolisa/rpm/component.toml"
     "README.md"
     "README_zh.md"
     "LICENSE"
@@ -55,7 +55,7 @@ if [[ -z "${ENFORCER_BIN:-}" ]]; then
     ENFORCER_BIN="$("$project_root/scripts/build-enforcer.sh")"
 fi
 install -d -m 0755 "$destination"
-python3 "$script_dir/copy-enforcer.py" "$ENFORCER_BIN" "$destination/agentsight-enforcer"
+python3 "$project_root/scripts/copy-enforcer.py" "$ENFORCER_BIN" "$destination/agentsight-enforcer"
 for index in "${!sources[@]}"; do
     mode=0644
     case "${targets[$index]}" in

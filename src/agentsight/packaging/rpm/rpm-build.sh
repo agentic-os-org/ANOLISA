@@ -6,7 +6,7 @@
 # for RPM package building.
 #
 # Usage:
-#   ./scripts/rpm-build.sh [options]
+#   ./packaging/rpm/rpm-build.sh [options]
 #
 # Options:
 #   -v, --version VERSION    Specify version (default: from Cargo.toml)
@@ -29,7 +29,7 @@ set -e
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_DIR="${PROJECT_ROOT}/rpm-sources"
 
 # Default version from Cargo.toml
@@ -155,7 +155,7 @@ TARBALL_NAME="agentsight-${VERSION}"
 TARBALL_DIR="${OUTPUT_DIR}/${TARBALL_NAME}"
 
 log_info "Preparing tarball contents..."
-ENFORCER_BIN="$ENFORCER_BIN" ./scripts/stage-rpm-payload.sh "$TARBALL_DIR"
+ENFORCER_BIN="$ENFORCER_BIN" ./packaging/rpm/stage-rpm-payload.sh "$TARBALL_DIR"
 
 log_info "Files prepared in: $TARBALL_DIR"
 

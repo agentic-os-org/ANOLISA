@@ -125,8 +125,18 @@ sudo ./target/release/agentsight trace &
 sudo ./target/release/agentsight serve --host 0.0.0.0
 ```
 
-只跑 `make build` 会跳过 enforcer，之后每次启动 `serve` 都会打印
-`AgentSight enforcement unavailable`。
+采集与分析可以直接在源码目录中运行。风险拦截还需要单独运行 enforcer 守护进程，
+构建完成并不代表它已经启动。
+
+### 将源码构建安装为服务
+
+如果需要安装已构建的运行时并改用 systemd 管理：
+
+```bash
+sudo make install-core
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentsight.service
+```
 
 ## 容器与 Sidecar
 

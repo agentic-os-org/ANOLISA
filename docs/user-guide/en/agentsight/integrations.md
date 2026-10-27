@@ -127,8 +127,8 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 ```
 
 Capture and analysis are unaffected; only the Risk Enforcement page and the
-`/api/enforcement/*` endpoints disappear. Start the unit, or build with `make build-all` if you
-built from source.
+`/api/enforcement/*` endpoints disappear. Start the enforcer daemon separately.
+For source builds, see [Source build](deployment.md#source-build).
 
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:

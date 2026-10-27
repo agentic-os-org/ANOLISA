@@ -480,7 +480,7 @@ build_agentsight() {
     log "Building RPM: agentsight"
     log "=========================================="
 
-    local spec_in="${SIGHT_DIR}/agentsight.spec.in"
+    local spec_in="${SIGHT_DIR}/packaging/rpm/agentsight.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -540,7 +540,7 @@ build_agentsight() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"
+    ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/packaging/rpm/stage-rpm-payload.sh" "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"

@@ -11,7 +11,7 @@ repository = "https://github.com/alibaba/anolisa"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.2.17"
 
 [backends.rpm]
 package = "agentsight"
@@ -63,11 +63,13 @@ type = "executable"
 source = "share/anolisa/agentsight/agentsight.service"
 target = "{unitdir}/agentsight.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.layout.files]]
 source = "share/anolisa/agentsight/agentsight-enforcer.service"
 target = "{unitdir}/agentsight-enforcer.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.capabilities]]
 path = "{bindir}/agentsight"

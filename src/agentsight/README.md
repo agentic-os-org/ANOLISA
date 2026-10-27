@@ -185,8 +185,8 @@ cd src/agentsight
 # Build frontend and embed into frontend-dist/ (required before cargo build)
 make build-frontend
 
-# Then build the Rust binary with the embedded UI
-make build
+# Then build only the Rust binary with the embedded UI
+make build-binary
 
 # Or do both in one step
 make build-all
@@ -384,8 +384,9 @@ For Linux cross builds, `scripts/build-enforcer.sh --target
 <aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` selects the target explicitly;
 without arguments it builds for the host. `CARGO` may select a prepared Cross
 wrapper, but must honor the requested target. Both Linux architectures use the
-same raw payload layout and source-owned `.anolisa/component.toml`. macOS ARM64
-uses `.anolisa/component.macos.toml` and ships only the main executable. Cross
+same raw payload layout and source-owned
+`packaging/anolisa/raw/component.toml`. macOS ARM64 uses
+`packaging/anolisa/raw/component.macos.toml` and ships only the main executable. Cross
 compiling macOS from Linux requires `--no-default-features --features server` to
 skip the optional `bpf-build` host dependencies. Remove
 the private enforcer directory only after packaging has consumed its receipt.

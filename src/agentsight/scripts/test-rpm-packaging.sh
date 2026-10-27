@@ -230,15 +230,15 @@ require_file() {
 
 fixture_root="$tmp_dir/source"
 fixture_payload="$tmp_dir/payload"
-mkdir -p "$fixture_root/target/release" "$fixture_root/scripts"
+mkdir -p "$fixture_root/target/release" "$fixture_root/scripts" "$fixture_root/packaging/systemd" "$fixture_root/packaging/anolisa/rpm"
 for file in \
     target/release/agentsight \
     target/release/agentsight-enforcer \
-    scripts/agentsight-start.sh \
-    scripts/agentsight.service \
-    scripts/agentsight-enforcer.service \
+    packaging/systemd/agentsight-start.sh \
+    packaging/systemd/agentsight.service \
+    packaging/systemd/agentsight-enforcer.service \
     agentsight.json \
-    component.toml \
+    packaging/anolisa/rpm/component.toml \
     README.md \
     README_zh.md \
     LICENSE; do
@@ -364,9 +364,9 @@ grep -q 'fixture Git diagnostic' "$tmp_dir/build.err"
 [[ "$(stat -c %a "$(dirname "$first_bin")")" = 700 ]]
 
 ENFORCER_BIN="$first_bin" AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
-    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" "$fixture_payload"
+    bash "$repo_root/src/agentsight/packaging/rpm/stage-rpm-payload.sh" "$fixture_payload"
 ENFORCER_BIN="$second_bin" AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
-    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" "$tmp_dir/payload-two"
+    bash "$repo_root/src/agentsight/packaging/rpm/stage-rpm-payload.sh" "$tmp_dir/payload-two"
 cmp "$first_bin" "$fixture_payload/agentsight-enforcer"
 cmp "$second_bin" "$tmp_dir/payload-two/agentsight-enforcer"
 if cmp -s "$first_bin" "$second_bin"; then
@@ -376,7 +376,7 @@ fi
 
 # Even with a shared binary present, no handoff means another fresh attested build.
 "${fixture_env[@]}" AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
-    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" "$tmp_dir/fresh-payload" \
+    bash "$repo_root/src/agentsight/packaging/rpm/stage-rpm-payload.sh" "$tmp_dir/fresh-payload" \
     2>>"$tmp_dir/build.err"
 if cmp -s "$tmp_dir/fresh-payload/agentsight-enforcer" "$second_bin"; then
     printf 'RPM staging reused a previous build without an explicit handoff\n' >&2
@@ -433,15 +433,15 @@ fi
 [[ ! -s "$tmp_dir/unsupported-path" ]]
 grep -Fq 'unsupported enforcer target' "$tmp_dir/unsupported.err"
 
-# Make install must hand off the captured path in the same recipe shell.
+# The explicit legacy installer hands off a fresh build in the same recipe shell.
 "${fixture_env[@]}" make --no-print-directory -C "$fixture_root" \
-    -f "$repo_root/src/agentsight/Makefile" -o build -o build-frontend install \
+    -f "$repo_root/src/agentsight/Makefile" -o build-binary -o build-frontend install-legacy \
     "DESTDIR=$tmp_dir/install" SETCAP=0 INSTALL_SYSTEMD=0 >"$tmp_dir/make.out" 2>"$tmp_dir/make.err"
 [[ -x "$tmp_dir/install/usr/local/bin/agentsight-enforcer" ]]
 ! cmp -s "$tmp_dir/install/usr/local/bin/agentsight-enforcer" \
     "$fixture_root/target/release/agentsight-enforcer"
 make --no-print-directory -C "$fixture_root" -f "$repo_root/src/agentsight/Makefile" \
-    -o build -o build-frontend install ENFORCER_BUILD=false "ENFORCER_BIN=$first_bin" \
+    -o build-binary -o build-frontend install-legacy ENFORCER_BUILD=false "ENFORCER_BIN=$first_bin" \
     "DESTDIR=$tmp_dir/install" SETCAP=0 INSTALL_SYSTEMD=0 >>"$tmp_dir/make.out" 2>>"$tmp_dir/make.err"
 cmp "$first_bin" "$tmp_dir/install/usr/local/bin/agentsight-enforcer"
 
@@ -505,7 +505,7 @@ existing_payload="$tmp_dir/existing-payload"
 mkdir -p "$existing_payload"
 printf 'preserve me\n' > "$existing_payload/sentinel"
 if AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
-    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" \
+    bash "$repo_root/src/agentsight/packaging/rpm/stage-rpm-payload.sh" \
     "$existing_payload" >"$tmp_dir/existing.out" 2>"$tmp_dir/existing.err"; then
     printf 'existing RPM payload destination unexpectedly replaced\n' >&2
     failures=$((failures + 1))
@@ -527,12 +527,12 @@ cat > "$complete_list" <<'EOF'
 /usr/share/anolisa/components/agentsight/component.toml
 EOF
 
-bash "$repo_root/src/agentsight/scripts/verify-rpm-package.sh" \
+bash "$repo_root/src/agentsight/packaging/rpm/verify-rpm-package.sh" \
     --file-list "$complete_list"
 
 incomplete_list="$tmp_dir/incomplete-rpm-files.txt"
 grep -v -E 'agentsight-enforcer($|\.service$)' "$complete_list" > "$incomplete_list"
-if bash "$repo_root/src/agentsight/scripts/verify-rpm-package.sh" \
+if bash "$repo_root/src/agentsight/packaging/rpm/verify-rpm-package.sh" \
     --file-list "$incomplete_list" >"$tmp_dir/incomplete.out" 2>"$tmp_dir/incomplete.err"; then
     printf 'incomplete RPM file list unexpectedly passed\n' >&2
     failures=$((failures + 1))
@@ -550,40 +550,40 @@ else
         "/usr/lib/systemd/system/agentsight-enforcer.service"
 fi
 
-require_literal src/agentsight/scripts/rpm-build.sh \
+require_literal src/agentsight/packaging/rpm/rpm-build.sh \
     'ENFORCER_BIN="$(./scripts/build-enforcer.sh)"'
-require_literal src/agentsight/scripts/rpm-build.sh \
-    'ENFORCER_BIN="$ENFORCER_BIN" ./scripts/stage-rpm-payload.sh "$TARBALL_DIR"'
+require_literal src/agentsight/packaging/rpm/rpm-build.sh \
+    'ENFORCER_BIN="$ENFORCER_BIN" ./packaging/rpm/stage-rpm-payload.sh "$TARBALL_DIR"'
 require_literal scripts/rpm-build.sh \
     './scripts/build-enforcer.sh >&3'
 require_literal scripts/rpm-build.sh \
-    'ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"'
+    'ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/packaging/rpm/stage-rpm-payload.sh" "$pkg_dir"'
 require_literal .github/workflows/_rpm-build.yaml \
-    '"$SOURCE_ROOT/scripts/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"'
+    '"$SOURCE_ROOT/packaging/rpm/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"'
 require_literal .github/workflows/_rpm-build.yaml \
     '"$AGENTSIGHT_VERIFY_RPM" "$rpm_path"'
 
-require_literal src/agentsight/agentsight.spec.in \
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in \
     "install -p -m 0755 agentsight-enforcer %{buildroot}/usr/local/bin/"
-require_literal src/agentsight/agentsight.spec.in \
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in \
     "install -p -m 0644 agentsight-enforcer.service %{buildroot}%{_unitdir}/"
-require_literal src/agentsight/agentsight.spec.in "%{_unitdir}/agentsight-enforcer.service"
-require_literal src/agentsight/agentsight.spec.in "%systemd_post agentsight-enforcer.service"
-require_literal src/agentsight/agentsight.spec.in "%systemd_preun agentsight-enforcer.service"
-require_literal src/agentsight/agentsight.spec.in "%systemd_postun agentsight-enforcer.service"
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%{_unitdir}/agentsight-enforcer.service"
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%systemd_post agentsight-enforcer.service"
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%systemd_preun agentsight-enforcer.service"
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%systemd_postun agentsight-enforcer.service"
 # rpm expands macros in comments too, and with systemd-rpm-macros installed a
 # bare %systemd_post (zero arguments) is fatal: "The %systemd_post macro
 # requires some arguments". Any comment that names the scriptlet macros must
 # escape them, or rpmbuild aborts before it produces a package.
-require_count src/agentsight/agentsight.spec.in \
+require_count src/agentsight/packaging/rpm/agentsight.spec.in \
     "%systemd_post/%systemd_preun/%systemd_postun" 0
-require_literal src/agentsight/agentsight.spec.in \
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in \
     "%%systemd_post/%%systemd_preun/%%systemd_postun"
-require_literal src/agentsight/agentsight.spec.in "%%systemd_* scriptlet macros"
-require_literal src/agentsight/scripts/agentsight.service "Wants=agentsight-enforcer.service"
-require_literal src/agentsight/scripts/agentsight-enforcer.service "PartOf=agentsight.service"
-require_literal src/agentsight/scripts/agentsight.service "UMask=0077"
-require_literal src/agentsight/scripts/agentsight-enforcer.service "UMask=0077"
+require_literal src/agentsight/packaging/rpm/agentsight.spec.in "%%systemd_* scriptlet macros"
+require_literal src/agentsight/packaging/systemd/agentsight.service "Wants=agentsight-enforcer.service"
+require_literal src/agentsight/packaging/systemd/agentsight-enforcer.service "PartOf=agentsight.service"
+require_literal src/agentsight/packaging/systemd/agentsight.service "UMask=0077"
+require_literal src/agentsight/packaging/systemd/agentsight-enforcer.service "UMask=0077"
 
 require_literal distribution/anolisa/manifests/components/agentsight/component.toml \
     'source = "bin/agentsight-enforcer"'

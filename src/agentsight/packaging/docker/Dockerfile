@@ -1,6 +1,6 @@
 # AgentSight runtime image.
 #
-# Consumes the release RPM produced by `src/agentsight/scripts/rpm-build.sh`;
+# Consumes the release RPM produced by `src/agentsight/packaging/rpm/rpm-build.sh`;
 # the binary (with the embedded Dashboard) is not rebuilt here. Build from the
 # repository root after a release build:
 #

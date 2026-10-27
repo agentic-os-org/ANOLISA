@@ -21,9 +21,9 @@ VERSION_RE = re.compile(
 TOML_CONTRACTS = (
     ("src/agent-memory/Cargo.toml", "distribution/anolisa/manifests/components/agent-memory/component.toml"),
     ("src/agent-sec-core/openclaw-plugin/package.json", "src/agent-sec-core/packaging/anolisa/component.toml"),
-    ("src/agentsight/Cargo.toml", "src/agentsight/component.toml"),
-    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.toml"),
-    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.macos.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/rpm/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/raw/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/raw/component.macos.toml"),
     ("src/agentsight/Cargo.toml", "distribution/anolisa/manifests/components/agentsight/component.toml"),
     ("deprecated/copilot-shell/package.json", "deprecated/copilot-shell/component.toml"),
     ("deprecated/copilot-shell/package.json", "distribution/anolisa/manifests/components/cosh/component.toml"),
