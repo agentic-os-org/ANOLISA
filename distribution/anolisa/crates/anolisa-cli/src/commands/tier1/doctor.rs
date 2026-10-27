@@ -2629,6 +2629,7 @@ mod tests {
             pending_journal: false,
             active_adapter_claims: Vec::new(),
             owned_files_verified: None,
+            owned_runtime_prepare: false,
         }
     }
 

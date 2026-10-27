@@ -138,6 +138,8 @@ pub struct Facts {
     /// `Some(false)` missing/corrupt, `None` not probed. Drives repair R2
     /// and the quarantine exit R6.
     pub owned_files_verified: Option<bool>,
+    /// Explicit repair must revalidate this owned component's generated runtime.
+    pub owned_runtime_prepare: bool,
 }
 
 /// State-store facts for one (component, scope).
@@ -570,6 +572,7 @@ fn plan_update(req: &UpdateRequest, facts: &Facts) -> Result<Plan, PlanError> {
                         // U3
                         Step::BackupFiles,
                         Step::DownloadVerify,
+                        Step::ProvisionRuntimeDeps,
                         Step::RemoveOwnedFiles,
                         Step::PlaceFiles,
                         Step::SetCapabilities,
@@ -638,6 +641,9 @@ fn plan_repair(facts: &Facts) -> Result<Plan, PlanError> {
             Err(PlanError::RecordUnrecoverable) // R6 failure arm
         }
         RecordFacts::Active(record) => match &record.binding {
+            ProviderBinding::Owned { .. } if facts.owned_runtime_prepare => {
+                Ok(Plan::execute(owned_replay_steps()))
+            }
             ProviderBinding::Owned { .. } => match facts.owned_files_verified {
                 Some(false) => Ok(Plan::execute(owned_replay_steps())), // R2
                 _ => Ok(Plan::NoOp {
@@ -745,6 +751,7 @@ fn owned_replay_steps() -> Vec<Step> {
     vec![
         Step::BackupFiles,
         Step::DownloadVerify,
+        Step::ProvisionRuntimeDeps,
         Step::RemoveOwnedFiles,
         Step::PlaceFiles,
         Step::SetCapabilities,
@@ -874,6 +881,7 @@ mod tests {
             pending_journal: false,
             active_adapter_claims: Vec::new(),
             owned_files_verified: None,
+            owned_runtime_prepare: false,
         }
     }
 
@@ -1281,6 +1289,7 @@ mod tests {
             vec![
                 Step::BackupFiles,
                 Step::DownloadVerify,
+                Step::ProvisionRuntimeDeps,
                 Step::RemoveOwnedFiles,
                 Step::PlaceFiles,
                 Step::SetCapabilities,
@@ -1334,6 +1343,26 @@ mod tests {
     }
 
     // ---- repair -------------------------------------------------------
+
+    #[test]
+    fn explicit_runtime_repair_prepares_before_replacing_healthy_files() {
+        let mut f = facts();
+        f.record = RecordFacts::Active(owned_record());
+        f.owned_files_verified = Some(true);
+        f.owned_runtime_prepare = true;
+        let steps = expect_steps(plan(&Intent::Repair, &f));
+        assert_eq!(
+            &steps[..3],
+            &[
+                Step::BackupFiles,
+                Step::DownloadVerify,
+                Step::ProvisionRuntimeDeps
+            ]
+        );
+        assert!(steps.contains(&Step::PlaceFiles));
+        f.record = RecordFacts::Absent;
+        assert_eq!(plan(&Intent::Repair, &f), Err(PlanError::NotInstalled));
+    }
 
     #[test]
     fn r2_owned_repair_replays_only_when_broken() {

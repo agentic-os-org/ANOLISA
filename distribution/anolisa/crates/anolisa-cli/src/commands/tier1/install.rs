@@ -97,6 +97,7 @@ mod types;
 // and for tests accessing via `super::*`.
 pub(crate) use types::*;
 
+mod prepare;
 mod provision;
 
 pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
