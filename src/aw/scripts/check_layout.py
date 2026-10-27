@@ -21,15 +21,13 @@ def structure(metadata: dict, root: Path) -> None:
             "serde",
             "serde_json",
             "serde_yaml_ng",
-            "sha2",
-            "thiserror",
             "libc",
-            "flate2",
-            "tar",
             "tempfile",
             "aw-config",
             "aw-exec",
             "aw-service",
+            "sha2",
+            "thiserror",
         },
         "aw-provider-tokenless": {
             "aw-exec",
@@ -76,6 +74,8 @@ def structure(metadata: dict, root: Path) -> None:
             "tempfile",
         },
     }
+    if metadata.get("shared_workspaces"):
+        raise ValueError("AW storage and runtime must remain inside framework crates")
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
     }
@@ -99,7 +99,6 @@ def structure(metadata: dict, root: Path) -> None:
     locations.update({name: root.parents[1] / "providers" / directory for name, directory in providers.items()})
     binaries = {
         "aw-cli": {"aw"},
-        "aw-package": {"aw-build"},
         **{name: {name} for name in providers},
     }
     for name, package in members.items():
@@ -111,7 +110,7 @@ def structure(metadata: dict, root: Path) -> None:
             target["name"] for target in package["targets"] if "bin" in target.get("kind", [])
         }
         if actual_binaries != binaries.get(name, set()):
-            raise ValueError(f"{name}: executable targets changed; aw is the software management command")
+            raise ValueError(f"{name}: executable targets changed; review CLI ownership")
         for target in package["targets"]:
             source = Path(target["src_path"]).resolve()
             if not any(source.is_relative_to(path.resolve()) for path in source_roots):
@@ -134,6 +133,7 @@ def structure(metadata: dict, root: Path) -> None:
     source_sizes(root)
     for name in providers:
         source_sizes(locations[name])
+    source_sizes(root.parents[1] / "distribution/packaging/aw")
 
 
 def source_sizes(root: Path) -> None:

@@ -248,7 +248,7 @@ class ResidentContainerTests(GateFixture):
                 signal.signal(sig, handler)
 
     def test_unmerged_profile_requires_manual_fork_exact_sha_and_no_secret(self):
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         block = workflow.split(
             "      - name: Require a trusted candidate before executing repository code\n",
             1,

@@ -126,7 +126,7 @@ class MatrixTests(GateFixture):
             workspace({name}, self.root / name) for name in sorted(providers)
         ]
         (self.root / "tests").mkdir()
-        for mode in ("valid", "missing-provider", "duplicate-target", "unknown-opt-in"):
+        for mode in ("valid", "missing-provider", "missing-framework", "duplicate-target", "unknown-opt-in"):
             matrix = copy.deepcopy(self.matrix)
             if mode == "unknown-opt-in":
                 matrix["opt_in_targets"]["unknown/test/acceptance"] = "fixture"
@@ -135,7 +135,7 @@ class MatrixTests(GateFixture):
             def collected(root: Path, data: dict, run: object, opt_in: frozenset) -> dict:
                 owned = set(data["workspace_members"])
                 self.assertTrue(all(target.split("/", 1)[0] in owned for target in opt_in))
-                if mode == "missing-provider" and owned == {"aw-provider-tokenless"}:
+                if (mode == "missing-provider" and owned == {"aw-provider-tokenless"}) or (mode == "missing-framework" and "aw-cli" in owned):
                     return {}
                 result = {
                     target: tests for target, tests in self.runnable.items()

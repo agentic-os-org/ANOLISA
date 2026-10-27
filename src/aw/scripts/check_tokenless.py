@@ -40,9 +40,8 @@ def check(directory: Path) -> None:
     report = {"candidate_sha": expected, "passed": False, "cases": []}
     try:
         commands.run(
-            ["cargo", "run", "--locked", "--release", "-p", "aw-package", "--bin", "aw-build",
-             "--", "--version", "0.1.0-preview.1", "--component", "tokenless",
-             "--output", str(directory / "packages")], AW, 2700,
+            ["make", "-C", str(REPO / "distribution"), "aw-integration-backends",
+             "BACKENDS=tokenless"], REPO, 2700,
         )
         report["binaries"] = {
             name: hashlib.sha256(Path(environment[key]).read_bytes()).hexdigest()

@@ -32,7 +32,7 @@ class GateFixture(unittest.TestCase):
 
 class PackageWorkflowTests(GateFixture):
     def test_real_cli_paths_use_the_container_workspace(self) -> None:
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         step = workflow.split(
             "      - name: Verify Tokenless PreTool and PostTool contracts\n", 1
         )[1]
@@ -115,6 +115,9 @@ class ScopeTests(GateFixture):
         workflow_head = self.commit(".github/workflows/aw-ci.yml", "workflow only")
         event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": workflow_head}}
         self.assertTrue(gate.scope("pull_request", event, workflow_head, self.root))
+        integration_head = self.commit(".github/workflows/aw-integration.yml", "integration only")
+        event["pull_request"]["head"]["sha"] = integration_head
+        self.assertTrue(gate.scope("pull_request", event, integration_head, self.root))
 
     def test_scope_handles_removal_noop_and_event_errors(self) -> None:
         base = self.init_git()
@@ -154,6 +157,13 @@ class ScopeTests(GateFixture):
         self.git("commit", "-qm", "remove Provider")
         removed = self.git("rev-parse", "HEAD")
         self.assertTrue(gate.scope("push", {"before": head, "after": removed}, removed, self.root))
+
+    def test_store_and_delivery_changes_select_the_gate(self) -> None:
+        base = self.init_git()
+        for path in ("src/aw/crates/aw-package/src/store/plan.rs", "distribution/packaging/aw/package.py", "distribution/Makefile"):
+            head = self.commit(path, "shared change")
+            self.assertTrue(gate.scope("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}, head, self.root))
+            base = head
 
     def test_merge_group_selects_only_aw_changes(self) -> None:
         base = self.init_git()
@@ -205,6 +215,7 @@ class GateTests(GateFixture):
             "aw-provider-sec-core": self.root.parents[1] / "providers/agent-sec-core",
             "aw-provider-tokenless": self.root.parents[1] / "providers/tokenless",
         }
+        local_directories = provider_directories
         packages = []
         for name, directory, dependencies in (
             ("aw-contracts", self.root / "crates/aw-contracts", ["serde_json"]),
@@ -234,7 +245,7 @@ class GateTests(GateFixture):
             ),
             (
                 "aw-package", self.root / "crates/aw-package",
-                ["aw-config", "aw-exec", "aw-service", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile"],
+                ["aw-config", "aw-exec", "aw-service", "serde", "serde_json", "serde_yaml_ng", "libc", "tempfile", "sha2", "thiserror"],
             ),
             (
                 "aw-provider-tokenless", self.root.parents[1] / "providers/tokenless",
@@ -251,7 +262,7 @@ class GateTests(GateFixture):
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
-            binary = {"aw-cli": "aw", "aw-package": "aw-build"}.get(name)
+            binary = {"aw-cli": "aw"}.get(name)
             if name in provider_directories:
                 binary = name
             targets = [{"src_path": str(directory / "src/lib.rs"), "kind": ["lib"]}]
@@ -268,7 +279,7 @@ class GateTests(GateFixture):
                         {
                             "name": dependency,
                             "path": (
-                                str(provider_directories.get(dependency, self.root / "crates" / dependency))
+                                str(local_directories.get(dependency, self.root / "crates" / dependency))
                                 if dependency.startswith("aw-") else None
                             ),
                             "source": None if dependency.startswith("aw-") else "registry+fixture",
@@ -287,6 +298,28 @@ class GateTests(GateFixture):
             ],
         }
         gate.structure(metadata, self.root)
+        for extra in ([{"workspace_root": "/foreign", "packages": []}],
+                      [{"workspace_root": str(self.root), "packages": []}] * 2):
+            with self.assertRaisesRegex(ValueError, "inside framework crates"):
+                gate.structure({**metadata, "shared_workspaces": extra}, self.root)
+        for name in ("aw-package", "aw-exec"):
+            for dependency in ("local-package", "local-package-runtime", "aw-cli"):
+                invalid = deepcopy(metadata)
+                package = next(p for p in invalid["packages"] if p["name"] == name)
+                package["dependencies"].append({"name": dependency})
+                with self.assertRaisesRegex(ValueError, "unreviewed dependency"):
+                    gate.structure(invalid, self.root)
+        invalid = deepcopy(metadata)
+        package = next(p for p in invalid["packages"] if p["name"] == "aw-package")
+        dependency = next(d for d in package["dependencies"] if d["name"] == "aw-exec")
+        dependency["path"] = str(self.root / "foreign-runtime")
+        with self.assertRaisesRegex(ValueError, "local dependency"):
+            gate.structure(invalid, self.root)
+        source = self.root / "crates/aw-package/src/store.rs"
+        source.write_text("// fixture\n" * 700)
+        with self.assertRaisesRegex(ValueError, "exceed"):
+            gate.structure(metadata, self.root)
+        source.unlink()
         for name in ("aw-cli", "aw-package", "aw-core", "aw-provider-sec-core"):
             invalid = deepcopy(metadata)
             package = next(p for p in invalid["packages"] if p["name"] == name)
@@ -294,7 +327,7 @@ class GateTests(GateFixture):
                                        "src_path": str(Path(package["manifest_path"]).parent / "src/bin/aw-package.rs")})
             with self.subTest(binary_owner=name), self.assertRaisesRegex(ValueError, "executable targets changed"):
                 gate.structure(invalid, self.root)
-        for name in ("aw-cli", "aw-package", "aw-provider-sec-core", "aw-provider-tokenless"):
+        for name in ("aw-cli", "aw-provider-sec-core", "aw-provider-tokenless"):
             invalid = deepcopy(metadata)
             package = next(p for p in invalid["packages"] if p["name"] == name)
             package["targets"] = [target for target in package["targets"] if "bin" not in target["kind"]]

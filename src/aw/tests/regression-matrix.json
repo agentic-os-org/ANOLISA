@@ -19,8 +19,7 @@
     "aw-exec/test/execution",
     "aw-host/test/host",
     "aw-cli/test/installation",
-    "aw-package/test/build_cli",
-    "aw-package/test/database",
+    "aw-package/lib/aw_package",
     "aw-provider-sec-core/test/provider",
     "aw-provider-tokenless/test/managed_rtk",
     "aw-provider-tokenless/test/pretool",
@@ -40,27 +39,12 @@
     "aw-cli/test/pretool",
     "aw-cli/test/qwenpaw",
     "aw-cli/test/service",
-    "aw-package/lib/aw_package",
-    "aw-package/test/management",
     "aw-exec/test/packages",
-    "aw-cli/test/legacy_migration",
     "aw-cli/test/qoder_sdk",
     "aw-cli/test/native_configuration",
     "aw-config/test/native_sources"
   ],
   "cases": {
-    "package-unified-bootstrap": {
-      "target": "aw-cli/test/packages",
-      "test": "bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command"
-    },
-    "package-unified-provider-bootstrap": {
-      "target": "aw-cli/test/packages",
-      "test": "provider_bundle_root_aw_appends_to_core_without_a_second_command"
-    },
-    "package-inventory-readonly": {
-      "target": "aw-cli/test/inventory",
-      "test": "legacy_queries_preserve_every_file_and_do_not_create_a_database"
-    },
     "package-doctor-files": {
       "target": "aw-cli/test/inventory",
       "test": "list_keeps_recorded_packages_while_doctor_reports_missing_files"
@@ -237,17 +221,9 @@
       "target": "aw-cli/test/packages",
       "test": "management::prefix_queries_follow_registration_from_another_user_database_location"
     },
-    "package-running-service": {
-      "target": "aw-cli/test/packages",
-      "test": "management::a_service_running_from_the_prefix_blocks_removal_until_shutdown"
-    },
     "package-generic-plan": {
       "target": "aw-package/lib/aw_package",
       "test": "store::tests::management::generic_install_plan_is_read_only_and_does_not_require_aw_core"
-    },
-    "package-legacy-migration": {
-      "target": "aw-cli/test/legacy_migration",
-      "test": "real_historical_installer_refuses_all_writes_after_package_record_migration"
     },
     "package-cross-prefix-reverse-dependency": {
       "target": "aw-package/lib/aw_package",
@@ -297,10 +273,6 @@
       "target": "aw-package/lib/aw_package",
       "test": "store::transaction::tests::final_journal_unlink_gap_preserves_committed_payload_and_recovery_is_idempotent"
     },
-    "package-migration-retry": {
-      "target": "aw-package/lib/aw_package",
-      "test": "store::transaction::tests::a_rolled_back_migration_does_not_reserve_future_legacy_record_bytes"
-    },
     "package-journal-capacity": {
       "target": "aw-package/lib/aw_package",
       "test": "store::transaction::journal::snapshots::tests::maximum_database_snapshots_fit_the_journal_and_preserve_exact_bytes"
@@ -329,13 +301,9 @@
       "target": "aw-cli/test/packages",
       "test": "metadata::removed_last_package_still_requires_the_registered_prefix_metadata"
     },
-    "package-scope-system-preview": {
-      "target": "aw-cli/test/packages",
-      "test": "scope::explicit_system_dry_run_selects_system_scope_without_creating_state"
-    },
     "package-scope-split-sequence": {
       "target": "aw-cli/test/packages",
-      "test": "scope::split_core_extension_and_uninstall_require_consistent_explicit_scope"
+      "test": "scope::split_extensions_and_uninstall_require_consistent_explicit_scope"
     },
     "package-prefix-action-capacity": {
       "target": "aw-package/lib/aw_package",
@@ -360,14 +328,6 @@
     "package-commit-sync-rollback": {
       "target": "aw-package/lib/aw_package",
       "test": "store::transaction::tests::durability::failed_commit_sync_keeps_rollback_material_if_the_old_database_returns"
-    },
-    "package-legacy-runtime-rejection": {
-      "target": "aw-package/test/management",
-      "test": "unknown_legacy_runtime_blocks_registration_before_any_writes"
-    },
-    "package-historical-core-rejection": {
-      "target": "aw-cli/test/legacy_migration",
-      "test": "historical_core_registration_is_rejected_without_disabling_its_installer"
     },
     "package-registration-lease-lifetime": {
       "target": "aw-cli/test/launcher",
@@ -824,6 +784,86 @@
     "native-config-context": {
       "target": "aw-cli/test/native_configuration",
       "test": "native_loader_receives_original_context_and_runs_once_with_or_without_descriptors"
+    },
+    "package-lock-permissions-rollback": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::existing_lock_permissions_remain_private_when_precommit_changes_roll_back"
+    },
+    "package-scope-system-dry-run": {
+      "target": "aw-cli/test/packages",
+      "test": "scope::explicit_system_dry_run_selects_system_scope_without_creating_state"
+    },
+    "package-product-authority": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::product_files_are_owned_only_by_the_product_database"
+    },
+    "package-product-execution-authority": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::execution_binds_manager_even_when_a_caller_reuses_the_same_root"
+    },
+    "package-product-runtime-lease": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::product_mutations_obey_the_same_runtime_leases_as_aw"
+    },
+    "package-current-locator-authority": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::current_locators_record_explicit_manager_and_authority"
+    },
+    "package-system-default-query-scope": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::default_user_paths_can_follow_an_aw_system_locator_for_read_only_queries"
+    },
+    "package-system-explicit-query-scope": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "command::inventory::tests::explicit_user_scope_still_rejects_a_recorded_system_prefix_before_reading_its_database"
+    },
+    "provider-artifact-ordinary-and-new-core-bundles-are-rejected-by-both-library-install-entries": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::ordinary_and_new_core_bundles_are_rejected_by_library_install"
+    },
+    "provider-artifact-independent-provider-install-preserves-plan-json-and-owned-cleanup": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::independent_provider_install_preserves_plan_json_and_owned_cleanup"
+    },
+    "provider-artifact-foreign-manager-cannot-use-aw-mutation-or-recovery-entries": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::foreign_manager_cannot_use_aw_mutation_or_recovery_entries"
+    },
+    "provider-artifact-aw-cannot-claim-or-recover-an-ordinary-software-database": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::aw_cannot_claim_or_recover_an_ordinary_software_database"
+    },
+    "provider-artifact-previous-manifest-bundles-are-rejected-before-any-writes": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::previous_manifest_bundles_are_rejected_before_any_writes"
+    },
+    "provider-artifact-historical-receipts-cannot-be-queried-configured-migrated-or-removed-by-aw": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::historical_receipts_cannot_be_queried_configured_migrated_or_removed_by_aw"
+    },
+    "provider-artifact-unmanaged-configuration-needs-no-raw-registration-or-installed-core": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::unmanaged_configuration_needs_no_raw_registration_or_installed_core"
+    },
+    "provider-artifact-checked-planning-binds-admission-to-the-descriptor-used-for-execution": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::checked_planning_binds_admission_to_the_descriptor_used_for_execution"
+    },
+    "package-unmanaged-core-config": {
+      "target": "aw-cli/test/standalone",
+      "test": "native_or_unregistered_aw_initializes_without_package_database"
+    },
+    "package-explicit-locator-manager": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::a_current_locator_requires_an_explicit_manager"
+    },
+    "package-retired-metadata-rejection": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::previous_metadata_directories_are_rejected_without_decoding_their_contents"
+    },
+    "package-current-source-version-contract": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::stored_versions_and_source_commits_use_the_current_description_contract"
     }
   },
   "agents": {
@@ -1244,6 +1284,6 @@
     ]
   },
   "opt_in_targets": {
-    "aw-package/test/installed": "Installed all-in-one Preview acceptance runs in package CI; requires installed binaries and a real sec-core socket or root."
+    "aw-package/test/installed": "Installed Provider acceptance runs in package CI; requires installed binaries and a real sec-core socket or root."
   }
 }
