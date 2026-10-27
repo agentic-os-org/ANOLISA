@@ -15,6 +15,24 @@ use crate::commands::common;
 use crate::commands::tier1::rpm_install;
 
 #[test]
+fn no_deps_rejects_recorded_rpm_before_observation() {
+    for dry_run in [false, true] {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(dry_run);
+        seed_tracked_rpm(&ctx, "copilot-shell", Ownership::RpmObserved);
+        let query = FakeQuery {
+            command_missing: true,
+            ..Default::default()
+        };
+        let mut args = args("copilot-shell");
+        args.no_deps = true;
+        let err = handle_one_with_query("copilot-shell".to_string(), args, &ctx, &query)
+            .expect_err("recorded RPM provenance must reject --no-deps");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("only supported by the raw backend"));
+    }
+}
+
+#[test]
 fn candidates_cli_override_matching_package_map_is_accepted() {
     let repo = repo_with_rpm_map(&[("cosh", "site-copilot")]);
     let backend = repo.backends.get("rpm");

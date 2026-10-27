@@ -102,6 +102,11 @@ scope。因此，即使 system scope 已安装同名组件，
 RPM 安装支持 Yum 3 和 DNF 4。使用 `sudo` 执行 RPM `--dry-run`，
 可在安装前检查依赖和冲突。
 
+raw 安装可使用 `anolisa install <component> --backend raw --no-deps`
+跳过运行依赖检查和安装，也支持与 `--all` 组合。使用组件前需自行确保
+所需依赖可用。安装成功后会向 stderr 输出提醒，`--quiet` 可隐藏提醒。
+RPM 后端不支持此选项，会明确报错。
+
 ## 架构
 
 五 crate Cargo workspace：

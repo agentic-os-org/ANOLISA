@@ -213,6 +213,44 @@ fn owned_artifact(installation: &Installation) -> &OwnedArtifact {
 }
 
 #[test]
+fn no_deps_system_install_skips_runtime_requirements_after_locked_replanning() {
+    for no_deps in [false, true] {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let repo_url = write_local_repo(&repo);
+        let manifest = format!(
+            "{}\n[[component.dependencies]]\nname = \"future-kernel\"\nkind = \"platform-capability\"\nmin_kernel = \"9999.0\"\n",
+            component_manifest_toml("agentsight", "0.2.0", &["system"])
+        );
+        let artifact = build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"#!/bin/sh\nexit 0\n"),
+        ]);
+        replace_repo_artifact(&repo, "agentsight", &artifact);
+        let ctx = ctx_with_prefix(false, Some(tmp.path().join("system")));
+        let mut args = args("agentsight");
+        args.repo = Some(repo_url);
+        args.no_deps = no_deps;
+        let result = handle_with_fake_rpm(args, &ctx);
+        let layout = common::resolve_layout(&ctx);
+        if no_deps {
+            result.expect("system install must skip dependencies even after replanning under lock");
+            assert!(layout.bin_dir.join("agentsight").is_file());
+            let store = StateStore::load_for_layout(
+                &layout.state_dir.join("installed.toml"),
+                anolisa_platform::privilege::effective_uid(),
+                &layout,
+            )
+            .unwrap();
+            assert!(store.find(ObjectKind::Component, "agentsight").is_some());
+        } else {
+            assert!(result.unwrap_err().reason().contains("future-kernel"));
+            assert!(!layout.bin_dir.join("agentsight").exists());
+        }
+    }
+}
+
+#[test]
 fn install_dry_run_resolves_without_writing_files() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
@@ -2380,6 +2418,7 @@ fn install_all_dry_run_rejects_conflicts_between_planned_components() {
         component: None,
         all: true,
         fail_fast: false,
+        no_deps: false,
         version: None,
         backend: Some("raw".to_string()),
         repo: None,
@@ -2469,6 +2508,7 @@ package = "agentsight"
         component: None,
         all: true,
         fail_fast: false,
+        no_deps: false,
         version: None,
         backend: Some("raw".to_string()),
         repo: Some(override_url),

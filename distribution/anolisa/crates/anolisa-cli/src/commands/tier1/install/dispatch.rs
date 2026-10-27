@@ -339,6 +339,13 @@ pub(crate) fn plan_component(
     }
 
     let family = install_family(args, &store, &component, &repo_config);
+    if args.no_deps && family == "rpm" {
+        return Err(CliError::InvalidArgument {
+            command,
+            reason: "--no-deps is only supported by the raw backend; the selected backend is rpm"
+                .to_string(),
+        });
+    }
 
     // Backend gate: only the raw and rpm families have executors. The
     // selection call validates the name and its configuration first, so an
@@ -561,6 +568,7 @@ pub(crate) fn plan_component(
     let request = InstallRequest {
         target,
         requested_version: args.version.clone(),
+        no_deps: args.no_deps,
     };
     let install_plan = plan(&Intent::Install(request.clone()), &facts)
         .map_err(|err| plan_error_to_cli(err, &component, &command))?;

@@ -50,6 +50,7 @@ pub fn args(component: &str) -> InstallArgs {
         component: Some(component.to_string()),
         all: false,
         fail_fast: false,
+        no_deps: false,
         version: None,
         backend: None,
         repo: None,
@@ -92,7 +93,7 @@ pub fn handle_with_effects(
         effects,
     )?;
     let warnings = outcome.warnings().to_vec();
-    render_outcome(ctx, outcome)?;
+    render_outcome(ctx, outcome, args.no_deps)?;
     Ok(warnings)
 }
 

@@ -75,6 +75,9 @@ pub struct InstallArgs {
     /// With --all, stop on the first failure instead of continuing
     #[arg(long, requires = "all")]
     pub fail_fast: bool,
+    /// Skip runtime dependency checks and installation (raw backend only)
+    #[arg(long)]
+    pub no_deps: bool,
     /// Install a specific version instead of the latest in the channel
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
@@ -124,7 +127,7 @@ fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<
         },
         ctx,
     )?;
-    render_outcome(ctx, outcome)
+    render_outcome(ctx, outcome, args.no_deps)
 }
 
 fn execution_intent(ctx: &CliContext) -> ExecutionIntent {
@@ -192,11 +195,15 @@ pub(crate) fn install_component_with_deps_and_env(
         crate::test_support::raw_effects(),
     )?;
     let batch_outcome = outcome.batch_outcome();
-    render_outcome(ctx, outcome)?;
+    render_outcome(ctx, outcome, args.no_deps)?;
     Ok(batch_outcome)
 }
 
-fn render_outcome(ctx: &CliContext, outcome: InstallApplicationOutcome) -> Result<(), CliError> {
+fn render_outcome(
+    ctx: &CliContext,
+    outcome: InstallApplicationOutcome,
+    no_deps: bool,
+) -> Result<(), CliError> {
     let payload = match outcome {
         InstallApplicationOutcome::NoOp { subject, reason } => {
             debug_assert!(matches!(
@@ -243,7 +250,21 @@ fn render_outcome(ctx: &CliContext, outcome: InstallApplicationOutcome) -> Resul
             payload
         }
     };
-    render_result(ctx, &payload)
+    render_result(ctx, &payload)?;
+    if no_deps && payload.action == "installed" {
+        render_no_deps_notice(ctx);
+    }
+    Ok(())
+}
+
+fn render_no_deps_notice(ctx: &CliContext) {
+    if !ctx.quiet {
+        progress::suspend_output(|| {
+            eprintln!(
+                "Runtime dependency checks and installation were skipped (--no-deps). Ensure required dependencies are available before use."
+            );
+        });
+    }
 }
 
 /// JSON payload for a completed, previewed, or idempotent install.
@@ -375,6 +396,22 @@ mod unit_tests {
     use super::tests::*;
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn install_no_deps_defaults_off_and_accepts_single_and_batch_targets() {
+        assert!(
+            !InstallArgs::try_parse_from(["install", "tokenless"])
+                .unwrap()
+                .no_deps
+        );
+        for argv in [
+            vec!["install", "tokenless", "--no-deps"],
+            vec!["install", "--all", "--no-deps"],
+            vec!["install", "tokenless", "--version", "1.0.0", "--no-deps"],
+        ] {
+            assert!(InstallArgs::try_parse_from(argv).unwrap().no_deps);
+        }
+    }
 
     #[test]
     fn install_cli_rejects_multiple_components() {

@@ -68,6 +68,30 @@ sudo anolisa --install-mode system --dry-run install cosh-ng --backend rpm
 
 如果 ANOLISA 无法识别系统包管理器，请按提示手工安装缺失依赖后重试。
 
+自行管理依赖的 raw 安装可使用 `--no-deps`：
+
+```bash
+anolisa install tokenless --backend raw --no-deps
+anolisa install --all --backend raw --no-deps
+anolisa --dry-run install tokenless --backend raw --no-deps
+```
+
+此参数在 user 和 system 模式下均跳过 ANOLISA 的运行依赖解析、检查（包括
+声明的平台要求）、自动安装和复验，仅作用于本次 install。制品校验、安装
+契约及冲突检查、hooks 和服务设置仍会执行；使用组件前需自行确保所需依赖
+可用。不传此参数时，依赖处理保持不变。RPM 不支持 `--no-deps`，包括由配置
+或已有安装记录选中 RPM 的情况，都会明确报错。
+
+实际安装成功后，stderr 会输出：
+
+> Runtime dependency checks and installation were skipped (--no-deps). Ensure required dependencies are available before use.
+
+即运行依赖检查和安装已跳过，使用前需确保依赖可用。`--quiet` 可隐藏此提醒，
+`--json` 的 stdout 仍保持 JSON 格式。批量安装只要至少一个组件安装成功，就在
+结果末尾提醒一次，部分成功时也如此。安装失败、已安装而无需操作及 dry-run
+均不输出此提醒。提醒不改变退出码。使用 `--no-deps` 时，dry-run 计划也会省略
+运行依赖补装步骤。
+
 ### uninstall
 
 从所选 scope 移除一个安装：

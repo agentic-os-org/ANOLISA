@@ -75,6 +75,32 @@ as a version lock, the command fails without substituting another version.
 If ANOLISA cannot identify the system's package manager, follow the reported
 instructions to install missing dependencies manually, then retry.
 
+For raw installations where you manage dependencies yourself, use `--no-deps`:
+
+```bash
+anolisa install tokenless --backend raw --no-deps
+anolisa install --all --backend raw --no-deps
+anolisa --dry-run install tokenless --backend raw --no-deps
+```
+
+This skips ANOLISA's runtime dependency resolution, checks (including declared
+platform requirements), automatic installation, and rechecks in both user and
+system mode. It applies only to this install invocation. Artifact verification,
+installation contract and conflict checks, hooks, and service setup still run;
+ensure the required dependencies are available before using the component.
+Without the flag, dependency handling is unchanged. RPM rejects `--no-deps`,
+including when RPM is selected by configuration or an existing installation.
+
+After an actual successful installation, stderr reports:
+
+> Runtime dependency checks and installation were skipped (--no-deps). Ensure required dependencies are available before use.
+
+`--quiet` hides this reminder, and `--json` keeps stdout as JSON. A batch prints
+the reminder once if at least one component was installed, including partial
+success. Failed installs, already-installed results, and dry-runs do not print
+it. The reminder does not change the exit code. Dry-run plans omit the runtime
+dependency provisioning step when `--no-deps` is set.
+
 ### uninstall
 
 Remove one installation from the selected scope:

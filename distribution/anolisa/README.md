@@ -106,6 +106,11 @@ for command forms, scope behavior, and recovery workflows.
 RPM installs support Yum 3 and DNF 4. Use `sudo` with RPM `--dry-run`
 to check dependencies and conflicts before installing.
 
+For raw installs, `anolisa install <component> --backend raw --no-deps`
+skips runtime dependency checks and installation. It also works with `--all`;
+ensure the required dependencies are available before use. Successful installs
+print a reminder to stderr unless `--quiet` is set. RPM rejects this option.
+
 ## Architecture
 
 Five-crate Cargo workspace:
