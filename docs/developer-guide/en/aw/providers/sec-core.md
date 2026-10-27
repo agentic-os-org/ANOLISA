@@ -10,22 +10,7 @@ command. You choose which tool inputs contain code and whether reported risks
 produce an observation or a block candidate. sec-core supplies the scanner and
 rules; AW supplies configuration, protocol validation and bounded invocation.
 
-This is a Linux source delivery for local Provider integration. The integrated Preview is described separately below. The
-Provider does not start either daemon, install Agent Hooks or persist AW audits.
-Tool-after support records an observation; it does not scan or replace results.
-
-For a prebuilt AW service + Qoder + sec-core integration, use the
-[Preview package guide](../../../../user-guide/en/aw/installation.md). The standalone source bridge below
-is also available.
-
-For the general component integration path, start with the
-[AW walkthrough](../integration.md). sec-core's CLI
-and daemon remain an independently managed backend; the AW service owns AW
-audit storage. See [container persistence](../native-agents.md#containers-and-persistent-data).
-The Preview generator maps Qoder `Bash` and OpenClaw `exec` inputs. Before using
-QwenPaw or Hermes, add and validate their normalized tool names and input pointers
-in `config.tools`. Select tools separately with standard names or exact native
-selectors in the security step's `match.tools`, as described below.
+See the [user guide](../../../../user-guide/en/aw/security.md) for installation and backend setup. This page covers input mapping, failures and standalone bridge validation.
 
 ## Prerequisites and build
 
@@ -165,20 +150,6 @@ never run as a shell command. Exit 0 means the CLI completed a scan, not that it
 verdict was `pass`. Nonzero/signal exits, malformed JSON, invalid verdicts,
 timeouts and stream limits produce Provider errors without candidate effects.
 
-Before scanning, the bridge passes `--trace-context` with the Adapter name as
-`agent_name` and native `trace_id`, `session_id`, `run_id`, `call_id` and
-`tool_call_id` values. It reads the original callback, including OpenClaw's
-event/context and Hermes's extra fields. Pi, QwenPaw and AgentScope supply the
-native tool ID through `tool_call.id`. Normalized AW session, call and instance
-IDs are never used as fallbacks; absent, blank or non-string native fields are
-omitted. The sec-core CLI converts this compatible input to its existing OTel
-Context/Baggage.
-
-Before starting the CLI, the bridge strips each native correlation value and
-limits it to 256 Unicode code points, including a `...[truncated]` suffix when
-truncation is needed. This matches the CLI's normalization and bounds the context
-argument before it reaches the OS argument limit.
-
 The caller must enforce a deadline for the entire Provider process, including
 stdin receipt and stdout delivery. `aw-host` does this through `aw-exec`. A direct
 caller must also close stdin after the request and terminate the process if I/O
@@ -190,6 +161,12 @@ It forwards its Host-selected environment to the CLI. Responses contain
 reason codes and the bound input digest, not source code, findings or CLI stderr.
 The CLI receives code through argv, subject to OS argument visibility and size
 limits. No stdin/file fallback is provided by this CLI contract.
+
+## Trace correlation
+
+The bridge passes native IDs to sec-core through the JSON `--trace-context` argument, with `agent_name` set to the Adapter name. It reads `trace_id`, `session_id`, `run_id`, `call_id` and `tool_call_id` from `event.native`, accepting snake_case and camelCase aliases. OpenClaw uses `native.event` then `native.context`; Hermes uses `native` then `native.extra`.
+Qoder, Qoder SDK and Claude SDK prefer native `tool_use_id` for the tool call; Pi, QwenPaw and AgentScope use `native.tool_call.id`. Missing native IDs remain absent; AW-generated IDs are kept separate.
+Values must be strings. The bridge trims surrounding whitespace, omits empty values and caps each value at 256 Unicode characters including the `...[truncated]` suffix. Field precedence is defined in [trace_context.rs](../../../../../providers/agent-sec-core/src/trace_context.rs).
 
 ## Try candidate effects locally
 

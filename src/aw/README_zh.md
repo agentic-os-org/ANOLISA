@@ -19,6 +19,23 @@ Adapter 接通原生事件并采纳支持的效果，Provider 实现具体策略
 core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
 工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
 
+## Hook 支持矩阵
+
+✓ 已声明且有契约测试覆盖，× 尚不支持。矩阵从[回归清单](tests/regression-matrix.json)生成。结果替换的原生限制与 MCP、更新范围见[完整能力表](../../docs/user-guide/zh/aw/capabilities.md)。
+
+<!-- aw-regression-matrix:start -->
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
+| --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ |
+| `pi` | ✓ | ✓ | ✓ | ✓ |
+| `qoder` | ✓ | ✓ | ✓ | ✓ |
+| `qoder-sdk` | ✓ | ✓ | ✓ | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+<!-- aw-regression-matrix:end -->
+
 <a id="安装与使用"></a>
 
 ## 安装与首次运行
@@ -67,7 +84,7 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需�
 | 选择 Agent、配置规则和更新策略 | [配置与启动](../../docs/user-guide/zh/aw/configuration.md) |
 | 启用输出压缩或安全检查 | [Tokenless](../../docs/user-guide/zh/aw/tokenless.md)、[sec-core](../../docs/user-guide/zh/aw/security.md) |
 | 查看运行记录 | [AgentSight](../../docs/user-guide/zh/aw/observability.md) |
-| 查询状态、管理安装包与排错 | [运行维护](../../docs/user-guide/zh/aw/operations.md) |
+| 查询状态、升级卸载与排错 | [运行维护](../../docs/user-guide/zh/aw/operations.md) |
 | 编写 Provider、接入 SDK 或理解架构 | [开发指南](../../docs/developer-guide/zh/aw/index.md) |
 
 <a id="代码架构"></a>

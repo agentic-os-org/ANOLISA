@@ -8,18 +8,7 @@
 配置指定哪些工具输入包含代码，以及发现风险后返回观察还是阻断候选效果。
 sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调用。
 
-当前交付为 Linux 源码，可用于本地 Provider 集成。完整 Preview 集成见下方指南。Provider 不启动任何 daemon，不安装 Agent Hook，也不持久化 AW 审计。
-工具后仅返回观察记录，不扫描或替换结果。
-
-完整的 AW 服务、Qoder 和 sec-core 预编译集成见 [Preview 包指南](../../../../user-guide/zh/aw/installation.md)。
-以下仍可单独从源码使用 Provider 桥接。
-
-通用的组件接入路径见 [AW 教程](../integration.md)。sec-core
-CLI 和 daemon 仍是独立管理的后端，AW 审计存储由 AW 服务负责，见
-[容器持久化说明](../native-agents.md#容器与持久化数据)。Preview 生成器映射 Qoder `Bash` 和
-OpenClaw `exec` 输入。使用 QwenPaw 或 Hermes 前，须在 `config.tools` 中补充并
-验证其规范化工具名称和输入指针。安全步骤的 `match.tools` 另行使用标准名称或
-精确的原生选择器选择工具，具体语法见下文。
+安装和后台准备见[用户指南](../../../../user-guide/zh/aw/security.md)。下文说明输入映射、故障处理和独立桥接验证。
 
 ## 前置条件与构建
 
@@ -141,18 +130,6 @@ Provider 的私有 `config` 接受以下字段：
 判定为 `pass`。非零或信号退出、非法 JSON、无效判定、超时和输出超限均返回
 Provider 错误，不产生候选效果。
 
-扫描前，桥接通过 `--trace-context` 传入以 Adapter 名称表示的 `agent_name`、
-原生 `trace_id`、`session_id`、`run_id`、`call_id` 和 `tool_call_id`。
-字段从原始回调提取，包括 OpenClaw 的 event/context 和 Hermes 的 extra 字段。
-Pi、QwenPaw 和 AgentScope 的原生工具 ID 从 `tool_call.id` 提取。
-AW 标准化事件中的 session、调用和实例 ID 不用于兜底；原生字段缺失、空白或
-不是字符串时会省略。
-sec-core CLI 将这份兼容输入转换为已有的 OTel Context/Baggage。
-
-启动 CLI 前，桥接会去除各原生关联字段首尾的空白，并将其限制为 256 个 Unicode
-码点；超长时保留 `...[truncated]` 后缀，后缀也计入限长。这与 CLI 的归一化规则
-一致，并在触及操作系统参数长度限制之前约束 context 参数大小。
-
 调用方必须限制整个 Provider 进程的期限，包括 stdin 接收和 stdout 输出。
 `aw-host` 通过 `aw-exec` 提供这一保证。直接调用时也必须在请求发送完毕后关闭 stdin，
 并在 I/O 停滞时终止进程；Provider 自身不保证独立调用的总耗时上限。
@@ -162,6 +139,12 @@ EOF 到达后，桥接从 invoke 预算（最多 60 秒）中扣除读取和解�
 选定的环境。响应仅携带原因码与绑定的输入摘要，不包含源码、发现详情或 CLI stderr。
 代码经 argv 传递，受操作系统的参数可见性与大小限制；当前 CLI 合同不提供 stdin
 或文件回退路径。
+
+## Trace 关联
+
+bridge 通过 JSON `--trace-context` 参数向 sec-core 传递原生 ID，`agent_name` 使用 Adapter 名称。从 `event.native` 读取 `trace_id`、`session_id`、`run_id`、`call_id` 和 `tool_call_id`，接受 snake_case 与 camelCase 别名。OpenClaw 依次读取 `native.event`、`native.context`；Hermes 依次读取 `native`、`native.extra`。
+Qoder、Qoder SDK 和 Claude SDK 优先使用原生 `tool_use_id` 标识工具调用；Pi、QwenPaw 和 AgentScope 使用 `native.tool_call.id`。缺失的原生 ID 保持缺失，AW 生成的 ID 独立保留。
+字段须为字符串，去除首尾空白后忽略空值；每项最多 256 个 Unicode 字符，包含超长时追加的 `...[truncated]`。字段优先级见 [trace_context.rs](../../../../../providers/agent-sec-core/src/trace_context.rs)。
 
 ## 本地验证候选效果
 

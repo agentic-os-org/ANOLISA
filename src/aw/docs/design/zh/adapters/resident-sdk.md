@@ -123,7 +123,7 @@ Pi/Claude 直接任务 worker 入口保留原失败策略和 1,024 个累计关�
 `createQuery` 按规范 cwd 和环境快照建立并确认子 scope，再通过共享 scope 传输登记、
 调用和结束递增 invocation。应用原始 Hook 保留原生 ID，AW 回调接收已登记 UUID。
 原生 partial 消息默认保持私有，仅在请求 `includePartialMessages: true` 时公开。
-启动方式与支持选项见 [Worker 指南](../../../../../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)。
+启动方式与支持选项见 [Worker 指南](../../../../../../docs/developer-guide/zh/aw/agents/qoder-sdk.md)。
 
 每个 Query 返回冻结的公共接口。工具完成后，先等待原生命令队列屏障和原始回调 finally，
 再回收工具身份。提前 return、取消和 transport 丢失均等待原生 close、Hook、权限、凭据、

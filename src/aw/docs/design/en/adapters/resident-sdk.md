@@ -167,7 +167,7 @@ with the canonical cwd and captured environment, then uses the shared scope
 transport to register, invoke and finish sequenced calls. Original application
 Hooks keep native IDs; AW callbacks receive the registered UUID. Native partial
 messages stay private unless `includePartialMessages: true` was requested.
-See the [worker guide](../../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
+See the [worker guide](../../../../../../docs/developer-guide/en/aw/agents/qoder-sdk.md)
 for startup and supported options.
 
 Each Query returns a frozen public facade. The native command-queue barrier and

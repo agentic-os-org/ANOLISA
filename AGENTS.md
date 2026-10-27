@@ -276,6 +276,9 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Framework crates and native Hook gates |
 | **AW Providers** | [`providers/AGENTS.md`](providers/AGENTS.md) | Independent collaboration workspaces and Provider contracts |
 
+AW documentation under `docs/` and `contribute/` also follows the audience and
+writing rules in [`src/aw/AGENTS.md`](src/aw/AGENTS.md#documentation-audiences-and-writing).
+
 ## 11.1 File Placement & Documentation Structure
 
 > **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §2–§4 for the complete file placement rules, bilingual naming convention, and component-level file requirements. Do NOT rely on cached or memorized rules — read the spec file directly.

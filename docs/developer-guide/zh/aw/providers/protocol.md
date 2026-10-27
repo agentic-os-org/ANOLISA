@@ -6,25 +6,8 @@
 
 `aw-provider` 定义实验性的 `aw-provider/v1alpha1` 接口，供外部策略程序使用，
 并离线检查消息和请求的能力。它将统一配置衔接到 Provider 合同，本身不启动进程、
-安装 Agent Hook 或建立运行时绑定。原生接入由 `aw-adapter` 实现、`aw-cli` 编排，支持范围见[能力矩阵](../../../../user-guide/zh/aw/capabilities.md#hook-与-mcp)。
+安装 Agent Hook 或建立运行时绑定。原生接入由 `aw-adapter` 实现、`aw-cli` 编排，支持范围见[能力矩阵](../../../../user-guide/zh/aw/capabilities.md#hook-支持矩阵)。
 
-## 交付边界
-
-| 层次 | 当前职责 |
-| --- | --- |
-| `aw-config` | 解析一份配置，检查结构和静态引用 |
-| `aw-provider` | 校验协议消息、关联响应，并依据调用方提供的 Provider 和 Adapter 证据检查配置步骤 |
-| `aw-contracts` / `aw-core` | 通过可信 Host 和 Journal 校验、执行已有能力模型 |
-| `aw-host` | 执行 Provider 命令，限制时间和输出，处理取消，返回可关联的调用报告 |
-| Adapter、`aw-cli` 与 `aw-service` | 认证原生能力，注册回调，转换效果，管理绑定并审计原生采用情况 |
-
-配置字段保持不变。`spec.providers` 中的命名对象选择 `aw-provider/v1alpha1`、
-固定的 `transport.argv` 和私有 `config`。脚本、二进制程序或后台服务的 CLI
-客户端均可实现该接口。AW 不推断或自动安装程序的依赖。
-
-[配置示例](../../../../../src/aw/crates/aw-config/examples/aw.yaml) 展示全部 16 个事件名和后续能力。
-该示例通过静态校验，不代表其中启用的事件、guard 或替换效果都能通过本阶段范围更窄
-的能力准入。
 
 ## 传输约定
 
@@ -155,7 +138,7 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 
 工具执行前的 `on_error` 支持 `report`；Adapter 支持阻断时，也可以使用 `block`。
 工具执行后的失败支持 `report`；已准备的 Adapter 显式声明该事件失败动作时，
-还支持 `withhold_result`。目前仅普通 QwenPaw resident 入口声明该能力。其他动作拒绝。
+还支持 `withhold_result`。目前普通 Qoder SDK 和 QwenPaw resident 入口声明该能力。其他动作拒绝。
 
 `required: false` 不允许静默丢弃已启用但不受支持的步骤。所有启用的结构化
 Provider 仍须在运行时选择工具之前提供发现证据和精确的配置校验证据。
@@ -177,24 +160,6 @@ Provider 结果不授予原生权限。`permission.request` 保留为词汇，AW
 限制、进程回收、原生调度或失败处理。因此，准入通过只是建立可运行原生绑定的
 前置条件之一。
 
-## 与 Core 和安全执行的关系
-
-当前 Core 模型接受四项能力：`security.command.inspect/v2`、
-`security.code.inspect/v2`、`security.content.inspect/v2` 和
-`context.projection.prepare/v2`。其 pre-tool 计划要求强制命令检查和
-`required_final_guard`；执行分发校验还将计划的 OS 要求与最新原生证据匹配。
-这些合同保持不变。
-
-普通原生 Hook Provider 返回 `block`，不满足上述命令检查或 final-guard 合同。
-它的 `describe` 响应不是已准入的 `provider-descriptor-v1`，调用响应也不是
-Host 生成的 `provider-receipt-v1`。回执的 `denied` 表示能力执行不可用或被拒绝，
-不表示成功得出的安全判断：成功的安全检查即使拒绝命令，也应产生 `verdict: "deny"`
-输出及 `produced` 回执。
-
-把这些通用操作接入 Core，仍需要显式评审并版本化原生 Hook 能力模型，以及已认证的
-Provider 身份。`aw-host` 执行传输并校验候选效果，不转换 Core 模型，也不为 Core 和
-Journal 生成证据。既有安全模型继续保持更强的最终分发要求。框架是否
-采用效果仍需要原生回读；Provider 响应或已经写入 Journal 的调用都不能单独证明采用。
 
 ## 独立 stdio 示例
 
@@ -223,19 +188,6 @@ printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config",
 包括工具执行后事件，返回空效果列表。这是示例策略，不是 sec-core 实现或内置安全
 规则集。运行示例不会启动 Agent，也不使 AW 库开始执行命令。
 
-## 与 sec-core 联合交付
-
-sec-core 可以依据 Schema 实现三个协议方法和私有策略配置，并使用本地 Host 进行
-协议集成。内置规则、自定义策略计算和特定工具安全判断的含义由 sec-core 负责。
-CLI 包装程序可以连接独立管理的 sec-core 服务，但必须将扫描结果转换为已声明的
-Provider 效果，并区分扫描失败与成功的策略阻断。
-
-AW 提供协议校验、准入和本地有界 Host，后续增加服务生命周期、可信 Adapter
-能力、原生 Hook 转换及审计接线。最终 `security.violation` 编排和 sec-core 的
-协作属于后续执行保障设计；本阶段不宣称提供最后一道不可绕过的安全检查。
-
-四框架夹具校验统一消息结构及能力拒绝行为，不证明所有原生入口都加载 Hook、
-框架一定采用返回的 block，或执行无法绕过回调。这些结论需要独立的运行时验收。
 
 ## PostTool 文本替换
 
@@ -252,41 +204,9 @@ AW 提供协议校验、准入和本地有界 Host，后续增加服务生命周
 Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须来自同一 Preview
 构建；旧实现会拒绝不支持的投影或效果，不会静默忽略。
 
-### PreTool 重试与 PostTool 归属
+### Tokenless 组合
 
-Tokenless Provider 在 `tool.before` 上准入 Protocol v2 `pre_tool`，复用已有的
-`block` 效果。对于具有对象 `command` 的受支持 Shell 工具，声明
-`replace_arguments: false, block_and_suggest: true`，由 Core 选择改写。
-AW 将完整的建议参数作为模型可见阻断原因返回，不输出 `updatedInput`、原生
-`modify`、审批指令，也不执行 Shell。Passthrough 必须保持原参数；直接替换动作、
-修改非 command 字段或非法响应均作为 Provider 故障。
-
-模型必须发起新调用才能采用建议。原调用和重试均经过选中的 sec-core before 步骤及
-原生权限链；Tokenless 的中立结果不能覆盖安全拒绝或扫描故障时的 fail-closed。
-联合模板先保留扫描，再追加 PreTool；完成观察仍位于最终 PostTool 步骤之前。
-AW 不改变外部 Hook 的顺序；外部改写 Hook 仍遵循宿主自己的权限合同。
-
-被阻断调用的 ID 不能标识重试。Tokenless 接入层从实际执行参数中识别独立的归属
-RTK 包装（Agent、Session、data 目录及绝对路径的 `rtk`），将
-`output_optimization: rtk` 传入 PostTool，并让此类重试通过 PreTool。
-识别时解码带引号或转义的字面量，并通过已存在祖先的规范路径比较状态目录，不创建目录。
-仅跳过[文档列明的执行前缀形式](tokenless.md#pretool-与权限行为)，
-其他命令的参数中出现归属包装并不足以确认 RTK 归属。
-裸 `rtk`、外部归属、未知或带额外选项的包装，以及复合 Shell 命令不推断 RTK 归属。这只是优化提示，不授予权限
-或恢复访问；不新增 AW 持久优化/恢复存储，也不复制压缩策略。
-RTK 定位和改写仍由公共 Tokenless CLI 负责；RTK 是 PreTool 的外部依赖，当前
-AW 包未包含它。CLI 故障按 `on_error: report` 显式报告；sec-core 保持
-`on_error: block`。
-
-### 生命周期扩展边界
-
-当前桥接实现通过重试的 `pre_tool` 和文本替换的 `post_tool`，未实现透明参数
-替换或 `before_model` Schema 替换。恢复、Stash、可达的恢复入口及恢复结果旁路
-由 Tokenless 接入层负责；当前请求继续声明 recovery `none`。启用 PreTool 不等于
-获得 Tokenless 全部能力。
-
-恢复需要真实的 Agent 可调用入口及 Tokenless 所需的原生授权与作用域，并将 Retrieve
-结果旁路，防止再次压缩。Schema 替换需要模型请求点位及独立恢复能力；当前支持的
-OpenClaw、Hermes 原生接入缺少该点位，应声明能力子集，不能声称四框架完全一致。
-失败环境诊断还需要独立的附加结果合同：当前桥接有意保持失败结果原样。上游 Tool Ready
-仍为硬禁用，不应计入当前已激活能力的完整性承诺。
+PreTool 通过 `block` 返回完整重试建议，新调用重新经过安全与原生权限检查；PostTool 只替换获准文本槽。
+RTK 归属、结果分类和遥测设置见[Tokenless 参考](tokenless.md)。
+当前接入的恢复能力为 `none`，Schema/BeforeModel 与 Retrieve 接点尚未开放。
+Core 计划 API 的独立合同见[Core 执行](../../../../../src/aw/docs/design/zh/core-execution.md)。

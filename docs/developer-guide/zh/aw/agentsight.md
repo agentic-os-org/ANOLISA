@@ -7,7 +7,7 @@
 配置一次可选 AgentSight 来源，随后使用 `aw run` 自动关联原生回调并读取有界证据。
 不要求动作 Provider 或 eBPF。来源不可用时，AW 仍保留本地审计。本功能不启用语义评估。
 
-本期自动观测与来源身份合同适用于 Qoder、OpenClaw、QwenPaw 和 Hermes。
+自动观测覆盖 Qoder、OpenClaw、Hermes；QwenPaw 使用受限 `--reloadable` 模式。普通 Qoder SDK、QwenPaw 以及 Pi/Claude 常驻入口要求 `evidence.mode: off`。
 Pi 保留已有原生策略能力；其纯观测回调及可信来源关联需另行准入 Adapter 合同。
 
 ## 前提与配置

@@ -12,7 +12,6 @@ Agent 的界面、模型账号和权限设置继续由原框架管理。
 | --- | --- |
 | 对比 Hook、MCP 与策略更新的支持范围 | [能力支持矩阵](capabilities.md) |
 | 第一次使用，安装后启动 Qoder | [安装与首次运行](installation.md) |
-| 在自己的 Linux 机器上编译 | [从源码构建 AW](../../../../contribute/zh/aw/building.md) |
 | 选择 Agent、增加规则或修改配置 | [配置与 Agent 启动](configuration.md) |
 | 减少工具结果占用的上下文 | [使用 Tokenless](tokenless.md) |
 | 在工具执行前检查风险 | [使用 sec-core](security.md) |

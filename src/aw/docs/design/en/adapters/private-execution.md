@@ -139,7 +139,7 @@ runtime admission contract before deployment. The public factory above provides
 the credential seam without changing those guards.
 
 See the [shared security configuration](../../../../crates/aw-service/examples/aw.sdk-security.yaml)
-and [native integration guide](../../../../../../docs/developer-guide/en/aw/native-agents.md#use-one-security-policy-for-resident-sdks)
+and [native integration guide](../../../../../../docs/developer-guide/en/aw/deployment/resident.md)
 for launch commands. The implementation contracts live in
 [Qoder private execution](../../../../crates/aw-adapter/native/qoder-sdk/private.mjs)
 and [QwenPaw private execution](../../../../crates/aw-adapter/native/qwenpaw/aw_private.py).

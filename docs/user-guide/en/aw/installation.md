@@ -48,50 +48,10 @@ Every checksum should report `OK`; a successful install reports the installed pa
 The installer refuses to overwrite existing components. [Use a new prefix when upgrading](operations.md).
 Set `AW_PREFIX` and `PATH` in subsequent terminals too, or add them to your shell configuration.
 
-For a personal installation that does not host a system backend, use an absolute `AW_PREFIX`
-you own, omit `sudo` and select `--scope user` (the default). Other users must not be able to write to its
-parent directory. A root backend needs a root-managed installation. Scope is explicit:
-running through `sudo` does not automatically select system scope or another user's database.
-
-The prefix and [package database](operations.md) need
-filesystems that support anonymous temporary files, hard links, atomic renames
-and durable directory synchronization. If an error names `O_TMPFILE`, use a
-filesystem that supports it for the reported directory.
-
-Inspect the installation without starting a service or Provider:
-
-```bash
-aw list --installed --prefix "$AW_PREFIX"
-aw doctor --prefix "$AW_PREFIX"
-```
-
-The list reads installation records; `doctor` checks the recorded files. New
-installs store package facts in the selected database and a database locator under
-`$AW_PREFIX/.aw-packages`. Queries with an explicit prefix follow that locator,
-so ordinary-user configuration can read a system install. Old Preview installs
-still use their component records there. These queries do not migrate records
-or create a database. See
-[package database and file checks](operations.md).
+For a personal installation, set `AW_PREFIX` to an absolute path you own, omit `sudo` and use `--scope user`.
+Keep the same scope for core and extensions. See [operations](operations.md) for package checks and recovery.
 
 ## Create configuration
-
-If AW is already installed, the same local installer is available through:
-
-```bash
-aw install --prefix "$AW_PREFIX" --bundle "/absolute/path/to/unpacked-bundle"
-```
-
-For the system prefix above, run the command with `sudo` and `--scope system`.
-This accepts unpacked Preview bundles and independent packages described by
-`package.json`, not component names, download URLs or RPM/DEB packages. Preview
-Provider packages still require core from the same build; an independent ordinary
-tool need not include AW core or declare a Provider. Exact dependencies must
-already exist in the same prefix or be delivered in the same Preview bundle.
-Use `--dry-run` before execution; see [package plans and recovery](operations.md).
-It does not start services, register Agent Hooks or enable Providers.
-The standalone `aw-package` command has been removed. Use the `aw` at each
-bundle's root for first installation, with an explicit absolute `--bundle` path,
-and the installed `aw` for later operations.
 
 Create configuration as your ordinary user, keeping data outside the installation prefix.
 

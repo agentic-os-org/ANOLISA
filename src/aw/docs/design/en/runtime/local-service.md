@@ -329,13 +329,13 @@ history and allocates a new generation.
 
 ## Source entry points
 
-- [User commands and local demonstration](../../../../../../docs/developer-guide/en/aw/native-agents.md#run-the-local-service-demo)
+- [User commands and local demonstration](../../../../../../docs/developer-guide/en/aw/local-service.md)
 - [Public API](../../../../crates/aw-service/src/lib.rs),
   [Client](../../../../crates/aw-service/src/client.rs) and
   [Server](../../../../crates/aw-service/src/server.rs)
 - [Runtime](../../../../crates/aw-service/src/runtime.rs) and
   [audit metadata](../../../../crates/aw-service/src/audit.rs)
-- [Development checks](../../../../CONTRIBUTING.md#runtime-validation)
+- [Development checks](../../../../CONTRIBUTING.md#build-and-check)
 
 ## Boolean command projection
 

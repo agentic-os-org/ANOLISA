@@ -76,7 +76,5 @@ yet build outside the repository. Pinned SDKs, independent releases and artifact
 composition tests are deferred. Preview delivers core and Providers as one build
 set, with installation checking matching versions and source commits.
 
-`aw-build` and `aw install` currently package and install built-in components only;
-they do not automatically install arbitrary community Providers. Independent
-installation works with the same protocol. Bundling requires package manifest
+`aw-build` produces built-in component bundles. Community Providers can ship independently or use the [local package format](../reference/packages.md) with `aw install`. Bundling requires package manifest
 and installation acceptance support.

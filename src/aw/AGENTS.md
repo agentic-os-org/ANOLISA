@@ -4,6 +4,48 @@ Read the repository AGENTS.md and [CONTRIBUTING.md](CONTRIBUTING.md) first.
 AW is a Linux component. The checkout directory name does not select another
 component's skills or validation workflow.
 
+## Documentation audiences and writing
+
+These rules also apply to AW pages under `docs/`, `contribute/` and the paired
+Provider integration guides. Read the repository documentation standard first.
+
+| Reader and task | Canonical location | Content |
+| --- | --- | --- |
+| Evaluate AW and start using it | README, `docs/user-guide/{en,zh}/aw/` | Core benefits, visible support matrix, installation, configuration, useful tool result, routine maintenance |
+| Integrate or deploy an application | `docs/developer-guide/{en,zh}/aw/` | Agent factories, Provider integration, worker deployment, persistence, updates, failure recovery |
+| Change or release AW | CONTRIBUTING, `contribute/{en,zh}/aw/` | Build dependencies, targeted checks, native acceptance, evidence and cleanup |
+| Change a protocol or implementation boundary | `src/aw/docs/design/{en,zh}/` | Ownership, invariants, ordering and design rationale |
+
+User chapters must let a reader complete one task: give prerequisites, commands,
+the expected visible result and necessary stop or rollback steps. Explain the
+capability and its practical support range before configuration details. Link
+to developer references for SDK wiring, deployment controls, field limits,
+protocol envelopes, package transactions and test fixtures. Do not make users
+assemble service RPCs or read implementation history to run an example.
+
+Developer chapters add only details needed to integrate, deploy or diagnose.
+Split Agent instructions under `agents/`, deployment under `deployment/`, and
+command references under `reference/`. Keep user chapter paths flat as required
+by the repository standard; express reading order through indexes and website
+navigation. Build and test commands belong in contribution documentation.
+Keep current behavior separate from explicitly labelled design proposals.
+
+Maintain one canonical explanation per contract and link from other chapters.
+Rewrite the relevant section when behavior changes; do not append a release
+narrative, review history, repeated non-goals or boilerplate assurances. Replace
+long prose comparisons with a short table when readers need to choose a mode.
+Use concrete conditions and actions for errors and limitations.
+
+Keep the generated Hook matrix expanded near the top of both READMEs and
+capability pages, never inside `details`. Generate all copies from the same
+regression manifest. Put MCP and update summaries in the capability page and
+exact versions, wiring and recovery in the corresponding developer chapter.
+
+Update both languages, links, moved-section anchors and website navigation in
+the same PR. Keep command blocks identical, define variables before use and
+state the working directory for source examples. Check documentation links and
+navigation; run gate behavior tests when changing generators or doc assertions.
+
 ## Integrated user experience
 
 The preferred entrypoint is `aw run --config aw.yaml --agent <target>`.
@@ -120,9 +162,8 @@ Maintain the paired [capability support reference](../../docs/user-guide/en/aw/c
 in the same PR as any support change. Record the Adapter, supported version and
 launch mode, execution boundary, limitations and runnable acceptance evidence.
 Keep implemented, experimental, vocabulary-only and planned states distinct.
-The support reference contains the generated event/effect catalog alongside
-MCP boundaries and update modes. Keep README summaries short and link to this
-reference for Adapter details.
+The README and support reference expose the generated event/effect grid.
+The reference adds MCP and update summaries; Agent pages own integration details.
 Recognition of any of the 16 event names, an internal lifecycle notification,
 or a model-response identity tap does not establish a public Provider Hook.
 
@@ -155,8 +196,8 @@ Update these together in the same change:
    shared PreTool and PostTool tests iterate the matrix without a fallback
    dialect, so an unimplemented fixture fails.
 4. Run `python3 scripts/check_matrix.py --write-docs` from this directory and
-   document native adoption limits in both capability references. README files
-   summarize shared capabilities and link to these references.
+   document native adoption limits in both capability references. Regenerate
+   both README grids in the same operation.
 5. Add pinned native commands, required reports, an owner and the exact acceptance
    boundary to `tests/native-matrix.json`. Unit suites declare counts; custom
    suites declare JSON result files with exact case names or observed counts.
@@ -164,7 +205,7 @@ Update these together in the same change:
    Agent must be accounted for; new integrations cannot silently opt out of nightly.
 6. Run `python3 scripts/check.py`. The gate compares the compiled catalog with
    the matrix and schema, resolves case names against real libtest executables,
-   rejects missing or ignored cases and checks both user-guide grids.
+   rejects missing or ignored cases and checks README and user-guide grids.
 
 Use deterministic service/CLI/Provider fixtures on every relevant push. Keep
 real SDK/CLI adoption checks explicit and pinned; describe which native seam

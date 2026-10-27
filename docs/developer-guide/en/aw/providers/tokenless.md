@@ -20,26 +20,7 @@ patches. It requires matching `aw-core`; `aw-all-in-one` combines the same compo
 payload and receipts with core and sec-core. Python wheels and Tokenless native
 plugins are not needed. Agent installations and runtime dependencies remain external.
 
-RTK lives at `libexec/aw/providers/tokenless/rtk` within the immutable prefix.
-Its source pin, setup script, two patches, shared Tokenless home/path-policy sources
-and Apache-2.0 license are owned files
-under `share/doc/aw-provider-tokenless/rtk`; their hashes and the binary hash are
-in the Tokenless component receipt. `provenance.json` records upstream and ANOLISA
-source revisions, each input's origin and hash, and why RTK includes the shared
-home/path-policy modules. Source builds use the official setup script
-with a fresh owned destination, preserving existing RTK source caches and local
-edits; the temporary source is removed after packaging. No user RTK or global PATH
-is replaced. A managed RTK installation prefix must be representable in PATH
-and cannot contain `:`; configuration rejects it before publication.
-PostTool works without RTK. Package-generated PreTool validates the managed RTK
-and its direct parent: both must belong to the current user or root and must not
-be world-writable; the parent must be a real directory, not a symlink. Group-write
-permission alone is allowed, matching Tokenless's dependency trust rules. It
-prepends its directory only to the Tokenless child's controlled PATH; retry
-suggestions use the absolute executable path. Missing, modified, nonexecutable or
-unusable managed RTK yields a Provider error governed by the existing `on_error`
-policy, without falling back to a user RTK. PostTool and read-only view continue.
-The existing view/schema and its unknown readiness fields are unchanged.
+The bundle records managed RTK provenance and hashes; the generator writes verified paths and digests. The prefix cannot contain `:`. Missing or invalid RTK follows `on_error`.
 
 After installing core, install the matching Tokenless extension into the same
 prefix, or install all-in-one into a new prefix. For Qoder/OpenClaw, initialize
@@ -52,17 +33,17 @@ does not enable it. The existing plain `sec-core` selection retains its behavior
 For supported targets, copy the
 [shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml),
 replace its executable paths and `RTK_SHA256_FROM_RECEIPT` with the RTK entry's
-`sha256` from `PREFIX/.aw-packages/aw-provider-tokenless.json`, and keep both state
+`sha256` from the Tokenless package file inventory returned by `aw list --installed --prefix "$AW_PREFIX" --json`, and keep both state
 directories outside the immutable installation prefix. Use the framework-specific profile and launch flags from the
-[AW guide](../native-agents.md#use-one-configuration-for-four-frameworks).
+[AW guide](../validation.md).
 
-Pi uses the SDK application factory described in the [Pi launch guide](../native-agents.md#start-a-pi-sdk-worker);
+Pi uses the SDK application factory described in the [Pi launch guide](../agents/pi.md);
 the package configuration generator still targets Qoder/OpenClaw.
 
 For AgentScope SDK, wire every public factory through `AwBridge`; the
 [SDK lifecycle example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
 combines sec-core checks/observation with both Tokenless operations. Follow the
-[SDK launch contract](../native-agents.md#start-agentscope-sdk) for Python and factory setup.
+[SDK launch contract](../agents/agentscope.md) for Python and factory setup.
 
 The Provider accepts only private configuration `{version: 1}`. Its fixed argv is
 `aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`, optionally followed by
@@ -74,17 +55,7 @@ The bridge calls `tokenless compress` using Protocol v2 and sets
 CLI statistics use the Agent, session and tool-call identifiers supplied by AW.
 The CLI's statistics measure selected compression, not verified native adoption.
 
-AW's journal and Tokenless statistics have separate retention boundaries. Tokenless
-CLI defaults enable both SQLite statistics and SLS logging unless configuration or
-inherited environment overrides them. SQLite records for compression savings can
-retain the complete before/after tool text in `$TOKENLESS_DATA_DIR/stats.db`, even
-with `recovery: none`. The SLS sink writes metrics and attribution to local JSONL
-(default `/var/log/anolisa/sls/ops/tokenless.jsonl`); this implementation does not
-include tool bodies in SLS records or upload them. On hosts running the anolisa
-telemetry uploader or SLS/Logtail collection, those metrics and attribution IDs
-can be uploaded separately; this channel still contains no tool text.
-Set `TOKENLESS_STATS_ENABLED=0` and `TOKENLESS_SLS_ENABLED=0` in the environment used to launch AW before binding
-an Agent to disable both sinks. These settings do not delete existing records.
+AW Journal stores metadata; Tokenless can independently retain complete compressed text. See [data and privacy](../../../../user-guide/en/aw/tokenless.md#data-and-privacy) for recording switches and locations.
 
 ## PreTool and permission behavior
 
@@ -202,7 +173,7 @@ PreTool step still references it. Then stop
 and restart AW using the updated configuration. Existing sessions are not reloaded.
 Keep or remove the external Tokenless state directory according to your data needs.
 
-Claude SDK uses the explicit worker factory described in the [AW guide](../native-agents.md#start-a-claude-sdk-worker). Its single AW callback already awaits steps in order. Only native Bash stdout is replaceable; MCP status is not reliably exposed and its results remain unchanged. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
+Claude SDK uses the explicit worker factory described in the [AW guide](../agents/claude-sdk.md). Its single AW callback already awaits steps in order. Only native Bash stdout is replaceable; MCP status is not reliably exposed and its results remain unchanged. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
 
 ## Read-only Panel queries
 

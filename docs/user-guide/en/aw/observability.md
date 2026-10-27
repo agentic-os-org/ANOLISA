@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/observability.md)
 
 AW associates Agent runs with AgentSight records to inspect activity and observation gaps.
-Automatic observation currently supports Qoder, OpenClaw, QwenPaw and Hermes.
+Automatic observation supports Qoder, OpenClaw and Hermes. QwenPaw requires restricted `--reloadable` mode; ordinary resident mode requires `evidence.mode: off`.
 AgentSight is installed and managed independently; connecting AW does not start a collector.
 
 ## Configure a source

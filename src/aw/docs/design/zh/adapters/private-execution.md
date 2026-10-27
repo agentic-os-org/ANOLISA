@@ -112,6 +112,6 @@ Qoder 结果替换仍不支持。
 须在部署前完成符合运行时准入合同的接入。上面的公共工厂提供凭据接点，保留这些检查。
 
 启动命令见[统一安全配置](../../../../crates/aw-service/examples/aw.sdk-security.yaml)与
-[原生接入指南](../../../../../../docs/developer-guide/zh/aw/native-agents.md#为常驻-sdk-复用一份安全策略)。
+[原生接入指南](../../../../../../docs/developer-guide/zh/aw/deployment/resident.md)。
 实现合同位于 [Qoder 私有执行](../../../../crates/aw-adapter/native/qoder-sdk/private.mjs)与
 [QwenPaw 私有执行](../../../../crates/aw-adapter/native/qwenpaw/aw_private.py)。

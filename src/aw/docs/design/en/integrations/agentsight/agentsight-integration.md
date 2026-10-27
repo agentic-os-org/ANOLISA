@@ -2,29 +2,11 @@
 
 [中文版](../../../zh/integrations/agentsight/agentsight-integration.md)
 
-## Status and delivery
+## Implementation and future design
 
-AW owns native Agent entry and local execution audit. AgentSight supplies optional
-observations and later consumes a derived audit projection. Users configure the
-source once and launch through `aw run`; no separate trajectory command or manual
-session lookup is part of the normal workflow.
-
-This design supersedes the standalone-query entrypoint. #7626 implements only the
-read-only connector. #7655 depends on it and implements #7622, including the minimum
-run lifecycle. Proposed contracts below are distinguished from the executable
-schemas in that dependent PR. Semantic evaluation remains phase two.
-
-| Stage | Owner | Depends on | Delivery |
-| --- | --- | --- | --- |
-| Bounded source connector | #7621 / #7626 | Existing AgentSight GET APIs | Library only; no `aw sight` |
-| Run lifecycle, trusted association, evidence and context | #7622 / #7655 | #7626 | Startup, observation-only callbacks, automatic association, optional degradation, bounded exit cleanup |
-| Full capability policy | #7623 | #7622 | Per-capability readiness, required admission, loss/recovery and coverage intervals |
-| Public incremental audit | #7624 | #7622, #7623 | Stable export schema, enumeration, cursors and replay |
-| AgentSight audit consumption | #7625 | #7624 | Authorized idempotent derived persistence |
-
-#7626 is merged. #7655 builds on that mainline connector; its review diff contains
-only the lifecycle/evidence stage. Neither stage changes semantic routing or independently redesigns the
-PostTool scheduling and completion behavior merged in #7411.
+The implemented read-only source connector, automatic observation and explicit context freezing are described in the [connector](agentsight-readonly.md) and [evidence contract](../../runtime/evidence-context.md).
+This document covers ownership and future design. Full capability admission, `required` mode, public incremental audit, AgentSight audit consumption and semantic evaluation remain proposed.
+See the [developer reference](../../../../../../../docs/developer-guide/en/aw/agentsight.md) for current configuration and integration.
 
 ## Component ownership
 
@@ -50,98 +32,21 @@ credentials; loopback refers to AW's own network namespace. HTTPS reports
 `bearer_supplied`, without claiming the source enforced it behind a proxy.
 Both transports use the same [API contract checks](agentsight-readonly.md).
 Future enforcement requiring authenticated local peers needs a separately
-admitted transport; phase one does not infer that guarantee from a local port.
+admitted transport with explicit peer authentication.
 
-## Minimum lifecycle in #7622
+## Proposed public audit and delivery
 
-1. Preparation validates configuration and Adapter support. A configured source in
-   `auto` mode enables observation; `off` disables source I/O and additional native
-   registrations. Unsupported `required` configuration must be rejected until
-   #7623 implements its capability admission.
-2. Binding creates an instance-scoped observation owner and performs a bounded
-   source compatibility probe. Query readiness cannot establish collection or
-   eBPF readiness. Optional source failure is recorded and does not prevent launch.
-3. Register observation callbacks even when no action Provider is configured.
-   Reuse existing callbacks when actions are present. Pure observation returns the
-   native no-op response and cannot block, replace results or replay tools.
-4. Corroborate session/call identity from admitted native callback bytes. The
-   service automatically schedules bounded source reads. Hook acknowledgement
-   waits for required local metadata, never for the external HTTP read.
-5. Keep observation work scoped to the instance rather than an open tool event.
-   Coalesce or reject excess work with an explicit gap; cap queued items, source
-   bytes, projected bytes, retained sessions and query duration. Do not create a
-   worker or HTTP request for every duplicate callback.
-6. Normal exit and handled signals release only this instance, stop accepting
-   observations, finish or discard bounded in-flight reads and remove owned
-   native files. Record the reported exit separately from AW cleanup failure.
-   Failed startup follows the same release path. An abruptly killed launcher may
-   leave an incomplete run; it must never be labeled a successful completion.
-
-The minimum implementation covers the native tool seams supported by each
-Adapter. It does not claim every model turn, native Stop event or subagent is
-observable. An empty run has a launch lifecycle but may have no associated native
-session. A Stop/continue within a live Agent does not terminate the AW instance.
-Source refresh uses bounded snapshots, not an invented streaming subscription.
-
-## Identity and evidence
-
-An AW instance, a native session and a source trajectory have distinct identities.
-One instance can encounter multiple sessions. A later instance may resume a native
-session; earlier source history remains historical evidence, not executions of
-the new instance. Active cross-instance ambiguity must stay visible. Association
-is corroborated against the admitted Adapter, not arbitrary source text or a PID.
-Process correlation additionally needs reviewed host, boot and process-start
-identity, which the first connector cannot supply.
-
-`aw.evidence/v1` separates these field groups, with executable details in #7655:
-
-| Group | Contract |
-| --- | --- |
-| Identity | Version, stable evidence ID, AW generation/configuration/binding/instance and event references |
-| Source | Component, source scope, nullable source instance, record reference and observed revision |
-| Association | Verified/unverified/unassociated, native session/call and corroboration basis |
-| Times and coverage | Source time or unknown, receipt time, cutoff, explicit gaps and truncation |
-| Content and derivation | Bounded content reference, encoding/digest, trust category and transformation version |
-| Execution | Only corroborated native execution facts can carry an execution reference |
-
-Model echoes and copied tool results do not add executions. Missing records,
-unavailable storage, malformed results and unverified identities remain distinct.
-Canonical metadata carries encoded content strings and digests for arbitrary
-native JSON; it does not insert floating-point or arbitrary-key source objects
-directly into the canonical domain.
-
-## Bounded context
-
-`aw.evidence-context/v1` binds the original candidate, constraints, selected
-evidence and gaps to a subject and deterministic revision. Freezing preserves the
-original event deadline and candidate; #7411 completion views cannot change them.
-Once frozen, later source data cannot rewrite the snapshot or a decision.
-
-Automatic observation and event context freezing have different lifetimes.
-Observation may finish after a tool callback closes, producing separate metadata.
-It cannot reopen that event or extend its execution budget. Phase one does not
-freeze every Hook merely to exercise an API. The explicit service operation
-remains available for embedding clients and later semantic consumers.
-
-Selected source content stays in bounded memory or an explicit caller response.
-Local Journal records contain identities, revisions, gaps and outcomes, without
-credentials, environment snapshots or raw tool/history content. No automatic
-redaction is claimed for content returned to an authorized caller.
-
-## Audit contract and delivery
-
-The proposed public `aw.audit/v1` in #7624 is separate from private Journal and
+The proposed public `aw.audit/v1` is separate from private Journal and
 service wire formats. Its envelope includes a stable event ID and kind,
 authenticated producer scope/generation, AW/native references, causal reference,
 source chain/sequence/digest, timestamps, applicable revisions, evidence/coverage
 references and a kind-specific outcome. Unknown facts are null or explicit gaps.
 
-Phase-one facts include binding preparation, launch attempt/outcome, observed
+The proposed export starts with existing facts, including binding preparation, launch attempt/outcome, observed
 native callbacks, Provider invocation, reported native results, context freezing,
 observation/coverage changes and event/run termination. Invocation completion does
 not prove native adoption. An exit report does not prove complete observation.
-Only implemented facts enter the executable export; semantic events wait for
-phase two.
+The exporter must preserve these distinctions. Semantic events require the evaluation capability described below.
 
 Critical local acknowledgement remains durable. Export and AgentSight consumption
 are asynchronous, with stable replay IDs and bounded per-chain cursors. Consumers
@@ -150,29 +55,15 @@ ID/content is a duplicate; same ID/different content is an integrity conflict.
 Remote recovery never replays an AW action. AgentSight writes its own derived
 store and does not parse or write private AW Journal files.
 
-## Degradation and all-in-one
+## Proposed capability admission and packaging
 
-| Condition | Minimum behavior |
-| --- | --- |
-| No source configuration or mode `off` | Existing AW actions and local audit continue; no source reads |
-| Optional source unavailable, incompatible or unauthorized | Continue AW; expose a sanitized reason and unknown/unavailable evidence |
-| Query API online, collector unknown | Query compatibility may be ready; collection and coverage stay unknown |
-| No kernel/BTF/privileges for eBPF | Keep AW usable; report missing eBPF coverage; use supported user-space trajectories if separately available |
-| Source content missing, delayed or over bounds | Record unknown/gap/truncation without turning it into proof of inactivity |
-| Required capability requested | Reject until implemented; #7623 admits only explicitly proven ready capabilities |
+`required` mode needs evidence for each requested source capability before launch. Admission must distinguish query compatibility, trajectory collection and eBPF coverage; unsupported or unready required capabilities reject startup. Optional-source failures retain the existing bounded degradation behavior in the [connector](agentsight-readonly.md).
 
-AgentSight `trace --no-ebpf` can collect supported user-space trajectories, while
-`serve` exposes queries. A live `serve` alone does not prove collection is running.
-All-in-one packaging must select artifacts and profiles by capability, permit the
-AW-only baseline and distinguish installed, enabled and ready. Deployment owns
-privileged probes; `aw run` never installs packages, changes file capabilities or
-starts root workers from a Hook. Ending one AW run cannot stop a shared service.
+All-in-one packaging must select artifacts and profiles by capability, permit an AW-only installation and distinguish installed, enabled and ready. Deployment owns privileged probes and worker shutdown. Hooks must not install packages, change file capabilities or start root workers; ending one AW run must preserve shared services.
 
-## Semantic evaluation contract reserved for phase 2
+## Proposed semantic evaluation contract
 
-The proposed capability is `semantic.evaluate/v1`. Phase 1 reserves its input
-foundation only. It does not add a Jev-like backend, invoke a model or interpret
-probabilities as permission.
+The proposed capability is `semantic.evaluate/v1`, using the implemented [evidence context](../../runtime/evidence-context.md) as its input foundation. Model evaluation and policy routing require a separate implementation.
 
 | Direction | Fields and validation |
 | --- | --- |
@@ -205,7 +96,7 @@ unusable. Timeout, stale/wrong bindings, unknown mandatory model revision and
 confidence below the configured minimum also take `on_unusable`. Existing
 Provider execution failures remain distinct from valid policy denials.
 
-Provider v1alpha1 cannot carry these answers. Phase 2 needs an explicitly
+Provider v1alpha1 cannot carry these answers. Semantic evaluation needs an explicitly
 versioned typed-result protocol plus service/configuration admission. It must not
 hide answers in `observe` reason text, change old response shapes in place or
 claim that a Provider handshake creates Core receipts. New capability schemas
@@ -214,7 +105,7 @@ admitted against their actual guarantees.
 
 ## Future semantic routing and audit
 
-The phase-2 sequence is: deterministic checks, select questions, acquire/freeze
+The proposed sequence is: deterministic checks, select questions, acquire/freeze
 context, bounded evaluation, validate answers, select a configured route, admit
 the resulting action plan, invoke registered actions, then return a supported
 native effect. The original event deadline covers all stages.
@@ -232,7 +123,7 @@ actions must succeed before dependent execution, and can be enabled only after
 their own native/OS guarantees are accepted. Native approval, final guards and
 Stop/continue control are not implied by a schema name or this design.
 
-Semantic configuration has independent `off`/`shadow`/`enforce` modes in phase 2.
+Semantic configuration has independent `off`/`shadow`/`enforce` modes.
 `off` disables the whole extension, not existing AW checks. `shadow` performs only
 authorized evaluations and records proposed routes without invoking their action
 Providers. `enforce` still requires per-policy capabilities and native acceptance.
@@ -244,16 +135,8 @@ state. It does not retain complete prompts, tool content or private diagnostics
 by default. Reproducing an evaluation requires a separately authorized immutable
 redacted snapshot; hashes alone cannot reconstruct its input.
 
-## Acceptance and rollback
+## Acceptance and rollback for the proposed extensions
 
-The run closure must work without action Providers or eBPF. Tests cover startup
-failure, zero callbacks, verified and forged IDs, resumed and conflicting sessions,
-multiple instances, bounded slow sources, duplicate callbacks, queue overflow,
-normal/signal exit and owned resource cleanup. Existing PostTool tests must pass.
-HTTP/native fixtures do not certify real AgentSight probe coverage or live models.
+Capability admission tests must cover absent collectors, incompatible sources, missing privileges and unavailable required capabilities. Audit export tests must cover replay, conflicting IDs, missing history and consumer lag. Semantic tests must cover binding mismatches, invalid answers, stale revisions, deadlines and unavailable required evaluations; retain existing Hook and observation regressions.
 
-Disable optional observation, exit owned runs and restart matching client/daemon
-binaries to roll back service protocol changes. Preserve Journal history and
-external AgentSight data. Packaging, orphan-owner recovery, full coverage policy
-and public incremental export must not be presented as already delivered by the
-connector-only PR.
+Each extension needs an independently selectable disable path. Before a service protocol rollback, drain owned runs and restart matching client/daemon binaries. Preserve Journal history and external AgentSight data. Packaging, orphan-owner recovery, full coverage policy and public incremental export remain future work.

@@ -2,28 +2,8 @@
 
 [English](../../../en/integrations/agentsight/agentsight-readonly.md)
 
-后续[证据/上下文层](../../runtime/evidence-context.md) 将连接器与已准入原生身份组合；
-诊断命令仍独立运行，关联状态保持 unassociated。
-
-## 范围与交付顺序
-
-本文对应 [#7621](https://github.com/agentic-os-org/ANOLISA/issues/7621)，是
-“AW 为基础、AgentSight 补充证据”的首个实施切片。
-`aw-service::agentsight::Client` 读取指定来源会话的轨迹，不提供独立查询命令。
-正常入口为 `aw run`，由 #7622 / #7655 按[生命周期设计](agentsight-integration.md)接入。Hook 分发、Provider 效果、本地 Journal 持久化和
-AgentSight 生命周期仍由各自组件负责。
-
-| 阶段 | Issue | 依赖 |
-| --- | --- | --- |
-| 只读来源连接器 | [#7621](https://github.com/agentic-os-org/ANOLISA/issues/7621) | AgentSight 现有 GET API |
-| 运行生命周期、可信身份、证据与有界上下文 | [#7622](https://github.com/agentic-os-org/ANOLISA/issues/7622) | #7621；范围准入与 #4372 协调 |
-| 能力覆盖与显式降级模式 | [#7623](https://github.com/agentic-os-org/ANOLISA/issues/7623) | #7621、#7622 |
-| AW 公共增量审计导出 | [#7624](https://github.com/agentic-os-org/ANOLISA/issues/7624) | #7622、#7623 |
-| AgentSight 幂等审计消费 | [#7625](https://github.com/agentic-os-org/ANOLISA/issues/7625) | #7623、#7624 |
-
-语义评估、Jev-like 模型、评分和动作路由放在二期。All-in-one profile 与生命周期
-在能力及审计合同稳定后单独推进。本次不引入 `aw.evidence/v1`、`aw.audit/v1`、
-`off`/`auto`/`required` 策略准入，也不增加 YAML 或服务 RPC 字段。
+`aw-service::agentsight::Client` 通过有界 GET 读取来源轨迹。调用方提供来源配置与会话身份，连接器返回兼容性、结果和缺口。
+运行时关联和上下文快照见[证据合同](../../runtime/evidence-context.md)，后续能力与审计扩展见[集成规划](agentsight-integration.md)。
 
 ## 查询边界
 

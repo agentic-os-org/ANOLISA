@@ -19,6 +19,23 @@ Adapters connect native events and adopt supported effects; Providers implement 
 Core works independently. Install and enable the corresponding Providers for security checks and compression.
 Tool result replacement is limited to authorized slots, and native Agent permission checks retain precedence.
 
+## Hook support matrix
+
+✓ Declared with contract coverage; × unsupported. Generated from the [regression manifest](tests/regression-matrix.json). See [capability support](../../docs/user-guide/en/aw/capabilities.md) for native replacement limits, MCP and policy updates.
+
+<!-- aw-regression-matrix:start -->
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
+| --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ |
+| `pi` | ✓ | ✓ | ✓ | ✓ |
+| `qoder` | ✓ | ✓ | ✓ | ✓ |
+| `qoder-sdk` | ✓ | ✓ | ✓ | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+<!-- aw-regression-matrix:end -->
+
 <a id="install-and-use"></a>
 
 ## Installation and first run
@@ -68,7 +85,7 @@ MCP and policy updates by Adapter and launch mode, with links to supported versi
 | Select an Agent, configure rules and update policy | [Configuration and launch](../../docs/user-guide/en/aw/configuration.md) |
 | Enable output compression or security checks | [Tokenless](../../docs/user-guide/en/aw/tokenless.md), [sec-core](../../docs/user-guide/en/aw/security.md) |
 | Inspect runtime records | [AgentSight](../../docs/user-guide/en/aw/observability.md) |
-| Inspect status, manage packages and troubleshoot | [Operations](../../docs/user-guide/en/aw/operations.md) |
+| Check status, upgrade/uninstall and troubleshoot | [Operations](../../docs/user-guide/en/aw/operations.md) |
 | Write Providers, integrate SDKs or understand the architecture | [Developer guide](../../docs/developer-guide/en/aw/index.md) |
 
 <a id="code-architecture"></a>

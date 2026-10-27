@@ -18,7 +18,7 @@ The shared [example](https://github.com/agentic-os-org/ANOLISA/blob/main/provide
 the same CLI/data directory for both entries.
 
 `aw-provider-view/v1alpha1` is independent of `aw-provider/v1alpha1` and
-`aw-service/v1alpha2`. The event request/response schemas remain unchanged.
+`aw-service/v1alpha7`. The event request/response schemas remain unchanged.
 Use matching Preview binaries/configuration; older binaries can reject the new
 registration. Missing/unsupported presentation capabilities do not change
 sec-core enforcement, after observers or custom Hook scheduling.
@@ -115,7 +115,3 @@ strict validation, subprocess limits/cancellation, no-start/no-initialization,
 identity/configuration mismatch, generation reset, bounded history and preserved
 blocking. Package CI additionally seeds statistics through the real public CLI,
 verifies dry-run exclusion and compares the view against the same summary.
-
-The existing sec-core and Qoder/OpenClaw/QwenPaw/Hermes event suites remain the
-regression gate. No Adapter, native Hook scheduler, before/after permission rule,
-compression policy, recovery mechanism or UI implementation is changed here.

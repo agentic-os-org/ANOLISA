@@ -12,7 +12,6 @@ The framework continues to manage its interface, model account and permissions.
 | --- | --- |
 | Compare Hook, MCP and policy-update support | [Capability support matrix](capabilities.md) |
 | Install AW and start your first Qoder session | [Installation and first run](installation.md) |
-| Compile on your own Linux machine | [Build AW from source](../../../../contribute/en/aw/building.md) |
 | Choose an Agent, add rules or edit configuration | [Configuration and Agent launch](configuration.md) |
 | Reduce the context used by tool results | [Use Tokenless](tokenless.md) |
 | Check commands before execution | [Use sec-core](security.md) |

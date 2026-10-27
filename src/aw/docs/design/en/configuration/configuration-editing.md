@@ -129,5 +129,5 @@ and does not enforce the editor's ownership checks. The standalone `aw-package`
 executable and its editor-specific validator have been removed; the Rust
 `ConfigurationEditor::validate` API remains. CLI editing changes no Schema,
 registry or service contracts and does not reload the running service. See the
-[CLI reference](../../../../../../docs/user-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration)
+[CLI reference](../../../../../../docs/developer-guide/en/aw/reference/configuration-editor.md)
 for options, rollback and restarting with the edited revision.

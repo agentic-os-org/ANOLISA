@@ -252,13 +252,13 @@ SIGINT/SIGTERM，取消活跃工作并等待连接和事件 worker。成功的 `
 
 ## 源码入口
 
-- [用户命令与本地演示](../../../../../../docs/developer-guide/zh/aw/native-agents.md#运行本地服务演示)
+- [用户命令与本地演示](../../../../../../docs/developer-guide/zh/aw/local-service.md)
 - [公共 API](../../../../crates/aw-service/src/lib.rs)、
   [Client](../../../../crates/aw-service/src/client.rs) 和
   [Server](../../../../crates/aw-service/src/server.rs)
 - [Runtime](../../../../crates/aw-service/src/runtime.rs) 与
   [审计元数据](../../../../crates/aw-service/src/audit.rs)
-- [开发检查](../../../../CONTRIBUTING_zh.md#运行时验收)
+- [开发检查](../../../../CONTRIBUTING_zh.md#构建与检查)
 
 ## 布尔命令投影
 

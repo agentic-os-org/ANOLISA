@@ -4,16 +4,9 @@
 
 ## 范围与依赖
 
-本文对应 [#7622](https://github.com/agentic-os-org/ANOLISA/issues/7622)，
-依赖 [#7626](https://github.com/agentic-os-org/ANOLISA/pull/7626) 提供的只读连接器；
-#7626 实现 #7621，现已合入。本阶段基于主线继续实现，并保留
-[#7411](https://github.com/agentic-os-org/ANOLISA/pull/7411) 合入后的主线，
-其合并提交为 `d217dd6bbab927a9820202de5944adf3d9e4a5d7`。
-
-服务为活动事件提供显式 `freeze_context` RPC，将原始候选、当前 AW 约束和选取的
-历史固定为一个不可变版本。`aw run` 不会自动发送该请求。本次不引入模型、语义
-评估、动作路由或新的 Provider operation。覆盖准入由 #7623 负责，公开增量审计
-导出由 #7624 负责，AgentSight 消费由 #7625 负责。语义评估仍属于二期。
+服务通过 `freeze_context` RPC 将活动事件的原始候选、AW 约束和选取的历史固定为不可变快照。
+正常 `aw run` 使用自动观测；显式冻结供嵌入方调用。来源数据由[只读连接器](../integrations/agentsight/agentsight-readonly.md)提供。
+后续覆盖准入、公共审计导出与语义评估见[集成规划](../integrations/agentsight/agentsight-integration.md)。
 
 ## 自动运行观测
 
@@ -58,7 +51,7 @@ null，并原样进入证据投影与 canonical 摘要。后续审计及语义�
 默认用户态轨迹扫描在两轮之间等待 30 秒。GET 只读取已入库快照，不触发采集，
 立即再读一次也不能保证新鲜数据。本投影仍将来源时间标记为未验证。Hook 不等待
 下一轮扫描，晚到记录不能改写已固定上下文或已完成决定；及时输入与本地审计仍
-以 AW 原生回调为基础。参见[二期合同](../integrations/agentsight/agentsight-integration.md#为二期预留的语义评估合同)。
+以 AW 原生回调为基础。
 
 ## 组件归属与信任边界
 

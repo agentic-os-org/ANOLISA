@@ -18,20 +18,7 @@ Qoder、OpenClaw、QwenPaw、Hermes、Pi、AgentScope SDK 2.0.6 及 Claude SDK �
 和回执与 core、sec-core 组合。无需 Python wheel 或 Tokenless 原生插件；Agent
 安装及其运行依赖仍由用户准备。
 
-RTK 位于不可变前缀内的 `libexec/aw/providers/tokenless/rtk`。源码 pin、setup
-脚本、两份补丁、共享的 Tokenless home/path-policy 源文件与 Apache-2.0 许可位于 `share/doc/aw-provider-tokenless/rtk`，
-它们和二进制的哈希均纳入 Tokenless 组件回执。`provenance.json` 记录上游与
-ANOLISA 源码提交、各输入的来源和哈希，以及 RTK 复用 home/path-policy 模块的原因。
-源码构建通过官方 setup 脚本创建本次
-专用源码目录，保留已有 RTK 源码缓存与本地修改，打包后清理临时源码；
-不替换用户 RTK 或全局 PATH。受管理 RTK 的安装前缀必须可编码到 PATH，不能包含
-`:`；配置在发布前明确拒绝这种路径。
-PostTool 不依赖 RTK。包生成的 PreTool 先校验受管理 RTK 及其直接父目录：两者必须
-属于当前用户或 root，且不能允许所有用户写入；父目录必须是真实目录，不能是符号链接。
-仅组可写不会被拒绝，与 Tokenless 的依赖信任规则一致。仅在 Tokenless 子进程的
-受控 PATH 前加入其目录；重试建议使用绝对执行路径。受管理 RTK 缺失、被修改、
-不可执行或不可用时，返回 Provider 错误并沿用已有 `on_error` 策略，不回退用户 RTK。
-PostTool 和只读 view 继续工作。现有 view/schema 及其 unknown 就绪字段保持不变。
+受管 RTK 的哈希与来源随包交付；生成器写入已校验的路径与摘要。安装前缀不能含 `:`。缺失或校验失败按 `on_error` 处理。
 
 先安装 core，再把匹配的 Tokenless 扩展安装到同一前缀；也可以将 all-in-one 安装到新
 前缀。Qoder/OpenClaw 使用 `aw config init --provider tokenless`，并提供既有
@@ -41,16 +28,16 @@ sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步�
 
 受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
 替换可执行路径，并将 `RTK_SHA256_FROM_RECEIPT` 替换为
-`PREFIX/.aw-packages/aw-provider-tokenless.json` 中 RTK 条目的 `sha256`，
+`aw list --installed --prefix "$AW_PREFIX" --json` 安装清单中 Tokenless 包的 RTK 文件 `sha256`，
 将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
-启动参数见 [AW 指南](../native-agents.md#四框架使用同一份配置)。
+启动参数见 [AW 指南](../validation.md)。
 
 AgentScope SDK 的每个公共工厂都需通过 `AwBridge` 接线；
 [SDK 生命周期示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
 组合 sec-core 检查/观察与两项 Tokenless 操作。Python 和工厂设置见
-[SDK 启动合同](../native-agents.md#启动-agentscope-sdk)。
+[SDK 启动合同](../agents/agentscope.md)。
 
-Pi 使用 [Pi 启动指南](../native-agents.md#启动-pi-sdk-worker)中的 SDK 应用工厂；
+Pi 使用 [Pi 启动指南](../agents/pi.md)中的 SDK 应用工厂；
 包配置生成器仍只面向 Qoder/OpenClaw。
 
 Provider 私有配置只接受 `{version: 1}`。固定 argv 为
@@ -60,15 +47,7 @@ Provider 私有配置只接受 `{version: 1}`。固定 argv 为
 桥接通过 Protocol v2 调用 `tokenless compress`，为该子进程设置 `TOKENLESS_DATA_DIR`。CLI 统计使用 AW
 提供的 Agent、Session 和工具调用标识。CLI 统计度量选中的压缩，不证明原生采用。
 
-AW Journal 与 Tokenless 统计具有独立的内容留存边界。Tokenless CLI 默认开启 SQLite
-统计和 SLS 日志，可由配置或继承的环境覆盖。产生压缩收益时，SQLite 统计可能将完整的
-压缩前后工具文本写入 `$TOKENLESS_DATA_DIR/stats.db`，即使恢复能力为 `none`。
-SLS sink 将指标和归属信息写入本地 JSONL，默认路径为
-`/var/log/anolisa/sls/ops/tokenless.jsonl`；当前实现不将工具正文写入 SLS，也不执行上传。
-若宿主运行 anolisa telemetry uploader 或 SLS/Logtail 采集，指标和归属标识可能由这些
-组件另行上传；该通道仍不含工具正文。
-如需关闭两个 sink，在启动 AW、绑定 Agent 之前设置 `TOKENLESS_STATS_ENABLED=0`
-和 `TOKENLESS_SLS_ENABLED=0`。这两个开关不会删除已有记录。
+AW Journal 保存元数据，Tokenless 可独立保存完整压缩文本。录制开关与数据位置见[数据与隐私](../../../../user-guide/zh/aw/tokenless.md#数据与隐私)。
 
 ## PreTool 与权限行为
 
@@ -90,7 +69,7 @@ Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装，�
 授予原生批准。仅需 PostTool 时，只删除 before 中的 `rewrite-command` 步骤，保留
 共用 Provider 和 after 链。
 
-本次恢复能力仍为 `none`。恢复入口、Stash、恢复作用域及恢复输出旁路由 Tokenless
+当前恢复能力为 `none`。恢复入口、Stash、恢复作用域及恢复输出旁路由 Tokenless
 接入层负责；启用 PreTool 不会自动获得这些能力或 Schema 压缩。
 
 ## 结果与故障行为
@@ -160,7 +139,7 @@ Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若
 停止 AW 后用新配置重新启动。已有会话不会
 热重载。外部 Tokenless state 目录按数据保留需求保留或删除。
 
-Claude SDK 使用 [AW 指南](../native-agents.md#启动-claude-sdk-worker) 中的显式 worker 工厂。单个 AW callback 已按顺序等待步骤。仅原生 Bash stdout 可替换，通过 `PostToolUse` 的 `hookSpecificOutput.updatedToolOutput` 返回原生 envelope；MCP 状态不可靠，结果保持原样。配置 AW replacement 时拒绝既有原生 callback 的输出改写。
+Claude SDK 使用 [AW 指南](../agents/claude-sdk.md) 中的显式 worker 工厂。单个 AW callback 已按顺序等待步骤。仅原生 Bash stdout 可替换，通过 `PostToolUse` 的 `hookSpecificOutput.updatedToolOutput` 返回原生 envelope；MCP 状态不可靠，结果保持原样。配置 AW replacement 时拒绝既有原生 callback 的输出改写。
 
 ## Panel 只读查询
 

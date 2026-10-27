@@ -1,10 +1,12 @@
-"""Regression obligations and the user-guide Hook grid share one checked manifest."""
+"""Regression obligations and visible Hook grids share one checked manifest."""
 
 from pathlib import Path
 
 START = "<!-- aw-regression-matrix:start -->"
 END = "<!-- aw-regression-matrix:end -->"
 CAPABILITY_DOCS = (
+    "README.md",
+    "README_zh.md",
     "../../docs/user-guide/en/aw/capabilities.md",
     "../../docs/user-guide/zh/aw/capabilities.md",
 )
@@ -95,6 +97,9 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
         text = (root / document).read_text(encoding="utf-8")
         if text.count(START) != 1 or text.count(END) != 1:
             raise ValueError(f"{document}: missing unique matrix markers")
+        prefix = text.split(START)[0].lower()
+        if prefix.rfind("<details") > prefix.rfind("</details>"):
+            raise ValueError(f"{document}: keep the Hook grid expanded")
         if text.split(START)[1].split(END)[0].strip() != table(matrix):
             raise ValueError(f"{document}: update the grid from tests/regression-matrix.json")
 

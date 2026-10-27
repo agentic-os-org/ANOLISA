@@ -7,7 +7,7 @@
 The `aw` executable owns daemon discovery, instance binding, foreground process
 lifetime and cleanup. Each native adapter owns version and entrypoint admission,
 registration files, event normalization and the host's response dialect. These
-interfaces are private CLI code. The service adds an optional native-command
+interfaces belong to `aw-adapter`. The service adds an optional native-command
 environment snapshot to `invoke_step`; existing requests may omit it.
 
 Native dialects, callback interpretation and Python/JavaScript assets live in

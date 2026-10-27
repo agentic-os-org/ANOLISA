@@ -23,7 +23,7 @@ ANOLISA/
 ## OS 分发设计
 
 组件 owner 负责 Provider 的实现、测试、依赖与发布；OS 发行方选择组件版本，
-验证来源和组合兼容性，再交付安装包与升级路径。收录在同一仓库不等于共用发布周期。
+验证来源和组合兼容性，再交付安装包与升级路径。各组件维护自己的发布周期。
 
 一方 Provider 的目标是仅依赖固定版本的公共 AW 库，在仓库外完成构建、测试和发布，
 自身后端依赖由 owner 管理。第三方可直接实现公开进程协议，通过 YAML 接入，
@@ -62,5 +62,5 @@ cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 桥接库，尚不能脱离仓库独立构建。固定版本 SDK、独立发布及产物级组合测试留待后续。
 Preview 将 core 与 Provider 作为一批构建产物交付，安装时校验版本和源码提交一致。
 
-`aw-build` 和 `aw install` 当前只打包、安装内置组件，不能自动安装任意社区 Provider。
+`aw-build` 生成内置组件包；社区 Provider 可自行分发，也可按[本地包格式](../reference/packages.md)交给 `aw install` 安装。
 独立安装不影响协议接入；加入统一安装包需另补打包清单和安装验收。
