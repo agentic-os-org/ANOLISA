@@ -26,10 +26,9 @@ pub struct IndexWorker {
 }
 
 impl IndexWorker {
-    /// Synchronously perform the initial full-scan AND wait for the
-    /// inotify/FSEvents watcher to be registered before returning. By the
-    /// time this completes, every existing file is indexed and any
-    /// subsequent write to the mount tree will be picked up by the watcher.
+    /// Register the watcher before the synchronous initial full scan.
+    /// Changes made during the scan or embedding backfill are queued for
+    /// incremental indexing, just like writes made after startup returns.
     pub fn spawn(
         mount: MountPointLite,
         store: Arc<Mutex<BM25Store>>,
@@ -44,13 +43,16 @@ impl IndexWorker {
         // fix; the worker thread itself has no current runtime.
         let rt_handle = tokio::runtime::Handle::try_current().ok();
 
-        // 1. Sync full scan so the caller can safely read svc.index.count()
+        // Arm before scanning: embedding backfill may take multiple network
+        // round trips, during which another client can change the shared store.
+        let (event_tx, event_rx) = stdmpsc::channel::<notify::Result<notify::Event>>();
+        let watcher = watch_mount(&mount, event_tx)?;
+
+        // Preserve synchronous initial indexing. If it fails, the local
+        // watcher is dropped without starting an orphan worker thread.
         full_scan(&mount, &store, embedding.as_deref(), rt_handle.as_ref())?;
 
-        // 2. Spawn watcher thread. Use a oneshot mpsc to know when the
-        //    watcher has been wired up.
         let (cancel_tx, cancel_rx) = stdmpsc::channel::<()>();
-        let (ready_tx, ready_rx) = stdmpsc::sync_channel::<Result<()>>(1);
         let mount_clone = mount.clone();
         let store_clone = Arc::clone(&store);
         let emb_clone = embedding.clone();
@@ -59,27 +61,19 @@ impl IndexWorker {
         let handle = thread::Builder::new()
             .name("agentmem-index".into())
             .spawn(move || {
+                let _watcher = watcher;
                 if let Err(e) = run_watcher(
                     mount_clone,
                     store_clone,
                     emb_clone,
                     rt_clone,
                     cancel_rx,
-                    ready_tx,
+                    event_rx,
                 ) {
                     tracing::warn!("index watcher exited: {e}");
                 }
             })
             .map_err(|e| MemoryError::Other(format!("spawn index thread: {e}")))?;
-
-        // 3. Block until watcher is registered (or fails); reasonable timeout.
-        match ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                tracing::warn!("watcher took >3s to become ready; continuing without sync barrier");
-            }
-        }
 
         Ok(Self {
             handle: Some(handle),
@@ -93,6 +87,25 @@ impl IndexWorker {
             let _ = h.join();
         }
     }
+}
+
+fn watch_mount(
+    mount: &MountPointLite,
+    event_tx: stdmpsc::Sender<notify::Result<notify::Event>>,
+) -> Result<notify::RecommendedWatcher> {
+    let mut watcher = recommended_watcher(move |res| {
+        let _ = event_tx.send(res);
+    })
+    .map_err(|e| MemoryError::Other(format!("watcher init: {e}")))?;
+    watcher
+        .watch(&mount.root, RecursiveMode::Recursive)
+        .map_err(|e| MemoryError::Other(format!("watch: {e}")))?;
+    // Keep startup SQLite writes out of the event queue instead of discarding
+    // them later in classify. IndexHandle::open already created this subtree.
+    watcher
+        .unwatch(&mount.meta_dir)
+        .map_err(|e| MemoryError::Other(format!("unwatch meta: {e}")))?;
+    Ok(watcher)
 }
 
 /// Lightweight clone of MountPoint that the worker can own across threads.
@@ -134,29 +147,8 @@ fn run_watcher(
     embedding: Option<Arc<dyn EmbeddingProvider>>,
     rt_handle: Option<tokio::runtime::Handle>,
     cancel_rx: stdmpsc::Receiver<()>,
-    ready_tx: stdmpsc::SyncSender<Result<()>>,
+    event_rx: stdmpsc::Receiver<notify::Result<notify::Event>>,
 ) -> Result<()> {
-    let (event_tx, event_rx) = stdmpsc::channel::<notify::Result<notify::Event>>();
-    let mut watcher = match recommended_watcher(move |res| {
-        let _ = event_tx.send(res);
-    }) {
-        Ok(w) => w,
-        Err(e) => {
-            let err = MemoryError::Other(format!("watcher init: {e}"));
-            let _ = ready_tx.send(Err(MemoryError::Other(err.to_string())));
-            return Err(err);
-        }
-    };
-
-    if let Err(e) = watcher.watch(&mount.root, RecursiveMode::Recursive) {
-        let err = MemoryError::Other(format!("watch: {e}"));
-        let _ = ready_tx.send(Err(MemoryError::Other(err.to_string())));
-        return Err(err);
-    }
-
-    // Watcher is now armed; signal readiness to the spawner.
-    let _ = ready_tx.send(Ok(()));
-
     // Debounce buffer: track unique paths touched since last flush
     let mut pending_modify: HashSet<PathBuf> = HashSet::new();
     let mut pending_remove: HashSet<PathBuf> = HashSet::new();
@@ -660,6 +652,71 @@ mod tests {
         let mount = MountPoint::ensure(Namespace::user("tester").unwrap(), tmp.path()).unwrap();
         let store = Arc::new(Mutex::new(BM25Store::open_in_memory().unwrap()));
         (tmp, mount.clone_lite(), store)
+    }
+
+    #[test]
+    fn watcher_excludes_startup_database_writes() {
+        use notify::event::{AccessKind, AccessMode};
+
+        let (_tmp, mount, _) = setup();
+        let index_dir = mount.meta_dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = Arc::new(Mutex::new(
+            BM25Store::open(&index_dir.join("bm25.db"), 0.0, 0.0, false).unwrap(),
+        ));
+        let notes_dir = mount.root.join("notes");
+        std::fs::create_dir(&notes_dir).unwrap();
+        for i in 0..16 {
+            std::fs::write(notes_dir.join(format!("{i}.md")), "cobaltzebra").unwrap();
+        }
+        let (event_tx, event_rx) = stdmpsc::channel();
+        let _watcher = watch_mount(&mount, event_tx).unwrap();
+
+        let wal_path = index_dir.join("bm25.db-wal");
+        let wal_before = std::fs::metadata(&wal_path).unwrap().len();
+        full_scan(&mount, &store, None, None).unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .search("cobaltzebra", 20, false)
+                .unwrap()
+                .len(),
+            16
+        );
+        assert!(std::fs::metadata(&wal_path).unwrap().len() > wal_before);
+
+        let external = notes_dir.join("0.md");
+        std::fs::write(&external, "heliotrope").unwrap();
+        let sentinel = mount.root.join("sentinel.md");
+        std::fs::write(&sentinel, "finished").unwrap();
+
+        // inotify preserves order: the sentinel's close follows the WAL writes
+        // and external modification, so absence is checked without a sleep.
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut external_seen = false;
+        loop {
+            let event = event_rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("missing sentinel event")
+                .expect("watcher error");
+            assert!(
+                !event
+                    .paths
+                    .iter()
+                    .any(|path| path.starts_with(&mount.meta_dir)),
+                "internal state reached the event queue: {event:?}"
+            );
+            if matches!(event.kind, EventKind::Modify(_)) && event.paths.contains(&external) {
+                external_seen = true;
+            }
+            if event.kind == EventKind::Access(AccessKind::Close(AccessMode::Write))
+                && event.paths.contains(&sentinel)
+            {
+                break;
+            }
+        }
+        assert!(external_seen, "external file modification was not watched");
     }
 
     fn flush_path(mount: &MountPointLite, store: &Arc<Mutex<BM25Store>>, path: &str) {
