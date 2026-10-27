@@ -60,6 +60,59 @@ pub struct SubagentTrajectoryRef {
 /// merely mentions "error".
 pub const EXTRA_IS_ERROR: &str = "is_error";
 
+/// The outcome a tool-result envelope declares, when it declares one.
+///
+/// Providers disagree about how to spell the out-of-band failure flag: Anthropic
+/// writes `is_error`, real agent traces carry the camelCase `isError`, and some
+/// tools report `success` or an `error` status instead. Reading only one
+/// spelling leaves the others indistinguishable from "declared nothing", which
+/// [`ObservationResult::is_error`] documents as *unknown* — not as success — so
+/// every consumer falls back to scanning free text for error words and a
+/// successful call whose output merely mentions "no such file or directory"
+/// turns into a reported failure.
+///
+/// Precedence: an explicit flag first, then `success`, and an `error` status
+/// wins over either polarity — a payload that says `is_error: false` and
+/// `status: error` contradicts itself, and both directions resolve towards the
+/// failure. The interruption detector and the grader still hold their own
+/// inline copies of this precedence and agree with it today; routing them
+/// through this function is left to a follow-up so this change stays additive.
+///
+/// Returns `None` when the envelope declares nothing.
+pub fn declared_tool_failure(envelope: &serde_json::Value) -> Option<bool> {
+    let status_is_error = envelope
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+
+    if let Some(is_error) = envelope
+        .get(EXTRA_IS_ERROR)
+        .or_else(|| envelope.get("isError"))
+        .and_then(|value| value.as_bool())
+    {
+        return Some(is_error || status_is_error);
+    }
+
+    if let Some(success) = envelope.get("success").and_then(|value| value.as_bool()) {
+        return Some(!success || status_is_error);
+    }
+
+    status_is_error.then_some(true)
+}
+
+/// The `extra` map carrying a declared outcome, both polarities.
+///
+/// `false` is written as well as `true`: [`ObservationResult::is_error`] reads an
+/// absent key as unknown, so dropping the negative polarity hands consumers a
+/// flag-less payload and lets the text heuristic re-judge a call the provider
+/// already declared successful.
+pub fn is_error_extra(is_error: bool) -> HashMap<String, serde_json::Value> {
+    HashMap::from([(
+        EXTRA_IS_ERROR.to_string(),
+        serde_json::Value::Bool(is_error),
+    )])
+}
+
 /// Whether two identifiers name the same tool call.
 ///
 /// Comparison first accepts the original identifiers case-insensitively. It
@@ -492,6 +545,56 @@ mod tests {
             subagent_trajectories: None,
             extra: None,
         }
+    }
+
+    #[test]
+    fn declared_failure_reads_every_spelling_and_lets_error_status_win() {
+        // The three spellings the pipeline serves, both polarities. A missing
+        // answer is None (unknown), never an implicit success.
+        let cases = [
+            (serde_json::json!({"is_error": true}), Some(true)),
+            (serde_json::json!({"is_error": false}), Some(false)),
+            (serde_json::json!({"isError": true}), Some(true)),
+            (serde_json::json!({"isError": false}), Some(false)),
+            (serde_json::json!({"success": false}), Some(true)),
+            (serde_json::json!({"success": true}), Some(false)),
+            (serde_json::json!({"status": "error"}), Some(true)),
+            (serde_json::json!({"status": "ERROR"}), Some(true)),
+            (serde_json::json!({"status": "complete"}), None),
+            (serde_json::json!({"content": "done"}), None),
+        ];
+        for (payload, expected) in cases {
+            assert_eq!(
+                declared_tool_failure(&payload),
+                expected,
+                "payload {payload}"
+            );
+        }
+
+        // An explicit success contradicted by an error status resolves towards
+        // the failure, matching the detector and the grader.
+        assert_eq!(
+            declared_tool_failure(&serde_json::json!({"is_error": false, "status": "error"})),
+            Some(true)
+        );
+        assert_eq!(
+            declared_tool_failure(&serde_json::json!({"success": true, "status": "error"})),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn is_error_extra_keeps_the_success_polarity() {
+        for flag in [true, false] {
+            let extra = is_error_extra(flag);
+            assert_eq!(
+                extra.get(EXTRA_IS_ERROR),
+                Some(&serde_json::Value::Bool(flag))
+            );
+        }
+        // `false` must be written rather than omitted: absent means unknown,
+        // and the text heuristic would re-judge a declared success.
+        assert!(is_error_extra(false).contains_key(EXTRA_IS_ERROR));
     }
 
     #[test]
