@@ -23,7 +23,11 @@ class SkillParser:
         if not self.skill_path.exists():
             raise FileNotFoundError(f"Skill path not found: {self.skill_path}")
 
-        result = {"path": str(self.skill_path), "files": [], "metadata": self._extract_metadata()}
+        result = {
+            "path": str(self.skill_path),
+            "files": [],
+            "metadata": self._extract_metadata(),
+        }
 
         # 收集所有相关文件
         for file_path in self._collect_files():
@@ -97,7 +101,11 @@ class SkillParser:
         Returns:
             dict: 元数据信息
         """
-        metadata = {"name": self.skill_path.name, "has_skill_md": False, "description": None}
+        metadata = {
+            "name": self.skill_path.name,
+            "has_skill_md": False,
+            "description": None,
+        }
 
         skill_md = self.skill_path / "SKILL.md"
         if skill_md.exists():
@@ -125,9 +133,9 @@ class SkillParser:
                     if line.strip().startswith("description:"):
                         # 从 YAML frontmatter 提取
                         return line.split(":", 1)[1].strip()
-                    elif line.lower().startswith("## description") or line.lower().startswith(
-                        "## 描述"
-                    ):
+                    elif line.lower().startswith(
+                        "## description"
+                    ) or line.lower().startswith("## 描述"):
                         # 从 markdown 标题后提取
                         desc_lines = []
                         for j in range(i + 1, min(i + 5, len(lines))):

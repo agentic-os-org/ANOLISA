@@ -1,0 +1,13 @@
+{
+  "revision": "combined-22/1",
+  "upstream": {
+    "skillaudit": {
+      "commit": "349eff1e12cf6f210aa9b865a9e865b948b5a89b",
+      "path": "skills_eval/task_scheme/system_prompt_skill_security_static_scanner.md"
+    },
+    "masb": {
+      "commit": "f7d28b1a9de4eb33d552529cf79d1065d765f6c3",
+      "path": "code/analysis/patterns.py"
+    }
+  }
+}

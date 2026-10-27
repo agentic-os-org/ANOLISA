@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from agent_sec_cli.code_scanner.models import Language
 from agent_sec_cli.code_scanner.scanner import scan as code_scan
 from agent_sec_cli.pii_checker.scanner import PiiScanner
@@ -44,7 +43,9 @@ def scan_content(items: list[dict[str, str]], config: ScoreConfig) -> dict[str, 
         for hit in result.to_dict()["findings"]:
             signals.append({"scanner": "pii", "ref": ref, "detail": hit})
         # Direct backend execution avoids writing evaluated content to host audit storage.
-        prompt_result = prompt.execute(RequestContext(action="prompt_scan"), text=text, mode="fast")
+        prompt_result = prompt.execute(
+            RequestContext(action="prompt_scan"), text=text, mode="fast"
+        )
         data = prompt_result.data or {}
         if (
             not prompt_result.success
@@ -72,13 +73,17 @@ def scan_content(items: list[dict[str, str]], config: ScoreConfig) -> dict[str, 
     )
 
 
-def scan_skill(skill: Path, source: dict[str, Any], config: ScoreConfig) -> dict[str, Any]:
+def scan_skill(
+    skill: Path, source: dict[str, Any], config: ScoreConfig
+) -> dict[str, Any]:
     items = [
         {
             "ref": path,
             "text": text,
             "language": (
-                "python" if path.endswith(".py") else "bash" if path.endswith(".sh") else ""
+                "python"
+                if path.endswith(".py")
+                else "bash" if path.endswith(".sh") else ""
             ),
         }
         for path, text in source["files"].items()

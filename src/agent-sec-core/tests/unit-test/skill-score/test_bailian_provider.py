@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from agent_sec_cli.skill_score.contracts import ContractError
 from agent_sec_cli.skill_score.provider import bailian as bailian_provider
 from agent_sec_cli.skill_score.provider.bailian import (
@@ -279,7 +278,9 @@ def test_successful_request_reports_close_failure_without_retrying() -> None:
             self.close_calls += 1
             raise ConnectionError("transport cleanup failed")
 
-    client = FailingCloseClient(_Messages({"content": [{"type": "text", "text": "ok"}]}))
+    client = FailingCloseClient(
+        _Messages({"content": [{"type": "text", "text": "ok"}]})
+    )
 
     with pytest.raises(ProviderCallError) as raised:
         call_messages(
@@ -369,7 +370,9 @@ def test_calls_messages_with_strict_bailian_output_schema() -> None:
 
 
 @pytest.mark.parametrize("effort", ["medium", "high"])
-def test_reasoning_and_schema_share_output_config_without_exposing_thoughts(effort: str) -> None:
+def test_reasoning_and_schema_share_output_config_without_exposing_thoughts(
+    effort: str,
+) -> None:
     messages = _Messages(
         {
             "content": [
@@ -526,7 +529,9 @@ def test_serializes_lazy_client_factory_loading_across_threads(
                 assert release_first.wait(timeout=2)
             else:
                 second_entered.set()
-            return lambda **_: _Client(_Messages({"content": [{"type": "text", "text": "ok"}]}))
+            return lambda **_: _Client(
+                _Messages({"content": [{"type": "text", "text": "ok"}]})
+            )
         finally:
             with state_lock:
                 active -= 1
@@ -566,7 +571,9 @@ def test_serialized_sdk_failure_releases_lock_and_keeps_contract() -> None:
     def failing_factory(**_arguments: str) -> _Client:
         raise RuntimeError(f"request failed with credential {secret}")
 
-    with pytest.raises(ContractError, match="^Bailian Anthropic Messages call failed$") as raised:
+    with pytest.raises(
+        ContractError, match="^Bailian Anthropic Messages call failed$"
+    ) as raised:
         call_messages(
             api_key=secret,
             api_base_url="https://dashscope.aliyuncs.com/apps/anthropic",
@@ -619,7 +626,9 @@ def test_calls_messages_with_multiline_prompt_text_unchanged() -> None:
 
     assert result == "ok"
     assert messages.arguments is not None
-    assert messages.arguments["messages"][0]["content"] == ("Finding:\n\tline one\r\nline two")
+    assert messages.arguments["messages"][0]["content"] == (
+        "Finding:\n\tline one\r\nline two"
+    )
     assert messages.arguments["system"] == "Return JSON.\nNo prose."
 
 

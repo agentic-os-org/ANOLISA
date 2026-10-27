@@ -102,7 +102,9 @@ def _provider_failure(exc: Exception) -> ProviderCallError:
     if isinstance(headers, Mapping):
         raw_retry_after = headers.get("retry-after") or headers.get("Retry-After")
         try:
-            retry_after = float(raw_retry_after) if raw_retry_after is not None else None
+            retry_after = (
+                float(raw_retry_after) if raw_retry_after is not None else None
+            )
         except (TypeError, ValueError):
             retry_after = None
     if status in {408, 429}:
@@ -164,7 +166,9 @@ class ResolvedBailianAuth:
 
 def _require_clean_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
-        raise ContractError(f"{field} must be a non-empty string without outer whitespace")
+        raise ContractError(
+            f"{field} must be a non-empty string without outer whitespace"
+        )
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise ContractError(f"{field} must not contain control characters")
     return value
@@ -179,7 +183,8 @@ def _require_message_text(value: Any, field: str, *, allow_empty: bool = False) 
         raise ContractError(f"{field} must contain non-whitespace text")
     allowed_controls = frozenset({"\t", "\n", "\r"})
     if any(
-        (ord(character) < 0x20 and character not in allowed_controls) or ord(character) == 0x7F
+        (ord(character) < 0x20 and character not in allowed_controls)
+        or ord(character) == 0x7F
         for character in value
     ):
         raise ContractError(f"{field} must not contain unsupported control characters")
@@ -196,11 +201,17 @@ def _parse_base_url(base_url: str) -> SplitResult:
     if parsed.scheme != "https":
         raise ContractError("Bailian Anthropic base URL must use HTTPS")
     if parsed.username is not None or parsed.password is not None:
-        raise ContractError("Bailian Anthropic base URL must not contain user information")
-    if port is not None or (parsed.hostname and parsed.netloc.lower() != parsed.hostname.lower()):
+        raise ContractError(
+            "Bailian Anthropic base URL must not contain user information"
+        )
+    if port is not None or (
+        parsed.hostname and parsed.netloc.lower() != parsed.hostname.lower()
+    ):
         raise ContractError("Bailian Anthropic base URL must not specify a port")
     if parsed.query or parsed.fragment or "?" in value or "#" in value:
-        raise ContractError("Bailian Anthropic base URL must not contain a query or fragment")
+        raise ContractError(
+            "Bailian Anthropic base URL must not contain a query or fragment"
+        )
     if parsed.path not in {"/apps/anthropic", "/apps/anthropic/"}:
         raise ContractError("Bailian Anthropic base URL path must be /apps/anthropic")
     if not parsed.hostname:
@@ -219,12 +230,18 @@ def validate_payg_anthropic_base_url(base_url: str) -> str:
     host = parsed.hostname.lower()
     labels = frozenset(host.split("."))
     if labels & _NON_PAYG_LABELS:
-        raise ContractError("Bailian Anthropic base URL must use a pay-as-you-go endpoint")
+        raise ContractError(
+            "Bailian Anthropic base URL must use a pay-as-you-go endpoint"
+        )
     workspace_match = _WORKSPACE_HOST.fullmatch(host)
     if host not in _SHARED_PAYG_HOSTS and workspace_match is None:
-        raise ContractError("Bailian Anthropic base URL host is not an approved pay-as-you-go host")
+        raise ContractError(
+            "Bailian Anthropic base URL host is not an approved pay-as-you-go host"
+        )
     if workspace_match and workspace_match.group("workspace") in _NON_PAYG_LABELS:
-        raise ContractError("Bailian Anthropic base URL must use a pay-as-you-go workspace")
+        raise ContractError(
+            "Bailian Anthropic base URL must use a pay-as-you-go workspace"
+        )
     return urlunsplit(("https", host, "/apps/anthropic", "", ""))
 
 
@@ -323,18 +340,24 @@ def extract_final_text(response: Any) -> str:
         or isinstance(content, (str, bytes, bytearray))
         or not content
     ):
-        raise ContractError("Bailian Anthropic response content must be a non-empty array")
+        raise ContractError(
+            "Bailian Anthropic response content must be a non-empty array"
+        )
 
     text_parts: list[str] = []
     for index, block in enumerate(content):
         block_type = _field(block, "type")
         if not isinstance(block_type, str) or not block_type:
-            raise ContractError(f"Bailian Anthropic response content[{index}] has no block type")
+            raise ContractError(
+                f"Bailian Anthropic response content[{index}] has no block type"
+            )
         if block_type != "text":
             continue
         block_text = _field(block, "text")
         if not isinstance(block_text, str):
-            raise ContractError(f"Bailian Anthropic response content[{index}].text is invalid")
+            raise ContractError(
+                f"Bailian Anthropic response content[{index}].text is invalid"
+            )
         if block_text.strip():
             text_parts.append(block_text)
 
@@ -354,7 +377,9 @@ def extract_token_usage(response: Any) -> dict[str, int]:
     for field_name in ("input_tokens", "output_tokens"):
         value = _field(usage, field_name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ContractError(f"Bailian Anthropic response usage.{field_name} is invalid")
+            raise ContractError(
+                f"Bailian Anthropic response usage.{field_name} is invalid"
+            )
         output[field_name] = value
     output["total_tokens"] = output["input_tokens"] + output["output_tokens"]
     return output
@@ -424,7 +449,11 @@ def _create_message(
         "Bailian system message",
         allow_empty=True,
     )
-    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
+    if (
+        isinstance(max_tokens, bool)
+        or not isinstance(max_tokens, int)
+        or max_tokens <= 0
+    ):
         raise ContractError("Bailian max_tokens must be a positive integer")
     schema = _clean_output_schema(output_schema)
 

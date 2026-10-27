@@ -27,7 +27,9 @@ def rpm_files(path: Path) -> list[str]:
 
 def validate_paths(paths: list[str], prefix: str) -> None:
     """Reject packages that would overwrite system AgentSecCore entrypoints."""
-    if not paths or any(path != prefix and not path.startswith(prefix + "/") for path in paths):
+    if not paths or any(
+        path != prefix and not path.startswith(prefix + "/") for path in paths
+    ):
         raise ValueError(f"package must own only {prefix}")
 
 
@@ -36,7 +38,9 @@ def validate_archive(path: Path) -> None:
     prefixes = ("opt/agent-sec/skill-score-cli", "opt/agent-sec/skill-score-runtime")
 
     def within_prefix(name: str) -> bool:
-        return any(name == prefix or name.startswith(prefix + "/") for prefix in prefixes)
+        return any(
+            name == prefix or name.startswith(prefix + "/") for prefix in prefixes
+        )
 
     with tarfile.open(path) as archive:
         members = archive.getmembers()
@@ -108,7 +112,11 @@ def main() -> None:
     parser.add_argument("--development", action="store_true")
     args = parser.parse_args()
     if args.payload_only is not None:
-        if args.directory is not None or args.source_commit is not None or args.development:
+        if (
+            args.directory is not None
+            or args.source_commit is not None
+            or args.development
+        ):
             parser.error("--payload-only cannot be combined with release arguments")
         validate_archive(args.payload_only)
         return
@@ -120,7 +128,9 @@ def main() -> None:
     if len(packages) != 2:
         raise ValueError("exactly two assessment RPMs are required")
     for kind in ("cli", "runtime"):
-        selected = [p for p in packages if p.name.startswith(f"agent-sec-skill-score-{kind}-")]
+        selected = [
+            p for p in packages if p.name.startswith(f"agent-sec-skill-score-{kind}-")
+        ]
         if len(selected) != 1:
             raise ValueError(f"exactly one {kind} RPM is required")
         validate_paths(rpm_files(selected[0]), f"/opt/agent-sec/skill-score-{kind}")
@@ -150,7 +160,9 @@ def main() -> None:
             for path in paths
         ],
     }
-    (args.directory / "release-manifest.json").write_text(json.dumps(result, indent=2) + "\n")
+    (args.directory / "release-manifest.json").write_text(
+        json.dumps(result, indent=2) + "\n"
+    )
 
 
 if __name__ == "__main__":

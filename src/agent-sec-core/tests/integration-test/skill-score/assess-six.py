@@ -53,7 +53,9 @@ def assess(name, snapshot, output, stage, python_module=False):
             f"assessment harness selected an incompatible CLI: {command}; skill-score {stage} unavailable"
         )
     command += ["skill-score", stage]
-    command += [str(snapshot / "skills" / name) if stage == "plan" else str(root / "task.json")]
+    command += [
+        str(snapshot / "skills" / name) if stage == "plan" else str(root / "task.json")
+    ]
     command += ["--output-file", str(result)]
     if stage == "run":
         command += ["--evidence-dir", str(root / "evidence")]
@@ -89,9 +91,13 @@ def assess(name, snapshot, output, stage, python_module=False):
     }
     if stage == "run" and data:
         expected = [p["id"] for p in read(root / "task.json")["audit"]["probes"]]
-        status["all_tasks_reported"] = expected == [e["task_id"] for e in data["execution"]]
+        status["all_tasks_reported"] = expected == [
+            e["task_id"] for e in data["execution"]
+        ]
     write(root / f"{stage}-status.json", status)
-    print(f"{name}: {stage} exit={code}, decision={data.get('decision', '-')}", flush=True)
+    print(
+        f"{name}: {stage} exit={code}, decision={data.get('decision', '-')}", flush=True
+    )
 
 
 def summarize(output, names=SKILLS):
@@ -153,11 +159,15 @@ def summarize(output, names=SKILLS):
             ]
             (root / "report.md").write_text("\n".join(lines) + "\n")
     ranking = sorted(
-        (r for r in rows if r["decision"] == "scored"), key=lambda r: (-r["score"], r["skill"])
+        (r for r in rows if r["decision"] == "scored"),
+        key=lambda r: (-r["score"], r["skill"]),
     )
     write(
         output / "ranking.json",
-        [{"rank": i + 1, "skill": r["skill"], "score": r["score"]} for i, r in enumerate(ranking)],
+        [
+            {"rank": i + 1, "skill": r["skill"], "score": r["score"]}
+            for i, r in enumerate(ranking)
+        ],
     )
     write(output / "summary.json", rows)
     lines = [
@@ -181,7 +191,16 @@ def summarize(output, names=SKILLS):
             "",
             "```json",
             json.dumps(
-                {k: r[k] for k in ("plan", "run", "usage", "corrections", "dynamic_diagnostic")},
+                {
+                    k: r[k]
+                    for k in (
+                        "plan",
+                        "run",
+                        "usage",
+                        "corrections",
+                        "dynamic_diagnostic",
+                    )
+                },
                 ensure_ascii=False,
                 indent=2,
             ),

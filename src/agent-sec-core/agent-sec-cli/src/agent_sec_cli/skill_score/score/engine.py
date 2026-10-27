@@ -37,7 +37,9 @@ def score_findings(
     for finding in sorted(
         findings,
         key=lambda f: -(
-            WEIGHTS.get(f.severity, 0) * float(EXISTENCE[f.status]) * float(DYNAMIC[f.dynamic])
+            WEIGHTS.get(f.severity, 0)
+            * float(EXISTENCE[f.status])
+            * float(DYNAMIC[f.dynamic])
         ),
     ):
         if finding.scope == "environment":
@@ -67,7 +69,9 @@ def score_findings(
     ordinary = rounded(max(Decimal(0), Decimal(100) - total))
     risk_score = ordinary
     hygiene = score_gaps(control_gaps or [], findings)
-    ordinary = rounded(max(Decimal(0), Decimal(100) - total - Decimal(str(hygiene["penalty"]))))
+    ordinary = rounded(
+        max(Decimal(0), Decimal(100) - total - Decimal(str(hygiene["penalty"])))
+    )
     critical = [
         f
         for f in findings

@@ -12,7 +12,7 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 [Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求，以及应用如何接入策略授权、
 本地审批和执行回执。
 
-可选的 [Skill 安全评测](skill-score.md) 使用独立 CLI/worker，通过模型调用生成计划和裁决。
+可选的 [Skill 安全评测](skill-score.md) 使用原生 ASC CLI 和共享模型配置生成计划、执行裁决。基础安装保持轻量，Docker/Harbor 动态执行需显式安装 `sec-core-skill-score`。
 
 ## 概述
 

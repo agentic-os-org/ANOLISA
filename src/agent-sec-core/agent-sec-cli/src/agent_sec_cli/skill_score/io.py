@@ -14,7 +14,9 @@ from agent_sec_cli.skill_score.evidence.redact import redact_text, redact_value
 def save(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(redact_value(value), ensure_ascii=False, indent=2) + "\n")
+    temporary.write_text(
+        json.dumps(redact_value(value), ensure_ascii=False, indent=2) + "\n"
+    )
     temporary.replace(path)
 
 
@@ -64,7 +66,9 @@ def load_source(skill: Path, *, hash_content: bool = True) -> dict[str, Any]:
             continue
         content = path.read_bytes()
         if hash_content:
-            digest.update(rel.encode() + b"\0" + len(content).to_bytes(8, "big") + content)
+            digest.update(
+                rel.encode() + b"\0" + len(content).to_bytes(8, "big") + content
+            )
         try:
             text = content.decode("utf-8")
             if "\0" in text:
@@ -111,5 +115,10 @@ def validate_refs(findings: list[Finding], catalog: dict[str, str]) -> None:
         ids.add(finding.id)
         if any(ref not in catalog for ref in finding.refs + finding.control_refs):
             raise ContractError(f"{finding.id}: evidence reference does not exist")
-        if finding.status in {"material_risk", "unresolved"} and not finding.boundary.strip():
-            raise ContractError(f"{finding.id}: a concrete security boundary is required")
+        if (
+            finding.status in {"material_risk", "unresolved"}
+            and not finding.boundary.strip()
+        ):
+            raise ContractError(
+                f"{finding.id}: a concrete security boundary is required"
+            )

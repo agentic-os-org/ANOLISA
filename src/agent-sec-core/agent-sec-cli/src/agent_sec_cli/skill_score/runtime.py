@@ -29,14 +29,19 @@ class Runtime:
     def __init__(self, config: ScoreConfig) -> None:
         self.config = config
 
-    def _invoke(self, request: dict[str, Any], root: Path, timeout: float) -> dict[str, Any]:
+    def _invoke(
+        self, request: dict[str, Any], root: Path, timeout: float
+    ) -> dict[str, Any]:
         if not WORKER_PYTHON.is_file():
             raise ContractError(
                 "install the assessment-enabled sec-core package and prepare Docker and its images first"
             )
         auth = resolve_payg_auth()
         request["config"] = self.config.model_dump()
-        input_path, output_path = root / "worker-input.json", root / "worker-output.json"
+        input_path, output_path = (
+            root / "worker-input.json",
+            root / "worker-output.json",
+        )
         save(input_path, request)
         environment = {
             key: value
@@ -57,7 +62,9 @@ class Runtime:
             }
         }
         environment.update(
-            auth.runtime_env(model=self.config.model, small_fast_model=self.config.model)
+            auth.runtime_env(
+                model=self.config.model, small_fast_model=self.config.model
+            )
         )
         environment["ANTHROPIC_API_KEY"] = auth.api_key
         # The private interpreter sees only its own site-packages.
@@ -102,10 +109,14 @@ class Runtime:
         return response
 
     def environment(self) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="agent-sec-score-preflight-") as temporary:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-sec-score-preflight-"
+        ) as temporary:
             return self._invoke({"operation": "environment"}, Path(temporary), 60)
 
-    def run(self, skill: Path, probe: Probe, root: Path, timeout: float) -> dict[str, Any]:
+    def run(
+        self, skill: Path, probe: Probe, root: Path, timeout: float
+    ) -> dict[str, Any]:
         return self._invoke(
             {
                 "operation": "run",

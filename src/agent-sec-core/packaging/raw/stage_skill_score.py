@@ -21,8 +21,13 @@ def stage_score(stage: Path, payload: Path, version: str) -> None:
     contract_text = contract_path.read_text()
     contract = tomllib.loads(contract_text)
     base = contract["component"]["version"]
-    if not re.fullmatch(re.escape(base) + r"-skillscore\.[a-f0-9]{7,40}", version):
-        raise ValueError(f"preview version must be {base}-skillscore.<7-40 character Git SHA>")
+    if not re.fullmatch(
+        re.escape(base) + r"-skillscore\.[a-f0-9]{7,40}(?:\.base\.[a-f0-9]{12})?",
+        version,
+    ):
+        raise ValueError(
+            f"preview version must be {base}-skillscore.<7-40 character Git SHA>"
+        )
     score_root = stage / SCORE_ROOT
     launcher = stage / "bin/agent-sec-skill-score"
     if score_root.exists() or launcher.exists():
@@ -48,7 +53,9 @@ def stage_score(stage: Path, payload: Path, version: str) -> None:
             shutil.copytree(source, score_root / kind, symlinks=False)
     private_cli = score_root / "cli/bin/agent-sec-cli"
     if not private_cli.is_file() or (score_root / "cli/bin/agent-sec-daemon").exists():
-        raise ValueError("assessment payload must expose a private CLI without a daemon")
+        raise ValueError(
+            "assessment payload must expose a private CLI without a daemon"
+        )
     # Raw installation owns regular files and their modes, never source symlinks.
     for path in score_root.rglob("*"):
         path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644)

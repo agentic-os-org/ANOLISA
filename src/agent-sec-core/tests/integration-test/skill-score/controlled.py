@@ -8,14 +8,13 @@ import time
 import uuid
 from pathlib import Path
 
-from harbor.environments.docker.docker import DockerEnvironment
-from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
-from harbor.models.trial.paths import TrialPaths
-
 from agent_sec_cli.skill_score.config import ScoreConfig
 from agent_sec_cli.skill_score.contracts import Probe
 from agent_sec_cli.skill_score.io import load_source, read, save
 from agent_sec_skill_score_runtime.observations import collect_evidence
+from harbor.environments.docker.docker import DockerEnvironment
+from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
+from harbor.models.trial.paths import TrialPaths
 
 
 def check(name: str, evidence: dict, execution: dict) -> bool:
@@ -35,7 +34,9 @@ def check(name: str, evidence: dict, execution: dict) -> bool:
         evidence[k] for k in ("positive_refs", "attempt_refs", "critical_canary")
     )
     if "labels" in name:
-        digest = hashlib.sha256(b"test; touch /app/guard/command-marker #\n").hexdigest()
+        digest = hashlib.sha256(
+            b"test; touch /app/guard/command-marker #\n"
+        ).hexdigest()
         return bool(
             safe
             and any(
@@ -67,9 +68,16 @@ async def verify(output: Path) -> None:
             paths.mkdir()
             environment_dir = root / "environment"
             environment_dir.mkdir()
-            probe = Probe.model_validate(read(Path(__file__).parent / "plans" / f"{name}.json"))
-            if probe.entry_path != f"scripts/{family}.py" or not probe.input_path.startswith("/"):
-                raise ValueError("expected the controlled fixture's original entry and local route")
+            probe = Probe.model_validate(
+                read(Path(__file__).parent / "plans" / f"{name}.json")
+            )
+            if (
+                probe.entry_path != f"scripts/{family}.py"
+                or not probe.input_path.startswith("/")
+            ):
+                raise ValueError(
+                    "expected the controlled fixture's original entry and local route"
+                )
             save(root / "probe.json", probe.model_dump())
             source = load_source(skill)
             save(root / "source.json", source)
@@ -79,7 +87,10 @@ async def verify(output: Path) -> None:
                 session_id="poc-code-" + uuid.uuid4().hex[:12],
                 trial_paths=paths,
                 task_env_config=EnvironmentConfig(
-                    docker_image=config.docker_image, workdir="/app/work", cpus=2, memory_mb=2048
+                    docker_image=config.docker_image,
+                    workdir="/app/work",
+                    cpus=2,
+                    memory_mb=2048,
                 ),
                 network_policy=NetworkPolicy(network_mode="no-network"),
             )
@@ -89,7 +100,9 @@ async def verify(output: Path) -> None:
             try:
                 await environment.start(force_build=False)
                 await environment.upload_dir(skill, "/app/subject")
-                await environment.upload_file(root / "probe.json", "/tmp/poc-probe.json")
+                await environment.upload_file(
+                    root / "probe.json", "/tmp/poc-probe.json"
+                )
                 for command in (
                     "python /opt/poc/observe.py init && "
                     "(nohup python /opt/poc/observe.py serve </dev/null >/tmp/poc-mock.log 2>&1 &)",
@@ -159,9 +172,13 @@ async def verify(output: Path) -> None:
                     "results": rows,
                 },
             )
-            print(f"{name}: passed={row['passed']}, outcome={row['outcome']}", flush=True)
+            print(
+                f"{name}: passed={row['passed']}, outcome={row['outcome']}", flush=True
+            )
     if not all(r["passed"] for r in rows):
-        raise RuntimeError("controlled code acceptance failed; see code-acceptance.json")
+        raise RuntimeError(
+            "controlled code acceptance failed; see code-acceptance.json"
+        )
 
 
 if __name__ == "__main__":

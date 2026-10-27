@@ -9,9 +9,6 @@ from typing import Any
 
 import pytest
 import test_two_stage
-from test_two_stage import FakeJudge, FakeRuntime, make_task, scan
-from typer.testing import CliRunner
-
 from agent_sec_cli.security_middleware.result import ActionResult
 from agent_sec_cli.skill_score import cli, pipeline, scanners
 from agent_sec_cli.skill_score.config import ScoreConfig
@@ -19,12 +16,16 @@ from agent_sec_cli.skill_score.contracts import ContractError
 from agent_sec_cli.skill_score.entrypoint import app
 from agent_sec_cli.skill_score.io import load_source
 from agent_sec_cli.skill_score.task import task_json
+from test_two_stage import FakeJudge, FakeRuntime, make_task, scan
+from typer.testing import CliRunner
 
 fake = test_two_stage.fake
 subject = test_two_stage.subject
 
 
-@pytest.mark.parametrize("change", ["text", "binary", "rename", "delete", "add", "symlink"])
+@pytest.mark.parametrize(
+    "change", ["text", "binary", "rename", "delete", "add", "symlink"]
+)
 def test_changed_skill_is_rejected_before_runtime(
     subject: Path, tmp_path: Path, fake: tuple[FakeJudge, FakeRuntime], change: str
 ) -> None:
@@ -83,7 +84,9 @@ def test_dedicated_entrypoint_keeps_public_command(
 ) -> None:
     result = CliRunner().invoke(app, ["skill-score", "plan", str(subject)])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["schema_version"] == "agent-sec-skill-score/task-v1"
+    assert (
+        json.loads(result.stdout)["schema_version"] == "agent-sec-skill-score/task-v1"
+    )
 
 
 def test_cli_exports_planning_notes_without_dynamic_limitations(
@@ -121,7 +124,11 @@ def test_incomplete_native_scanner_cannot_be_treated_as_clean(
     monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     data = dict(
-        verdict="pass", degraded=False, input_truncated=False, findings=[], layers_failed=[]
+        verdict="pass",
+        degraded=False,
+        input_truncated=False,
+        findings=[],
+        layers_failed=[],
     )
     if failure == "error":
         data["verdict"] = "error"
@@ -132,7 +139,9 @@ def test_incomplete_native_scanner_cannot_be_treated_as_clean(
     else:
         data.pop("degraded")
     monkeypatch.setattr(
-        scanners.PromptScanBackend, "execute", lambda *a, **k: ActionResult(success=True, data=data)
+        scanners.PromptScanBackend,
+        "execute",
+        lambda *a, **k: ActionResult(success=True, data=data),
     )
     with pytest.raises(ContractError, match="incomplete coverage"):
         scanners.scan_content(
@@ -140,7 +149,9 @@ def test_incomplete_native_scanner_cannot_be_treated_as_clean(
         )
 
 
-def test_current_native_scanner_findings_are_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_current_native_scanner_findings_are_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hit = {"rule_id": "test-rule", "title": "Test observation"}
     calls = []
 
@@ -161,12 +172,16 @@ def test_current_native_scanner_findings_are_preserved(monkeypatch: pytest.Monke
     result = scanners.scan_content(
         [{"text": "Harmless input", "ref": "source:SKILL.md:1"}], ScoreConfig()
     )
-    assert result["signals"] == [{"scanner": "prompt", "ref": "source:SKILL.md:1", "detail": hit}]
+    assert result["signals"] == [
+        {"scanner": "prompt", "ref": "source:SKILL.md:1", "detail": hit}
+    ]
     assert calls == [{"text": "Harmless input", "mode": "fast"}]
 
 
 def release_verifier() -> Any:
-    path = Path(__file__).resolve().parents[3] / "packaging/skill-score/verify-release.py"
+    path = (
+        Path(__file__).resolve().parents[3] / "packaging/skill-score/verify-release.py"
+    )
     spec = importlib.util.spec_from_file_location("score_release", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -186,7 +201,9 @@ def test_assessment_package_cannot_own_system_cli() -> None:
             module.validate_paths([prefix, unsafe], prefix)
 
 
-@pytest.mark.parametrize("unsafe", ["traversal", "absolute", "link", "device", "setuid"])
+@pytest.mark.parametrize(
+    "unsafe", ["traversal", "absolute", "link", "device", "setuid"]
+)
 def test_payload_archive_rejects_unsafe_members(tmp_path: Path, unsafe: str) -> None:
     path = tmp_path / "payload.tar.gz"
     member = tarfile.TarInfo("opt/agent-sec/skill-score-cli/bin/test")
@@ -207,7 +224,9 @@ def test_payload_archive_rejects_unsafe_members(tmp_path: Path, unsafe: str) -> 
 
 
 @pytest.mark.parametrize("case", ["chain", "cycle", "hardlink", "duplicate"])
-def test_payload_archive_resolves_links_before_parent_traversal(tmp_path: Path, case: str) -> None:
+def test_payload_archive_resolves_links_before_parent_traversal(
+    tmp_path: Path, case: str
+) -> None:
     prefix = "opt/agent-sec/skill-score-cli/"
     links = [("a", ".", tarfile.SYMTYPE), ("b", "a/../outside", tarfile.SYMTYPE)]
     if case == "cycle":

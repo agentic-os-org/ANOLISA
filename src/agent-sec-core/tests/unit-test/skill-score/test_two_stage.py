@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
-
 from agent_sec_cli.skill_score import cli, pipeline, runtime
 from agent_sec_cli.skill_score.audit import Judge
 from agent_sec_cli.skill_score.config import ScoreConfig
@@ -19,6 +17,7 @@ from agent_sec_cli.skill_score.io import load_source, read, save
 from agent_sec_cli.skill_score.scanners import scan_skill
 from agent_sec_cli.skill_score.score.engine import score_findings
 from agent_sec_cli.skill_score.task import parse_task, read_task_input
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -68,7 +67,9 @@ def targeted():
 
 
 class FakeJudge:
-    def __init__(self, config=None, *, findings=None, refute=False, tasks=None, fail=None):
+    def __init__(
+        self, config=None, *, findings=None, refute=False, tasks=None, fail=None
+    ):
         self.stages = []
         self.findings = findings or []
         self.refute = refute
@@ -93,7 +94,10 @@ class FakeJudge:
         findings = [dict(f) for f in payload.get("audit", {}).get("findings", [])]
         for f in findings:
             if self.refute:
-                f.update(status="refuted", reason="source:SKILL.md:1 shows a bounded operation")
+                f.update(
+                    status="refuted",
+                    reason="source:SKILL.md:1 shows a bounded operation",
+                )
         result = Adjudication.model_validate(
             dict(
                 findings=findings,
@@ -193,7 +197,9 @@ def fake(monkeypatch):
     monkeypatch.setattr(pipeline, "Judge", lambda *args: judge)
     monkeypatch.setattr(pipeline, "Runtime", lambda *args: runtime)
     original_plan, original_run = pipeline.plan_skill, pipeline.run_task
-    monkeypatch.setattr(cli, "plan_skill", lambda *args: original_plan(*args, scanner=scan))
+    monkeypatch.setattr(
+        cli, "plan_skill", lambda *args: original_plan(*args, scanner=scan)
+    )
     monkeypatch.setattr(
         cli,
         "run_task",
@@ -206,7 +212,11 @@ def fake(monkeypatch):
 
 def make_task(subject, tmp_path, judge=None):
     data = pipeline.plan_skill(
-        subject, tmp_path / "plan-internal", ScoreConfig(), judge=judge or FakeJudge(), scanner=scan
+        subject,
+        tmp_path / "plan-internal",
+        ScoreConfig(),
+        judge=judge or FakeJudge(),
+        scanner=scan,
     )
     return parse_task(data, tmp_path)
 
@@ -257,7 +267,9 @@ def test_plan_has_exact_public_shape_and_never_initializes_runtime(subject, fake
 @pytest.mark.parametrize(
     "relative", ["internal-report.json", "probes/report.json", "critical.attempts.json"]
 )
-def test_internal_output_collision_is_rejected_before_work(subject, fake, tmp_path, relative):
+def test_internal_output_collision_is_rejected_before_work(
+    subject, fake, tmp_path, relative
+):
     task = runner.invoke(cli.app, ["plan", str(subject)]).stdout
     result = runner.invoke(
         cli.app,
@@ -279,7 +291,9 @@ def test_internal_output_collision_is_rejected_before_work(subject, fake, tmp_pa
 @pytest.mark.parametrize(
     "file_output,evidence", [(False, False), (True, False), (False, True), (True, True)]
 )
-def test_run_inputs_output_combinations(subject, fake, tmp_path, mode, file_output, evidence):
+def test_run_inputs_output_combinations(
+    subject, fake, tmp_path, mode, file_output, evidence
+):
     task = runner.invoke(cli.app, ["plan", str(subject)]).stdout
     if mode == "file":
         task_path = tmp_path / "task.json"
@@ -335,13 +349,18 @@ def test_invalid_json_not_interpreted_as_a_file(fake, payload):
     ],
 )
 def test_input_cannot_forge_runtime_or_gate(subject, tmp_path, field, value):
-    task = make_task(subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")]))
+    task = make_task(
+        subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")])
+    )
     data = dict(
         schema_version=task.schema_version,
         skill_path=task.skill_path,
         content_hash=task.content_hash,
         audit=dict(
-            objective="x", allowed_boundary="x", findings=[risk(**{field: value})], probes=[]
+            objective="x",
+            allowed_boundary="x",
+            findings=[risk(**{field: value})],
+            probes=[],
         ),
     )
     with pytest.raises(ValueError):
@@ -354,7 +373,9 @@ def test_relative_paths_follow_input_kind(subject, tmp_path, monkeypatch):
         schema_version=task.schema_version,
         skill_path="subject",
         content_hash=task.content_hash,
-        audit=dict(objective="x", allowed_boundary="x", findings=[], probes=[baseline()]),
+        audit=dict(
+            objective="x", allowed_boundary="x", findings=[], probes=[baseline()]
+        ),
     )
     file = tmp_path / "task.json"
     file.write_text(json.dumps(data))
@@ -390,7 +411,9 @@ def test_invalid_outputs_rejected_before_cost(subject, fake, tmp_path, target):
 
 
 def test_static_refutation_preserved_without_replanning(subject, tmp_path):
-    task = make_task(subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")]))
+    task = make_task(
+        subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")])
+    )
     judge, runtime = FakeJudge(refute=True), FakeRuntime()
     report = pipeline.run_task(
         task,
@@ -403,7 +426,10 @@ def test_static_refutation_preserved_without_replanning(subject, tmp_path):
     )
     assert report["score"] == 100.0
     assert judge.stages == ["final"]
-    assert read(tmp_path / "run/internal-report.json")["findings"][0]["status"] == "refuted"
+    assert (
+        read(tmp_path / "run/internal-report.json")["findings"][0]["status"]
+        == "refuted"
+    )
 
 
 @pytest.mark.parametrize("identifiers", [["r1"], [], ["unexpected"], ["r1", "r1"]])
@@ -523,7 +549,9 @@ def test_default_temporary_evidence_removed(subject, fake, monkeypatch):
 
 
 def test_fixed_score_replay_without_provider(subject, tmp_path):
-    task = make_task(subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")]))
+    task = make_task(
+        subject, tmp_path, FakeJudge(findings=[risk(dynamic="unsupported")])
+    )
     report = pipeline.run_task(
         task,
         tmp_path / "run",
@@ -543,10 +571,16 @@ def test_fixed_score_replay_without_provider(subject, tmp_path):
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda value: value["audit"]["findings"][0].update(refs=["source:missing.py:1"]),
+        lambda value: value["audit"]["findings"][0].update(
+            refs=["source:missing.py:1"]
+        ),
         lambda value: value["audit"]["probes"][0].update(entry_path="../outside"),
-        lambda value: value["audit"]["probes"][0].update(fixtures={"../outside": "data"}),
-        lambda value: value["audit"]["probes"].extend([targeted(), dict(targeted(), id="other")]),
+        lambda value: value["audit"]["probes"][0].update(
+            fixtures={"../outside": "data"}
+        ),
+        lambda value: value["audit"]["probes"].extend(
+            [targeted(), dict(targeted(), id="other")]
+        ),
         lambda value: value.update(score=99),
     ],
 )
@@ -583,14 +617,18 @@ def test_tampered_task_completion_is_rejected():
             ]
         },
         task_results=[
-            dict(task_id="target", completed=True, reason="done", refs=["atif:target:1"])
+            dict(
+                task_id="target", completed=True, reason="done", refs=["atif:target:1"]
+            )
         ],
     )
     with pytest.raises(ContractError, match="matching entry"):
         Judge.validate("final", result, payload)
 
 
-def test_output_save_failure_keeps_result_and_score(subject, fake, tmp_path, monkeypatch):
+def test_output_save_failure_keeps_result_and_score(
+    subject, fake, tmp_path, monkeypatch
+):
     original = cli.plan_skill
     destination = tmp_path / "result.json"
 
@@ -600,7 +638,9 @@ def test_output_save_failure_keeps_result_and_score(subject, fake, tmp_path, mon
         return result
 
     monkeypatch.setattr(cli, "plan_skill", collide)
-    result = runner.invoke(cli.app, ["plan", str(subject), "--output-file", str(destination)])
+    result = runner.invoke(
+        cli.app, ["plan", str(subject), "--output-file", str(destination)]
+    )
     assert result.exit_code == 1
     assert json.loads(result.stdout)["schema_version"].endswith("/task-v1")
     assert destination.read_text() == "a concurrent writer owns this"
@@ -657,10 +697,16 @@ def test_configured_key_is_scrubbed_from_results_and_retained_files(
     directory = tmp_path / "evidence"
     result = runner.invoke(cli.app, ["run", task, "--evidence-dir", str(directory)])
     assert result.exit_code == 0 and secret not in result.output
-    assert all(secret not in path.read_text() for path in directory.rglob("*") if path.is_file())
+    assert all(
+        secret not in path.read_text()
+        for path in directory.rglob("*")
+        if path.is_file()
+    )
 
 
-def test_missing_optional_worker_preserves_source_assessment(subject, tmp_path, monkeypatch):
+def test_missing_optional_worker_preserves_source_assessment(
+    subject, tmp_path, monkeypatch
+):
     monkeypatch.setattr(runtime, "WORKER_PYTHON", tmp_path / "not-installed")
     task = make_task(subject, tmp_path)
     judge = FakeJudge()

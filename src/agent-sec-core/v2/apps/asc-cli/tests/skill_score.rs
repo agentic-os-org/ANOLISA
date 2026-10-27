@@ -1,61 +1,27 @@
-//! The public Rust entrypoint delegates locally without changing the assessment process contract.
+//! Native local assessment validates inputs without invoking the retired Python CLI.
 
 mod common;
 
-use std::ffi::{OsStr, OsString};
-use std::io::Write as _;
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::process::ExitStatusExt as _;
-use std::path::{Path, PathBuf};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use asc_cli::{Cli, InputError, Plan};
 use serde_json::{Value, json};
 
-const PRIVATE_CLI: &str = "lib/anolisa/sec-core/skill-score/cli/bin/agent-sec-cli";
-static INSTALLATION_LOCK: Mutex<()> = Mutex::new(());
-const FIXTURE: &str = r"#!/usr/bin/env python3
-import json, os, signal, sys
-mode = os.environ.get('SCORE_TEST_MODE', 'capture')
-if mode == 'signal':
-    os.kill(os.getpid(), signal.SIGTERM)
-if mode == 'wait':
-    def stop(signum, frame):
-        print('cleanup-on-term', file=sys.stderr, flush=True)
-        sys.exit(23)
-    signal.signal(signal.SIGTERM, stop)
-    signal.alarm(10)
-print(json.dumps({'argv': [list(os.fsencode(a)) for a in sys.argv[1:]],
-                  'pid': os.getpid(), 'pgid': os.getpgrp(),
-                  'stdin': sys.stdin.read() if sys.argv[-1] == '-' else '',
-                  'model_key': os.environ.get('ANTHROPIC_API_KEY')}), flush=True)
-if mode == 'wait':
-    while True:
-        signal.pause()
-print('assessment-diagnostic', file=sys.stderr)
-sys.exit(int(os.environ.get('SCORE_TEST_EXIT', '0')))
-";
-
-fn installation(with_payload: bool) -> (common::Directory, MutexGuard<'static, ()>) {
-    // Concurrent fork can retain another fixture's writable executable fd until exec, causing
-    // ETXTBSY even though that fixture has closed its own copy. Serialize copying and child runs.
-    let guard = INSTALLATION_LOCK.lock().unwrap();
-    let directory = common::Directory::new();
-    std::fs::create_dir(directory.0.join("bin")).unwrap();
-    std::fs::copy(
-        env!("CARGO_BIN_EXE_agent-sec-cli"),
-        directory.0.join("bin/agent-sec-cli"),
-    )
-    .unwrap();
-    if with_payload {
-        let private = directory.0.join(PRIVATE_CLI);
-        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
-        std::fs::write(&private, FIXTURE).unwrap();
-        std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    (directory, guard)
+fn installation() -> common::Directory {
+    let binary = Path::new(env!("CARGO_BIN_EXE_agent-sec-cli"));
+    let directory = common::Directory(
+        binary
+            .parent()
+            .unwrap()
+            .join(format!("score-install-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(directory.0.join("bin")).unwrap();
+    // A parallel child must not inherit a writable copy descriptor for another test's executable.
+    std::fs::hard_link(binary, directory.0.join("bin/agent-sec-cli")).unwrap();
+    directory
 }
 
 fn command(prefix: &Path) -> Command {
@@ -64,18 +30,15 @@ fn command(prefix: &Path) -> Command {
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap())
         .env("AGENT_SEC_DAEMON_SOCKET", "relative-invalid-socket")
-        .env("ANTHROPIC_API_KEY", "test-only-placeholder")
+        .env(
+            "AGENT_SEC_MODEL_CONFIG",
+            prefix.join("no-model-config.json"),
+        )
         .args(["skillsec", "score"]);
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     command
-}
-
-fn argv_bytes(arguments: &[&OsStr]) -> Value {
-    json!(
-        arguments
-            .iter()
-            .map(|argument| argument.as_bytes().to_vec())
-            .collect::<Vec<_>>()
-    )
 }
 
 #[test]
@@ -129,7 +92,7 @@ fn score_rejects_daemon_and_context_options_instead_of_ignoring_them() {
 
 #[test]
 fn public_help_and_usage_errors_do_not_need_a_payload() {
-    let (prefix, _installation_guard) = installation(false);
+    let prefix = installation();
     for arguments in [
         vec!["--help"],
         vec!["plan", "--help"],
@@ -161,134 +124,402 @@ fn public_help_and_usage_errors_do_not_need_a_payload() {
 }
 
 #[test]
-fn plan_preserves_os_paths_and_reports_the_runtime_exit_status() {
-    let (prefix, _installation_guard) = installation(true);
-    let skill = OsString::from_vec(b"skill with space-\xff".to_vec());
-    let output_path = PathBuf::from("report with spaces-\u{4e2d}.json");
-    for exit_code in [0, 1, 2, 77] {
-        let output = command(&prefix.0)
-            .arg("plan")
-            .arg(&skill)
-            .arg("--output-file")
-            .arg(&output_path)
-            .env("SCORE_TEST_EXIT", exit_code.to_string())
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(exit_code), "{output:?}");
-        let body: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let mut output_option = OsString::from("--output-file=");
-        output_option.push(&output_path);
-        assert_eq!(
-            body["argv"],
-            argv_bytes(&[
-                OsStr::new("skill-score"),
-                OsStr::new("plan"),
-                &output_option,
-                OsStr::new("--"),
-                &skill,
-            ])
-        );
-        assert_eq!(body["model_key"], "test-only-placeholder");
-        assert_eq!(output.stderr, b"assessment-diagnostic\n");
-    }
-}
-
-#[test]
-fn run_preserves_inline_json_option_looking_paths_and_stdin() {
-    let (prefix, _installation_guard) = installation(true);
-    let inline = r#"{"skill_path":"/work/\u4e2d skill","note":"$(printf should-not-run)"}"#;
-    for input in [inline, "-"] {
+fn malformed_task_rejects_inline_file_and_stdin_before_runtime_or_model() {
+    let prefix = installation();
+    let input = r#"{"schema_version":"agent-sec-skill-score/task-v1","skill_path":"ignored","content_hash":"invalid","audit":{}}"#;
+    let path = prefix.0.join("input.json");
+    std::fs::write(&path, input).unwrap();
+    for argument in [input, "-", path.to_str().unwrap()] {
         let mut child = command(&prefix.0)
-            .args([
-                "run",
-                input,
-                "--output-file=-report.json",
-                "--evidence-dir",
-                "\u{4e2d} evidence",
-            ])
+            .args(["run", argument])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        if input == "-" {
+        if argument == "-" {
             child
                 .stdin
                 .take()
                 .unwrap()
-                .write_all(inline.as_bytes())
+                .write_all(input.as_bytes())
                 .unwrap();
         }
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "{output:?}");
-        let body: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            body["argv"],
-            argv_bytes(&[
-                OsStr::new("skill-score"),
-                OsStr::new("run"),
-                OsStr::new("--output-file=-report.json"),
-                OsStr::new("--evidence-dir=\u{4e2d} evidence"),
-                OsStr::new("--"),
-                OsStr::new(input),
-            ])
-        );
-        assert_eq!(body["stdin"], if input == "-" { inline } else { "" });
+        let result = child.wait_with_output().unwrap();
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("content_hash"));
+    }
+}
+
+fn task_for(skill: &Path) -> Value {
+    json!({
+        "schema_version":"agent-sec-skill-score/task-v1", "skill_path":skill,
+        "content_hash":"0".repeat(64),
+        "audit":{"objective":"Do not echo private task contents", "allowed_boundary":"Read SKILL.md",
+        "findings":[],"probes":[{"id":"baseline","template":"baseline","entry_path":"SKILL.md",
+        "turns":["Describe this Skill."],"activation":"Read its instructions","expected_result":"A description"}]}
+    })
+}
+
+#[test]
+fn missing_task_reports_stage_and_escaped_path_without_a_report() {
+    let prefix = installation();
+    let missing = prefix.0.join("missing task\nforged-log.json");
+    let report = prefix.0.join("report.json");
+    for path in [missing.clone(), prefix.0.join("dangling-task.json")] {
+        if path != missing {
+            std::os::unix::fs::symlink(&missing, &path).unwrap();
+        }
+        let result = command(&prefix.0)
+            .arg("run")
+            .arg(&path)
+            .arg("--output-file")
+            .arg(&report)
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.code(), Some(1), "{error}");
+        assert!(error.contains("stage=task.resolve"), "{error}");
+        assert!(error.contains(&format!("path={path:?}")), "{error}");
+        assert!(error.contains("os error 2"), "{error}");
+        assert_eq!(error.lines().count(), 1, "{error}");
+        assert!(result.stdout.is_empty() && !report.exists());
     }
 }
 
 #[test]
-fn a_missing_private_payload_fails_without_using_path_or_a_daemon() {
-    let (prefix, _installation_guard) = installation(false);
-    let output = command(&prefix.0).args(["plan", "skill"]).output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("scoring payload"), "{error}");
-    assert!(error.contains(PRIVATE_CLI), "{error}");
-    assert!(!error.contains("socket"), "{error}");
-}
-
-#[test]
-fn exec_preserves_signal_termination() {
-    let (prefix, _installation_guard) = installation(true);
-    let output = command(&prefix.0)
-        .args(["plan", "skill"])
-        .env("SCORE_TEST_MODE", "signal")
+fn missing_skill_is_resolved_relative_to_task_without_echoing_its_contents() {
+    let prefix = installation();
+    let task_path = prefix.0.join("task.json");
+    std::fs::write(&task_path, task_for(Path::new("missing skill")).to_string()).unwrap();
+    let report = prefix.0.join("report.json");
+    let result = command(&prefix.0)
+        .arg("run")
+        .arg(&task_path)
+        .arg("--output-file")
+        .arg(&report)
         .output()
         .unwrap();
-    assert_eq!(output.status.signal(), Some(15));
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.status.code(), Some(1), "{error}");
+    assert!(error.contains("stage=task.skill.resolve"), "{error}");
+    assert!(
+        error.contains(&format!("path={:?}", prefix.0.join("missing skill"))),
+        "{error}"
+    );
+    assert!(error.contains("os error 2"), "{error}");
+    assert!(
+        !error.contains("Do not echo private task contents"),
+        "{error}"
+    );
+    assert!(result.stdout.is_empty() && !report.exists());
 }
 
 #[test]
-fn exec_preserves_pid_process_group_and_term_cleanup() {
-    let (prefix, _installation_guard) = installation(true);
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(
-            r"
-import json, os, select, signal, subprocess, sys
-env = dict(os.environ, SCORE_TEST_MODE='wait', AGENT_SEC_DAEMON_SOCKET='invalid-relative')
-child = subprocess.Popen([sys.argv[1], 'skillsec', 'score', 'plan', 'skill'],
-                         env=env, start_new_session=True,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-try:
-    assert select.select([child.stdout], [], [], 5)[0], 'runtime did not become ready'
-    record = json.loads(child.stdout.readline())
-    assert record['pid'] == child.pid, record
-    assert record['pgid'] == child.pid, record
-    os.killpg(child.pid, signal.SIGTERM)
-    stdout, stderr = child.communicate(timeout=5)
-    assert child.returncode == 23, (child.returncode, stderr)
-    assert stderr == b'cleanup-on-term\n', stderr
-finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+fn missing_temporary_directory_identifies_evidence_preparation() {
+    let prefix = installation();
+    let skill = prefix.0.join("skill");
+    std::fs::create_dir(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
+    let missing = prefix.0.join("missing temporary directory");
+    let report = prefix.0.join("report.json");
+    let result = command(&prefix.0)
+        .env("TMPDIR", &missing)
+        .arg("run")
+        .arg(task_for(&skill).to_string())
+        .arg("--output-file")
+        .arg(&report)
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.status.code(), Some(1), "{error}");
+    assert!(error.contains("stage=evidence.temp.create"), "{error}");
+    assert!(error.contains(&format!("path={missing:?}")), "{error}");
+    assert!(error.contains("os error 2"), "{error}");
+    assert!(result.stdout.is_empty() && !report.exists());
+}
+
+#[test]
+fn missing_paths_redact_the_configured_model_credential() {
+    let prefix = installation();
+    let config = prefix.0.join("model.json");
+    std::fs::write(
+        &config,
+        json!({"schemaVersion":1,"remote":{
+        "provider":"bailian-payg-anthropic","baseUrl":"https://dashscope.aliyuncs.com/apps/anthropic",
+        "defaultModel":"fixture","apiKeyEnv":"TEST_KEY"}})
+        .to_string(),
+    )
+    .unwrap();
+    for key in ["fixture-opaque-key", r#"fixture"opaque\key"#] {
+        let missing = prefix.0.join(key);
+        for (argument, stage) in [
+            (missing.to_string_lossy().into_owned(), "task.resolve"),
+            (task_for(&missing).to_string(), "task.skill.resolve"),
+        ] {
+            let result = command(&prefix.0)
+                .env("AGENT_SEC_MODEL_CONFIG", &config)
+                .env("TEST_KEY", key)
+                .arg("run")
+                .arg(argument)
+                .output()
+                .unwrap();
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert_eq!(result.status.code(), Some(1), "{error}");
+            assert!(
+                error.contains(&format!("stage={stage}")) && error.contains("path="),
+                "{error}"
+            );
+            assert!(!error.contains(key), "{error}");
+            let escaped = format!("{key:?}");
+            assert!(!error.contains(&escaped[1..escaped.len() - 1]), "{error}");
+            assert!(error.contains("[REDACTED]"), "{error}");
+            assert!(error.contains("os error 2"), "{error}");
+            assert!(result.stdout.is_empty());
+        }
+    }
+}
+
+#[test]
+fn native_plan_does_not_invoke_retired_payload_and_rejects_output_in_skill() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let prefix = installation();
+    let skill = prefix.0.join("skill with spaces");
+    std::fs::create_dir(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
+    let retired = prefix
+        .0
+        .join("lib/anolisa/sec-core/skill-score/cli/bin/agent-sec-cli");
+    std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
+    std::fs::write(
+        &retired,
+        "#!/bin/sh
+exit 77
 ",
-        )
-        .arg(prefix.0.join("bin/agent-sec-cli"))
+    )
+    .unwrap();
+    std::fs::set_permissions(retired, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let result = command(&prefix.0)
+        .arg("plan")
+        .arg(&skill)
+        .arg("--output-file")
+        .arg(skill.join("task.json"))
         .output()
         .unwrap();
-    assert!(output.status.success(), "{output:?}");
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("outside"));
+    let result = command(&prefix.0).arg("plan").arg(&skill).output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("model"));
+}
+
+fn serve_planning_response() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut length = 0;
+        let mut header = String::new();
+        loop {
+            header.clear();
+            assert!(reader.read_line(&mut header).unwrap() > 0);
+            if header == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        assert!((1..=2_000_000).contains(&length));
+        let mut bytes = vec![0; length];
+        reader.read_exact(&mut bytes).unwrap();
+        let request: Value = serde_json::from_slice(&bytes).unwrap();
+        let prompt = request["messages"][0]["content"].as_str().unwrap();
+        let (payload, _) = prompt.split_once("\nRequired JSON schema:").unwrap();
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        let reviewed = |field: &str| -> serde_json::Map<String, Value> {
+            payload[field].as_object().unwrap().keys().map(|id| {
+                (id.clone(), json!({"status":"not_applicable", "reason":"This example only describes input."}))
+            }).collect()
+        };
+        let audit = json!({
+            "objective":"Describe the supplied Skill", "allowed_boundary":"Read SKILL.md",
+            "findings":[], "pattern_checks":reviewed("risk_catalog"),
+            "hygiene_review":reviewed("hygiene_checks"),
+            "probes":[{"id":"baseline", "template":"baseline", "finding_ids":[], "input_path":"",
+                "entry_path":"SKILL.md","turns":["Describe this Skill."],
+                "activation":"Read the instructions","expected_result":"A description"}]
+        });
+        let reply = json!({"content":[{"type":"text","text":audit.to_string()}],
+            "usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"end_turn"})
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
+        )
+        .unwrap();
+    });
+    (address, server)
+}
+
+#[test]
+fn installed_cli_writes_a_bound_plan_and_reports_the_missing_runtime() {
+    let prefix = installation();
+    let skill = prefix.0.join("skill");
+    std::fs::create_dir(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "# Example\nDescribe the supplied input.",
+    )
+    .unwrap();
+    let (address, server) = serve_planning_response();
+    let config = prefix.0.join("model.json");
+    std::fs::write(
+        &config,
+        json!({"schemaVersion":1,"remote":{
+        "provider":"anthropic-compatible","baseUrl":format!("http://{address}"),
+        "defaultModel":"fixture-model","apiKeyEnv":"FIXTURE_MODEL_KEY"}})
+        .to_string(),
+    )
+    .unwrap();
+    let output = prefix.0.join("reports/task.json");
+    let plan = command(&prefix.0)
+        .env("AGENT_SEC_MODEL_CONFIG", config)
+        .env("FIXTURE_MODEL_KEY", "fixture-credential")
+        .arg("plan")
+        .arg(&skill)
+        .arg("--output-file")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{plan:?}");
+    server.join().unwrap();
+    assert_eq!(plan.stdout, std::fs::read(&output).unwrap());
+    let task: Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(
+        task["skill_path"].as_str(),
+        skill.canonicalize().unwrap().to_str()
+    );
+    assert_eq!(task["audit"]["probes"][0]["id"], "baseline");
+    let evidence = prefix.0.join("evidence");
+    let run = command(&prefix.0)
+        .arg("run")
+        .arg(output)
+        .arg("--evidence-dir")
+        .arg(&evidence)
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("install-runtime"),
+        "{run:?}"
+    );
+    assert!(evidence.is_dir());
+    assert!(run.stdout.is_empty());
+}
+
+#[test]
+fn plan_rejects_credentials_in_omitted_binary_paths_before_contacting_the_model() {
+    let prefix = installation();
+    let skill = prefix.0.join("skill");
+    std::fs::create_dir(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
+    std::fs::write(skill.join("fixture-opaque-key.bin"), [0_u8, 255]).unwrap();
+    let config = prefix.0.join("model.json");
+    std::fs::write(
+        &config,
+        json!({"schemaVersion":1,"remote":{
+        "provider":"anthropic-compatible","baseUrl":"http://127.0.0.1:1",
+        "defaultModel":"fixture","apiKeyEnv":"TEST_KEY"}})
+        .to_string(),
+    )
+    .unwrap();
+    let output = prefix.0.join("task.json");
+    let result = command(&prefix.0)
+        .env("AGENT_SEC_MODEL_CONFIG", config)
+        .env("TEST_KEY", "fixture-opaque-key")
+        .arg("plan")
+        .arg(skill)
+        .arg("--output-file")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("credential") && !error.contains("fixture-opaque-key"),
+        "{error}"
+    );
+    assert!(result.stdout.is_empty() && !output.exists());
+}
+
+#[test]
+fn run_rejects_conflicting_report_paths_before_creating_evidence() {
+    let prefix = installation();
+    let skill = prefix.0.join("skill");
+    std::fs::create_dir(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
+    let task = serde_json::json!({
+        "schema_version":"agent-sec-skill-score/task-v1", "skill_path":skill,
+        "content_hash":"0".repeat(64),
+        "audit":{"objective":"Describe the Skill","allowed_boundary":"Read SKILL.md",
+        "findings":[],"probes":[{"id":"baseline","template":"baseline","entry_path":"SKILL.md",
+        "turns":["Describe this Skill."],"activation":"Read its instructions","expected_result":"A description"}]}
+    }).to_string();
+    let parent = prefix.0.join("results");
+    let evidence = parent.join("evidence");
+    for output in [
+        evidence.join("source-redaction.json"),
+        evidence.clone(),
+        parent.clone(),
+    ] {
+        let result = command(&prefix.0)
+            .args(["run", &task, "--evidence-dir"])
+            .arg(&evidence)
+            .arg("--output-file")
+            .arg(output)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("evidence"),
+            "{result:?}"
+        );
+        assert!(!parent.exists());
+    }
+}
+
+#[test]
+fn cancellation_interrupts_open_stdin_without_waiting_for_eof() {
+    let prefix = installation();
+    let mut child = command(&prefix.0)
+        .args(["run", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            let _ = child.kill();
+            panic!("native stdin did not respond to cancellation");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

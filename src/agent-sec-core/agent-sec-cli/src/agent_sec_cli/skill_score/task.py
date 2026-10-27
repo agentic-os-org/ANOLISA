@@ -4,13 +4,12 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from agent_sec_cli.skill_score.contracts import Audit, ContractError
 from agent_sec_cli.skill_score.evidence.redact import redact_value
 from agent_sec_cli.skill_score.hygiene import validate_gaps
 from agent_sec_cli.skill_score.io import validate_refs
 from agent_sec_cli.skill_score.probes import plan_probes
+from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_VERSION = "agent-sec-skill-score/task-v1"
 FINDING_PRIVATE = {"critical_confirmed", "control_test_refs", "dynamic_target"}
@@ -35,7 +34,9 @@ def task_json(skill: Path, content_hash: str, audit: Audit) -> dict[str, Any]:
     probes = []
     for probe in audit.probes:
         value = probe.model_dump(exclude=PROBE_DERIVED, exclude_defaults=True)
-        probes.append({key: item for key, item in value.items() if item not in ("", [], {})})
+        probes.append(
+            {key: item for key, item in value.items() if item not in ("", [], {})}
+        )
     return redact_value(
         {
             "schema_version": SCHEMA_VERSION,
@@ -100,7 +101,9 @@ def parse_task(value: Any, base: Path) -> Task:
             raise ContractError("task findings cannot supply a dynamic verdict")
     for probe in audit.get("probes", []):
         if not isinstance(probe, dict) or PROBE_DERIVED & probe.keys():
-            raise ContractError("task target and required are derived, not caller-supplied")
+            raise ContractError(
+                "task target and required are derived, not caller-supplied"
+            )
         probe.setdefault("finding_ids", [])
         probe.setdefault("input_path", "")
     task = Task.model_validate(value)
@@ -124,11 +127,15 @@ def validate_task(task: Task, source: dict[str, Any], catalog: dict[str, str]) -
     validate_refs(task.audit.findings, catalog)
     validate_gaps(task.audit.control_gaps, catalog, source_only=True)
     for finding in task.audit.findings:
-        if any(not ref.startswith("source:") for ref in finding.refs + finding.control_refs):
+        if any(
+            not ref.startswith("source:") for ref in finding.refs + finding.control_refs
+        ):
             raise ContractError("planning findings must reference source evidence only")
     selected = plan_probes(task.audit, source, normalize=False)
     if [p.id for p in selected] != [p.id for p in task.audit.probes]:
-        raise ContractError("task list is incomplete, redundant or not in execution order")
+        raise ContractError(
+            "task list is incomplete, redundant or not in execution order"
+        )
     task.audit.probes = selected
 
 

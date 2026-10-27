@@ -1,7 +1,6 @@
 """Frozen catalog/score contracts; these tests do not measure model recall."""
 
 import pytest
-
 from agent_sec_cli.skill_score.audit import Judge
 from agent_sec_cli.skill_score.contracts import Audit, Finding, Probe
 from agent_sec_cli.skill_score.risk_catalog import CATALOG
@@ -59,7 +58,9 @@ def test_topic_contrasts_validate_and_score_once(topic: str, unsafe: bool) -> No
     """Contract/score tests only: a fake verdict is not measured model recall."""
     text = CATALOG[topic]["danger_example" if unsafe else "safe_example"]
     risk = finding(
-        pattern_ids=[topic], status="material_risk" if unsafe else "accepted", dynamic="unsupported"
+        pattern_ids=[topic],
+        status="material_risk" if unsafe else "accepted",
+        dynamic="unsupported",
     )
     base = probe(id="baseline", template="baseline", target="", finding_ids=[])
     audit = Audit(
@@ -72,7 +73,10 @@ def test_topic_contrasts_validate_and_score_once(topic: str, unsafe: bool) -> No
     Judge.validate("audit", audit, {"catalog": {"source:SKILL.md:1": text}})
     single = score_findings([risk])["score"]
     assert single == (91 if unsafe else 100)
-    assert score_findings([risk, risk.model_copy(update={"id": "duplicate"})])["score"] == single
+    assert (
+        score_findings([risk, risk.model_copy(update={"id": "duplicate"})])["score"]
+        == single
+    )
 
 
 @pytest.mark.parametrize(
@@ -91,7 +95,16 @@ def test_frozen_dynamic_weights(state, score):
 
 
 def test_gates_decimal_rounding_and_environment():
-    assert score_findings([finding(severity="Critical", critical_confirmed=True)])["score"] == 0.0
+    assert (
+        score_findings([finding(severity="Critical", critical_confirmed=True)])["score"]
+        == 0.0
+    )
     assert score_findings([finding(severity="Critical")])["decision"] == "needs_review"
-    assert score_findings([finding(status="unresolved", dynamic="contained")])["score"] == 97.8
-    assert score_findings([finding(severity="Critical", scope="environment")])["score"] == 100.0
+    assert (
+        score_findings([finding(status="unresolved", dynamic="contained")])["score"]
+        == 97.8
+    )
+    assert (
+        score_findings([finding(severity="Critical", scope="environment")])["score"]
+        == 100.0
+    )

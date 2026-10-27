@@ -11,7 +11,6 @@ from types import FrameType
 from typing import Annotated, Any
 
 import typer
-
 from agent_sec_cli.skill_score.config import ScoreConfig
 from agent_sec_cli.skill_score.contracts import ContractError
 from agent_sec_cli.skill_score.evidence.redact import redact_text, redact_value
@@ -24,18 +23,28 @@ app = typer.Typer(
 )
 
 
-def check_targets(skill: Path, output_file: Path | None, evidence_dir: Path | None) -> None:
+def check_targets(
+    skill: Path, output_file: Path | None, evidence_dir: Path | None
+) -> None:
     for path in (output_file, evidence_dir):
         if path is not None and path.resolve().is_relative_to(skill.resolve()):
             raise ContractError("outputs must not be inside the evaluated Skill")
     if output_file is not None and os.path.lexists(output_file):
         raise ContractError("output file already exists")
     if evidence_dir is not None and os.path.lexists(evidence_dir):
-        if evidence_dir.is_symlink() or not evidence_dir.is_dir() or any(evidence_dir.iterdir()):
-            raise ContractError("evidence directory must be absent or empty, and not a symlink")
+        if (
+            evidence_dir.is_symlink()
+            or not evidence_dir.is_dir()
+            or any(evidence_dir.iterdir())
+        ):
+            raise ContractError(
+                "evidence directory must be absent or empty, and not a symlink"
+            )
     if output_file is not None and evidence_dir is not None:
         if output_file.resolve() == evidence_dir.resolve():
-            raise ContractError("output file and evidence directory must be different paths")
+            raise ContractError(
+                "output file and evidence directory must be different paths"
+            )
         if output_file.resolve().is_relative_to(evidence_dir.resolve()):
             first = output_file.resolve().relative_to(evidence_dir.resolve()).parts[0]
             if first.split(".")[0] in {
@@ -50,7 +59,9 @@ def check_targets(skill: Path, output_file: Path | None, evidence_dir: Path | No
                 "internal-report",
                 "events",
             }:
-                raise ContractError("output file conflicts with reserved internal evidence paths")
+                raise ContractError(
+                    "output file conflicts with reserved internal evidence paths"
+                )
     for directory in ([output_file.parent] if output_file is not None else []) + (
         [evidence_dir] if evidence_dir is not None else []
     ):
@@ -65,7 +76,9 @@ def interrupted(_signal: int, _frame: FrameType | None) -> None:
 
 def emit(result: dict[str, Any] | None, output_file: Path | None, code: int) -> None:
     if result is not None:
-        serialized = json.dumps(redact_value(result), ensure_ascii=False, indent=2) + "\n"
+        serialized = (
+            json.dumps(redact_value(result), ensure_ascii=False, indent=2) + "\n"
+        )
         if output_file is not None:
             try:
                 with output_file.open("x", encoding="utf-8") as stream:
@@ -91,7 +104,9 @@ def execute(
             if not (skill / "SKILL.md").is_file():
                 raise ContractError("skill-dir must contain a readable SKILL.md")
         else:
-            task = read_task_input(argument, sys.stdin.read() if argument == "-" else "")
+            task = read_task_input(
+                argument, sys.stdin.read() if argument == "-" else ""
+            )
             skill = Path(task.skill_path)
             if not (skill / "SKILL.md").is_file():
                 raise ContractError("the original Skill directory is unavailable")
@@ -119,7 +134,9 @@ def execute(
                 for failure in failures:
                     typer.echo(redact_text(failure), err=True)
                 for limitation in result.get("limitations", []):
-                    typer.echo("limited assessment: " + redact_text(limitation), err=True)
+                    typer.echo(
+                        "limited assessment: " + redact_text(limitation), err=True
+                    )
                 if evidence_dir is not None:
                     result["evidence_dir"] = str(directory)
     except KeyboardInterrupt:
@@ -129,7 +146,10 @@ def execute(
         typer.echo("skill-score failed: " + redact_text(str(exc)), err=True)
         code = 2 if isinstance(exc, ContractError) and stage == "run" else 1
     except Exception as exc:
-        typer.echo("skill-score failed: " + redact_text(f"{type(exc).__name__}: {exc}"), err=True)
+        typer.echo(
+            "skill-score failed: " + redact_text(f"{type(exc).__name__}: {exc}"),
+            err=True,
+        )
         code = 1
     finally:
         try:
@@ -154,7 +174,9 @@ def plan(
 
 @app.command("run")
 def run(
-    task_input: Annotated[str, typer.Argument(help="Task JSON file, inline JSON, or - for stdin.")],
+    task_input: Annotated[
+        str, typer.Argument(help="Task JSON file, inline JSON, or - for stdin.")
+    ],
     output_file: Annotated[Path | None, typer.Option("--output-file")] = None,
     evidence_dir: Annotated[Path | None, typer.Option("--evidence-dir")] = None,
 ) -> None:

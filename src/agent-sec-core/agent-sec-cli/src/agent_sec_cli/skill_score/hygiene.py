@@ -12,17 +12,24 @@ from agent_sec_cli.skill_score.contracts import (
 
 
 def validate_review(
-    review: dict[str, PatternCheck], catalog: dict[str, str], *, source_only: bool = True
+    review: dict[str, PatternCheck],
+    catalog: dict[str, str],
+    *,
+    source_only: bool = True,
 ) -> None:
     """An omitted rule is not equivalent to a negative audit result."""
     if set(review) != set(RULES):
         raise ContractError("hygiene_review must cover all 23 rules exactly once")
     for rule, check in review.items():
         if not check.reason.strip() or set(check.refs) - catalog.keys():
-            raise ContractError(f"{rule}: hygiene review needs a reason and valid references")
+            raise ContractError(
+                f"{rule}: hygiene review needs a reason and valid references"
+            )
         if check.status == "checked" and (
             not check.refs
-            or (source_only and not any(ref.startswith("source:") for ref in check.refs))
+            or (
+                source_only and not any(ref.startswith("source:") for ref in check.refs)
+            )
         ):
             raise ContractError(
                 f"{rule}: applicable control review needs {'source' if source_only else 'source or runtime'} evidence"
@@ -311,13 +318,16 @@ def validate_gaps(
 
 def identity(item: Finding | ControlGap) -> tuple[str, ...]:
     return tuple(
-        " ".join(value.casefold().split()) for value in (item.entry, item.operation, item.boundary)
+        " ".join(value.casefold().split())
+        for value in (item.entry, item.operation, item.boundary)
     )
 
 
 def score_gaps(gaps: list[ControlGap], findings: list[Finding]) -> dict[str, Any]:
     risks = [
-        f for f in findings if f.scope == "skill" and f.status in {"material_risk", "unresolved"}
+        f
+        for f in findings
+        if f.scope == "skill" and f.status in {"material_risk", "unresolved"}
     ]
     promoted = {f.control_gap_id for f in risks if f.control_gap_id}
     risk_keys = {identity(f) for f in risks}
