@@ -26,6 +26,7 @@ Requires(posttrans): /usr/bin/cat /usr/bin/dirname /usr/bin/id /usr/bin/rm /usr/
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
 Conflicts:      copilot-shell
+Conflicts:      anolisa < 0.3.21
 
 %description
 Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface
@@ -79,7 +80,6 @@ install -d %{buildroot}%{_docdir}/%{name}
 install -m 0644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 
-
 # Install the managed Task checkpoint workflow for the outer COSH Agent.
 bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
 
@@ -94,6 +94,7 @@ bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
 %{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
 %{_unitdir}/cosh-gateway@.service
+
 %{_skilldir_cosh}/manage-task-checkpoints/
 
 %preun

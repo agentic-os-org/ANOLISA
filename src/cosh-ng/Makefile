@@ -21,6 +21,7 @@ install:
 
 test-packaging:
 	@bash "$(DELIVERY_COMPONENT_ROOT)/tests/test-system-install.sh"
+	@python3 "$(DELIVERY_COMPONENT_ROOT)/tests/test_rpm_split.py"
 
 help:
 	@printf '%s\n' 'Targets: build install layout test-packaging' 'install copies prebuilt files; UID selects defaults; override PREFIX AWPRJ DESTDIR'

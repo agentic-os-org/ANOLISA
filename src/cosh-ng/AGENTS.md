@@ -60,6 +60,57 @@ crates/cosh-shell/scripts/check-layout.sh
 
 Prerequisites: Linux (or macOS for limited functionality), Rust 1.88+. pkg/svc commands need root/sudo. Checkpoint commands need a running ws-ckpt daemon.
 
+## Build and file installation
+
+Use the component root Makefile. `make build` compiles the workspace;
+`make install` copies all prebuilt programs, license, service template and
+bundled skill. Installation accepts `PREFIX`, `AWPRJ` and `DESTDIR` without
+building, registering a shell or activating a service.
+
+Without an explicit `INSTALL_PROFILE`, effective UID 0 selects the system
+profile (`PREFIX=/usr/local`); other UIDs select the user profile
+(`PREFIX=$HOME/.local`) and `XDG_DATA_HOME` resources (or the owned home
+`.local/share` fallback). Explicit profiles override this default. Keep private
+executables under `PREFIX/libexec`, since XDG defines no libexec root. Explicit
+role paths override these defaults. Packaging must select `INSTALL_PROFILE=system` with `PREFIX=/usr`
+and `DESTDIR`; it must ignore user XDG roots. Preserve existing runtime configuration
+and state directories; file installation never migrates them.
+
+## RPM Package Ownership
+
+[packaging/rpm/cosh-ng.spec.in](packaging/rpm/cosh-ng.spec.in) is the authority
+for physical RPM products, dependencies, file ownership and scriptlets.
+
+| Package | Responsibility |
+|---------|----------------|
+| `cosh-ng` | Public CLI, shell launcher and switch command; private Core, Gateway and shell binaries; Gateway service unit, license, runtime documentation and the `manage-task-checkpoints` workflow skill. Retains `Provides: anolisa-component(cosh-ng)`. |
+
+The single `cosh-ng` RPM owns all runtime files and the bundled skill. Keep the
+service and login-shell scriptlets with this package and preserve the
+final-erase guards that protect active login shells and stop Gateway instances.
+Installing the service unit must not enable or start it.
+
+When changing payloads, update [packaging/payload.sh](packaging/payload.sh) and
+the corresponding RPM `%install`/`%files` inventory together.
+The component root Makefile remains the public build and delivery entrypoint;
+`make test-packaging` checks the file installer and RPM inventory with fixtures.
+
+## ANOLISA Metadata Boundary
+
+ANOLISA owns the installed RPM integration registry. Its cosh-ng contract is
+[distribution/anolisa/manifests/components/cosh-ng/component.toml](../../distribution/anolisa/manifests/components/cosh-ng/component.toml).
+The `cosh-ng` RPM does not install
+`/usr/share/anolisa/components/cosh-ng/component.toml`. Its Provides capability
+identifies the component; it does not transfer
+ownership of ANOLISA's registry to cosh-ng.
+
+The component's [raw contracts](packaging/anolisa/raw/) remain inputs to
+[packaging/raw/package.sh](packaging/raw/package.sh), which embeds the selected
+Linux or macOS contract as `.anolisa/component.toml`. The retained
+[RPM registration manifest](packaging/anolisa/rpm/component.toml) is legacy
+metadata, not the distribution registry authority. RPM builds must not generate
+or install these component-local contracts as ANOLISA registry data.
+
 ## Architecture
 
 8-crate workspace. Dependency direction: `cosh-cli` / `cosh-core` → `cosh-platform` → `cosh-types`; `cosh-shell` is standalone (no internal crate deps). `cosh-gateway` depends only on the side-effect-free `cosh-gateway-contracts` leaf among internal crates. `cosh-gateway-app` is the installed composition root and may connect Gateway policy/storage to platform side-effect adapters.

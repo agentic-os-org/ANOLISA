@@ -12,7 +12,7 @@ conflicts = ["cosh"]
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.2.17"
 
 [backends.rpm]
 package = "cosh-ng"
@@ -59,22 +59,27 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/cosh-gateway"
+target = "{libexecdir}/cosh-ng/cosh-gateway"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
 source = "libexec/anolisa/cosh-ng/cosh-shell"
 target = "{libexecdir}/cosh-ng/cosh-shell"
 mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "share/anolisa/hooks/cosh-ng/post-install.sh"
-target = "{datadir}/hooks/cosh-ng/post-install.sh"
-mode = "0755"
-type = "executable"
+source = "share/anolisa/cosh-ng/cosh-gateway@.service.in"
+target = "{unitdir}/cosh-gateway@.service"
+mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.layout.files]]
-source = "share/anolisa/hooks/cosh-ng/pre-uninstall.sh"
-target = "{datadir}/hooks/cosh-ng/pre-uninstall.sh"
-mode = "0755"
-type = "executable"
+source = "share/anolisa/skills/manage-task-checkpoints/SKILL.md"
+target = "{datadir}/anolisa/skills/manage-task-checkpoints/SKILL.md"
+mode = "0644"
 
 [[component.layout.files]]
 source = "share/doc/cosh-ng/LICENSE"
@@ -86,17 +91,11 @@ source = "share/doc/cosh-ng/README.md"
 target = "{datadir}/doc/cosh-ng/README.md"
 mode = "0644"
 
-[[component.hooks]]
-phase = "post_install"
-script = "{datadir}/hooks/cosh-ng/post-install.sh"
-timeout_secs = 30
-strict = false
-
-[[component.hooks]]
-phase = "pre_uninstall"
-script = "{datadir}/hooks/cosh-ng/pre-uninstall.sh"
-timeout_secs = 30
-strict = false
+[[component.services]]
+unit = "cosh-gateway@.service"
+scope = "system"
+enable = false
+start = false
 
 [component.health_check]
 type = "binary_version"
