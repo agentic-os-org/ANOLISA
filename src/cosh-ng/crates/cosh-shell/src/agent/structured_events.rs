@@ -49,6 +49,9 @@ pub(crate) fn render_agent_structured_events<W: Write>(
         origin,
         run_request.map(|request| request.id.as_str()),
     );
+    // Recorded before the question cards render so the auth guard below also
+    // sees an auth flow activated by this same batch.
+    let auth_ids = crate::auth::runtime::record_auth_required(state, governed_events);
     let activity_events = question_rejection
         .map(|(_, event_index, _)| &governed_events[..event_index])
         .unwrap_or(governed_events);
@@ -63,7 +66,14 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     );
     render_provider_native_shell_transcript(state, &activity_ids, output)?;
     render_activity_rows(state, &activity_ids, output)?;
-    render_user_questions(state, &question_ids, output)?;
+    // While an auth flow is active it owns both the panel and the capture,
+    // so a question arriving in the same batch is recorded but not
+    // rendered: painting it would show the user a question card whose input
+    // actually feeds the auth field/menu underneath. The queued question is
+    // rendered when the auth flow completes (clear_active_auth_panel).
+    if state.auth.state.is_none() {
+        render_user_questions(state, &question_ids, output)?;
+    }
     if let Some((reason, _, should_report)) = question_rejection {
         if should_report {
             let active_run = state.agent_run.active.as_mut().expect("active Core run");
@@ -82,7 +92,6 @@ pub(crate) fn render_agent_structured_events<W: Write>(
         }
         return Ok(());
     }
-    let auth_ids = crate::auth::runtime::record_auth_required(state, governed_events);
     crate::auth::runtime::render_auth_panel(state, &auth_ids, output)?;
     if render_trusted_tool(state, governed_events, run_request, origin, output, adapter)? {
         return Ok(());
@@ -161,6 +170,78 @@ mod tests {
             },
             GovernancePolicyDecision::DisplayOnly,
         )
+    }
+
+    #[test]
+    fn a_question_arriving_during_an_active_auth_flow_is_not_rendered() {
+        let mut state = InlineState::default();
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut active_run = test_active_run();
+        active_run.provider_name = "cosh-core";
+        let run_request = active_run.request.clone();
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        // The same batch carries a user question and an auth requirement:
+        // the auth flow takes the panel and the capture, so the question is
+        // recorded (it stays pending) but not painted — otherwise the user
+        // would answer a visible question card whose input actually feeds
+        // the hidden auth field.
+        let auth_required = governed(
+            AgentEvent::AuthRequired {
+                run_id: "request-1".to_string(),
+                request_id: "auth-1".to_string(),
+                reason: "credentials required".to_string(),
+                error_message: None,
+                providers: vec![crate::adapter::AuthProviderInfo {
+                    id: "dashscope".to_string(),
+                    label: "DashScope".to_string(),
+                    description: None,
+                    description_zh_cn: None,
+                    builtin_base_url: None,
+                    fields: Vec::new(),
+                }],
+            },
+            GovernancePolicyDecision::DisplayOnly,
+        );
+        render_agent_structured_events(
+            &mut state,
+            &[question("question-1", "Pick"), auth_required],
+            Some(&run_request),
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render batch");
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(
+            !rendered.contains("Pick"),
+            "the queued question must not be painted while auth owns the panel: {rendered:?}"
+        );
+        // The question is recorded and stays pending for after auth.
+        assert_eq!(state.questions.pending_id.as_deref(), Some("q-1"));
+        // The auth flow owns the panel and the capture.
+        assert!(state.auth.state.is_some());
+        let panel_id = state
+            .questions
+            .active_panel_id
+            .as_deref()
+            .expect("auth panel painted");
+        assert!(panel_id.starts_with("auth-auth-1@"), "panel is the auth one: {panel_id}");
+        assert!(crate::auth::capture::pending_auth_capture(&state).is_some());
+        // Clearing the finished auth panel paints the queued question, so
+        // the visible card matches the input owner.
+        state.auth.state = None;
+        let mut clear_output = Vec::new();
+        crate::auth::prompt::clear_active_auth_panel(&mut state, &mut clear_output)
+            .expect("clear auth panel");
+        let cleared = String::from_utf8_lossy(&clear_output);
+        assert!(
+            cleared.contains("Pick"),
+            "the queued question must be painted once auth completes: {cleared:?}"
+        );
+        assert_eq!(state.questions.active_panel_id.as_deref(), Some("q-1"));
     }
 
     #[test]
