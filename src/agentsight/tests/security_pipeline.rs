@@ -28,6 +28,7 @@ fn audit_request(binding_id: Uuid) -> ApplyPolicy {
         policy_revision: "3".into(),
         policy_dsl: "mode=audit".into(),
         policy_mode: Some(PolicyMode::Audit),
+        file_protection_policy: None,
     }
 }
 

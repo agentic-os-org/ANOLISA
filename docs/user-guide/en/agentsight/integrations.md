@@ -145,6 +145,11 @@ not attached — the engine still reports the match as a violation with `effect=
 check the engine profile (`ACTPLANE_HOOK_PROFILE` / `ACTPLANE_PINNED_PROFILE`) and the kernel's LSM
 configuration.
 
+Protocol v5 adds a versioned `file_protection_policy` payload, mutually exclusive with `policy_dsl`.
+Current backends reject structured policies without changing bindings; the new file-protection
+capabilities remain false. Existing DSL semantics are retained, but v4 clients must upgrade with
+the enforcer because protocol v4 frames are rejected.
+
 ## cosh: ask in natural language
 
 AgentSight ships a conversational Skill for cosh, so Token and audit questions can be asked in the

@@ -896,6 +896,7 @@ mod tests {
                 policy_revision: "1".into(),
                 policy_dsl: "source AGENT = exec \"**\"".into(),
                 policy_mode: Some(PolicyMode::Audit),
+                file_protection_policy: None,
             },
             state,
             message: None,

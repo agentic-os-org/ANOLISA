@@ -44,6 +44,14 @@ const _: () = assert!(
 /// Exact official upstream revision compiled into this adapter.
 pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
 
+fn validate_actplane_policy_payload(request: &ApplyPolicy) -> Result<(), BackendError> {
+    crate::backend::validate_apply_policy_payload(request)?;
+    if request.file_protection_policy.is_some() {
+        return Err(crate::backend::structured_file_protection_unsupported());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ActiveBinding {
     binding: Binding,
@@ -206,6 +214,7 @@ impl ActPlaneBackend {
         mut request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<PreparedBinding, BackendError> {
+        validate_actplane_policy_payload(&request)?;
         // Resolve namespace-local PID to host PID BEFORE start-time validation,
         // so that the stale-process check reads the correct /proc/<host_pid>/stat.
         let host_pid = resolve_to_host_pid(request.root_pid, request.process_start_time);
@@ -796,6 +805,7 @@ fn credential_apply_request(
             policy_revision: policy.revision.to_string(),
             policy_dsl,
             policy_mode: Some(policy.mode),
+            file_protection_policy: None,
         },
         policy,
     ))
@@ -815,6 +825,7 @@ fn replacement_failure_code(error: &BackendError) -> ReplaceFailureCode {
 fn validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode {
     match error {
         ReplaceValidationError::CredentialPolicy(_)
+        | ReplaceValidationError::PolicyPayload(_)
         | ReplaceValidationError::SourcePolicySnapshot(_) => ReplaceFailureCode::CompileFailure,
         ReplaceValidationError::SameBindingId
         | ReplaceValidationError::SourceNotEnforced
@@ -1475,6 +1486,7 @@ mod tests {
                     policy_revision: "revision-1".into(),
                     policy_dsl: "fixture".into(),
                     policy_mode: Some(PolicyMode::Audit),
+                    file_protection_policy: None,
                 },
                 state: BindingState::Enforced,
                 message: None,
@@ -1487,6 +1499,35 @@ mod tests {
             label_names: HashMap::from([(1, "CREDENTIAL".into())]),
             inode_policy: InodePolicy::default(),
         }
+    }
+
+    #[test]
+    fn structured_payload_is_rejected_without_resolving_a_process() {
+        use agentsight_enforcement_protocol::{
+            FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
+            FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections,
+        };
+
+        let mut request = active_binding().binding.request;
+        request.root_pid = 0;
+        request.process_start_time = 0;
+        request.policy_dsl.clear();
+        request.file_protection_policy = Some(FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![FileProtectionTarget {
+                path: "/missing/file".into(),
+                kind: FileProtectionTargetKind::ExactFile,
+                protections: FileProtections {
+                    delete: true,
+                    ordinary_write: false,
+                },
+                exclusions: vec![],
+            }],
+        });
+        let error = validate_actplane_policy_payload(&request).expect_err("unsupported payload");
+        assert!(matches!(error, BackendError::CompileFailure(message)
+            if message == crate::backend::STRUCTURED_FILE_PROTECTION_UNSUPPORTED));
     }
 
     fn raw_violation(timestamp_ns: u64) -> Violation {

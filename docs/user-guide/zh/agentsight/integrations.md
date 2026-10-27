@@ -123,6 +123,10 @@ hook 并未挂载——引擎仍会以 `effect=block` 且 `blocked=false` 的 vi
 报告，说明该策略实际无法拒绝；请检查引擎 profile（`ACTPLANE_HOOK_PROFILE` /
 `ACTPLANE_PINNED_PROFILE`）与内核 LSM 配置。
 
+协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。当前后端会拒绝
+结构化策略且不改变已有绑定，新增文件保护能力保持 false。旧 DSL 语义不变，但协议 v4 帧会
+被拒绝，因此客户端需与 enforcer 一起升级。
+
 ## cosh：用自然语言提问
 
 AgentSight 为 cosh 提供了对话式 Skill，Token 和审计相关的问题可以直接在终端里问，而不必敲 CLI：

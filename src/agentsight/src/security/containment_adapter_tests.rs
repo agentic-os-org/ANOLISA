@@ -645,6 +645,7 @@ fn binding(
             policy_revision: "3".into(),
             policy_dsl,
             policy_mode: None,
+            file_protection_policy: None,
         },
         state: BindingState::Enforced,
         message: None,
