@@ -3,8 +3,11 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent_sec_cli.observability.session_report import (
     SessionReport,
+    _parse_metrics,
     build_session_report,
     format_text,
 )
@@ -42,6 +45,33 @@ def _fake_sec_event(category, result="succeeded"):
     e.category = category
     e.result = result
     return e
+
+
+class TestParseMetricsNonDict:
+    """Non-dict JSON payloads must degrade to empty dict, not crash."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        ["[1, 2, 3]", '"hello"', "42", "true", "null"],
+    )
+    def test_non_dict_returns_empty(self, payload: str) -> None:
+        assert _parse_metrics(payload) == {}
+
+    def test_valid_dict_preserved(self) -> None:
+        assert _parse_metrics('{"a": 1}') == {"a": 1}
+
+    def test_non_dict_does_not_crash_build(self) -> None:
+        reader = MagicMock()
+        reader.list_sessions.return_value = [_fake_session()]
+        reader.list_runs.return_value = [_fake_run()]
+        ev = MagicMock()
+        ev.hook = "after_llm_call"
+        ev.metrics_json = "[1, 2, 3]"
+        reader.list_events.return_value = [ev]
+        rpt = build_session_report("sess-1", reader)
+        assert rpt.llm_calls == 1
+        assert rpt.request_bytes == 0
+        assert rpt.response_bytes == 0
 
 
 class TestBuildSessionReport:

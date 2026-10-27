@@ -46,9 +46,10 @@ def _parse_metrics(metrics_json: str | None) -> dict[str, Any]:
     if not metrics_json:
         return {}
     try:
-        return json.loads(metrics_json)
+        result = json.loads(metrics_json)
     except (json.JSONDecodeError, TypeError):
         return {}
+    return result if isinstance(result, dict) else {}
 
 
 def build_session_report(
