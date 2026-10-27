@@ -776,3 +776,28 @@ class TestErrorHandling:
         assert proc.returncode == 0
         result = json.loads(proc.stdout)
         assert result["verdict"] == "pass"
+
+
+class TestMultiTurnNonDictPayload:
+    """multi_turn mode must reject non-dict JSON with a friendly error.
+
+    Before the fix, ``json.loads`` returning a list/str/int caused
+    ``payload.get(...)`` to raise ``AttributeError`` — the isinstance
+    guard at line 329 was unreachable because the crash happened first.
+    """
+
+    @pytest.mark.parametrize("raw", ["[1, 2, 3]", '"hello"', "42", "true"])
+    def test_non_dict_json_exits_1(self, raw: str) -> None:
+        cmd = _cli_cmd("scan-prompt", "--mode", "multi_turn")
+        proc = subprocess.run(
+            cmd,
+            input=raw,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+            env=os.environ.copy(),
+        )
+        assert proc.returncode == 1
+        assert "payload must be a JSON object" in proc.stderr
+        assert "AttributeError" not in proc.stderr

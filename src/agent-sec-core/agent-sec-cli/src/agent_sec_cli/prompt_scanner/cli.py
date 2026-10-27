@@ -323,6 +323,14 @@ def scan_prompt(
             typer.echo(f"Error: Invalid JSON: {exc}", err=True)
             raise typer.Exit(code=1)
 
+        if not isinstance(payload, dict):
+            typer.echo(
+                "Error: payload must be a JSON object, "
+                f"got {type(payload).__name__}.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
         history = payload.get("history") or []
         current_query = payload.get("current_query") or ""
         assistant_response = payload.get("assistant_response") or ""
