@@ -325,7 +325,7 @@ def main():
         output += f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/total_trials*100:.1f}%)\n"
 
     if args.output:
-        with open(args.output, "w") as f:
+        with open(args.output, "w", newline="" if args.format == "csv" else None) as f:
             f.write(output)
         print(f"Written to {args.output}")
     else:
