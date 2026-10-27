@@ -7,6 +7,27 @@ from aw_resident_test import aw_resident
 
 
 class ReviewResidentTests(NativeFixture):
+    async def test_incomplete_native_assembly_rejects_before_model_or_tool(self):
+        for name in ("_aw_managed_acting_impl", "_aw_managed_parser",
+                     "_aw_managed_toolkit", "_aw_managed_toolkit_call"):
+            with self.subTest(missing=name):
+                entered = []
+                async def tool(tool_call):
+                    entered.append("tool")
+                    yield response()
+                middleware, agent, _ = self.setup_agent(tool)
+                delattr(agent, name)
+                async def reply():
+                    entered.append("model")
+                    async for item in Agent._acting(agent, self.call()):
+                        yield item
+                with self.assertRaisesRegex(ResidentFailure, "assembly is incomplete"):
+                    [item async for item in middleware.on_reply(agent, {}, reply)]
+                self.assertEqual(entered, [])
+                self.assertTrue(middleware.failed)
+                self.assertTrue(middleware.scope.closed)
+                self.assertEqual(middleware.active, {})
+
     async def toolkit_agent(self, schema, *, hooks=None, coordinator=None):
         seen = []
         async def function(**kwargs):
