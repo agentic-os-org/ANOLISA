@@ -279,3 +279,294 @@ fn capacity_count_overflow_is_reported() {
         .expect_err("capacity arithmetic must be checked");
     assert!(error.to_string().contains("overflow"));
 }
+
+#[test]
+fn submounts_are_assigned_to_their_component_boundary_root() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/tree/sub");
+    fixture.mkdir("/treeish/sub");
+    let prepared = prepare_fixture(
+        &fixture,
+        &normalized(vec![target(
+            "/tree",
+            FileProtectionTargetKind::DirectoryTree,
+        )]),
+        vec![
+            mount(1, 0, "/", "/", "ext4"),
+            mount(2, 1, "/sub", "/tree/sub", "ext4"),
+            mount(3, 1, "/other", "/treeish/sub", "ext4"),
+        ],
+    )
+    .expect("prepare submount topology");
+
+    assert_eq!(prepared.existing_submounts.len(), 1);
+    assert_eq!(
+        prepared.existing_submounts[0].path.authored_path,
+        "/tree/sub"
+    );
+    assert_eq!(prepared.existing_submounts[0].target_id, 1);
+}
+
+#[test]
+fn intermediate_symlink_target_discovers_canonical_submount() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/real/tree/mounted");
+    symlink("real", fixture.host("/alias")).expect("intermediate directory symlink");
+    let prepared = prepare_fixture(
+        &fixture,
+        &normalized(vec![target(
+            "/alias/tree",
+            FileProtectionTargetKind::DirectoryTree,
+        )]),
+        vec![
+            mount(1, 0, "/", "/", "ext4"),
+            mount(2, 1, "/outside/source", "/real/tree/mounted", "ext4"),
+        ],
+    )
+    .expect("prepare canonical submount through authored alias");
+    assert!(
+        prepared
+            .existing_submounts
+            .iter()
+            .any(|record| record.path.authored_path == "/real/tree/mounted")
+    );
+    assert!(
+        prepared
+            .known_bind_aliases
+            .iter()
+            .any(|record| record.path.authored_path == "/real/tree")
+    );
+    assert_eq!(prepared.direct_targets[0].path.authored_path, "/alias/tree");
+    prepared.validate().expect("stable intermediate alias");
+}
+
+#[test]
+fn submount_discovery_matches_underlying_identity_across_mount_ids() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/tree/mounted");
+    symlink("tree", fixture.host("/view")).expect("simulate alias spelling");
+    let source = FakeSource::new(&fixture.root, Vec::new());
+    let root = source.open_root().expect("open fixture root");
+    let mut identity = resolve_held(&root, "/tree")
+        .expect("target identity")
+        .identity;
+    identity.mnt_id = identity.mnt_id.wrapping_add(1);
+    let discovery = discover_submounts(
+        &root,
+        &[
+            mount(1, 0, "/", "/", "ext4"),
+            mount(2, 1, "/source", "/view/mounted", "ext4"),
+        ],
+        "/tree",
+        identity,
+    )
+    .expect("discover alias submount with a distinct namespace mount id");
+    assert_eq!(discovery.indices, vec![1]);
+    assert!(discovery.target_spellings.contains("/view"));
+}
+
+#[test]
+fn unrelated_unresolvable_mounts_do_not_abort_tree_preparation() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/tree");
+    symlink("loop", fixture.host("/loop")).expect("unrelated looping symlink");
+    let policy = normalized(vec![target(
+        "/tree",
+        FileProtectionTargetKind::DirectoryTree,
+    )]);
+    let prepared = prepare_fixture(
+        &fixture,
+        &policy,
+        vec![
+            mount(1, 0, "/", "/", "ext4"),
+            mount(2, 1, "/missing", "/hidden/missing", "ext4"),
+            mount(3, 1, "/loop", "/loop/mounted", "ext4"),
+        ],
+    )
+    .expect("unrelated inaccessible mountpoints must not reject policy");
+    prepared.validate().expect("stable relevant identities");
+    assert!(prepared.existing_submounts.is_empty());
+
+    assert!(
+        prepare_fixture(
+            &fixture,
+            &policy,
+            vec![
+                mount(1, 0, "/", "/", "ext4"),
+                mount(2, 1, "/missing", "/tree/missing", "ext4"),
+            ],
+        )
+        .is_err(),
+        "an unresolvable protected submount must still fail closed"
+    );
+}
+
+#[test]
+fn overlay_rejection_is_scoped_to_targets_exclusions_and_submounts() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/tree/sub");
+    let tree = normalized(vec![target(
+        "/tree",
+        FileProtectionTargetKind::DirectoryTree,
+    )]);
+    fixture.mkdir("/unrelated");
+    let base = mount(1, 0, "/", "/", "ext4");
+    assert!(
+        reject_relevant_overlay(
+            &[
+                mount(1, 0, "/", "/", "overlay"),
+                mount(2, 1, "/", "/tmp", "tmpfs"),
+            ],
+            "/tmp/tree",
+            true,
+            2,
+        )
+        .is_ok(),
+        "a non-overlay mount shadows its overlay parent"
+    );
+    assert!(
+        prepare_fixture(
+            &fixture,
+            &tree,
+            vec![base.clone(), mount(2, 1, "/x", "/unrelated", "overlay")],
+        )
+        .is_ok()
+    );
+    assert!(
+        prepare_fixture(
+            &fixture,
+            &tree,
+            vec![base, mount(2, 1, "/x", "/tree/sub", "overlayfs")],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn symlink_entry_exclusion_and_followed_parent_keep_separate_identities() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/tree");
+    fixture.write("/outside/file");
+    symlink("../outside", fixture.host("/tree/link")).expect("excluded symlink entry");
+    let mut tree = target("/tree", FileProtectionTargetKind::DirectoryTree);
+    tree.exclusions.push(FileProtectionExclusion {
+        path: "/tree/link".into(),
+        kind: FileProtectionExclusionKind::ExactEntry,
+    });
+    let prepared = prepare_fixture(
+        &fixture,
+        &normalized(vec![
+            tree,
+            target("/tree/link/file", FileProtectionTargetKind::ExactFile),
+        ]),
+        vec![mount(1, 0, "/", "/", "ext4")],
+    )
+    .expect("the excluded symlink and followed directory are distinct expectations");
+    prepared.validate().expect("validate both resolution modes");
+    fs::rename(fixture.host("/outside"), fixture.host("/retired-outside"))
+        .expect("retire followed parent");
+    fixture.write("/outside/file");
+    assert!(
+        prepared.validate().is_err(),
+        "a stable symlink inode must not hide a replaced parent"
+    );
+}
+
+#[test]
+fn authored_path_aba_during_prepare_is_rejected() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/config");
+    fixture.mkdir("/other");
+    let expected_ino = fs::metadata(fixture.host("/config"))
+        .expect("original directory")
+        .ino();
+    let path = fixture.host("/config");
+    let other = fixture.host("/other");
+    let temporary = fixture.host("/swap");
+    let stable = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
+    let source = Arc::new(FakeSource::new(&fixture.root, vec![stable]));
+    let swap_path = path.clone();
+    let swap_other = other.clone();
+    let swap_temporary = temporary.clone();
+    source.act_on_next_open(move || {
+        fs::rename(&swap_path, &swap_temporary).expect("move authored inode aside");
+        fs::rename(&swap_other, &swap_path).expect("install transient inode");
+        fs::rename(&swap_temporary, &swap_other).expect("complete first exchange");
+    });
+    source.act_after_snapshots(2, move || {
+        fs::rename(&path, &temporary).expect("move transient inode aside");
+        fs::rename(&other, &path).expect("restore authored inode");
+        fs::rename(&temporary, &other).expect("complete ABA exchange");
+    });
+
+    let error = prepare_from(
+        &normalized(vec![target(
+            "/config",
+            FileProtectionTargetKind::DirectoryTree,
+        )]),
+        123,
+        77,
+        source,
+    )
+    .expect_err("fresh-root re-resolution must detect a restored authored path");
+
+    assert!(error.to_string().contains("identity changed"));
+    assert_eq!(
+        fs::metadata(fixture.host("/config"))
+            .expect("restored directory")
+            .ino(),
+        expected_ino
+    );
+}
+
+#[test]
+fn authored_path_aba_before_activation_is_rejected() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.write("/config");
+    let stable = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
+    let source = Arc::new(FakeSource::new(&fixture.root, vec![stable]));
+    let prepared = prepare_from(
+        &normalized(vec![target("/config", FileProtectionTargetKind::ExactFile)]),
+        123,
+        77,
+        source.clone(),
+    )
+    .expect("prepare stable identity manifest");
+    let path = fixture.host("/config");
+    let retired = fixture.host("/retired-config");
+    source.act_on_next_open(move || {
+        fs::rename(&path, &retired).expect("retire prepared inode");
+        fs::write(&path, b"replacement").expect("replace authored path");
+    });
+
+    let error = prepared
+        .validate()
+        .expect_err("activation validation must detect path replacement");
+
+    assert!(error.to_string().contains("identity changed"));
+}
+
+#[test]
+fn future_exclusion_must_still_have_a_missing_final_component() {
+    let fixture = Fixture::new("fp-topology");
+    fixture.mkdir("/tree");
+    let mut tree = target("/tree", FileProtectionTargetKind::DirectoryTree);
+    tree.exclusions.push(FileProtectionExclusion {
+        path: "/tree/future".into(),
+        kind: FileProtectionExclusionKind::ExactEntry,
+    });
+    let stable = snapshot(77, 1, vec![mount(1, 0, "/", "/", "ext4")]);
+    let source = Arc::new(FakeSource::new(&fixture.root, vec![stable]));
+    let prepared = prepare_from(&normalized(vec![tree]), 123, 77, source.clone())
+        .expect("prepare future exclusion");
+    let future = fixture.host("/tree/future");
+    source.act_on_next_open(move || {
+        fs::write(future, b"now present").expect("materialize future exclusion");
+    });
+
+    let error = prepared
+        .validate()
+        .expect_err("activation validation must reject a materialized exclusion");
+
+    assert!(error.to_string().contains("now exists"));
+}
