@@ -940,9 +940,10 @@ fn resolve_render_spec(
     let mode = RenderMode::parse(render).ok_or_else(|| CliError::InvalidArgument {
         command: COMMAND.to_string(),
         reason: format!(
-            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}'); run 'anolisa update self' and retry",
+            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}', '{}'); run 'anolisa update self' and retry",
             spec.display(),
             anolisa_core::manifest::RENDER_ANOLISA_PATHS_V1,
+            anolisa_core::manifest::RENDER_ANOLISA_JSON_COMMAND_V1,
         ),
     })?;
     if spec.kind == FileKind::Symlink || spec.source.as_deref().is_some_and(|s| s.ends_with('/')) {

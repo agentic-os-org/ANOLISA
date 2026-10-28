@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import struct
 import tarfile
@@ -71,7 +72,6 @@ def package(args: argparse.Namespace) -> Path:
     }
     sources = {
         "share/anolisa/agent-memory/default.toml": "config/default.toml",
-        "share/anolisa/mcp-servers/agent-memory.json": "config/mcp-server.json",
         "share/anolisa/agent-memory/anolisa-memory@.service": "packaging/systemd/anolisa-memory@.service.in",
     }
     for relative, source in adapter_inventory.runtime_files(
@@ -89,6 +89,12 @@ def package(args: argparse.Namespace) -> Path:
             (root / source).read_bytes(),
             0o755 if source.endswith(".sh") else 0o644,
         )
+    mcp = json.loads((root / "config/mcp-server.json").read_text())
+    mcp["command"] = "{bindir}/agent-memory"
+    files["share/anolisa/mcp-servers/agent-memory.json"] = (
+        (json.dumps(mcp, indent=2, ensure_ascii=False) + "\n").encode(),
+        0o644,
+    )
     directories = {"."}
     for name in files:
         directories.update(str(parent) for parent in Path(name).parents)

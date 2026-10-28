@@ -54,9 +54,11 @@ for the native RPM; source installation renders a copy without modifying it.
 Raw archives keep the `share/anolisa/agent-memory/anolisa-memory@.service` member
 name but carry the template bytes. The raw contract must declare
 `render = "anolisa-paths-v1"` for this mapping so ANOLISA resolves `{bindir}` at
-installation time for both user and system layouts. This requires ANOLISA
-0.3.15 or later. Keep the unit identity, session/config paths and opt-in activation
-policy unchanged when adjusting delivery paths.
+installation time for both user and system layouts. The raw MCP descriptor uses
+`anolisa-json-command-v1` to render its command without changing the public JSON
+input. The complete raw contract requires ANOLISA 0.3.20 or later. Keep the unit
+identity, session/config paths and opt-in activation policy unchanged when
+adjusting delivery paths.
 
 ## Raw builds and integration metadata
 
@@ -82,5 +84,8 @@ the distribution's agent-memory contract without lowering its stronger minimum
 version requirement for RPM adapter features.
 
 For packaging changes, use `make test-packaging` with fixtures; it checks file
-installation, raw archives and RPM ownership without native compilation. Follow
-the root platform restrictions before running native builds or Rust checks.
+installation, raw archives and RPM ownership without native compilation. Raw
+packaging and this complete test target require Python 3.11 or later as
+`python3` on `PATH`. This does not change the installation helpers' Python
+compatibility. Follow the root platform restrictions before running native
+builds or Rust checks.

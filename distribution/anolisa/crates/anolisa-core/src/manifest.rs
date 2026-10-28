@@ -24,6 +24,9 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// so contract authors, the install resolver, and docs cannot drift.
 pub const RENDER_ANOLISA_PATHS_V1: &str = "anolisa-paths-v1";
 
+/// Render layout placeholders in the command field of a JSON document.
+pub const RENDER_ANOLISA_JSON_COMMAND_V1: &str = "anolisa-json-command-v1";
+
 // ---------------------------------------------------------------------------
 // ComponentManifest
 // ---------------------------------------------------------------------------

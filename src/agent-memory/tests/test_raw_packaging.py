@@ -5,6 +5,7 @@ import json
 import shutil
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -58,7 +59,7 @@ class RawPackaging(unittest.TestCase):
     ) -> subprocess.CompletedProcess:
         result = subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(PACKAGER),
                 "--source-dir",
                 str(self.source),
@@ -120,7 +121,19 @@ class RawPackaging(unittest.TestCase):
                 self.assertEqual(unit_mapping["target"], "{userunitdir}/anolisa-memory@.service")
                 self.assertEqual(unit_mapping["render"], "anolisa-paths-v1")
                 minimum = contract["component"]["contract"]["min_anolisa_version"]
-                self.assertGreaterEqual(tuple(map(int, minimum.split("."))), (0, 2, 17))
+                self.assertGreaterEqual(tuple(map(int, minimum.split("."))), (0, 3, 20))
+                mcp_path = "share/anolisa/mcp-servers/agent-memory.json"
+                mcp = json.loads(files[mcp_path])
+                self.assertEqual(mcp["command"], "{bindir}/agent-memory")
+                self.assertEqual(
+                    json.loads((self.source / "config/mcp-server.json").read_text())["command"],
+                    "/usr/bin/agent-memory",
+                )
+                mcp_mapping = next(
+                    item for item in contract["component"]["layout"]["files"]
+                    if item.get("source") == mcp_path
+                )
+                self.assertEqual(mcp_mapping["render"], "anolisa-json-command-v1")
                 for item in tar.getmembers():
                     self.assertEqual((item.uid, item.gid, item.mtime), (0, 0, 1700000000))
                     executable = item.name.endswith(".sh") or item.name == "./bin/agent-memory"
