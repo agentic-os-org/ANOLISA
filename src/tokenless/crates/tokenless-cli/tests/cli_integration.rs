@@ -4374,3 +4374,88 @@ fn mode_mismatch_notice_survives_an_unwritable_stderr() {
         },
     );
 }
+
+#[test]
+fn html_unsupported_list_numbering_passes_through() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("data");
+    for (body, expected) in [
+        (
+            "<ol reversed><li>third</li><li>second</li><li>first</li></ol>",
+            false,
+        ),
+        (
+            "<ol><li>first</li><li value=\"5\">fifth</li><li>sixth</li></ol>",
+            false,
+        ),
+        (
+            "<ol start=\"-2\"><li>minus two</li><li>minus one</li></ol>",
+            false,
+        ),
+        ("<ol><li></li><li>second</li></ol>", false),
+        ("<ol start=\"3\"><li>third</li><li>fourth</li></ol>", true),
+    ] {
+        let html = format!(
+            "<!DOCTYPE html><html><head><title>Reference</title></head><body>\
+             <p>This reference preserves command syntax and numbered steps so readers \
+             can follow the instructions without changing their meaning.</p>{body}\
+             <script>{}</script></body></html>",
+            "var padding = 12345; ".repeat(100)
+        );
+        let mut request: serde_json::Value = serde_json::from_str(&post_tool_request_json(
+            &html,
+            true,
+            "html_unsupported_list_numbering_passes_through",
+        ))
+        .unwrap();
+        request["input"]["capabilities"]["replace_with_text"] = true.into();
+        let output = spawn_with_stdin(
+            tokenless_bin()
+                .env("TOKENLESS_DATA_DIR", &state)
+                .env_remove("TOKENLESS_STATS_DB")
+                .env_remove("TOKENLESS_STASH_DB")
+                .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        assert_eq!(result["content_type"], "html");
+
+        if !expected {
+            assert_eq!(result["disposition"], "no_savings", "{body}");
+            assert_eq!(result["output"], html);
+            assert_eq!(result["recoverability"], "lossless");
+            assert_eq!(result["applied_operations"], serde_json::json!([]));
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["disposition"], "applied");
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("3. third\n4. fourth")
+        );
+
+        let hash = result["stash_keys"][0].as_str().unwrap();
+        let retrieved = tokenless_bin()
+            .env("TOKENLESS_DATA_DIR", &state)
+            .env_remove("TOKENLESS_STASH_DB")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args(["retrieve", hash])
+            .output()
+            .unwrap();
+        assert!(retrieved.status.success());
+        assert_eq!(retrieved.stdout, html.as_bytes());
+    }
+}
