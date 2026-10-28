@@ -56,7 +56,7 @@ struct FakeState {
 
 /// Topology source backed by a fixture directory, so manifest validation can be
 /// driven deterministically without a second process.
-pub(super) struct FakeSource {
+pub(crate) struct FakeSource {
     root: File,
     state: Mutex<FakeState>,
 }
@@ -138,7 +138,7 @@ pub(crate) fn mount(
     }
 }
 
-pub(super) fn snapshot(start_time: u64, digest: u64, mounts: Vec<MountInfo>) -> TopologySnapshot {
+pub(crate) fn snapshot(start_time: u64, digest: u64, mounts: Vec<MountInfo>) -> TopologySnapshot {
     TopologySnapshot {
         namespace: (1, 2),
         start_time,
