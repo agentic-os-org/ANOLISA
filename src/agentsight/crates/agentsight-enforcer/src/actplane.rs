@@ -33,6 +33,10 @@ use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 // Normalization and resolution primitives land before the topology stage that
 // consumes them, so they stay test-scoped until a production caller exists.
 #[cfg(test)]
+mod file_protection_discovery;
+#[cfg(test)]
+mod file_protection_manifest;
+#[cfg(test)]
 mod file_protection_mountinfo;
 #[cfg(test)]
 mod file_protection_policy;
