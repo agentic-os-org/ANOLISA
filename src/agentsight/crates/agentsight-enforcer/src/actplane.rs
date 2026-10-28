@@ -43,6 +43,8 @@ mod file_protection_policy;
 #[cfg(test)]
 mod file_protection_resolver;
 #[cfg(test)]
+mod file_protection_runtime;
+#[cfg(test)]
 mod file_protection_topology;
 mod inode_policy;
 use inode_policy::InodePolicy;
