@@ -25,16 +25,41 @@ const bridge = process.env.AW_QODER_SDK_BRIDGE
   ? await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE)) : undefined;
 const makeQuery = bridge ? bridge.createQuery : async (request) => query(request);
 const makeDaemon = bridge ? bridge.startDaemon : startDaemon;
-const daemon = await makeDaemon({ auth: accessTokenFromEnv() });
-let current;
-try {
-  current = await makeQuery({ prompt, options: {
+let daemon, current, stopping = false, cleanup, initialized;
+function close() {
+  return cleanup ??= (async () => {
+    // Creation failures are reported by the main task; still close its daemon.
+    await initialized.catch(() => {});
+    try { await current?.return(); }
+    finally { await daemon?.stop(); }
+  })();
+}
+function stop() {
+  stopping = true; // A service also closes its HTTP/queue admission here.
+  void close().catch(error => { console.error(error); process.exitCode = 1; });
+}
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+initialized = (async () => {
+  daemon = await makeDaemon({ auth: accessTokenFromEnv() });
+  if (!stopping) current = await makeQuery({ prompt, options: {
     daemon, cwd: process.cwd(), settingSources: [],
   } });
-  for await (const message of current) console.log(JSON.stringify(message));
+})();
+try {
+  await initialized;
+  if (!stopping) {
+    for await (const message of current) {
+      if (stopping) break;
+      console.log(JSON.stringify(message));
+    }
+  }
 } finally {
-  await current?.return();
-  await daemon.stop();
+  try { await close(); }
+  finally {
+    process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGINT", stop);
+  }
 }
 ```
 ## Launch and validate
@@ -53,6 +78,7 @@ For security composition, use the [SDK example](../../../../../src/aw/crates/aw-
 
 | Item | Requirement |
 | --- | --- |
+| Shutdown | Handle TERM/INT in both ordinary and `--reloadable` workers; stop admission and await cleanup before exiting. Without handlers, Node exits immediately and AW forcibly reclaims remaining SDK children. |
 | Factory coverage | Route every protected Query through the Bridge; direct native factories bypass AW checks |
 | Native settings | Use `settingSources: []`; omit settings, extra CLI arguments and transport overrides. Imports and local plugins require [execution-asset grants](../configuration.md#qoder-sdk-execution-assets). |
 | Permissions and input | Preserve native denial; argument rewriting and permission Hook overrides are unsupported |

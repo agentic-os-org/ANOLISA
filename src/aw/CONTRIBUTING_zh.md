@@ -6,7 +6,7 @@
 
 ## 构建与检查
 
-准备 rustup、Python 3.11+、Node.js；Rust、rustfmt 和 Clippy 版本由 [rust-toolchain.toml](rust-toolchain.toml) 固定。
+准备 rustup、Python 3.11+、Node.js 22+（CI 使用24.15.0）；Rust、rustfmt 和 Clippy 版本由 [rust-toolchain.toml](rust-toolchain.toml) 固定。
 从仓库根目录运行。
 
 ```bash

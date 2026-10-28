@@ -94,6 +94,7 @@ if "--hold" in arguments:
             sys.exit(37)
 
         signal.signal(signal.SIGTERM, finish_shutdown)
+        signal.signal(signal.SIGINT, finish_shutdown)
     (root / f"ready-{run_id}").write_text("waiting")
     # The parent releases after assertions, possibly after another Agent starts.
     deadline = time.monotonic() + int(os.environ["FAKE_HOLD_TIMEOUT_SECONDS"])

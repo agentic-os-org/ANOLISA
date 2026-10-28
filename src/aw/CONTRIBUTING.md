@@ -6,7 +6,7 @@ Use Linux to change the AW framework, Adapters or gates. See the [developer guid
 
 ## Build and check
 
-Prepare rustup, Python 3.11+ and Node.js. [rust-toolchain.toml](rust-toolchain.toml) pins Rust, rustfmt and Clippy.
+Prepare rustup, Python 3.11+ and Node.js 22+ (CI uses 24.15.0). [rust-toolchain.toml](rust-toolchain.toml) pins Rust, rustfmt and Clippy.
 Run from the repository root.
 
 ```bash

@@ -40,9 +40,67 @@ Configuration and Provider protocols remain `aw/v1alpha1` and `aw-provider/v1alp
 `spec.agents.<target>.shutdown_grace_ms` accepts 1..120000 ms, default 2000.
 For example, `15000` gives the launcher 15 seconds after first forwarding an external shutdown signal before forced cleanup of its owned process group. Repeated signals do not extend the timer.
 
+Qoder SDK workers in ordinary and `--reloadable` mode receive external signals
+at the worker PID first, so their signal handler can close Queries and the native daemon in order. Use a
+foreground worker with TERM/INT handlers; keep it alive until cleanup completes.
+Other launch modes forward to the process group. Terminal-generated signals
+still follow the kernel foreground group; deploy these services without a TTY.
+The supervisor must deliver its initial stop signal only to the `aw run` PID.
+Broadcasting to a cgroup or a process group containing SDK children bypasses
+worker-first forwarding. With systemd, use `KillMode=mixed` so initial TERM goes
+to the main launcher PID and final KILL covers the cgroup; allow the full drain
+budget in `TimeoutStopSec`.
+All modes forcibly clean the owned group when the worker exits or time expires.
+
 This controls foreground launcher shutdown by external signal. Internal readiness/lifecycle failure retains a two-second grace; natural exit immediately cleans up remaining children.
 `aw stop` and externally attached processes have separate lifecycle controls. Coordinate application drain deadlines with the container shutdown budget.
 Changes require launcher restart. Old AW versions reject this field; remove it when rolling configuration back.
+
+## Budget a resident SDK container
+
+The [SDK security example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+sets the Qoder SDK target to `shutdown_grace_ms: 90000`. Each Query's cleanup
+phases share a 60-second budget. After that phase, daemon
+credential callbacks have a separate budget of up to 12 seconds; native daemon
+shutdown follows. A 10-second launcher or 15-second supervisor
+can kill the worker before these operations finish. Updating the AW binary alone
+leaves existing deployment deadlines unchanged.
+
+Use nested deadlines and keep the services available while the application drains.
+For a supervisor that stops the application, AW and sec-core sequentially:
+
+| Layer | Example budget |
+| --- | --- |
+| Application: stop dispatch, close managed SDK daemon | Within the target's 90 seconds |
+| `aw run`: `shutdown_grace_ms` | 90000 ms |
+| Supervisor: wait for the application's `aw run` group | 95 seconds |
+| Supervisor: stop AW, then sec-core | 5 seconds, then 75 seconds |
+| Container: complete all stages plus margin | 185 seconds |
+
+```bash
+docker stop --time 185 CONTAINER
+```
+
+For this sequential supervisor, set Kubernetes Pod
+`terminationGracePeriodSeconds: 185` (or longer) and Compose
+`stop_grace_period: 185s`. Kubernetes' default 30 seconds would interrupt the
+90-second AW grace period. Include any preStop work in the outer budget.
+
+The outer total follows the deployed supervisor's actual stop order. Set its
+application grace and the target configuration together; restarting the launcher
+activates the change. For Qoder, call the managed `daemon.stop()` after closing
+request admission: it closes its owned Queries and still attempts native daemon
+shutdown when a Query close fails. Handle its rejection as failed cleanup.
+Avoid a preceding fail-fast `Promise.all(query.close())` that skips `daemon.stop()`
+on the first rejection.
+
+A backend failure must fence new work immediately. The external-signal grace lets
+already-owned cleanup finish; internal readiness/lifecycle failure keeps its short
+forced-cleanup deadline. Do not release credentials or assets when cleanup is
+uncertain. Record SDK cleanup completion separately from process exit: exit 143
+or 70 alone cannot establish that callbacks drained. Before deploying, test a
+warmed worker with an open Query under TERM/INT, backend loss, a slow finalizer and
+an expired deadline; verify SDK completion, process reaping and runtime-file removal.
 
 ## Concurrent service budgets
 

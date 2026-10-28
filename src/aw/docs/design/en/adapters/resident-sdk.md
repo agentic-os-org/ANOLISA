@@ -241,8 +241,12 @@ Failed audit, release or cancellation cannot revive a closing invocation.
 An alive idle client has no inferred business deadline: the application must
 close it and bound request admission. Remote side effects need tool cancellation.
 
-The launcher forwards termination to its owned group and starts forced cleanup
-after the target's `shutdown_grace_ms` grace period, defaulting to two seconds.
+Both ordinary and restricted `--reloadable` Qoder SDK launch forward external
+termination to the unreaped worker PID, preserving native daemon and callback transports for worker-owned cleanup.
+Other launch modes forward to the owned group. Internal failure still signals the
+whole group; worker exit and deadline expiry always reclaim that group. Kernel
+terminal signals follow the foreground group independently of launcher forwarding.
+The launcher starts forced cleanup after the target's `shutdown_grace_ms` grace period, defaulting to two seconds.
 Timing starts when the foreground loop first forwards an external termination
 signal; repeated signals do not reset it. Pre-forwarding waits and final process
 cleanup are outside this interval. Internal readiness/lifecycle failures retain

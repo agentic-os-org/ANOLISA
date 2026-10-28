@@ -478,3 +478,28 @@ test("successful cleanup joins callback finally before snapshots and scope retir
   assert.equal(f.scope.reservation, null);
   assert(!f.resident.owner.queries.has(f.resident.ownerClose));
 });
+
+
+test("native close can drain past the old twelve-second deadline", { timeout: 5000 }, async t => {
+  const f = fixture(t);
+  f.state.importGate.resolve();
+  assert(!(await f.create()).error);
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  let settled = false;
+  const closing = f.resident.close().finally(() => { settled = true; });
+  closing.catch(() => {});
+  try {
+    await f.state.closeEntered.promise;
+    t.mock.timers.tick(13000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false, "native close must retain its shared sixty-second budget");
+    assert(f.scope.handle, "scope must remain owned until native close completes");
+    f.state.closeGate.resolve();
+    await closing;
+    assert.deepEqual(f.state.events, ["native-closed", "scope-closed"]);
+  } finally {
+    f.state.closeGate.resolve();
+    await closing.catch(() => {});
+    t.mock.timers.reset();
+  }
+});

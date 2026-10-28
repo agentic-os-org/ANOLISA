@@ -260,6 +260,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             &SIGNAL,
             &failed,
             shutdown_grace,
+            name == "qoder-sdk",
             plan.readiness,
             |pid| {
                 if reloadable || resident_policy_reload {

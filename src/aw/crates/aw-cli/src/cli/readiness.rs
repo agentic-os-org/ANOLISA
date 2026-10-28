@@ -20,39 +20,37 @@ pub(super) fn run(
     signal: &AtomicI32,
     failed: &AtomicBool,
     shutdown_grace: Duration,
+    leader_signals: bool,
     ready: Option<Readiness>,
     started: impl FnOnce(u32),
 ) -> Result<ExitStatus> {
-    let Some(ready) = ready else {
-        return aw_exec::run_foreground_with_grace(
-            command,
-            signal,
-            failed,
-            shutdown_grace,
-            started,
-        )
-        .map_err(Into::into);
-    };
-    if ready.timeout.is_zero() || ready.timeout > Duration::from_secs(120) {
+    if ready
+        .as_ref()
+        .is_some_and(|ready| ready.timeout.is_zero() || ready.timeout > Duration::from_secs(120))
+    {
         return Err("native startup deadline must be within 1..120000 ms".into());
     }
     let (stop, receiver) = mpsc::sync_channel(1);
     thread::scope(|scope| {
         let mut watcher = None;
-        let execution =
-            aw_exec::run_foreground_with_grace(command, signal, failed, shutdown_grace, |pid| {
-                started(pid);
-                let ready = &ready;
-                watcher = Some(scope.spawn(move || {
-                    let result = wait(ready, receiver, pid);
-                    if result.is_err() {
-                        // Startup failure keeps its short cleanup budget even when
-                        // the application has a longer cooperative shutdown grace.
-                        failed.store(true, Ordering::Release);
-                    }
-                    result
-                }));
-            });
+        let execute = if leader_signals {
+            aw_exec::run_foreground_worker_with_grace
+        } else {
+            aw_exec::run_foreground_with_grace
+        };
+        let execution = execute(command, signal, failed, shutdown_grace, |pid| {
+            started(pid);
+            let Some(ready) = &ready else { return };
+            watcher = Some(scope.spawn(move || {
+                let result = wait(ready, receiver, pid);
+                if result.is_err() {
+                    // Startup failure keeps its short cleanup budget even when
+                    // the application has a longer cooperative shutdown grace.
+                    failed.store(true, Ordering::Release);
+                }
+                result
+            }));
+        });
         let _ = stop.send(());
         let registered = match watcher {
             Some(watcher) => watcher
@@ -62,7 +60,7 @@ pub(super) fn run(
             None => false,
         };
         let status = execution?;
-        if !registered && status.success() {
+        if ready.is_some() && !registered && status.success() {
             return Err("Agent exited before native hooks became ready".into());
         }
         Ok(status)

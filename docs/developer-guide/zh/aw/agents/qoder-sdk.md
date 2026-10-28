@@ -25,16 +25,41 @@ const bridge = process.env.AW_QODER_SDK_BRIDGE
   ? await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE)) : undefined;
 const makeQuery = bridge ? bridge.createQuery : async (request) => query(request);
 const makeDaemon = bridge ? bridge.startDaemon : startDaemon;
-const daemon = await makeDaemon({ auth: accessTokenFromEnv() });
-let current;
-try {
-  current = await makeQuery({ prompt, options: {
+let daemon, current, stopping = false, cleanup, initialized;
+function close() {
+  return cleanup ??= (async () => {
+    // Creation failures are reported by the main task; still close its daemon.
+    await initialized.catch(() => {});
+    try { await current?.return(); }
+    finally { await daemon?.stop(); }
+  })();
+}
+function stop() {
+  stopping = true; // A service also closes its HTTP/queue admission here.
+  void close().catch(error => { console.error(error); process.exitCode = 1; });
+}
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+initialized = (async () => {
+  daemon = await makeDaemon({ auth: accessTokenFromEnv() });
+  if (!stopping) current = await makeQuery({ prompt, options: {
     daemon, cwd: process.cwd(), settingSources: [],
   } });
-  for await (const message of current) console.log(JSON.stringify(message));
+})();
+try {
+  await initialized;
+  if (!stopping) {
+    for await (const message of current) {
+      if (stopping) break;
+      console.log(JSON.stringify(message));
+    }
+  }
 } finally {
-  await current?.return();
-  await daemon.stop();
+  try { await close(); }
+  finally {
+    process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGINT", stop);
+  }
 }
 ```
 ## 启动与验证
@@ -53,6 +78,7 @@ aw stop --config /absolute/aw.yaml
 
 | 项目 | 接入要求 |
 | --- | --- |
+| 退出 | 普通与 `--reloadable` worker 均处理 TERM/INT，停止接单并等待清理后退出；没有处理器时 Node 立即退出，AW 随后强制回收遗留 SDK 子进程。 |
 | 工厂覆盖 | 所有受保护 Query 经过 Bridge；直接使用原生工厂的 Query 无 AW 检查 |
 | 原生设置 | `settingSources: []`；不传 settings、额外 CLI 参数或 transport 覆盖。Import 与本地插件需[执行资产授权](../configuration.md#qoder-sdk-执行资产)。 |
 | 权限与输入 | 保留原生拒绝；不支持参数改写或权限 Hook 覆盖 |
