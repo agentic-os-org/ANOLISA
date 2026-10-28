@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-Agent-independent semantic judgments with configurable decision-model backends and deterministic recorded-clock checks. The Rust library evaluates preservation and task-scope questions against a frozen task, candidate and evidence. Bailian and TypeSafe JEV adapters interpret task intent under deterministic resource constraints and local reconstruction requirements. Results are advisory; consumers own authorization and execution.
+Agent-independent semantic judgments with configurable decision-model backends and deterministic recorded-clock checks. The Rust library evaluates preservation and task-scope questions against a frozen task, candidate and evidence. Bailian and TypeSafe JEV adapters interpret the authoritative task text under optional resource constraints and local reconstruction requirements. Results are advisory; consumers own authorization and execution.
 
 ## Use
 

@@ -44,7 +44,7 @@ fn every_example_is_indexed_bounded_and_matches_independent_expectations() {
     assert!(index_bytes.len() <= MAX_MESSAGE_BYTES);
     let index: SampleIndex = serde_json::from_slice(&index_bytes).unwrap();
     assert!(index.synthetic);
-    assert_eq!(index.cases.len(), 12);
+    assert_eq!(index.cases.len(), 13);
 
     let mut indexed_files = BTreeSet::from([String::from("index.json")]);
     let mut case_ids = BTreeSet::new();

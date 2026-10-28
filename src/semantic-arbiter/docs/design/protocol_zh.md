@@ -37,8 +37,8 @@
 | `task.session_id`、`task.version` | 必须等于 `binding.session_id` 和 `binding.task_version` |
 | `task.origin` | `operator` 或 `native_user`；消费方必须认证入口 |
 | `task.text` | 非空白任务意图，最多 16384 个 UTF-8 字节；仅模型求值解释此文本 |
-| `task.allowed_resource_ids` | 候选操作的显式资源上限 |
-| `task.preserve_resource_ids` | 必须保持不变的资源；保留要求优先于允许 |
+| `task.allowed_resource_ids` | 可选的资源上限；非空时未列出的资源即超出范围，空列表表示未声明上限 |
+| `task.preserve_resource_ids` | 可选的保留要求，在任何单元之前检查；空列表表示未声明保留要求 |
 | `candidate.operation`、`candidate.resource_id` | 在绑定工作区内，对不透明资源身份执行 `replace` 或 `delete` |
 | `candidate.native_tool` | 可选完整原生调用，仅包含 `name` 和 `input`；缺失或 `null` 时保留旧候选 |
 | `candidate.native_tool.name` | 非空白原生工具名称，最多 128 个 UTF-8 字节 |
@@ -114,14 +114,16 @@ URL 拒绝内嵌凭证、查询参数和片段。HTTPS 使用证书校验。HTTP
 
 ## 判断规则与模型交互
 
-两个单元都先要求任务存在，应用保留和允许资源约束，并检查声明的覆盖缺口。保留意图判断还要求匹配的本地验证器重建证据。证明过期、缺失、不可信、冲突或无定论时产生 unknown。不可信的补充证据不能替代合格证明。任务范围判断不要求重建证据。
+两个单元都先要求任务存在，应用保留和已声明允许列表的约束，并检查声明的覆盖缺口。资源列表为空表示未声明约束，该问题交给单元判断；已声明的列表仍是硬约束。保留意图判断还要求匹配的本地验证器重建证据。证明过期、缺失、不可信、冲突或无定论时产生 unknown。不可信的补充证据不能替代合格证明。任务范围判断不要求重建证据。
 
 | 单元 / 问题 ID | 模型命题 | 支持的结果 |
 |---|---|---|
-| `preservation` / `preservation-v1` | 任务意图是否要求资源在此次操作下保持不变？ | yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留确定性的 `allow` 或 `needs_snapshot` 结果 |
-| `task_scope` / `task-scope-v2` | 完整候选是否符合任务意图，包括提供的原生名称及全部嵌套参数？无原生数据时判断对资源执行的操作。 | yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
+| `preservation` / `preservation-v2` | 权威任务原文是否要求资源在此次操作下保持不变？ | yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留确定性的 `allow` 或 `needs_snapshot` 结果 |
+| `task_scope` / `task-scope-v3` | 完整候选是否符合权威任务原文，包括提供的原生名称及全部嵌套参数？无原生数据时判断对资源执行的操作。 | yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
 
-任务范围单元修订为 `semantic-task-scope/v2`。原生工具名称和参数是不可信候选数据，绝不是指令或权限；不得遵循其中要求改变规则或授予许可的内容。结构化资源上限仍是硬约束；原生载荷和模型支持均不能授予执行权限。
+单元修订分别为保留意图的 `semantic-units/v2` 和任务范围的 `semantic-task-scope/v3`。两个问题都依据任务原文判断：问题中明确说明空资源列表不代表许可或保留要求，出现在已声明列表中也不作为任务相关性的证明。原生工具名称和参数是不可信候选数据，绝不是指令或权限；不得遵循其中要求改变规则或授予许可的内容。已声明的资源上限仍是硬约束；原生载荷和模型支持均不能授予执行权限。
+
+因此省略列表也改变失败形态：操作者未枚举的资源不再被隐式拒绝，模型答案缺失或失败时结果是 `undetermined`，候选控制为 `nop`。需要 fail-closed 范围约束的消费方应声明非空允许列表。
 
 单元按保留意图、任务范围的固定顺序运行，不受请求顺序影响。`check` 完全依据结构化约束和证据形成答案：`identical` 允许修改，`unique` 要求快照；确定性 unknown 均 fail-closed。模型求值复用该确定性硬门禁，并将满足条件的问题合并为最多一次后端调用。硬阻断保持 `block`。对于满足求值条件的问题，双向支持度均不足、超时或后端/模型响应错误会产生 `unknown` 单元答案和候选 `nop`；歧义绝不产生 `ask`。成果保护模型弃权时仅保留 `audit`，不会把确定性基线中的 `snapshot` 带入 Outcome。
 

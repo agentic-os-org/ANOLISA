@@ -24,8 +24,8 @@ use semantic_arbiter::protocol;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-const PRESERVATION: &str = "preservation-v1";
-const TASK_SCOPE: &str = "task-scope-v2";
+const PRESERVATION: &str = "preservation-v2";
+const TASK_SCOPE: &str = "task-scope-v3";
 
 fn config() -> ModelConfig {
     ModelConfig::decode(
@@ -310,7 +310,10 @@ async fn hard_task_constraints_skip_inference_even_with_favorable_fixture_answer
                 .unwrap()
                 .preserve_resource_ids
                 .push(request.candidate.resource_id.clone()),
-            "outside" => request.task.as_mut().unwrap().allowed_resource_ids.clear(),
+            "outside" => {
+                request.task.as_mut().unwrap().allowed_resource_ids =
+                    vec!["unrelated-result".into()]
+            }
             "missing" => request.task = None,
             _ => unreachable!(),
         }
@@ -327,6 +330,54 @@ async fn hard_task_constraints_skip_inference_even_with_favorable_fixture_answer
         assert!(run.response.judgments.iter().all(|trace| !trace.model_used
             && trace.probability.is_none()
             && trace.error.is_none()));
+    }
+}
+
+#[tokio::test]
+async fn omitted_resource_lists_leave_every_unit_to_the_model() {
+    let cases = [
+        (
+            0.0,
+            1.0,
+            [AnswerValue::Allow, AnswerValue::Allow],
+            CandidateControl::Allow,
+        ),
+        (
+            0.0,
+            0.0,
+            [AnswerValue::Allow, AnswerValue::OutsideScope],
+            CandidateControl::Block,
+        ),
+        (
+            1.0,
+            1.0,
+            [AnswerValue::Preserve, AnswerValue::Allow],
+            CandidateControl::Block,
+        ),
+    ];
+    for (preservation, task_scope, expected, control) in cases {
+        let mut request = request();
+        let task = request.task.as_mut().unwrap();
+        task.allowed_resource_ids.clear();
+        task.preserve_resource_ids.clear();
+        let (run, observations) = evaluate(
+            &request,
+            &[(PRESERVATION, preservation), (TASK_SCOPE, task_scope)],
+        )
+        .await;
+        assert_answers(&run, &expected, control);
+        assert!(run.response.model_called);
+        assert_eq!(observations.calls().len(), 1);
+        assert_eq!(
+            observations.calls()[0]
+                .0
+                .questions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [PRESERVATION, TASK_SCOPE]
+        );
+        assert!(run.response.judgments.iter().all(|trace| trace.model_used));
     }
 }
 

@@ -96,7 +96,10 @@ fn evaluate_unit(
     if task.preserve_resource_ids.contains(resource) {
         return (Reason::Preserved, vec![]);
     }
-    if !task.allowed_resource_ids.contains(resource) {
+    // An omitted allowance declares no ceiling, so scope is left to the semantic
+    // units instead of denying every resource an operator did not enumerate. A
+    // declared allowance keeps excluding each resource it omits.
+    if !task.allowed_resource_ids.is_empty() && !task.allowed_resource_ids.contains(resource) {
         return (Reason::OutsideScope, vec![]);
     }
     if request.gaps.iter().any(|gap| gap.scenario == unit) {

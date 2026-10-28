@@ -19,7 +19,7 @@ The complete target design covers six business scenarios: protect results, enfor
 | Business scenario | Purpose | Proposed output | Availability |
 |---|---|---|---|
 | Preservation | Keep required versions; protect unique results before modification | `allow` with `audit`, add `snapshot` for unique results; `block` when preservation is required or proof is unusable | Implemented core: `preservation`; execution pending |
-| Task scope | Check task intent, allowed resources and supplied native arguments | `allow/block` with `audit`; a future deterministic approval rule may produce `ask` after integration | Implemented core: `task_scope`, resource `replace/delete` with optional complete native arguments; AW observer supports explicitly mapped single-resource tools |
+| Task scope | Check the authoritative task text, optional resource limits and supplied native arguments | `allow/block` with `audit`; a future deterministic approval rule may produce `ask` after integration | Implemented core: `task_scope`, resource `replace/delete` with optional complete native arguments; AW observer supports explicitly mapped single-resource tools |
 | Context supplementation | Find missing skills, memories or other reviewed material | `retrieve_skill/retrieve_memory`, `inject_context`, `audit`; candidate handling depends on delivery path | Pending scenario and integration |
 | Diagnosis | Assess failures, resource pressure and task progress; request assistance | `diagnose`, `notify`, `audit`; a later candidate may need `ask` | Pending scenario and integration |
 | Security response | Assess event credibility and contain the affected subject | `block` before execution; `freeze/quarantine/kill` with `audit`, optionally `notify` | Pending scenario and integration |
@@ -84,7 +84,7 @@ Help exits `0` with text on stdout. `describe`, `check` and `evaluate` retain JS
 
 ### Complete native candidates
 
-A consumer may include `candidate.native_tool` with a nonblank `name` (at most 128 UTF-8 bytes) and the complete `input` JSON object (at most 65536 compact JSON bytes). The whole request remains bounded to 262144 bytes. Inputs must not be truncated to fit these limits. Native names and arguments are untrusted data; they grant no authority and do not replace the structured resource ceiling. The `task-scope-v2` question considers every supplied argument.
+A consumer may include `candidate.native_tool` with a nonblank `name` (at most 128 UTF-8 bytes) and the complete `input` JSON object (at most 65536 compact JSON bytes). The whole request remains bounded to 262144 bytes. Inputs must not be truncated to fit these limits. Native names and arguments are untrusted data; they grant no authority and do not replace a declared resource ceiling. The `task-scope-v3` question considers every supplied argument.
 
 When `native_tool` is present, `binding.candidate_revision` must equal the public Rust `contract::candidate_revision(&candidate)` result. It hashes the complete candidate using recursively sorted object keys, compact JSON and the domain `semantic-arbiter/v1alpha1\0candidate\0`. Changes to the operation, resource, tool name or parameters require a fresh revision and matching evidence bindings. Both judgment commands reject nested duplicate JSON keys. Requests without native data retain their existing candidate revision format and input digests.
 
@@ -146,10 +146,10 @@ This command retains the request's deadline and uses its inline evidence. It col
 
 | Scenario | Question and decision |
 |---|---|
-| `preservation` | Does task intent require keeping the resource unchanged? Yes support meeting the threshold yields `preserve`; no support meeting it retains the local rebuild result: `allow` for identical bytes or `needs_snapshot` for unique results |
-| `task_scope` | Does the candidate operation satisfy task intent? Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
+| `preservation` | Does the authoritative task text require keeping the resource unchanged? Yes support meeting the threshold yields `preserve`; no support meeting it retains the local rebuild result: `allow` for identical bytes or `needs_snapshot` for unique results |
+| `task_scope` | Does the full candidate satisfy the authoritative task text? Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
 
-`evaluate` reuses the deterministic hard gate. Structured retention, allowed-resource limits, missing task/proof and coverage gaps remain binding and hard blockers remain `block`. At most one batched backend call is made; no call is made when no unit is eligible. The CLI uses the built-in unit registry and fixed composition. Library consumers may pass a reviewed closed-scenario registry through `Evaluator::with_units`; this does not change accepted wire scenarios or protocol versions.
+`evaluate` reuses the deterministic hard gate. Declared retention and allowance limits, missing task/proof and coverage gaps remain binding and hard blockers remain `block`. Omitted resource lists declare no limit, so every unit reaches the model; a missing or failed answer is then `unknown` with candidate `nop`, not an implicit deny. Declare a non-empty allowance when you need fail-closed scope. At most one batched backend call is made; no call is made when no unit is eligible. The CLI uses the built-in unit registry and fixed composition. Library consumers may pass a reviewed closed-scenario registry through `Evaluator::with_units`; this does not change accepted wire scenarios or protocol versions.
 
 Inspect these response fields:
 

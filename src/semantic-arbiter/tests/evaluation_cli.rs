@@ -15,8 +15,8 @@ use semantic_arbiter::deadline::Ingress;
 use semantic_arbiter::evaluation::{input_digest, EvaluationRequest, EVALUATION_API_VERSION};
 use serde_json::{json, Value};
 
-const PRESERVATION: &str = "preservation-v1";
-const TASK_SCOPE: &str = "task-scope-v2";
+const PRESERVATION: &str = "preservation-v2";
+const TASK_SCOPE: &str = "task-scope-v3";
 const KEY_ENV: &str = "SEMANTIC_ARBITER_EVALUATION_CLI_SYNTHETIC_KEY_D7630C4B";
 const SYNTHETIC_KEY: &str = "synthetic-cli-only-not-a-real-key-d7630c4b";
 const TASK_MARKER: &str = "PRIVATE_SYNTHETIC_TASK_d7630c4b: replace only the generated result.";
@@ -503,8 +503,8 @@ fn both_http_adapters_emit_golden_advisory_allow_preserve_snapshot_scope_and_unk
                     "binding": request["binding"], "backend": {"kind": kind, "mode": "loopback_test", "model": "cli-test-model"},
                     "normalization_revision": "noul-floor-ppm/v2", "model_called": true,
                     "judgments": [
-                        {"unit": "preservation", "unit_revision": "semantic-units/v1", "question_id": PRESERVATION, "threshold_ppm": 900000, "probability": probability(preservation), "error": null, "model_used": true, "evidence_refs": ["rebuild-1"]},
-                        {"unit": "task_scope", "unit_revision": "semantic-task-scope/v2", "question_id": TASK_SCOPE, "threshold_ppm": 900000, "probability": probability(task_scope), "error": null, "model_used": true, "evidence_refs": []}
+                        {"unit": "preservation", "unit_revision": "semantic-units/v2", "question_id": PRESERVATION, "threshold_ppm": 900000, "probability": probability(preservation), "error": null, "model_used": true, "evidence_refs": ["rebuild-1"]},
+                        {"unit": "task_scope", "unit_revision": "semantic-task-scope/v3", "question_id": TASK_SCOPE, "threshold_ppm": 900000, "probability": probability(task_scope), "error": null, "model_used": true, "evidence_refs": []}
                     ],
                     "answers": [
                         {"unit": "preservation", "value": values[0], "confidence_ppm": confidence, "reason": reasons[0], "evidence_refs": ["rebuild-1"]},

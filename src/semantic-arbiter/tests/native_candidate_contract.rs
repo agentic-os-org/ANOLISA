@@ -367,7 +367,7 @@ async fn model_projection_contains_full_native_arguments_only_as_untrusted_data(
         calls[0].state["authoritative_task"],
         serde_json::to_value(&request.task).unwrap()
     );
-    let question = serde_json::to_value(&calls[0].questions["task-scope-v2"]).unwrap();
+    let question = serde_json::to_value(&calls[0].questions["task-scope-v3"]).unwrap();
     let instructions = question["instructions"].as_str().unwrap();
     for text in [
         "candidate.native_tool.name",
@@ -379,10 +379,10 @@ async fn model_projection_contains_full_native_arguments_only_as_untrusted_data(
         assert!(instructions.contains(text), "{text}");
     }
     assert!(!instructions.contains(marker));
-    assert_eq!(run.response.judgments[0].question_id, "task-scope-v2");
+    assert_eq!(run.response.judgments[0].question_id, "task-scope-v3");
     assert_eq!(
         run.response.judgments[0].unit_revision,
-        "semantic-task-scope/v2"
+        "semantic-task-scope/v3"
     );
 }
 

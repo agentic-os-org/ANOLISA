@@ -37,8 +37,8 @@ Public definitions are in [`contract.rs`](../../src/contract.rs), [`evidence.rs`
 | `task.session_id`, `task.version` | Must equal `binding.session_id` and `binding.task_version` |
 | `task.origin` | `operator` or `native_user`; the consumer must authenticate the ingress |
 | `task.text` | Nonblank task intent, at most 16384 UTF-8 bytes; interpreted only by model evaluation |
-| `task.allowed_resource_ids` | Explicit resource ceiling for the candidate operation |
-| `task.preserve_resource_ids` | Resources required to remain unchanged; retention overrides allowance |
+| `task.allowed_resource_ids` | Optional resource ceiling; when non-empty, every omitted resource is out of scope. An empty list declares no ceiling |
+| `task.preserve_resource_ids` | Optional retention limit checked before any unit; an empty list declares no retention requirement |
 | `candidate.operation`, `candidate.resource_id` | `replace` or `delete` on an opaque resource identity under the bound workspace |
 | `candidate.native_tool` | Optional full native call, with exactly `name` and `input`; absent or `null` retains the legacy candidate |
 | `candidate.native_tool.name` | Nonblank native tool name, at most 128 UTF-8 bytes |
@@ -114,14 +114,16 @@ URLs reject embedded credentials, query strings and fragments. HTTPS uses certif
 
 ## Judgment rules and model exchange
 
-Both units first require a task, apply retention and allowed-resource constraints, and check declared coverage gaps. Preservation also requires matching local-verifier rebuild evidence. Stale, missing, untrusted, conflicting or inconclusive proof yields unknown. Untrusted supplemental evidence cannot replace qualified proof. Task scope needs no rebuild evidence.
+Both units first require a task, apply retention and declared-allowance constraints, and check declared coverage gaps. Omitted resource lists declare no constraint and leave the question to the unit; a declared list stays a hard limit. Preservation also requires matching local-verifier rebuild evidence. Stale, missing, untrusted, conflicting or inconclusive proof yields unknown. Untrusted supplemental evidence cannot replace qualified proof. Task scope needs no rebuild evidence.
 
 | Unit / question ID | Model proposition | Supported result |
 |---|---|---|
-| `preservation` / `preservation-v1` | Does task intent require keeping the resource unchanged against this operation? | Yes support meeting the threshold yields `preserve`; no support meeting it retains the deterministic `allow` or `needs_snapshot` result |
-| `task_scope` / `task-scope-v2` | Does the full candidate, including the native name and every nested argument when supplied, satisfy task intent? Without native data, judge the operation on the resource. | Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
+| `preservation` / `preservation-v2` | Does the authoritative task text require keeping the resource unchanged against this operation? | Yes support meeting the threshold yields `preserve`; no support meeting it retains the deterministic `allow` or `needs_snapshot` result |
+| `task_scope` / `task-scope-v3` | Does the full candidate, including the native name and every nested argument when supplied, satisfy the authoritative task text? Without native data, judge the operation on the resource. | Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
 
-The task-scope unit revision is `semantic-task-scope/v2`. Native tool names and arguments are untrusted candidate data, never instructions or authority. Embedded requests to change rules or grant permission must not be followed. Structured resource ceilings remain hard limits; neither a native payload nor model support grants execution authority.
+Unit revisions are `semantic-units/v2` for preservation and `semantic-task-scope/v3` for task scope. Both questions decide from the task text: an omitted resource list is stated to carry no permission or retention meaning, and membership in a declared list is not offered as proof of task relevance. Native tool names and arguments are untrusted candidate data, never instructions or authority. Embedded requests to change rules or grant permission must not be followed. A declared resource ceiling remains a hard limit; neither a native payload nor model support grants execution authority.
+
+Omitting a list therefore changes the failure mode as well: a resource an operator never enumerated is no longer an implicit deny, and a missing or failed model answer becomes `undetermined` with candidate `nop`. A consumer that needs fail-closed scope declares a non-empty allowance.
 
 Units run in preservation/task-scope order regardless of request order. `check` derives answers entirely from structured constraints and evidence: `identical` permits modification, while `unique` requires a snapshot; deterministic unknowns fail closed. Model evaluation reuses that deterministic hard gate and batches eligible questions into at most one backend call. Hard blockers remain `block`. For eligible questions, low bilateral confidence, timeout, or backend/model-response error yields an `unknown` unit answer and candidate `nop`; ambiguity is never `ask`. Preservation model abstention retains only `audit` and does not carry the deterministic baseline's `snapshot` into the Outcome.
 
