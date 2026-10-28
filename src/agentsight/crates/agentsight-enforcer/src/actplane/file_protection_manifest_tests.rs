@@ -51,7 +51,9 @@ struct FakeState {
     snapshots: VecDeque<TopologySnapshot>,
     last: Option<TopologySnapshot>,
     open_count: usize,
+    snapshot_count: usize,
     open_action: Option<(usize, Action)>,
+    snapshot_action: Option<(usize, Action)>,
 }
 
 /// Topology source backed by a fixture directory, so manifest validation can be
@@ -69,7 +71,9 @@ impl FakeSource {
                 snapshots: snapshots.into(),
                 last: None,
                 open_count: 0,
+                snapshot_count: 0,
                 open_action: None,
+                snapshot_action: None,
             }),
         }
     }
@@ -78,6 +82,18 @@ impl FakeSource {
         let mut state = self.state.lock().expect("lock fake topology source");
         let open_count = state.open_count;
         state.open_action = Some((open_count + 1, Box::new(action)));
+    }
+
+    /// Runs `action` as the given snapshot is served, so a test can mutate the
+    /// fixture between the brackets of one validation pass.
+    pub(crate) fn act_after_snapshots(
+        &self,
+        additional: usize,
+        action: impl FnOnce() + Send + 'static,
+    ) {
+        let mut state = self.state.lock().expect("lock fake topology source");
+        let snapshot_count = state.snapshot_count;
+        state.snapshot_action = Some((snapshot_count + additional, Box::new(action)));
     }
 }
 
@@ -100,16 +116,30 @@ impl TopologySource for FakeSource {
     }
 
     fn snapshot(&self) -> Result<TopologySnapshot, BackendError> {
-        let mut state = self.state.lock().expect("lock fake topology source");
-        if let Some(snapshot) = state.snapshots.pop_front() {
-            state.last = Some(snapshot.clone());
-            Ok(snapshot)
-        } else {
-            state
-                .last
-                .clone()
-                .ok_or_else(|| BackendError::CompileFailure("fixture has no snapshot".into()))
+        let (snapshot, action) = {
+            let mut state = self.state.lock().expect("lock fake topology source");
+            state.snapshot_count += 1;
+            let action = state
+                .snapshot_action
+                .as_ref()
+                .is_some_and(|(at, _)| *at == state.snapshot_count)
+                .then(|| state.snapshot_action.take().map(|(_, action)| action))
+                .flatten();
+            let snapshot = if let Some(snapshot) = state.snapshots.pop_front() {
+                state.last = Some(snapshot.clone());
+                snapshot
+            } else {
+                state
+                    .last
+                    .clone()
+                    .ok_or_else(|| BackendError::CompileFailure("fixture has no snapshot".into()))?
+            };
+            (snapshot, action)
+        };
+        if let Some(action) = action {
+            action();
         }
+        Ok(snapshot)
     }
 }
 
