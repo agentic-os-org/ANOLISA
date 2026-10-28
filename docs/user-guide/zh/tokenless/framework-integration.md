@@ -134,7 +134,30 @@ PreToolUse 匹配 `Bash`、`mcp__workspace__bash` 和
 
 工作区 Shell 的结果恰好包含一个普通 MCP 文本块时，内容进入文本槽，支持 JSON 转 TOON。
 多个块、混合媒体或带注解的块数组保持透传，其他 MCP 工具保留已有结构化结果处理。
-工作区 Shell 的统计及 Pre/Post 去重状态保存在 `<cwd>/.tokenless`；原生 Bash 保留原有数据位置。
+千问办公工作区 Shell Hook 的 Tokenless 数据库和 Pre/Post 去重状态使用默认的
+`~/.tokenless`，或 `TOKENLESS_DATA_DIR` 指定的绝对路径。
+默认家目录与 CLI/RTK 一致，按操作系统用户身份解析，不读取 `$HOME`。
+Adapter 保留该环境变量，
+不再自动选择工作区内的数据目录。已有的 `<cwd>/.tokenless` 数据库不会自动迁移；
+查询历史记录时，需要显式指定原目录。
+
+`TOKENLESS_DATA_DIR` 未设置或为空时使用默认目录；路径无效时（相对路径、文件系统
+根目录、父目录遍历、非目录目标或无法解析的链接），工作区 Shell Hook 原样放行，
+不创建数据目录。系统家目录不可用且未设置覆盖路径时，也按此处理。
+
+如果 Shell 沙箱无法写入所选目录，RTK 的 Tokenless 统计和执行回执可能缺失，
+但命令仍可执行。缺少回执时会保守跳过后续压缩。
+PostTool 压缩统计由 Hook 进程写入，是否成功取决于该进程的权限。
+因此，即使 Agent 完成任务，统计也可能不完整；失败的 RTK 记录不会排队补写。
+
+RTK 原生数据库有独立的路径配置，不受 `TOKENLESS_DATA_DIR` 控制。
+它的写入同样受 Shell 沙箱约束，Adapter 保留这一行为。
+
+安装和检测输出会显示当前进程的数据目录、配置来源及上述沙箱限制。
+这不是沙箱可写性检测，也不证明桌面进程继承了终端环境变量。
+提示不会加入 Hook 结果或模型上下文。需要完整的 RTK 记录时，应选择 Shell 已获准写入的目录。
+Adapter 不修改沙箱权限，也不跨沙箱转存记录。
+
 独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。模型 Shell 不会继承 Hook 的环境，
 因此工作区 Shell 或插件私有二进制不声明裸 `tokenless retrieve` 恢复能力，PostTool 只应用无损压缩。
 

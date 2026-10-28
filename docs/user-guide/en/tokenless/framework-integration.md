@@ -150,9 +150,40 @@ ID `qwenwork`. Tool Ready and Schema hooks are not registered.
 A workspace Shell result containing exactly one plain MCP text block enters the
 text slot, enabling JSON-to-TOON compression. Multi-block, multimodal, or annotated
 block arrays pass through. Other MCP tools retain their existing structured-output
-handling. Workspace Shell statistics and Pre/Post deduplication state live in
-`<cwd>/.tokenless`; native Bash keeps its existing data location. If a standalone
-installation includes `bin/` inside the plugin, the adapter uses those binaries.
+handling. For QwenWork workspace Shell hooks, Tokenless databases and Pre/Post
+deduplication state use the default `~/.tokenless` directory or the absolute path
+specified by `TOKENLESS_DATA_DIR`. The default home comes from the operating
+system's user identity, as in the CLI/RTK, rather than `$HOME`.
+The adapter preserves that variable
+and no longer selects a workspace-local directory automatically. Existing databases in
+`<cwd>/.tokenless` are not automatically migrated; explicitly select that directory
+to query earlier records.
+
+An unset or empty `TOKENLESS_DATA_DIR` uses the default. Invalid paths (relative,
+filesystem root, parent traversal, non-directory targets, or unresolvable links)
+make workspace Shell hooks pass through without creating a data directory.
+The same applies when no system home is available and no override is set.
+
+If the Shell sandbox cannot write to the selected directory, RTK's Tokenless
+statistics and execution receipts may be missing while commands still run.
+Missing receipts conservatively skip further compression. PostTool compression
+statistics are written by the Hook process and depend on its permissions.
+Statistics can therefore be incomplete even when the Agent completes its task.
+Failed RTK records are not queued for later recovery.
+
+RTK's native database has its own path configuration, independent of
+`TOKENLESS_DATA_DIR`. Its writes are
+subject to the Shell sandbox too. The adapter keeps this behavior unchanged.
+
+Installation and detection output show the data directory and its source for the
+current process, together with this sandbox limitation. They do not test sandbox
+write access or verify that the desktop inherited terminal environment variables.
+These notices are not added to Hook results or model context. For complete RTK
+records, use a directory the Shell is authorized to write. The adapter does not
+change sandbox permissions or transfer records across that boundary.
+
+If a standalone installation includes `bin/` inside the plugin, the adapter uses
+those binaries.
 Workspace Shell and plugin-private binaries do not advertise bare
 `tokenless retrieve` recovery, since the model shell does not inherit the hook
 environment. Their PostTool compression therefore requires a lossless result.
