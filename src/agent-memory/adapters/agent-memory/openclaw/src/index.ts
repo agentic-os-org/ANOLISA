@@ -63,7 +63,7 @@ function stopStaleClient(api: OpenClawPluginApi): void {
   api.logger.warn?.(
     "agent-memory: previous client still active during register() — tearing it down (hot-reload?)",
   );
-  stale.stop().catch((err: unknown) => {
+  stale.dispose().catch((err: unknown) => {
     api.logger.warn?.(
       `agent-memory: stale-client teardown failed (${err instanceof Error ? err.message : String(err)})`,
     );
@@ -442,10 +442,10 @@ export default definePluginEntry({
       { names: ["memory_get_context"] },
     );
 
-    // Return the stop promise so the host waits for the subprocess to exit.
+    // Return the disposal promise so the host waits for the subprocess to exit.
     const cleanup = async () => {
       try {
-        await client.stop();
+        await client.dispose();
       } catch (err: unknown) {
         api.logger.warn?.(
           `agent-memory: subprocess cleanup error (${err instanceof Error ? err.message : String(err)})`,
