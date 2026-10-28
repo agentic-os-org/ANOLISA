@@ -783,48 +783,60 @@ function issueRevision(issue) {
     issue.labels.map((label) => typeof label === 'string' ? label : label.name).sort()]);
 }
 
+async function readPublication({ github, context, env }) {
+  check(env.PUBLISH_ALLOWED === 'true', 'Issue publication is not enabled');
+  const output = path.join(env.ANALYSIS_ROOT, 'output');
+  const { data: repository } = await github.rest.repos.get(context.repo);
+  assertRepository(repository);
+  const run = readJson(path.join(output, 'run.json'));
+  assertRepository(run.repository);
+  const producingRun = /^([1-9]\d*)-([1-9]\d*)$/.exec(run.run_id);
+  const producingAttempt = Number(producingRun?.[2]);
+  const publishingAttempt = Number(env.GITHUB_RUN_ATTEMPT || '1');
+  // Re-running failed jobs can retain the successful analysis from an earlier attempt.
+  check(typeof run.run_id === 'string' && producingRun?.[1] === String(context.runId) && Number.isSafeInteger(producingAttempt) &&
+    Number.isSafeInteger(publishingAttempt) && producingAttempt <= publishingAttempt &&
+    run.workflow_commit_sha === context.sha && run.permissions.publish_issue_results === true,
+  'Artifact does not belong to this authorized workflow run');
+  const snapshot = readJson(path.join(output, 'snapshot.json'));
+  check(run.repository.id === repository.id && snapshot.repository.id === repository.id,
+    'Artifact belongs to a different repository');
+  const analysis = parseResult(fs.readFileSync(path.join(output, 'analysis.json'), 'utf8'));
+  const review = parseResult(fs.readFileSync(path.join(output, 'review.json'), 'utf8'));
+  validateReview(review, analysis);
+  check(analysis.issue_number === snapshot.issue.number &&
+    analysis.source_commit_sha === snapshot.target.source_commit_sha, 'Publication input mismatch');
+  for (const phase of ['analysis', 'review']) {
+    check(readJson(path.join(output, `${phase}-execution.json`)).validation === 'passed',
+      'Only validated agent results can be published');
+  }
+  const reviewExecution = readJson(path.join(output, 'review-execution.json'));
+  check(['inline_self_review', 'focused_model_review'].includes(reviewExecution.execution_kind), 'Missing review execution provenance');
+  if (reviewExecution.execution_kind === 'inline_self_review') {
+    check(reviewReasons(analysis).length === 0, 'This decision requires a focused model review');
+    check(JSON.stringify(review) === JSON.stringify(inlineReview(analysis)), 'Inline review differs from the validated analysis');
+  }
+  const plan = readJson(path.join(output, 'writeback-plan.json'));
+  const expectedPriority = review.verdict === 'accept' ? analysis.priority.label : null;
+  check(plan.authorized === true && plan.suggested_priority === analysis.priority.label &&
+    plan.approved_priority === expectedPriority && plan.repository.toLowerCase() === repository.full_name.toLowerCase(),
+    'Publication plan does not match the reviewed decision');
+  await authorizeActor(github, context);
+
+  check(plan.component === snapshot.component.id && plan.issue_number === snapshot.issue.number &&
+    run.issue_id === snapshot.issue.id && run.issue_number === snapshot.issue.number &&
+    plan.source_commit_sha === snapshot.target.source_commit_sha, 'Publication component or issue mismatch');
+  return { repository, run, snapshot, analysis, review, plan, expectedPriority };
+}
+
 async function publish({ github, context, core, env }) {
   check(env.PUBLISH_ALLOWED === 'true', 'Issue publication is not enabled');
   const root = env.ANALYSIS_ROOT;
   const output = path.join(root, 'output');
   const result = { status: 'pending', operations: [], started_at_utc: new Date().toISOString() };
   try {
-    const { data: repository } = await github.rest.repos.get(context.repo);
-    assertRepository(repository);
-    const run = readJson(path.join(output, 'run.json'));
-    assertRepository(run.repository);
-    const producingRun = /^([1-9]\d*)-([1-9]\d*)$/.exec(run.run_id);
-    const producingAttempt = Number(producingRun?.[2]);
-    const publishingAttempt = Number(env.GITHUB_RUN_ATTEMPT || '1');
-    // Re-running failed jobs can retain the successful analysis from an earlier attempt.
-    check(typeof run.run_id === 'string' && producingRun?.[1] === String(context.runId) && Number.isSafeInteger(producingAttempt) &&
-      Number.isSafeInteger(publishingAttempt) && producingAttempt <= publishingAttempt &&
-      run.workflow_commit_sha === context.sha && run.permissions.publish_issue_results === true,
-    'Artifact does not belong to this authorized workflow run');
-    const snapshot = readJson(path.join(output, 'snapshot.json'));
-    check(run.repository.id === repository.id && snapshot.repository.id === repository.id,
-      'Artifact belongs to a different repository');
-    const analysis = parseResult(fs.readFileSync(path.join(output, 'analysis.json'), 'utf8'));
-    const review = parseResult(fs.readFileSync(path.join(output, 'review.json'), 'utf8'));
-    validateReview(review, analysis);
-    check(analysis.issue_number === snapshot.issue.number &&
-      analysis.source_commit_sha === snapshot.target.source_commit_sha, 'Publication input mismatch');
-    for (const phase of ['analysis', 'review']) {
-      check(readJson(path.join(output, `${phase}-execution.json`)).validation === 'passed',
-        'Only validated agent results can be published');
-    }
-    const reviewExecution = readJson(path.join(output, 'review-execution.json'));
-    check(['inline_self_review', 'focused_model_review'].includes(reviewExecution.execution_kind), 'Missing review execution provenance');
-    if (reviewExecution.execution_kind === 'inline_self_review') {
-      check(reviewReasons(analysis).length === 0, 'This decision requires a focused model review');
-      check(JSON.stringify(review) === JSON.stringify(inlineReview(analysis)), 'Inline review differs from the validated analysis');
-    }
-    const plan = readJson(path.join(output, 'writeback-plan.json'));
-    const expectedPriority = review.verdict === 'accept' ? analysis.priority.label : null;
-    check(plan.authorized === true && plan.suggested_priority === analysis.priority.label &&
-      plan.approved_priority === expectedPriority && plan.repository.toLowerCase() === repository.full_name.toLowerCase(),
-      'Publication plan does not match the reviewed decision');
-    await authorizeActor(github, context);
+    const { repository, snapshot, analysis, review, plan, expectedPriority } =
+      await readPublication({ github, context, env });
     if (!isPublishable(analysis)) {
       check(JSON.stringify(plan.operations) === JSON.stringify([
         { action: 'record_completion', input_fingerprint: snapshot.input_fingerprint },
@@ -920,7 +932,7 @@ async function publish({ github, context, core, env }) {
   }
 }
 
-module.exports = { main, hasCompletedAnalysis, completionPrefix, authorizeActor, componentForIssue, componentScope, inputFingerprint, commentPrefix, assertRepository, priorityRules, prepare, stageSource, parseResult,
+module.exports = { main, hasCompletedAnalysis, completionPrefix, publicationMarker, readPublication, issueRevision, isPublishable, authorizeActor, componentForIssue, componentScope, inputFingerprint, commentPrefix, assertRepository, priorityRules, prepare, stageSource, parseResult,
   validateAnalysis, validateReview, inlineReview, reviewReasons, reviewIfNeeded, agentArguments, runAgent, reviewContext, revise, finish, publish, parseCliResult, phasePolicy };
 
 function main() {

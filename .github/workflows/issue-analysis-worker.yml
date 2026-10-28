@@ -18,6 +18,10 @@ on:
     secrets:
       QODER_PERSONAL_ACCESS_TOKEN:
         required: true
+      DINGTALK_WEBHOOK:
+        required: false
+      DINGTALK_SECRET:
+        required: false
 
 permissions:
   contents: read
@@ -153,6 +157,8 @@ jobs:
           if-no-files-found: error
 
   publish:
+    outputs:
+      notification_artifact: ${{ needs.analyze.outputs.artifact_name }}-publication-${{ github.run_attempt }}
     needs: analyze
     if: >-
       needs.analyze.outputs.skip_analysis != 'true' && inputs.publish
@@ -187,3 +193,50 @@ jobs:
           path: ${{ runner.temp }}/issue-analysis/output/
           retention-days: 7
           if-no-files-found: error
+
+  notify:
+    name: Notify the reviewed Issue result
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.publish.outputs.notification_artifact }}
+          path: ${{ runner.temp }}/issue-analysis/output
+      - name: Notify triagers and verify the delivery receipt
+        uses: actions/github-script@v7
+        env:
+          ANALYSIS_ROOT: ${{ runner.temp }}/issue-analysis
+          PUBLISH_ALLOWED: 'true'
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { notify } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-analysis-notification`);
+            let result;
+            try {
+              result = await notify({ github, context, core, env: process.env });
+            } catch (error) {
+              result = { status: 'failed', error: error.message };
+              throw error;
+            } finally {
+              fs.writeFileSync(path.join(process.env.ANALYSIS_ROOT, 'notification-results.json'), JSON.stringify(result));
+            }
+      - name: Upload result notification audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.publish.outputs.notification_artifact }}-notification-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-analysis/notification-results.json
+          retention-days: 7
+          if-no-files-found: warn

@@ -83,9 +83,8 @@ records bound to the Issue content, component, source SHA, policy and priority
 definitions. Published refutations count as completed even without a priority.
 Validated results outside publication scope record a short completion receipt
 with the Actions report link. Batches skip matching completions, and workers
-recheck them before model work. Failed publication leaves no successful
-completion when no record was written; use **Re-run failed jobs** to finish
-failed or uncertain writes. The writeback preview lists completion operations,
+recheck them before model work. Use **Re-run failed jobs** to reconcile failed
+or uncertain publication writes. The writeback preview lists completion operations,
 and their receipt is read back before the publisher reports success.
 
 Use the same full source SHA when continuing a historical sweep. Changing the
@@ -115,10 +114,40 @@ Use **Re-run failed jobs** for failed analysis or publication. Publication can
 reuse validated artifacts from an earlier attempt, including partial label
 writes. Redispatching a repeated Router decision does not retry its analysis.
 
+## DingTalk result notifications
+
+Router notifications continue to announce new ownership decisions. After
+publication, a separate job sends a result card with the component, priority,
+conclusion, impact, next action, triagers and report link. P0/P1 results request
+maintainer verification. Unresolved scope or review objections produce a
+needs-review card. Other out-of-scope or inactive results remain quiet.
+Report-only runs and eligibility skips send no result card.
+
+Before each delivery, including a retry after explicit rejection, the job
+re-reads the linked bot report and compares its complete body with the validated
+publication artifact. An edited or deleted report blocks delivery and requires
+fresh analysis. Already delivered decisions remain quiet.
+
+The job uses the existing `DINGTALK_WEBHOOK` and `DINGTALK_SECRET` secrets and
+the same signed transport as Router notifications. With no webhook configured,
+result notification is disabled and its audit records that status. Model jobs
+receive neither DingTalk nor GitHub write credentials.
+
+A separate bot comment records delivery state, leaving the analysis report
+untouched. Its key identifies the component and public decision, so rerunning
+an already delivered result stays quiet. Explicit API rejection permits a
+notification-only retry through **Re-run failed jobs**. Transport timeouts,
+unreadable responses and interrupted receipt writes retain an uncertain state;
+automatic resending stops to avoid duplicating a potentially delivered card.
+Inspect the receipt and DingTalk delivery before resolving it to `delivered`
+or, after confirming no delivery, `rejected`; then rerun the failed job.
+Notification audits are retained for seven days alongside publication artifacts.
+
 ## Local checks
 
 ```bash
 node --test .github/scripts/sec-core-issue-analysis.test.js \
   .github/scripts/issue-analysis.test.js .github/scripts/issue-triage.test.js \
   .github/scripts/issue-claim.test.js
+python3 -B .github/scripts/test_dingtalk_notification.py
 ```

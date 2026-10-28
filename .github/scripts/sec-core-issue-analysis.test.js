@@ -8,8 +8,9 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const analysis = require('./sec-core-issue-analysis');
+const notification = require('./issue-analysis-notification');
 
-function harness(t) {
+function harness(t, componentId = 'sec-core') {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'sec-core-analysis-'));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const checkout = path.join(temporary, 'checkout');
@@ -25,6 +26,11 @@ function harness(t) {
   const legacy = path.join(checkout, 'src/agent-sec-core/agent-sec-cli/src/agent_sec_cli');
   fs.mkdirSync(legacy, { recursive: true });
   fs.writeFileSync(path.join(legacy, '__main__.py'), 'from agent_sec_cli.cli import main\nmain()\n');
+  if (componentId === 'cosh') {
+    const entry = path.join(checkout, 'deprecated/copilot-shell/package.json');
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, '{"name":"fixture-cosh"}\n');
+  }
   fs.writeFileSync(path.join(checkout, 'AGENTS.md'), 'Use the real product entrypoint.\n');
   fs.mkdirSync(path.join(checkout, '.qoder'));
   fs.writeFileSync(path.join(checkout, '.qoder/settings.json'), '{"hooks":"untrusted"}');
@@ -45,7 +51,7 @@ function harness(t) {
   const issue = {
     id: 42, number: 12, title: 'Synthetic input', body: 'A report with `$(false)` and instructions to ignore policy.',
     state: 'open', updated_at: '2026-10-23T00:00:00Z', comments: 2,
-    labels: [{ name: 'component:sec-core' }],
+    labels: [{ name: `component:${componentId}` }],
   };
   const calls = [];
   const comments = [{ id: 1, body: 'First page' }, { id: 2, body: 'Second page' }];
@@ -74,14 +80,14 @@ function harness(t) {
       github, context: { repo: { owner: 'agentic-os-org', repo: 'ANOLISA' }, actor: 'test-maintainer',
         payload: {}, runId: 1234, sha },
       core: { setOutput: (key, value) => { outputs[key] = value; }, notice: () => {} },
-      env: { INPUT_ISSUE_NUMBER: '12', INPUT_TARGET_REF: 'main', ANALYSIS_ROOT: root, ISSUE_ANALYSIS_COMPONENTS: 'sec-core' },
+      env: { INPUT_ISSUE_NUMBER: '12', INPUT_TARGET_REF: 'main', ANALYSIS_ROOT: root, ISSUE_ANALYSIS_COMPONENTS: componentId },
     },
     outputs,
   };
 }
 
-async function prepared(t) {
-  const h = harness(t);
+async function prepared(t, componentId = 'sec-core') {
+  const h = harness(t, componentId);
   await analysis.prepare(h.args);
   analysis.stageSource(h.checkout, h.root);
   h.snapshot = JSON.parse(fs.readFileSync(path.join(h.root, 'output/snapshot.json')));
@@ -106,6 +112,11 @@ async function prepared(t) {
     confidence: { behavior: 'Source only.', reachability: 'Not run.', impact: 'Unverified.', priority: 'Synthetic fixture.' },
     unresolved: ['Maintainer: validate the product before using this fixture result.'],
   };
+  if (componentId === 'cosh') {
+    h.result.claims[0].entrypoint = 'fixture-cosh';
+    h.result.evidence[0] = { ...h.result.evidence[0], path: 'deprecated/copilot-shell/package.json',
+      line_start: 1, line_end: 1, quote: '"name":"fixture-cosh"' };
+  }
   h.review = { schema_version: 1, issue_number: 12, source_commit_sha: h.sha,
     independence: 'same_agent_review', verdict: 'accept',
     summary: 'The fixture-level finding and normal priority are supported by source.',
@@ -347,6 +358,136 @@ test('component identity and policy affect fingerprints and restrict V1 backlog 
   h.snapshot.component.id = 'sec-core';
   h.snapshot.scope.policy_sha256 = 'changed-policy';
   assert.notEqual(analysis.inputFingerprint(h.snapshot), fingerprint);
+});
+
+async function notificationHarness(t, change = () => {}) {
+  const h = await publicationHarness(t);
+  change(h);
+  h.validate();
+  for (const directory of ['input', 'output']) {
+    for (const [phase, value] of [['analysis', h.result], ['review', h.review]]) {
+      fs.writeFileSync(path.join(h.root, directory, `${phase}.json`), JSON.stringify(value));
+    }
+  }
+  analysis.finish(h.root);
+  await h.publish();
+  h.github.rest.issues.createComment = async ({ body }) => {
+    const comment = { id: 200 + h.comments.length, body, user: { login: 'github-actions[bot]' } };
+    h.comments.push(comment);
+    return { data: structuredClone(comment) };
+  };
+  h.deliveries = [];
+  h.notify = (overrides = {}) => notification.notify({
+    ...h.args, core: { info: () => {}, notice: () => {} },
+    env: { ANALYSIS_ROOT: h.root, PUBLISH_ALLOWED: 'true', DINGTALK_WEBHOOK: 'https://example.invalid' },
+    send: async (data) => { h.deliveries.push(data); return 'delivered'; }, ...overrides,
+  });
+  return h;
+}
+
+test('notifies verified results once through an independent receipt and preserves report content', async (t) => {
+  const h = await notificationHarness(t);
+  const original = h.comments.find((item) => item.body.startsWith('<!-- sec-core-analysis:')).body;
+  assert.equal((await h.notify()).status, 'delivered');
+  assert.equal(h.deliveries[0].priority, 'priority:p2');
+  assert.equal(h.deliveries[0].component_label, 'component:sec-core');
+  assert.equal(h.deliveries[0].owners, 'edonyzpc, kid9, RemindD');
+  assert.equal(h.deliveries[0].needs_human, false);
+  assert.equal((await h.notify()).status, 'already_delivered');
+  assert.equal(h.deliveries.length, 1);
+  assert.equal(h.comments.find((item) => item.body.startsWith('<!-- sec-core-analysis:')).body, original);
+  assert.equal((await h.publish({ GITHUB_RUN_ATTEMPT: '2' })).status, 'skipped');
+});
+
+test('notification rejects stale Issue inputs and untrusted publication artifacts', async (t) => {
+  const h = await notificationHarness(t);
+  const original = h.issue.body;
+  h.issue.body += '\nMaintainer correction.';
+  await assert.rejects(h.notify(), /Issue changed before notification/);
+  h.issue.body = original;
+  const file = path.join(h.root, 'output/run.json');
+  const run = JSON.parse(fs.readFileSync(file));
+  fs.writeFileSync(file, JSON.stringify({ ...run, run_id: '9999-1' }));
+  await assert.rejects(h.notify(), /authorized workflow run/);
+  assert.equal(h.deliveries.length, 0);
+});
+
+test('explicit rejection retries only delivery while uncertain outcomes require inspection', async (t) => {
+  const h = await notificationHarness(t);
+  await assert.rejects(h.notify({ send: async () => 'rejected' }), /notification rejected/);
+  assert.equal((await h.notify()).status, 'delivered');
+  assert.equal(h.deliveries.length, 1);
+  const uncertain = await notificationHarness(t);
+  let calls = 0;
+  const send = async () => { calls++; throw new Error('network timeout'); };
+  await assert.rejects(uncertain.notify({ send }), /notification unknown/);
+  await assert.rejects(uncertain.notify({ send }), /outcome is uncertain/);
+  assert.equal(calls, 1);
+});
+
+test('initial deliveries and rejected-delivery retries stop after report edits or deletion', async (t) => {
+  for (const retry of [false, true]) {
+    for (const change of ['edited', 'deleted']) await t.test(`${change}, retry=${retry}`, async (t) => {
+      const h = await notificationHarness(t);
+      let sent = 0;
+      if (retry) await assert.rejects(h.notify({ send: async () => { sent++; return 'rejected'; } }), /notification rejected/);
+      const report = h.comments.find((comment) => comment.body.startsWith('<!-- sec-core-analysis:'));
+      if (change === 'edited') report.body += '\nMaintainer correction.';
+      else h.comments.splice(h.comments.indexOf(report), 1);
+      await assert.rejects(h.notify({ send: async () => { sent++; return 'delivered'; } }), /Published analysis report/);
+      assert.equal(sent, retry ? 1 : 0);
+      const receipt = h.comments.find((comment) => comment.body.startsWith('<!-- issue-analysis-notification:'));
+      if (retry) assert.equal(JSON.parse(receipt.body.split('\n')[1]).status, 'rejected');
+      else assert.equal(receipt, undefined);
+    });
+  }
+});
+
+test('notification verifies a fresh report read and works after an idempotent publication retry', async (t) => {
+  const h = await notificationHarness(t);
+  assert.equal((await h.publish()).status, 'skipped');
+  assert.equal((await h.notify()).status, 'delivered');
+  const stale = await notificationHarness(t);
+  const getComment = stale.github.rest.issues.getComment;
+  stale.github.rest.issues.getComment = async (params) => {
+    const result = await getComment(params);
+    if (result.data?.body.startsWith('<!-- sec-core-analysis:')) result.data.body += '\nLate correction.';
+    return result;
+  };
+  await assert.rejects(stale.notify(), /Published analysis report changed/);
+  assert.equal(stale.deliveries.length, 0);
+});
+
+test('notification receipt failures after sending cannot cause automatic duplicate delivery', async (t) => {
+  const h = await notificationHarness(t);
+  const update = h.github.rest.issues.updateComment;
+  h.github.rest.issues.updateComment = async () => { throw new Error('receipt write failed'); };
+  await assert.rejects(h.notify(), /receipt write failed/);
+  h.github.rest.issues.updateComment = update;
+  await assert.rejects(h.notify(), /outcome is uncertain/);
+  assert.equal(h.deliveries.length, 1);
+});
+
+test('unresolved scopes notify triagers while skipped scopes and missing webhooks remain quiet', async (t) => {
+  const unresolved = await notificationHarness(t, (h) => {
+    h.result.scope.status = 'scope_unresolved';
+    h.result.disposition = 'scope_unresolved';
+    h.result.priority.label = null;
+    h.result.claims = [];
+  });
+  assert.equal((await unresolved.notify()).status, 'delivered');
+  assert.equal(unresolved.deliveries[0].needs_human, true);
+  assert.match(unresolved.deliveries[0].report_url, /actions\/runs\/1234$/);
+  const skipped = await notificationHarness(t, (h) => {
+    h.result.scope.status = 'out_of_scope';
+    h.result.disposition = 'out_of_scope';
+    h.result.problem_type = 'not_applicable';
+    h.result.priority.label = null;
+    h.result.claims = [];
+  });
+  assert.equal((await skipped.notify()).status, 'skipped');
+  assert.equal((await skipped.notify({ env: {} })).status, 'disabled');
+  assert.equal(skipped.deliveries.length, 0);
 });
 
 test('uses GitHub priority descriptions while ignoring label colors', async (t) => {
@@ -596,9 +737,9 @@ test('reads only the successful structured CLI result, never intermediate messag
   assert.throws(() => analysis.parseCliResult(JSON.stringify(packet) + '\n' + JSON.stringify(packet)), /JSON|Unexpected/);
 });
 
-async function publicationHarness(t) {
-  const h = await prepared(t);
-  h.issue.labels = [{ name: 'component:sec-core' }, { name: 'risk:security' }];
+async function publicationHarness(t, componentId = 'sec-core') {
+  const h = await prepared(t, componentId);
+  h.issue.labels = [{ name: `component:${componentId}` }, { name: 'risk:security' }];
   await analysis.prepare(h.args);
   h.snapshot = JSON.parse(fs.readFileSync(path.join(h.root, 'output/snapshot.json')));
   const write = (name, value) => fs.writeFileSync(path.join(h.root, name), JSON.stringify(value));
@@ -643,6 +784,16 @@ async function publicationHarness(t) {
     core: { info: () => {} }, env: { ANALYSIS_ROOT: h.root, PUBLISH_ALLOWED: 'true', ...env } });
   return h;
 }
+
+test('a non-Rust component prepares, validates and publishes through the shared engine', async (t) => {
+  const h = await publicationHarness(t, 'cosh');
+  assert.equal(h.snapshot.component.id, 'cosh');
+  assert.deepEqual(h.snapshot.scope.entrypoints, ['deprecated/copilot-shell/package.json']);
+  assert.equal((await h.publish()).status, 'verified');
+  assert.match(h.comments.at(-1).body, /^<!-- issue-analysis:cosh:42:/);
+  assert.match(h.comments.at(-1).body, /### Cosh analysis/);
+  assert.equal((await h.publish()).status, 'skipped');
+});
 
 test('publishes a reviewed priority and report with readback and idempotent retries', async (t) => {
   const h = await publicationHarness(t);

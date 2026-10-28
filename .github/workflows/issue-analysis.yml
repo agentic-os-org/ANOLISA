@@ -38,6 +38,10 @@ on:
     secrets:
       QODER_PERSONAL_ACCESS_TOKEN:
         required: true
+      DINGTALK_WEBHOOK:
+        required: false
+      DINGTALK_SECRET:
+        required: false
 
 permissions:
   contents: read
@@ -91,3 +95,5 @@ jobs:
       skip_completed: ${{ inputs.mode == 'batch' }}
     secrets:
       QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}

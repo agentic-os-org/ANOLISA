@@ -111,28 +111,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/.github/scripts
         run: |
           python3 << 'PYEOF'
-          import base64
-          import hashlib
-          import hmac
-          import json
           import os
-          import subprocess
-          import sys
-          import time
-          import urllib.parse
+          from dingtalk_notification import build_issue_markdown, send_markdown
 
-          from dingtalk_notification import build_issue_markdown
-
-          timestamp = str(round(time.time() * 1000))
-          secret = os.environ.get("DINGTALK_SECRET", "")
-          signature = hmac.new(
-              secret.encode(),
-              (timestamp + "\n" + secret).encode(),
-              hashlib.sha256,
-          ).digest()
-          sign = urllib.parse.quote_plus(base64.b64encode(signature).decode())
-
-          assigned = os.environ.get("ASSIGNED", "") or "none"
           text = build_issue_markdown(
               issue_number=os.environ["ISSUE_NUMBER"],
               issue_title=os.environ["ISSUE_TITLE"],
@@ -140,44 +121,13 @@ jobs:
               component_label=os.environ["COMPONENT_LABEL"],
               author=os.environ["ISSUE_AUTHOR"],
               owners=os.environ["OWNERS"],
-              assigned=assigned,
+              assigned=os.environ.get("ASSIGNED", "") or "none",
           )
-          payload = json.dumps({
-              "msgtype": "markdown",
-              "markdown": {
-                  "title": f"Issue Triage #{os.environ['ISSUE_NUMBER']}",
-                  "text": text,
-              },
-          })
-          url = (
-              f"{os.environ['DINGTALK_WEBHOOK']}"
-              f"&timestamp={timestamp}&sign={sign}"
-          )
-          response = subprocess.run(
-              [
-                  "curl",
-                  "-fsS",
-                  "-X",
-                  "POST",
-                  url,
-                  "-H",
-                  "Content-Type: application/json",
-                  "-d",
-                  payload,
-              ],
-              stdout=subprocess.PIPE,
-              text=True,
-              check=True,
-          )
-          validator = os.path.join(
-              os.environ["GITHUB_WORKSPACE"],
-              ".github/scripts/dingtalk_notification.py",
-          )
-          subprocess.run(
-              [sys.executable, validator],
-              input=response.stdout,
-              text=True,
-              check=True,
+          send_markdown(
+              webhook=os.environ["DINGTALK_WEBHOOK"],
+              secret=os.environ.get("DINGTALK_SECRET", ""),
+              title=f"Issue Triage #{os.environ['ISSUE_NUMBER']}",
+              text=text,
           )
           PYEOF
 
@@ -221,3 +171,5 @@ jobs:
       publish: true
     secrets:
       QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
