@@ -62,6 +62,12 @@ impl CompletionScheduler {
     }
 }
 
+/// Raw captures may consume at most half the shared byte allowance so deferred
+/// delivery and SQLite local retries retain capacity.
+fn shared_completion_bytes(limit: usize, pending_genai_bytes: usize) -> usize {
+    limit.saturating_sub(pending_genai_bytes).min(limit / 2)
+}
+
 impl AgentSight {
     pub(super) fn process_aggregated_results(&mut self, results: Vec<AggregatedResult>) {
         if self.completions.budget.is_none() {
@@ -70,11 +76,10 @@ impl AgentSight {
         }
         for mut result in results {
             loop {
-                let available = self
-                    .runtime_limits
-                    .pending_genai_max_bytes
-                    .saturating_sub(self.pending_genai.bytes)
-                    .min(self.runtime_limits.pending_genai_max_bytes / 2);
+                let available = shared_completion_bytes(
+                    self.runtime_limits.pending_genai_max_bytes,
+                    self.pending_genai.bytes,
+                );
                 let count = self
                     .runtime_limits
                     .pending_genai_max_count
@@ -86,6 +91,8 @@ impl AgentSight {
                 result = rejected;
                 if self.completions.len() > 0 {
                     // Preserve FIFO and apply backpressure without bypassing pacing.
+                    let _timer =
+                        crate::runtime_metrics::StageTimer::start("completion_backpressure");
                     self.drain_one_completion(true);
                     continue;
                 }
