@@ -5,7 +5,10 @@ import {exists, kebabCase, repoRoot, stripCopilotShellNavigation, toPosix, walkF
 
 const overrides = JSON.parse(await readFile(path.join(repoRoot, 'website/agent-index/overrides.json'), 'utf8'));
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
-const baseUrl = process.env.BASE_URL ?? '/';
+const configuredBaseUrl = process.env.BASE_URL ?? '/';
+const baseUrl = configuredBaseUrl === '/'
+  ? '/'
+  : `/${configuredBaseUrl.replace(/^\/+|\/+$/g, '')}/`;
 const agentsOutput = path.join(repoRoot, 'website/.generated/static/agents');
 const architectureAliases = {
   x86_64: 'x86_64',
