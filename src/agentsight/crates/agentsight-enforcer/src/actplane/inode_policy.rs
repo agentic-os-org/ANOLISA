@@ -256,7 +256,7 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
 }
 
 // Translate glibc's encoded st_dev into the kernel's MKDEV(major, minor).
-fn userspace_dev_to_kernel(dev: u64) -> u32 {
+pub(super) fn userspace_dev_to_kernel(dev: u64) -> u32 {
     (libc::major(dev) << 20) | libc::minor(dev)
 }
 
