@@ -18,16 +18,31 @@ function Get-CargoTargetDirectory([string]$Manifest) {
         [Console]::OutputEncoding = $previousEncoding
     }
 }
-# The existing setup script remains the single source of the pinned revision.
+# The existing setup script remains the single source of the pinned revision
+# and of the ordered patch list.
 $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'setup-rtk.sh') -Raw
 $revision = [regex]::Match($source, '(?m)^RTK_COMMIT="([0-9a-f]{40})"').Groups[1].Value
 $repository = [regex]::Match($source, '(?m)^RTK_REPOSITORY="([^"]+)"').Groups[1].Value
+$patches = @([regex]::Match($source, '(?ms)^PATCHES=\((.*?)^\)').Groups[1].Value -split '\s+' |
+    Where-Object { $_ })
 if (!$revision -or !$repository) { throw 'RTK source pin is missing from setup-rtk.sh' }
+if (!$patches) { throw 'RTK patch list (PATCHES) is missing from setup-rtk.sh' }
+# Matches the `sha256sum` marker of setup-rtk.sh, so either script accepts the
+# other's checkout and rejects one made from other patches.
+$patchDigest = ($patches | ForEach-Object {
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $component "third_party/patches/$_")).Hash
+    "$($hash.ToLowerInvariant())  $_"
+}) -join "`n"
 if (Test-Path -LiteralPath $rtk) {
     $marker = Get-Content -LiteralPath (Join-Path $rtk '.anolisa-rtk-commit') -Raw
     if ($marker.Trim() -ne $revision) { throw 'RTK checkout does not match the pinned revision' }
     $head = & git -C $rtk rev-parse HEAD
     if ($LASTEXITCODE -ne 0 -or $head -ne $revision) { throw 'RTK HEAD does not match the pinned revision' }
+    $patchMarker = Join-Path $rtk '.anolisa-rtk-patches'
+    if (!(Test-Path -LiteralPath $patchMarker)) { throw "RTK patch-set marker is missing; remove $rtk and retry" }
+    if ((Get-Content -LiteralPath $patchMarker -Raw).Trim() -ne $patchDigest) {
+        throw "RTK checkout was patched with a different patch set; remove $rtk and retry"
+    }
 } else {
     $stage = "$rtk.tmp.$([guid]::NewGuid().ToString('N'))"
     & git init --quiet $stage
@@ -37,7 +52,7 @@ if (Test-Path -LiteralPath $rtk) {
     if ($LASTEXITCODE -ne 0) { throw "RTK fetch failed; incomplete checkout retained at $stage" }
     & git -C $stage checkout --quiet --detach FETCH_HEAD
     if ($LASTEXITCODE -ne 0) { throw 'RTK checkout failed' }
-    foreach ($patch in @('rtk-tokenless-stats.patch', 'rtk-pytest-error-report.patch')) {
+    foreach ($patch in $patches) {
         $patchFile = Join-Path $stage '.tokenless-apply.patch'
         $patchText = [IO.File]::ReadAllText((Join-Path $component "third_party/patches/$patch")).Replace("`r`n", "`n")
         [IO.File]::WriteAllText($patchFile, $patchText, [Text.UTF8Encoding]::new($false))
@@ -46,6 +61,7 @@ if (Test-Path -LiteralPath $rtk) {
         Remove-Item -LiteralPath $patchFile
     }
     [IO.File]::WriteAllText((Join-Path $stage '.anolisa-rtk-commit'), "$revision`n")
+    [IO.File]::WriteAllText((Join-Path $stage '.anolisa-rtk-patches'), "$patchDigest`n")
     Move-Item -LiteralPath $stage -Destination $rtk
 }
 $buildArgs = @('build', '--locked', '--target', 'x86_64-pc-windows-msvc')

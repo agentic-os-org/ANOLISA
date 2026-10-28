@@ -227,9 +227,9 @@ grep -Fq "does not match pinned commit $PINNED_RTK_COMMIT" \
 CURRENT_BUILD="$TEMPORARY/current-source"
 install -d -m 0755 "$CURRENT_BUILD/packaging/build" "$CURRENT_BUILD/third_party/patches"
 cp "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh" "$CURRENT_BUILD/packaging/build/"
-cp "$REPO_ROOT/src/tokenless/third_party/patches/rtk-tokenless-stats.patch" \
-    "$REPO_ROOT/src/tokenless/third_party/patches/rtk-pytest-error-report.patch" \
+cp "$REPO_ROOT"/src/tokenless/third_party/patches/*.patch \
     "$CURRENT_BUILD/third_party/patches/"
+CURRENT_PATCH_COUNT="$(find "$CURRENT_BUILD/third_party/patches" -name '*.patch' | wc -l)"
 PATH="$HISTORICAL_FAKE_BIN:$PATH" \
     HISTORICAL_FAKE_HEAD="$CURRENT_RTK_COMMIT" \
     HISTORICAL_GIT_LOG="$TEMPORARY/current-git.log" \
@@ -237,7 +237,7 @@ PATH="$HISTORICAL_FAKE_BIN:$PATH" \
     bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD"
 grep -Fq "fetch --quiet --depth 1 origin $CURRENT_RTK_COMMIT" \
     "$TEMPORARY/current-git.log"
-[ "$(wc -l < "$TEMPORARY/current-patch.log")" -eq 2 ]
+[ "$(wc -l < "$TEMPORARY/current-patch.log")" -eq "$CURRENT_PATCH_COUNT" ]
 [ "$(cat "$CURRENT_BUILD/third_party/rtk/.anolisa-rtk-commit")" = \
     "$CURRENT_RTK_COMMIT" ]
 
