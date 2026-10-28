@@ -30,7 +30,10 @@ use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
 };
-pub use file_protection_generation::FileProtectionStaging;
+pub use file_protection_generation::{
+    ActiveFileProtectionGeneration, FileProtectionDetachError, FileProtectionStaging,
+    InactiveFileProtectionGeneration,
+};
 pub use file_protection_map_writer::{
     FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
     FileProtectionMapWriter, FileProtectionSlot, FileProtectionSlotValue,

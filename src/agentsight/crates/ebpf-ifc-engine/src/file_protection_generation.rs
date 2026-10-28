@@ -1,10 +1,12 @@
 //! Generation-scoped transactional registration for structured file-protection maps.
 
+use std::fmt;
 use std::io;
 
 use super::file_protection_map_writer::{
-    FileProtectionGeneration, FileProtectionMapCounts, FileProtectionMapWriter, FileProtectionSlot,
-    FileProtectionSlotValue, FileProtectionTargetValue, TreePathIdentity,
+    FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
+    FileProtectionMapWriter, FileProtectionSlot, FileProtectionSlotValue,
+    FileProtectionTargetValue, TreePathIdentity,
 };
 
 /// A generation that has not yet published its domain activation record.
@@ -19,6 +21,39 @@ pub struct FileProtectionStaging<W: FileProtectionMapWriter> {
     stable_paths: Vec<TreePathIdentity>,
     slots: Vec<FileProtectionSlot>,
     targets: Vec<u32>,
+}
+
+/// Active generation owner. Dropping it deactivates first, then attempts cleanup.
+#[derive(Debug)]
+pub struct ActiveFileProtectionGeneration<W: FileProtectionMapWriter> {
+    staging: FileProtectionStaging<W>,
+    active: bool,
+}
+
+/// Inactive generation whose partial cleanup can be retried without losing key metadata.
+#[derive(Debug)]
+pub struct InactiveFileProtectionGeneration<W: FileProtectionMapWriter> {
+    staging: FileProtectionStaging<W>,
+    needs_deactivation: bool,
+}
+
+/// Detach failure that retains the inactive retry owner and any held writer state.
+#[derive(Debug)]
+pub struct FileProtectionDetachError<W: FileProtectionMapWriter> {
+    /// Individual map cleanup errors.
+    pub errors: Vec<String>,
+    /// Retry owner; activation may still exist when deactivation failed.
+    pub retry: InactiveFileProtectionGeneration<W>,
+}
+
+impl<W: FileProtectionMapWriter> fmt::Display for FileProtectionDetachError<W> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "file protection cleanup failed: {}",
+            self.errors.join("; ")
+        )
+    }
 }
 
 impl<W: FileProtectionMapWriter> FileProtectionStaging<W> {
@@ -173,6 +208,42 @@ impl<W: FileProtectionMapWriter> FileProtectionStaging<W> {
         Ok(())
     }
 
+    /// Publishes the activation record last; activation failure rolls back staged keys.
+    pub fn activate(
+        mut self,
+        value: FileProtectionDomainValue,
+    ) -> io::Result<ActiveFileProtectionGeneration<W>> {
+        if self.limits.domains != 1 {
+            let cleanup = self.cleanup();
+            return Err(with_cleanup(
+                "activate file protection generation",
+                other("activation was not included in the prechecked count"),
+                cleanup,
+            ));
+        }
+        if value.target_count as usize != self.targets.len() {
+            let cleanup = self.cleanup();
+            return Err(with_cleanup(
+                "activate file protection generation",
+                other("activation target count does not match staged targets"),
+                cleanup,
+            ));
+        }
+        let (domain, generation) = (self.domain, self.generation);
+        if let Err(error) = self.writer_mut()?.activate(domain, generation, value) {
+            let cleanup = self.cleanup();
+            return Err(with_cleanup(
+                "activate file protection generation",
+                error,
+                cleanup,
+            ));
+        }
+        Ok(ActiveFileProtectionGeneration {
+            staging: self,
+            active: true,
+        })
+    }
+
     fn ensure_room(&self, current: usize, limit: usize, name: &str) -> io::Result<()> {
         if current >= limit {
             Err(other(format!("staged {name} exceed the prechecked count")))
@@ -231,6 +302,129 @@ impl<W: FileProtectionMapWriter> Drop for FileProtectionStaging<W> {
                 errors.join("; ")
             );
         }
+    }
+}
+
+impl<W: FileProtectionMapWriter> ActiveFileProtectionGeneration<W> {
+    /// Deactivates first and then removes only this generation's staged keys.
+    // Keep the retry owner inline instead of allocating another owner on cleanup failure.
+    #[allow(clippy::result_large_err)]
+    pub fn detach(mut self) -> Result<(), FileProtectionDetachError<W>> {
+        let (domain, generation) = (self.staging.domain, self.staging.generation);
+        if let Err(error) = self
+            .staging
+            .writer_mut()
+            .and_then(|writer| writer.deactivate(domain, generation))
+        {
+            self.active = false;
+            return Err(FileProtectionDetachError {
+                errors: vec![format!("deactivate generation: {error}")],
+                retry: InactiveFileProtectionGeneration {
+                    staging: take_staging(&mut self.staging),
+                    needs_deactivation: true,
+                },
+            });
+        }
+        self.active = false;
+        let errors = self.staging.cleanup();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(FileProtectionDetachError {
+                errors,
+                retry: InactiveFileProtectionGeneration {
+                    staging: take_staging(&mut self.staging),
+                    needs_deactivation: false,
+                },
+            })
+        }
+    }
+}
+
+impl<W: FileProtectionMapWriter> Drop for ActiveFileProtectionGeneration<W> {
+    fn drop(&mut self) {
+        if self.active {
+            let (domain, generation) = (self.staging.domain, self.staging.generation);
+            if self
+                .staging
+                .writer_mut()
+                .is_ok_and(|writer| writer.deactivate(domain, generation).is_ok())
+            {
+                self.active = false;
+            } else {
+                log::error!(
+                    "active file protection generation {}:{} retained after drop deactivation failure",
+                    domain,
+                    generation.get()
+                );
+                let retained = take_staging(&mut self.staging);
+                // Exit reclaims this owner, not pinned maps; cleanup must never precede deactivation.
+                std::mem::forget(retained);
+                self.active = false;
+            }
+        }
+    }
+}
+
+impl<W: FileProtectionMapWriter> InactiveFileProtectionGeneration<W> {
+    /// Retries deactivation when needed, then idempotently retries partial cleanup.
+    // Keep the retry owner inline instead of allocating another owner on cleanup failure.
+    #[allow(clippy::result_large_err)]
+    pub fn retry_cleanup(mut self) -> Result<(), FileProtectionDetachError<W>> {
+        if self.needs_deactivation {
+            let (domain, generation) = (self.staging.domain, self.staging.generation);
+            if let Err(error) = self
+                .staging
+                .writer_mut()
+                .and_then(|writer| writer.deactivate(domain, generation))
+            {
+                return Err(FileProtectionDetachError {
+                    errors: vec![format!("deactivate generation: {error}")],
+                    retry: self,
+                });
+            }
+            self.needs_deactivation = false;
+        }
+        let errors = self.staging.cleanup();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(FileProtectionDetachError {
+                errors,
+                retry: self,
+            })
+        }
+    }
+}
+
+impl<W: FileProtectionMapWriter> Drop for InactiveFileProtectionGeneration<W> {
+    fn drop(&mut self) {
+        if self.needs_deactivation {
+            log::error!(
+                "file protection detach retry {}:{} retained after drop",
+                self.staging.domain,
+                self.staging.generation.get()
+            );
+            let retained = take_staging(&mut self.staging);
+            // One failed owner is retained per drop; repeated failures are not process-lifetime bounded.
+            std::mem::forget(retained);
+        }
+    }
+}
+
+fn take_staging<W: FileProtectionMapWriter>(
+    staging: &mut FileProtectionStaging<W>,
+) -> FileProtectionStaging<W> {
+    FileProtectionStaging {
+        writer: staging.writer.take(),
+        domain: staging.domain,
+        generation: staging.generation,
+        limits: staging.limits,
+        roots: std::mem::take(&mut staging.roots),
+        directories: std::mem::take(&mut staging.directories),
+        stable_paths: std::mem::take(&mut staging.stable_paths),
+        slots: std::mem::take(&mut staging.slots),
+        targets: std::mem::take(&mut staging.targets),
     }
 }
 
