@@ -86,6 +86,14 @@
       "target": "aw-provider-semantic-arbiter/test/provider",
       "test": "preserve_overrides_allowance_without_model_call"
     },
+    "semantic-derived-identity": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "unenumerated_paths_get_a_derived_identity_usable_as_a_hard_constraint"
+    },
+    "semantic-task-capture": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "operator_task_capture_is_recorded_and_never_upgrades_the_ingress"
+    },
     "semantic-uncovered": {
       "target": "aw-provider-semantic-arbiter/test/provider",
       "test": "mismatches_missing_identity_and_unmapped_tools_are_uncovered"
@@ -1241,6 +1249,8 @@
       "semantic-candidate",
       "semantic-authority",
       "semantic-preserve",
+      "semantic-derived-identity",
+      "semantic-task-capture",
       "semantic-uncovered",
       "semantic-size",
       "semantic-errors",

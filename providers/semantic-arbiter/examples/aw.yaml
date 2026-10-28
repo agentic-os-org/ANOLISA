@@ -34,17 +34,20 @@ spec:
           session_id: synthetic-session
           version: task-v1
           text: Update the synthetic greeting, preserving the synthetic reference file.
-          allowed_resource_ids: [greeting]
-          preserve_resource_ids: [reference]
+          provenance:
+            source: user_prompt_verbatim
+            captured_by: synthetic-operator
+            captured_at_ms: 1700000000000
+            text_sha256: sha256:9a0389a1d4bee901bd97beb46425ecb2ee97f848f9e94b25cd206bef10136ba9
+          allowed_resource_ids: []
+          preserve_resource_ids: []
         adapter: qoder
         workspace_path: /absolute/synthetic-workspace
         workspace_id: synthetic-workspace
         tools:
           Edit: {operation: replace, path_pointer: /file_path}
           Write: {operation: replace, path_pointer: /file_path}
-        resources:
-          /absolute/synthetic-workspace/greeting.txt: greeting
-          /absolute/synthetic-workspace/reference.txt: reference
+        resources: {}
         model:
           config_revision: aw_request
           backend:

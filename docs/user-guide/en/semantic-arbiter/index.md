@@ -12,7 +12,7 @@ The complete target design covers six business scenarios: protect results, enfor
 |---|---|
 | **Implemented core** | Preservation/task-scope judgments, frozen inline evidence, bounded EvidenceSource collection, closed-scenario JudgmentUnit replacement, deterministic Outcome composition, consumer-side executor contracts, deterministic `check` and Noul model evaluation through Bailian/TypeSafe |
 | **Contract types/validation only** | Full `nop < allow < ask < block` CandidateControl vocabulary, wider Outcome types, Directive projection and receipt validation exist; current scenarios do not produce `ask` or wider actions |
-| **AW shadow Provider** | A separate Provider binds an explicit operator task to one session, retains complete mapped candidates and local records, and returns no execution effects |
+| **AW shadow Provider** | A separate Provider binds an explicit operator task to one session, records how that task text was captured, retains complete mapped candidates and local records, and returns no execution effects |
 | **Pending consumer integration** | Automatic task/history delivery, native admission and blocking, real Executors, native adoption verification, persistent production claims/audit and effect verification still require integration |
 | **External capability requires verification** | AgentSight, AW, ws-ckpt and native Adapter interfaces must be checked against target-version source and deployment behavior; historical capability inventories establish no support |
 

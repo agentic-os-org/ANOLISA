@@ -12,7 +12,7 @@
 |---|---|
 | **核心已实现** | 成果保护/任务范围判断、冻结内联证据、有界 EvidenceSource 采集、封闭场景 JudgmentUnit 替换、确定性 Outcome 组合、消费方侧 executor 契约、确定性 `check`，以及通过 Bailian/TypeSafe 进行 Noul 模型求值 |
 | **仅契约类型/校验** | 已有完整 `nop < allow < ask < block` CandidateControl 词汇、更完整的 Outcome 类型、Directive 投影和回执校验；当前场景不会产生 `ask` 或扩展动作 |
-| **AW 旁路 Provider** | 独立 Provider 将显式操作者任务绑定到一个会话，保留完整映射候选和本地记录，返回空执行效果 |
+| **AW 旁路 Provider** | 独立 Provider 将显式操作者任务绑定到一个会话，记录该任务原文的采集方式，保留完整映射候选和本地记录，返回空执行效果 |
 | **消费方集成待实现** | 自动任务/历史投递、原生准入与阻断、真实 Executor、原生采纳验证、生产级持久 claim/审计和效果核验仍需接入 |
 | **外部能力须核验** | AgentSight、AW、ws-ckpt 和原生 Adapter 接口须对照目标版本源码与部署行为核验；历史能力清单不能证明支持情况 |
 

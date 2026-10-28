@@ -14,11 +14,22 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 pub const KEY_ENV: &str = "SEMANTIC_PROVIDER_SYNTHETIC_TEST_KEY";
 pub const KEY: &str = "synthetic-only-not-a-real-credential";
 pub const BINARY: &str = env!("CARGO_BIN_EXE_aw-provider-semantic-arbiter");
+pub const TASK_TEXT: &str = "Update the synthetic greeting only.";
+
+/// Operator capture metadata an operator could reproduce with `sha256sum`.
+pub fn provenance(text: &str) -> Value {
+    let digest = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
+    json!({
+        "source":"user_prompt_verbatim", "captured_by":"synthetic-operator",
+        "captured_at_ms":1_700_000_000_000u64, "text_sha256":digest
+    })
+}
 
 pub struct Fixture {
     pub root: TempDir,
@@ -37,7 +48,8 @@ impl Fixture {
     pub fn config(&self, endpoint: &str) -> Value {
         json!({
             "version":1,
-            "task":{"session_id":"session/long+native", "version":"v1", "text":"Update the synthetic greeting only.",
+            "task":{"session_id":"session/long+native", "version":"v1", "text":TASK_TEXT,
+                "provenance":provenance(TASK_TEXT),
                 "allowed_resource_ids":["greeting"],"preserve_resource_ids":[]},
             "adapter":"qoder", "workspace_path":self.root.path(), "workspace_id":"synthetic-workspace",
             "tools":{"Write":{"operation":"replace","path_pointer":"/file_path"},

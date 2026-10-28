@@ -102,6 +102,7 @@ use std::time::Duration;
 
 use fixture::*;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 #[test]
 fn describe_and_offline_closed_config() {
@@ -153,6 +154,19 @@ fn invalid_config_and_duplicate_fields_are_sanitized() {
         ("/model/credential", json!("private-config-marker")),
         ("/model/config_revision", json!("unrelated")),
         ("/max_storage_bytes", json!(1)),
+        // The declared capture must match the text that would be judged, so
+        // editing either side alone is rejected before any evaluation.
+        (
+            "/task/text",
+            json!("Delete the synthetic reference instead."),
+        ),
+        (
+            "/task/provenance/text_sha256",
+            json!(format!("sha256:{}", "0".repeat(64))),
+        ),
+        ("/task/provenance/source", json!("native_transcript")),
+        ("/task/provenance/captured_by", json!("  ")),
+        ("/task/provenance/captured_at_ms", json!(0)),
         (
             "/model/backend/endpoint_url",
             json!("http://not-loopback.example/"),
@@ -224,6 +238,30 @@ fn full_candidate_normal_and_denial_never_emit_effects() {
             assert!(!String::from_utf8_lossy(&bytes).contains(KEY));
         }
     }
+}
+
+#[test]
+fn operator_task_capture_is_recorded_and_never_upgrades_the_ingress() {
+    let fixture = Fixture::new();
+    let server = Server::new("0.99", 200, Duration::ZERO);
+    let request = fixture.request(fixture.config(&server.endpoint));
+    let (_, diagnostic) = invoke(&fixture, request, true);
+    assert_eq!(diagnostic["code"], "shadow_evaluated");
+    let dir = fixture.records().pop().unwrap();
+    let task = read(&dir.join("05-task.json"));
+    let digest = format!("sha256:{:x}", Sha256::digest(TASK_TEXT.as_bytes()));
+    assert_eq!(task["source"], "user_prompt_verbatim");
+    assert_eq!(task["captured_by"], "synthetic-operator");
+    assert_eq!(task["captured_at_ms"], 1_700_000_000_000u64);
+    assert_eq!(task["declared_text_sha256"], digest);
+    assert_eq!(task["evaluated_text_sha256"], digest);
+    assert_eq!(task["text_bytes"], TASK_TEXT.len());
+    // A verbatim transcription is still operator ingress; it grants no authority.
+    assert_eq!(task["origin"], "operator");
+    assert!(task.get("text").is_none());
+    let evaluation = read(&dir.join("10-evaluation.json"));
+    assert_eq!(evaluation["task"]["text"], TASK_TEXT);
+    assert_eq!(evaluation["task"]["origin"], "operator");
 }
 
 #[test]
@@ -341,9 +379,21 @@ fn mismatches_missing_identity_and_unmapped_tools_are_uncovered() {
             json!({"file_path":"greeting.txt","content":"ok","other_path":"private.txt"}),
             "unsupported_input",
         ),
+        // A derived identity uses ':' as the separator and must satisfy the
+        // arbiter identifier charset, so these paths have no derived form.
         (
             "/event/tool/input/file_path",
-            json!("other.txt"),
+            json!("odd:name.txt"),
+            "unmapped_resource",
+        ),
+        (
+            "/event/tool/input/file_path",
+            json!("\u{4ea7}\u{7269}.txt"),
+            "unmapped_resource",
+        ),
+        (
+            "/event/tool/input/file_path",
+            json!("a".repeat(200)),
             "unmapped_resource",
         ),
         (
@@ -373,6 +423,35 @@ fn mismatches_missing_identity_and_unmapped_tools_are_uncovered() {
             "uncovered"
         );
         assert!(server.received.try_recv().is_err());
+    }
+}
+
+#[test]
+fn unenumerated_paths_get_a_derived_identity_usable_as_a_hard_constraint() {
+    let fixture = Fixture::new();
+    let server = Server::new("0.99", 200, Duration::ZERO);
+    let derived = "path:nested:report.txt";
+    for (allowed, preserve, code, status) in [
+        (vec![], vec![], "shadow_evaluated", "evaluated"),
+        (vec![derived], vec![], "shadow_evaluated", "evaluated"),
+        (vec![], vec![derived], "shadow_evaluated", "evaluated"),
+        (vec!["greeting"], vec![], "shadow_evaluated", "evaluated"),
+    ] {
+        let mut config = fixture.config(&server.endpoint);
+        config["resources"] = json!({});
+        config["task"]["allowed_resource_ids"] = json!(allowed);
+        config["task"]["preserve_resource_ids"] = json!(preserve);
+        let mut request = fixture.request(config);
+        request["event"]["tool"]["input"]["file_path"] = json!("nested/report.txt");
+        let (_, diagnostic) = invoke(&fixture, request, true);
+        assert_eq!(diagnostic["code"], code, "{allowed:?}/{preserve:?}");
+        let dir = fixture.records().pop().unwrap();
+        assert_eq!(read(&dir.join("40-result.json"))["status"], status);
+        let evaluation = read(&dir.join("10-evaluation.json"));
+        assert_eq!(evaluation["candidate"]["resource_id"], derived);
+        // Only an unconstrained or permitted identity reaches the model.
+        let asked = dir.join("20-model-request.json").exists();
+        assert_eq!(asked, preserve.is_empty() && allowed != vec!["greeting"]);
     }
 }
 
