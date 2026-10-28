@@ -95,8 +95,12 @@ GenAI 维护使用独立于采集投递与查询的连接。删除分成小批�
 采集写入或排队重试需要写锁时，维护不会再启动下一批删除，而是延后到后续调度轮次。
 
 开启定时维护时，trace 进程将 primary 和 GenAI 的 WAL checkpoint 交给该维护线程，避免在采集提交时触发。
-保留与容量检查之间约每秒执行一次 passive checkpoint；清理周期仍由 `check_interval_secs` 控制。
-SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动 WAL checkpoint。
+`runtime_limits.cpu_budget_percent=0` 时，保留与容量检查之间约每秒执行一次 passive checkpoint。
+启用非零 CPU 预算时，worker 每 20 ms 检查一次，并在 WAL 增长达到 1 MiB 或距上次 checkpoint 达到
+50 ms 时请求 passive checkpoint；清理轮次在有界操作之间让出执行权时也遵循该节奏。
+`check_interval_secs` 仍控制清理周期。容量清理只在一轮结束时尝试截断 WAL：达到 live page 目标，
+或已没有可淘汰记录时执行。SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动
+WAL checkpoint。
 
 开启 `runtime_limits.cpu_budget_percent` 后，primary 与 GenAI 清理会在有界操作之间让出执行权，
 并在后续调度继续。维护与采集投递共用 CPU 准入，既有保留和容量目标继续生效，但清理一轮可能耗时更长。

@@ -73,8 +73,7 @@ impl AgentSight {
                 let available = self
                     .runtime_limits
                     .pending_genai_max_bytes
-                    .saturating_sub(self.pending_genai.bytes)
-                    .min(self.runtime_limits.pending_genai_max_bytes / 2);
+                    .saturating_sub(self.pending_genai.bytes);
                 let count = self
                     .runtime_limits
                     .pending_genai_max_count
@@ -86,6 +85,8 @@ impl AgentSight {
                 result = rejected;
                 if self.completions.len() > 0 {
                     // Preserve FIFO and apply backpressure without bypassing pacing.
+                    let _timer =
+                        crate::runtime_metrics::StageTimer::start("completion_backpressure");
                     self.drain_one_completion(true);
                     continue;
                 }

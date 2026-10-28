@@ -18,6 +18,10 @@ pub struct AuditStore {
 }
 
 impl AuditStore {
+    /// Measure current live pages without copying or truncating the WAL.
+    pub(in crate::storage) fn live_bytes(&self) -> anyhow::Result<u64> {
+        Ok(crate::storage::checkpoint::live_bytes(&self.conn)?)
+    }
     /// Delete one expired row while a paced maintenance pass owns the writer.
     pub(in crate::storage) fn purge_expired_step(&self, cutoff_ns: u64) -> anyhow::Result<usize> {
         let sql = format!(
@@ -38,7 +42,7 @@ impl AuditStore {
 
     /// Copy WAL frames without waiting for the capture writer.
     pub(in crate::storage) fn checkpoint_passive(&self) -> anyhow::Result<CheckpointOutcome> {
-        Ok(agentsight_sqlite_lifecycle::checkpoint_passive(&self.conn)?)
+        Ok(crate::storage::checkpoint::passive(&self.conn, "primary")?)
     }
 
     /// Create a new AuditStore with default table name, automatically creating the table and indexes
@@ -292,7 +296,7 @@ impl AuditStore {
 
     /// Truncating WAL checkpoint used by size-based maintenance.
     pub fn checkpoint_outcome(&self) -> Result<CheckpointOutcome> {
-        checkpoint_truncate(&self.conn).map_err(Into::into)
+        crate::storage::checkpoint::truncate(&self.conn, "primary").map_err(Into::into)
     }
 
     /// Measures physical allocation and reusable freelist capacity.

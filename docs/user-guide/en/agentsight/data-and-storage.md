@@ -113,10 +113,13 @@ Maintenance yields before starting another delete batch while capture writes or 
 need the writer, and resumes on a later scheduled pass.
 
 When periodic maintenance is enabled, the trace process delegates primary and GenAI WAL checkpoints
-to that worker instead of triggering them on capture commits. Passive checkpoints run about once a
-second between retention/capacity checks; `check_interval_secs` still controls cleanup. SQLite's
-synchronous durability setting is unchanged. Disabling periodic maintenance retains automatic WAL
-checkpointing on capture connections.
+to that worker instead of triggering them on capture commits. With `runtime_limits.cpu_budget_percent=0`,
+passive checkpoints run about once a second between retention/capacity checks. With a nonzero CPU budget,
+the worker polls every 20 ms and requests a passive checkpoint after 1 MiB of WAL growth or 50 ms since
+the previous checkpoint, including while a cleanup pass is yielding between bounded operations.
+`check_interval_secs` still controls cleanup. A capacity pass attempts WAL truncation only at its boundary,
+after the live-page target is reached or no eligible rows remain. SQLite's synchronous durability setting
+is unchanged. Disabling periodic maintenance retains automatic WAL checkpointing on capture connections.
 
 With `runtime_limits.cpu_budget_percent` enabled, primary and GenAI cleanup yield between bounded
 operations and continue on later worker ticks. They share CPU admission with capture delivery;

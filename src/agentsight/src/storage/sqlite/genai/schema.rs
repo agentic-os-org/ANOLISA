@@ -259,6 +259,14 @@ impl GenAISqliteStore {
         measure_database(&self.db_path, &conn).map_err(Into::into)
     }
 
+    pub(super) fn live_bytes(&self) -> Result<u64, Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| format!("GenAI capacity measurement mutex poisoned: {error}"))?;
+        crate::storage::checkpoint::live_bytes(&conn).map_err(Into::into)
+    }
+
     #[cfg(test)]
     pub(super) fn get_total_db_size(&self) -> u64 {
         self.size_snapshot()
@@ -592,7 +600,7 @@ impl GenAISqliteStore {
             .conn
             .lock()
             .map_err(|error| format!("GenAI passive checkpoint mutex poisoned: {error}"))?;
-        agentsight_sqlite_lifecycle::checkpoint_passive(&conn).map_err(Into::into)
+        crate::storage::checkpoint::passive(&conn, "genai").map_err(Into::into)
     }
 
     pub(super) fn maintenance_checkpoint(
@@ -611,10 +619,10 @@ impl GenAISqliteStore {
             .map_err(|error| format!("GenAI maintenance mutex poisoned: {error}"))?;
         // Copy the bulk of the WAL without excluding the live writer. Only
         // attempt truncation after every frame was copied; its busy timeout is zero.
-        if agentsight_sqlite_lifecycle::checkpoint_passive(&conn)? == CheckpointOutcome::Busy {
+        if crate::storage::checkpoint::passive(&conn, "genai")? == CheckpointOutcome::Busy {
             return Ok(CheckpointOutcome::Busy);
         }
-        checkpoint_truncate(&conn).map_err(Into::into)
+        crate::storage::checkpoint::truncate(&conn, "genai").map_err(Into::into)
     }
 
     fn checkpoint_outcome(&self) -> Result<CheckpointOutcome, Box<dyn std::error::Error>> {
