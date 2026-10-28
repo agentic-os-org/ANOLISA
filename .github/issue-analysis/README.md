@@ -1,10 +1,20 @@
-# SecCore Issue source analysis
+# Component Issue source analysis
 
 Repository writers can analyze one Issue's title and body in
-`agentic-os-org/ANOLISA` against a frozen source snapshot, focusing on SecCore V2.
+`agentic-os-org/ANOLISA` against a frozen source snapshot using its component policy.
 Discussion comments are excluded from analysis. The workflow checks source
 references and priority rules, performs same-agent review, and produces a report.
 It does not execute the component, functional tests, or dynamic reproductions.
+
+## Component policies
+
+The shared engine is `.github/scripts/issue-analysis.js`. Component identity,
+paths, labels and triagers come from `.github/components.json`; source entrypoints
+and scope notes live in `.github/issue-analysis/components.json`. All public
+components have a profile. Internal components are excluded.
+The common policy is `policy.md`. Source-backed legacy V1 P3 classification is
+restricted to SecCore; other components use the captured GitHub priority rules.
+The existing SecCore workflow and script entrypoints delegate to this engine.
 
 ## Run the workflow manually
 

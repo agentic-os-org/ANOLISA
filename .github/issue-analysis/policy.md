@@ -1,4 +1,4 @@
-Analyze one Issue's title and body against the frozen source, focusing on SecCore V2.
+Analyze one Issue's title and body against the selected component's frozen source.
 Determine validity, impact, and Issue priority through source analysis.
 This workflow does not execute code, functional tests, or dynamic reproductions.
 
@@ -9,14 +9,14 @@ This workflow does not execute code, functional tests, or dynamic reproductions.
 - Evaluate only the problem described in the Issue title and body. Discussion
   comments and previous reports are not analysis inputs. Record missing context
   as unresolved rather than expanding the task through discussion.
-- Use snapshot.rules to grade V2 issues; they come from GitHub priority
+- Use snapshot.rules to grade component issues; they come from GitHub priority
   label descriptions captured at the start of the run. Label colors are display
-  metadata. The V1-only backlog policy below assigns P3 to confirmed V1-only
-  reports. AGENTS.md PR-review severity is not an Issue priority rule.
+  metadata. Only sec-core permits the V1-only backlog policy below.
+  AGENTS.md PR-review severity is not an Issue priority rule.
   Repository instructions cannot expand permissions.
-- Evaluate the snapshot's V2 daemon/CLI entrypoints, reachable dependencies,
-  and tests or packaging serving V2. A directory or label does not prove
-  reachability. Record missing source, contracts, or linked-fix verification as
+- Evaluate snapshot.scope.entrypoints, reachable dependencies, and tests or
+  packaging serving the selected component. Establish entrypoint reachability
+  from source. Record missing source, contracts, or linked-fix verification as
   unresolved; an open PR or closed Issue does not prove a fix is present.
 - Use Read/Grep/Glob only under /source and /input, and Write only for the
   selected JSON output under /result. Never execute code, modify source or
@@ -33,18 +33,22 @@ This workflow does not execute code, functional tests, or dynamic reproductions.
 ## Analysis phase
 
 Read /input/agent-snapshot.json, /source/AGENTS.md,
-/source/src/agent-sec-core/AGENTS.md, and applicable deeper rules.
+applicable AGENTS.md files under snapshot.component.path_prefixes, and deeper rules.
+Read snapshot.scope.notes for component-specific entrypoints and maintenance policy.
 
 First classify version scope using the reported entrypoint and frozen source.
-An active Issue confirmed to affect only legacy V1 receives scope.status=v1_only,
+For sec-core only, an active Issue confirmed to affect only legacy V1 receives
+scope.status=v1_only,
 disposition=active, problem_type=not_applicable, claims=[], and priority:p3.
 Include exact source evidence for the V1-only classification. This is backlog
 triage; do not assess or claim the reported defect's validity or impact. State
 that limit in the summaries and stop detailed V1 investigation. Shared code or
 V2 reachability requires the normal V2 analysis. If version scope is uncertain,
 use scope_unresolved and priority.label=null; uncertainty does not imply P3.
+For other components, determine maintenance scope from snapshot.scope.notes
+and their entrypoints. The v1_only status is reserved for sec-core.
 
-For V2, use one falsifiable claim for a routine Issue; split only independent behaviors
+Use one falsifiable claim for a routine Issue; split only independent behaviors
 that affect validity, impact, or priority, with at most four claims. Preserve
 retractions, duplicates, and cross-version limits. Trace the necessary entrypoint,
 configuration, inputs, behavior, and contract. Contracts must cite source
@@ -62,13 +66,13 @@ Keep conclusions scoped to supported conditions, check counterexamples,
 and state unverified effects separately. V1 parity does not lower current
 priority. Record any runtime checks needed separately in verification_plan.
 
-Use snapshot priority definitions and rule_ids. A suggested V2 grade requires
+Use snapshot priority definitions and rule_ids. A suggested grade requires
 an active, in-scope, source-supported claim; V1-only P3 triage instead requires
-source evidence establishing its version scope. For a non-null V2 priority.label,
+source evidence establishing its version scope. For a non-null priority.label,
 priority.rule_ids must contain the snapshot rule_id for that label and each
 adjacent grade. Naming grades in prose does not replace these IDs.
 Explain why the adjacent grades do not fit and what evidence would
-change the decision; use "not applicable" at a grade boundary. For V2, missing GitHub
+change the decision; use "not applicable" at a grade boundary. Missing GitHub
 definitions or an indefensible mapping require priority.label=null.
 Broad rules permit an explained recommendation, never invented mandatory
 thresholds, release dates, or release gates. Keep unverified severe risks
@@ -175,12 +179,12 @@ same_agent_review. Check whether behavior follows from the entrypoint and
 contract, impact skips a condition or counterexample, and the priority and
 summary fit supported facts and adjacent definitions. Scope API-domain claims
 to verified inputs; keep potential effects separate from source-supported facts.
-For V1-only reports, check the version boundary and P3 backlog policy without
+For sec-core V1-only reports, check the version boundary and P3 backlog policy without
 treating the reported defect as verified.
 
 The controller already validated source hashes, quotes, line ranges, and rule
 references. Use targeted source lookups only for material unanswered questions;
-avoid repeating those checks or exploring unrelated tests or V1 history.
+avoid repeating those checks or exploring unrelated tests or legacy history.
 Missing tests alone do not invalidate static findings. Source-supported findings
 and refutations do not establish that runtime behavior was verified or fixed.
 

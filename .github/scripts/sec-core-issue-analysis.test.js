@@ -337,6 +337,18 @@ test('accepts V1-only backlog triage with scope evidence and only P3', async (t)
   h.validate();
 });
 
+test('component identity and policy affect fingerprints and restrict V1 backlog grading', async (t) => {
+  const h = await prepared(t);
+  const fingerprint = analysis.inputFingerprint(h.snapshot);
+  h.snapshot.component = { ...h.snapshot.component, id: 'cosh-ng' };
+  assert.notEqual(analysis.inputFingerprint(h.snapshot), fingerprint);
+  h.result = v1OnlyResult(h);
+  assert.throws(h.validate, /restricted to SecCore/);
+  h.snapshot.component.id = 'sec-core';
+  h.snapshot.scope.policy_sha256 = 'changed-policy';
+  assert.notEqual(analysis.inputFingerprint(h.snapshot), fingerprint);
+});
+
 test('uses GitHub priority descriptions while ignoring label colors', async (t) => {
   const h = await prepared(t);
   const frozen = structuredClone(h.snapshot);
@@ -566,7 +578,7 @@ if (command === 'run') {
 });
 
 test('gives each model invocation one phase policy and one output schema', () => {
-  const policy = fs.readFileSync(path.join(__dirname, '../issue-analysis/sec-core.md'), 'utf8');
+  const policy = fs.readFileSync(path.join(__dirname, '../issue-analysis/policy.md'), 'utf8');
   const first = analysis.phasePolicy(policy, 'analysis');
   const second = analysis.phasePolicy(policy, 'review');
   assert.ok(first.includes('/result/analysis.json'));
