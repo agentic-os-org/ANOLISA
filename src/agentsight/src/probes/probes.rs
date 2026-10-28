@@ -305,6 +305,16 @@ impl Probes {
         Ok(())
     }
 
+    /// Complete deferred SSL scans without blocking event consumption.
+    pub(crate) fn poll_pending_ssl(&mut self) {
+        self.sslsniff.poll_pending_scans();
+    }
+
+    /// Share CPU admission with the bounded executable scan worker.
+    pub(crate) fn set_cpu_budget(&self, budget: Option<Arc<crate::utils::cpu_budget::CpuBudget>>) {
+        self.sslsniff.set_cpu_budget(budget);
+    }
+
     /// Start polling for events from the shared ring buffer
     ///
     /// A single background thread polls the shared ring buffer and dispatches
