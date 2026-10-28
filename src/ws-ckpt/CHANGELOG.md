@@ -2,6 +2,13 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## [0.6.1] - Unreleased
+
+### Changed
+
+- Install the runtime, host integrations and skill through separate RPMs.
+- Place the skill and host plugins in the shared ANOLISA resource directories.
+
 ## 0.6.0
 
 ### Added

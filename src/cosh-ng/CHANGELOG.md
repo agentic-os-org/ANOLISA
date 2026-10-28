@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.28.1] - Unreleased
+
+### Changed
+
+- Install prebuilt binaries and the bundled workflow skill with the component Makefile.
+
 ## [0.28.0] — 2026-10-25
 
 ### Added

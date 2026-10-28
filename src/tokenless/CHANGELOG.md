@@ -9,6 +9,13 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.2] - Unreleased
+
+### Changed
+
+- Choose the CLI and framework integrations separately using the core and plugins RPMs.
+- Use the selected installation paths for adapter registration and removal.
+
 ## [0.9.1] - 2026-10-29
 
 ### Fixed

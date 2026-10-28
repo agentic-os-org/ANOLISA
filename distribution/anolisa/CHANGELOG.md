@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.21] - Unreleased
+
+### Changed
+
+- Render Agent Memory MCP command paths for the selected installation layout.
+
 ## [0.3.20] - 2026-10-29
 
 ### Added

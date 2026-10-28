@@ -7,6 +7,23 @@
 本文档格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [0.2.13] - 未发布
+
+### 变更
+
+- 可通过 core 和 plugins RPM 分别选择安装记忆运行时与 OpenClaw 集成。
+- raw 安装根据所选二进制目录渲染 MCP 命令路径。
+
+### 修复
+
+- 当 embedding provider 在 TOML 中选定时，正确应用对应环境变量；切换 embedding 模型可能需要重建向量。
+- 避免已退役的 OpenClaw 插件实例在重载或销毁期间重新启动记忆 worker。
+- 同一次索引中，文本索引失败的文件不再发布新向量；后续成功扫描时重试。
+- `mem_edit` 在修改内容前拒绝互相重叠的歧义匹配。
+- `mem_export` 在扫描或读取失败时报告错误，不再静默生成不完整的归档。
+- `mem_promote` 或仅创建模式的 `mem_write` 失败后清理不完整目标，以便重试。
+- 恢复非空只读快照目录时保留其权限，并在重试前清理失败的暂存目录。
+
 ## [0.2.12] - 2026-10-28
 
 ### 修复

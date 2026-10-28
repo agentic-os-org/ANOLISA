@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - Unreleased
+
+### Fixed
+
+- Correct the ws-ckpt skill and adapter script paths in the local fallback documentation.
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

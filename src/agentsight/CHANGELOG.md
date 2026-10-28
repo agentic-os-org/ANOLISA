@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.15.1] - Unreleased
+
+### Changed
+
+- Choose the runtime and DSH integration separately using the core and plugins RPMs.
+
 ## 0.15.0
 
 ### Features

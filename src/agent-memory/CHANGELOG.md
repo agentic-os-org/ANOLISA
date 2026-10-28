@@ -7,6 +7,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.13] - Unreleased
+
+### Changed
+
+- Choose the memory runtime and OpenClaw integration separately using the core and plugins RPMs.
+- Raw installations render the MCP command for the selected binary directory.
+
+### Fixed
+
+- Honor configured embedding provider environment fields when the provider is selected in TOML; changing embedding models can require rebuilding vectors.
+- Prevent retired OpenClaw plugin instances from restarting their memory worker during reload or disposal.
+- Avoid publishing vectors for files whose text indexing failed in the same pass; a later successful scan retries them.
+- Reject overlapping ambiguous `mem_edit` matches before changing content.
+- Report `mem_export` scan or read errors instead of silently producing an incomplete archive.
+- Clean up incomplete destinations after failed `mem_promote` or create-only `mem_write` calls so they can be retried.
+- Restore nonempty read-only snapshot directories with their permissions intact and clean up failed staging before retry.
+
 ## [0.2.12] - 2026-10-28
 
 ### Fixed

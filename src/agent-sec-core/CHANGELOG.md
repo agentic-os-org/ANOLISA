@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - Unreleased
+
+### Changed
+
+- Install the security runtime, framework integrations and skills through separate RPMs.
+
 ## 1.1.1
 
 **Breaking Changes**
