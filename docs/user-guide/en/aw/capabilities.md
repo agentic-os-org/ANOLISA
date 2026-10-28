@@ -24,6 +24,29 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
 Qoder CLI has no failed-tool Post callback integration. See each Agent page for result types and callback limits.
 
+## 16 common Hooks
+
+Public Provider Hook status; see the matrix above for effects supported by each Adapter.
+
+| Hook | Status |
+| --- | --- |
+| `session.start` | Planned |
+| `input.submit` | Planned |
+| `tool.before` | Implemented |
+| `tool.after` | Implemented |
+| `permission.request` | Planned |
+| `compact.before` | Planned |
+| `compact.after` | Planned |
+| `subagent.start` | Planned |
+| `subagent.stop` | Planned |
+| `turn.stop` | Planned |
+| `session.end` | Planned |
+| `model.before_request` | Planned |
+| `runtime.observed` | Planned |
+| `runtime.exited` | Planned |
+| `security.violation` | Planned |
+| `coverage.changed` | Planned |
+
 ## MCP and policy updates
 
 | Entrypoint | Managed MCP | Idle policy updates |

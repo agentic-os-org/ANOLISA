@@ -167,6 +167,7 @@ after-event coverage are listed in the [native Agent reference](native-agents.md
 
 The configuration recognizes these 16 names. Public Provider dispatch currently
 covers only `tool.before` and `tool.after`; the other fourteen names are reserved.
+Implementation status is in the [16-Hook overview](../../../user-guide/en/aw/capabilities.md#16-common-hooks).
 See the [capability matrix](../../../user-guide/en/aw/capabilities.md#hook-support-matrix)
 for Adapter effect support.
 

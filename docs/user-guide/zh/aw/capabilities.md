@@ -24,6 +24,29 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
 Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点限制见各 Agent 页。
 
+## 16 个通用 Hook
+
+下表列出公共 Provider Hook 的实现状态，各 Adapter 的效果支持见上表。
+
+| Hook | 状态 |
+| --- | --- |
+| `session.start` | 规划中 |
+| `input.submit` | 规划中 |
+| `tool.before` | 已实现 |
+| `tool.after` | 已实现 |
+| `permission.request` | 规划中 |
+| `compact.before` | 规划中 |
+| `compact.after` | 规划中 |
+| `subagent.start` | 规划中 |
+| `subagent.stop` | 规划中 |
+| `turn.stop` | 规划中 |
+| `session.end` | 规划中 |
+| `model.before_request` | 规划中 |
+| `runtime.observed` | 规划中 |
+| `runtime.exited` | 规划中 |
+| `security.violation` | 规划中 |
+| `coverage.changed` | 规划中 |
+
 ## MCP 与策略更新
 
 | 入口 | 受管 MCP | 空闲策略更新 |
