@@ -314,13 +314,18 @@ fn load_all_tasks(svc: &MemoryService) -> Result<Vec<Task>> {
 }
 
 /// Save a task to the tasks/ directory.
-fn save_task(svc: &MemoryService, task: &Task) -> Result<()> {
-    // Single write chokepoint: `task.id` is caller-supplied on create, but on
-    // the update path it is re-parsed from the file's frontmatter (see
-    // `parse_task`), and `tasks/` is writable through `mem_write` — a planted
-    // `id: ../../…` would otherwise escape the mount. Enforce the same
-    // charset rule here that `memory_task_save` applies to caller ids.
-    validate_task_id(&task.id)?;
+///
+/// This is the single write chokepoint. The caller must pass the *authoritative*
+/// id — the one it already validated — rather than a value re-parsed from the
+/// file's frontmatter. `tasks/` is writable through `mem_write`, so a planted
+/// `id: ../../…` in the body of an existing task file must never reach the
+/// filesystem as a path component. We re-validate and re-pin `task.id` here so
+/// the write always lands on `<root>/tasks/<authoritative_id>.md`, inside the
+/// mount, no matter what the frontmatter carries (the close path is the one
+/// caller that still parses an id from the file before saving).
+fn save_task(svc: &MemoryService, authoritative_id: &str, task: &mut Task) -> Result<()> {
+    validate_task_id(authoritative_id)?;
+    task.id = authoritative_id.to_string();
     let dir = svc.mount.root.join(TASKS_DIR);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.md", task.id));
@@ -448,7 +453,12 @@ pub fn memory_task_save(
     }
 
     task.updated_at = now;
-    save_task(svc, &task)?;
+    // The write is keyed on `task.id`, which is already the caller-validated id
+    // (explicit id, or the freshly generated one) — never the parsed frontmatter.
+    // Clone it out first so the immutable field borrow doesn't collide with the
+    // mutable borrow of `task` that `save_task` now takes.
+    let save_id = task.id.clone();
+    save_task(svc, &save_id, &mut task)?;
 
     svc.audit_log(
         AuditEntry::new("memory_task_save")
@@ -579,7 +589,10 @@ pub fn memory_task_close(svc: &MemoryService, id: &str, reason: Option<&str>) ->
         task.context.push_str(&format!("**Closed**: {}\n", r));
     }
 
-    save_task(svc, &task)?;
+    // Key the close write on the caller-validated id, never on a frontmatter id
+    // that a planted file could carry — otherwise a valid planted `id:` would
+    // redirect the write to a different file (leaving the caller's task open).
+    save_task(svc, id, &mut task)?;
 
     svc.audit_log(
         AuditEntry::new("memory_task_close")
@@ -849,12 +862,12 @@ mod tests {
     }
 
     #[test]
-    fn task_save_rejects_an_id_parsed_from_a_planted_frontmatter() {
+    fn task_save_pins_the_write_to_the_caller_id_when_the_frontmatter_is_planted() {
         let (_tmp, svc) = setup();
         // `tasks/` is writable through `mem_write` (it is not a reserved
         // first segment), so a planted file whose frontmatter carries a
         // traversal id must not turn memory_task_save into a write outside
-        // the mount.
+        // the mount. The save chokepoint keys the write on the caller id.
         let tasks_dir = svc.mount.root.join(TASKS_DIR);
         std::fs::create_dir_all(&tasks_dir).unwrap();
         std::fs::write(
@@ -863,7 +876,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = memory_task_save(
+        // Saving with the caller id "pwn" must succeed and write inside the mount.
+        memory_task_save(
             &svc,
             "t",
             None,
@@ -875,13 +889,49 @@ mod tests {
             None,
             Some("pwn"),
         )
-        .unwrap_err();
+        .unwrap();
+
+        // The frontmatter id self-heals to the caller id, proving the write was
+        // keyed on "pwn" and not the planted traversal id.
+        let md = std::fs::read_to_string(tasks_dir.join("pwn.md")).unwrap();
+        assert!(md.contains("id: pwn"), "frontmatter must self-heal: {md}");
+        // The traversal target the unpinned code would have written is never created.
+        let escape = svc
+            .mount
+            .root
+            .join(TASKS_DIR)
+            .join(format!("{}.md", "../../../../outside"));
         assert!(
-            matches!(err, MemoryError::InvalidArgument(_)),
-            "expected InvalidArgument for the parsed traversal id, got {err:?}"
+            !escape.exists(),
+            "nothing may land outside the mount: {escape:?}"
         );
-        // Nothing may land outside the mount root.
-        assert!(!svc.mount.root.join("../outside.md").exists());
+    }
+
+    #[test]
+    fn task_close_keys_the_write_to_the_caller_id_not_the_frontmatter() {
+        let (_tmp, svc) = setup();
+        let tasks_dir = svc.mount.root.join(TASKS_DIR);
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        // A planted, charset-valid frontmatter id must not redirect the close write.
+        std::fs::write(
+            tasks_dir.join("a.md"),
+            "---\nid: b\ntitle: original\nstatus: in-progress\nprogress: 0\ncreated_at: x\nupdated_at: x\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        memory_task_close(&svc, "a", None).unwrap();
+
+        // The caller-id file is the one that gets closed...
+        let a = std::fs::read_to_string(tasks_dir.join("a.md")).unwrap();
+        assert!(
+            a.contains("status: done"),
+            "the caller-id file must be updated: {a}"
+        );
+        // ...and the planted frontmatter id must not redirect the write.
+        assert!(
+            !tasks_dir.join("b.md").exists(),
+            "the frontmatter id must not redirect the close write"
+        );
     }
 
     #[test]
@@ -911,7 +961,12 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(tasks_dir.join("a.md")).unwrap();
-        assert!(content.contains("updated"), "{content}");
+        // The title was actually updated — not just the pre-existing `updated_at`
+        // substring — and the write went to the caller-id file, not the frontmatter id.
+        assert!(
+            content.contains("title: \"updated\""),
+            "the caller-id file title must be updated: {content}"
+        );
         assert!(
             !tasks_dir.join("b.md").exists(),
             "the frontmatter id must not redirect the write"
