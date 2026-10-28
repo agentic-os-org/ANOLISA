@@ -22,6 +22,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
+    ErrInvalidManifestPath,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigInvalid,
@@ -299,6 +300,13 @@ def verify_manifest_hashes(skill_dir: str, manifest: dict, skill_name: str) -> N
     for file_entry in manifest.get("files", []):
         rel_path = file_entry["path"]
         expected_hash = file_entry["hash"]
+
+        # Reject path traversal: absolute paths or parent-directory components
+        # could escape skill_dir and read arbitrary files outside the skill.
+        rel = Path(rel_path)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ErrInvalidManifestPath(skill_name, rel_path)
+
         manifest_paths.add(rel_path)
 
         full_path = os.path.join(skill_dir, rel_path)

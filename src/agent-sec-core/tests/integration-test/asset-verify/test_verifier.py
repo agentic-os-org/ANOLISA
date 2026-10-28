@@ -26,6 +26,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
+    ErrInvalidManifestPath,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigMissing,
@@ -119,6 +120,21 @@ class TestVerifyManifestHashes(unittest.TestCase):
 
         manifest = {"files": [{"path": "main.py", "hash": self.file_hash}]}
         verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+    def test_absolute_path_rejected(self):
+        manifest = {"files": [{"path": "/etc/passwd", "hash": "somehash"}]}
+        with self.assertRaises(ErrInvalidManifestPath):
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+    def test_parent_dir_path_rejected(self):
+        manifest = {"files": [{"path": "../outside.py", "hash": "somehash"}]}
+        with self.assertRaises(ErrInvalidManifestPath):
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+    def test_nested_parent_dir_path_rejected(self):
+        manifest = {"files": [{"path": "sub/../../outside.py", "hash": "somehash"}]}
+        with self.assertRaises(ErrInvalidManifestPath):
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
 
 
 class TestVerifySkill(unittest.TestCase):

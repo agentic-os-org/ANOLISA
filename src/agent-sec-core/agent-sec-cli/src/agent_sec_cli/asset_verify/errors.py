@@ -56,6 +56,16 @@ class ErrUnexpectedFile(SkillVerifyError):
         )
 
 
+class ErrInvalidManifestPath(SkillVerifyError):
+    code = 15
+
+    def __init__(self, skill_name: str, file_path: str) -> None:
+        super().__init__(
+            f"ERR_INVALID_MANIFEST_PATH: Path '{file_path}' in manifest for "
+            f"'{skill_name}' escapes the skill directory"
+        )
+
+
 class ErrConfigMissing(SkillVerifyError):
     code = 20
 
