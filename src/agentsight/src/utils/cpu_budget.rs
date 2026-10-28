@@ -14,6 +14,8 @@ pub(crate) enum WorkClass {
     Capture,
     /// Perform one resumable retention or checkpoint operation.
     Maintenance,
+    /// Inspect executable windows away from the capture event consumer.
+    Probe,
 }
 
 impl WorkClass {
@@ -21,6 +23,7 @@ impl WorkClass {
         match self {
             Self::Capture => "capture",
             Self::Maintenance => "maintenance",
+            Self::Probe => "probe",
         }
     }
 }
