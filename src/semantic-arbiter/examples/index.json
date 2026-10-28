@@ -101,7 +101,20 @@
           {"unit": "task_scope", "value": "outside_scope", "confidence_ppm": 1000000, "reason": "outside_scope", "evidence_refs": []}
         ]
       },
-      "rationale": "Synthetic free-text mention of a resource cannot extend the structured allowed resource set."
+      "rationale": "Synthetic free-text mention of a resource cannot extend a declared allowed resource set."
+    },
+    {
+      "case_id": "no-ceiling",
+      "request": "no-ceiling.json",
+      "expected": {
+        "candidate_control": "allow",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": ["rebuild-1"]},
+          {"unit": "task_scope", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic omitted resource lists declare no ceiling, so neither unit is decided by enumeration."
     },
     {
       "case_id": "timeout",

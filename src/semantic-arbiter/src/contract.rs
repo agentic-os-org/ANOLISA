@@ -42,11 +42,11 @@ pub struct Task {
     pub version: String,
     /// Consumer-verified ingress, synthetic in check fixtures.
     pub origin: TaskOrigin,
-    /// Task text retained for later semantic units, not interpreted by check.
+    /// Authoritative task text; the semantic units judge against it.
     pub text: String,
-    /// Opaque resources explicitly permitted for this operation.
+    /// Optional ceiling: when non-empty, every omitted resource is out of scope.
     pub allowed_resource_ids: Vec<String>,
-    /// Resources which must remain unchanged, overriding allowances.
+    /// Optional retention limit overriding allowances; checked before any unit.
     pub preserve_resource_ids: Vec<String>,
 }
 
@@ -145,7 +145,7 @@ fn canonical_json(
 pub enum Scenario {
     /// Protect existing results.
     Preservation,
-    /// Enforce explicit task scope.
+    /// Keep an operation within the authoritative task.
     TaskScope,
 }
 
@@ -223,7 +223,7 @@ pub enum Reason {
     Preserved,
     /// Unique results require a confirmed recovery point before execution.
     NeedsSnapshot,
-    /// Task does not explicitly permit this resource.
+    /// A declared allowance omits this resource, or a unit judged it out of scope.
     OutsideScope,
     /// No authoritative task was supplied.
     MissingTask,

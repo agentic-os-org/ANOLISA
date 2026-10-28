@@ -19,7 +19,7 @@
 | 业务场景 | 目的 | 目标输出 | 可用范围 |
 |---|---|---|---|
 | 成果保护 | 保留必需版本；修改前保护独有成果 | `allow` 配合 `audit`，独有成果另加 `snapshot`；要求保留或证明不可用时 `block` | 核心已实现：`preservation`；执行待接入 |
-| 任务范围 | 检查任务意图、允许资源与提供的原生参数 | `allow/block` 配合 `audit`；未来确定性审批规则在接入后可产生 `ask` | 核心已实现：`task_scope`，资源 `replace/delete` 可附完整原生参数；AW 观测支持显式映射的单资源工具 |
+| 任务范围 | 检查权威任务原文、可选资源限制与提供的原生参数 | `allow/block` 配合 `audit`；未来确定性审批规则在接入后可产生 `ask` | 核心已实现：`task_scope`，资源 `replace/delete` 可附完整原生参数；AW 观测支持显式映射的单资源工具 |
 | 上下文补给 | 查找缺失的 skill、记忆或其他已审核材料 | `retrieve_skill/retrieve_memory`、`inject_context`、`audit`；候选处置取决于交付路径 | 场景和集成待实现 |
 | 状态诊断 | 判断故障、资源压力和任务进展；请求协助 | `diagnose`、`notify`、`audit`；后续候选可能需要 `ask` | 场景和集成待实现 |
 | 安全响应 | 判断事件可信度并控制受影响主体 | 执行前 `block`；`freeze/quarantine/kill` 配合 `audit`，可附加 `notify` | 场景和集成待实现 |
@@ -84,7 +84,7 @@ cargo run --example evidence_source
 
 ### 完整原生候选
 
-消费方可在 `candidate.native_tool` 中提供非空白 `name`（最多 128 个 UTF-8 字节）和完整的 `input` JSON 对象（紧凑 JSON 最多 65536 字节）。整个请求仍受 262144 字节上限约束，不能通过截断输入满足限制。原生工具名和参数是不可信数据，不授予权限，也不替代结构化资源上限。`task-scope-v2` 问题会考虑所有提供的参数。
+消费方可在 `candidate.native_tool` 中提供非空白 `name`（最多 128 个 UTF-8 字节）和完整的 `input` JSON 对象（紧凑 JSON 最多 65536 字节）。整个请求仍受 262144 字节上限约束，不能通过截断输入满足限制。原生工具名和参数是不可信数据，不授予权限，也不替代已声明的资源上限。`task-scope-v3` 问题会考虑所有提供的参数。
 
 存在 `native_tool` 时，`binding.candidate_revision` 必须等于公共 Rust API `contract::candidate_revision(&candidate)` 的结果。该函数对完整候选使用递归对象键排序、紧凑 JSON 和域 `semantic-arbiter/v1alpha1\0candidate\0` 计算摘要。操作、资源、工具名或参数变化都需要新的版本及匹配的证据绑定。两个判定命令均拒绝嵌套重复 JSON 键。不携带原生数据的请求保留现有候选版本格式和输入摘要。
 
@@ -146,10 +146,10 @@ printf 'semantic-arbiter exit: %s\n' "$status"
 
 | 场景 | 问题与判定 |
 |---|---|
-| `preservation` | 任务意图是否要求资源保持不变？yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留本地重建结果：相同字节为 `allow`，独有成果为 `needs_snapshot` |
-| `task_scope` | 候选操作是否符合任务意图？yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
+| `preservation` | 权威任务原文是否要求资源保持不变？yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留本地重建结果：相同字节为 `allow`，独有成果为 `needs_snapshot` |
+| `task_scope` | 完整候选是否符合权威任务原文？yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
 
-`evaluate` 复用确定性硬门禁。结构化保留要求、允许资源上限、任务/证明缺失和覆盖缺口保持约束力，硬阻断保持 `block`。最多发起一次合并后端调用；没有满足条件的单元时不调用。CLI 使用内置单元注册表和固定组合。库消费方可以通过 `Evaluator::with_units` 传入经过审核的封闭场景注册表；该能力不改变线协议接受的场景或协议版本。
+`evaluate` 复用确定性硬门禁。已声明的保留要求与允许上限、任务/证明缺失和覆盖缺口保持约束力，硬阻断保持 `block`。资源列表为空表示未声明限制，所有单元都会交给模型；此时答案缺失或失败的结果是 `unknown` 与候选 `nop`，而不是隐式拒绝。需要 fail-closed 范围约束时请声明非空允许列表。最多发起一次合并后端调用；没有满足条件的单元时不调用。CLI 使用内置单元注册表和固定组合。库消费方可以通过 `Evaluator::with_units` 传入经过审核的封闭场景注册表；该能力不改变线协议接受的场景或协议版本。
 
 检查以下响应字段：
 
