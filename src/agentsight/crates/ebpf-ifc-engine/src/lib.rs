@@ -26,6 +26,7 @@ use aya::{Btf, Ebpf, EbpfLoader};
 pub mod capability;
 mod file_protection_generation;
 mod file_protection_map_writer;
+mod file_protection_pinned_maps;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
@@ -40,6 +41,7 @@ pub use file_protection_map_writer::{
     FileProtectionTargetValue, TreeGuard, TreePathIdentity, FILE_PROTECTION_MAP_CAPACITY,
     FILE_PROTECTION_MAX_TARGETS, FILE_PROTECTION_NAME_MAX,
 };
+pub use file_protection_pinned_maps::PinnedFileProtectionMaps;
 
 const BPF_ANY: u64 = 0;
 const BPF_NOEXIST: u64 = 1;
@@ -2886,6 +2888,40 @@ impl PinnedEngine {
             ignore_missing_remove(guard.remove(&key), "clear inode guard")?;
         }
         Ok(())
+    }
+
+    pub fn clear_file_protection_generations(&self) -> io::Result<()> {
+        let domains = self.clear_policy_map::<u32, PolicyDomainVal>("te_policy_domains");
+        if let Err(error) = domains {
+            return Err(err(format!(
+                "deactivate stale structured file-protection domains: {error}"
+            )));
+        }
+        let errors: Vec<_> = [
+            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_roots"),
+            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_dirs"),
+            self.clear_policy_map::<TreePathKey, PolicyStableVal>("te_policy_stable"),
+            self.clear_policy_map::<PolicySlotKey, PolicySlotVal>("te_policy_slots"),
+            self.clear_policy_map::<PolicyTargetKey, PolicyTargetVal>("te_policy_targets"),
+        ]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.to_string())
+        .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(err(errors.join("; ")))
+        }
+    }
+
+    fn clear_policy_map<K: aya::Pod + Copy, V: aya::Pod + Copy>(
+        &self,
+        name: &str,
+    ) -> io::Result<()> {
+        let data = pinned_map_data(&self.paths, name)?;
+        let fd = dup_cloexec_fd(data.fd().as_fd().as_raw_fd())?;
+        clear_hash_map::<K, V>(&fd, name)
     }
 
     /// Registers a policy path only within its owning domain.
