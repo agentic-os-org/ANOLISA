@@ -280,7 +280,7 @@ substring-search fallback.
 | `memory_get_context` | — | `max_tokens` (default 2048) | markdown preview of recently modified files; each entry has `suspicious` |
 | `memory_sessions` | — | `limit` (default 10) | historical session list |
 | `memory_timeline` | `session_id` | `limit` (default 50) | tool-call timeline for a specific session |
-| `mem_index_refresh` | — | — | force-rebuild the FTS5 index |
+| `mem_index_refresh` | — | — | refresh the MEMORY.md directory index |
 
 ### Tier C — governance & versioning (7)
 
@@ -442,7 +442,7 @@ BM25 + dense vector hybrid retrieval, fused via RRF (Reciprocal Rank Fusion, k=6
 | Provider | Configuration | Notes |
 |----------|---------|------|
 | OpenAI | `MEMORY_EMBEDDING_BACKEND=openai` + `OPENAI_API_KEY` | calls OpenAI Embeddings API |
-| Ollama | `MEMORY_EMBEDDING_BACKEND=ollama` + `OLLAMA_BASE_URL` | local Ollama instance |
+| Ollama | `MEMORY_EMBEDDING_BACKEND=ollama` + `MEMORY_OLLAMA_BASE_URL` | local Ollama instance |
 
 `memory_search` supports `mode`: `bm25` (default) / `vector` (cosine similarity) / `hybrid` (RRF fusion). Without embedding config, `vector`/`hybrid` auto-degrade to BM25 — no error.
 
@@ -547,6 +547,7 @@ Every config key has a matching `MEMORY_*` env var. Priority: **env > config.tom
 | `MEMORY_EMBEDDING_BACKEND` | embedding backend (none/openai/ollama) | none |
 | `MEMORY_OPENAI_API_KEY` | OpenAI API key (falls back to `OPENAI_API_KEY`) | — |
 | `MEMORY_OPENAI_MODEL` | OpenAI embedding model | text-embedding-3-small |
+| `MEMORY_OPENAI_BASE_URL` | OpenAI-compatible base URL | https://api.openai.com |
 | `MEMORY_OLLAMA_MODEL` | Ollama embedding model | nomic-embed-text |
 | `MEMORY_OLLAMA_BASE_URL` | Ollama base URL | http://localhost:11434 |
 | `MEMORY_CONSOLIDATION_ENABLED` | enable auto consolidation | true |
@@ -580,6 +581,36 @@ leave the memory slot loaded while every one of those calls came back
 `METHOD_NOT_FOUND`, so the adapter fails at boot and says why instead.
 
 ### Embedding config
+
+When `backend` is selected in TOML, leave `MEMORY_EMBEDDING_BACKEND` unset
+to retain that provider's file settings. Its `MEMORY_OPENAI_*` or
+`MEMORY_OLLAMA_*` variables override only the fields supplied; for example,
+`MEMORY_OPENAI_API_KEY` supplies the key without repeating the backend selector.
+Direct server use still falls back to `OPENAI_API_KEY` when the effective key is
+empty; the OpenClaw adapter forwards the prefixed variable, not that generic one.
+Setting `MEMORY_EMBEDDING_BACKEND` explicitly retains its existing behavior:
+provider fields come from environment variables or provider defaults, rather
+than inheriting TOML values. Field variables alone do not activate a backend
+configured as `none`.
+
+Unset means the variable is absent: remove `MEMORY_EMBEDDING_BACKEND` from the
+environment rather than setting it to `""`. An empty or unknown selector keeps
+the TOML configuration and ignores provider field overrides. Empty field values
+are supplied overrides and replace the corresponding TOML values. In particular,
+`MEMORY_OPENAI_API_KEY=""` clears a file key, then uses the generic-key fallback
+or leaves embedding disabled. An empty model name can cause request failures.
+`MEMORY_OPENAI_BASE_URL=""` selects the public `https://api.openai.com` default,
+not the TOML endpoint, so requests use that public endpoint instead of a
+file-configured proxy. `MEMORY_OLLAMA_BASE_URL=""` leaves the endpoint empty and
+requests fail URL construction. Remove a field variable to keep its file value.
+
+Keep a populated index on the model that produced its vectors until you have a
+controlled re-embedding plan; different models can have incompatible semantics
+even with equal dimensions. Restarting does not re-embed existing vectors, and
+`mem_index_refresh` only refreshes the `MEMORY.md` directory index. The proposed
+[dimension-change recovery](https://github.com/agentic-os-org/ANOLISA/pull/4077)
+is tracked separately and is not implemented by this configuration fix. Restoring
+the old model setting does not undo vectors already produced with a new model.
 
 ```toml
 [memory.embedding]

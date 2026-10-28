@@ -262,7 +262,7 @@ procfs 和容纳完整新内容的空闲空间。临时文件位于 `.anolisa/` 
 | `memory_get_context` | — | `max_tokens`（默认 2048） | 最近修改文件的 markdown 预览，每条含 `suspicious` |
 | `memory_sessions` | — | `limit`（默认 10） | 历史会话列表 |
 | `memory_timeline` | `session_id` | `limit`（默认 50） | 指定会话的工具调用时间线 |
-| `mem_index_refresh` | — | — | 强制重建 FTS5 索引 |
+| `mem_index_refresh` | — | — | 刷新 MEMORY.md 目录索引 |
 
 ### Tier C — 治理与版本（7 个）
 
@@ -415,7 +415,7 @@ BM25 + 稠密向量混合检索，通过 RRF（Reciprocal Rank Fusion, k=60）�
 | Provider | 配置方式 | 说明 |
 |----------|---------|------|
 | OpenAI | `MEMORY_EMBEDDING_BACKEND=openai` + `OPENAI_API_KEY` | 调用 OpenAI Embeddings API |
-| Ollama | `MEMORY_EMBEDDING_BACKEND=ollama` + `OLLAMA_BASE_URL` | 本地 Ollama 实例 |
+| Ollama | `MEMORY_EMBEDDING_BACKEND=ollama` + `MEMORY_OLLAMA_BASE_URL` | 本地 Ollama 实例 |
 
 `memory_search` 支持 `mode` 参数：`bm25`（默认）/ `vector`（余弦相似度）/ `hybrid`（RRF 融合）。未配置 embedding 时 `vector`/`hybrid` 自动降级为 BM25，不报错。
 
@@ -518,6 +518,7 @@ conflict_bm25_threshold = -2.0
 | `MEMORY_EMBEDDING_BACKEND` | embedding 后端（none/openai/ollama） | none |
 | `MEMORY_OPENAI_API_KEY` | OpenAI API key（空时回退 `OPENAI_API_KEY`） | — |
 | `MEMORY_OPENAI_MODEL` | OpenAI embedding 模型 | text-embedding-3-small |
+| `MEMORY_OPENAI_BASE_URL` | OpenAI 兼容服务地址 | https://api.openai.com |
 | `MEMORY_OLLAMA_MODEL` | Ollama embedding 模型 | nomic-embed-text |
 | `MEMORY_OLLAMA_BASE_URL` | Ollama base URL | http://localhost:11434 |
 | `MEMORY_CONSOLIDATION_ENABLED` | 启用自动 consolidation | true |
@@ -548,6 +549,28 @@ Profile 是 UX 提示而非安全边界，但在 `tools/list` 和 `tools/call` �
 在启动时失败并说明原因。
 
 ### Embedding 配置
+
+在 TOML 中选择 `backend` 后，可不设置 `MEMORY_EMBEDDING_BACKEND`，从而保留该
+provider 的文件配置。对应的 `MEMORY_OPENAI_*` 或 `MEMORY_OLLAMA_*` 变量只覆盖
+已提供的字段；例如只需设置 `MEMORY_OPENAI_API_KEY` 即可提供密钥，无需重复选择后端。
+直接运行服务时，有效密钥为空仍会回退到 `OPENAI_API_KEY`；OpenClaw 适配器转发
+带前缀的变量，不转发这个通用变量。显式设置 `MEMORY_EMBEDDING_BACKEND` 时保留
+原有行为：provider 字段来自环境变量或 provider 默认值，不继承 TOML 中的值。
+仅设置字段变量不会激活原本配置为 `none` 的后端。
+
+未设置是指变量不存在：请从环境中移除 `MEMORY_EMBEDDING_BACKEND`，而不是将其设为
+`""`。空值或未知后端选择器会保留 TOML 配置，并忽略 provider 字段覆盖。字段变量的
+空字符串仍属于已提供的覆盖值，会替换对应的 TOML 值。例如，`MEMORY_OPENAI_API_KEY=""`
+会清除文件中的密钥，随后使用通用密钥回退，或让 embedding 保持禁用。空模型名可能导致
+请求失败。`MEMORY_OPENAI_BASE_URL=""` 会选择公共默认地址 `https://api.openai.com`，
+而不是 TOML 中的地址，因此请求会发往公共服务而非文件中配置的代理。
+`MEMORY_OLLAMA_BASE_URL=""` 会让服务地址保持为空，请求构造 URL 时失败。
+若要保留文件中的字段值，请移除对应环境变量。
+
+在准备好受控的重新嵌入方案前，已有索引应继续使用生成其向量的模型；即使维度相同，不同
+模型的向量语义也可能不兼容。重启不会重新嵌入已有向量，`mem_index_refresh` 也只刷新
+`MEMORY.md` 目录索引。[维度变化恢复方案](https://github.com/agentic-os-org/ANOLISA/pull/4077)
+另行跟踪，本次配置修复不实现该能力。恢复旧模型设置也不会撤销已经使用新模型生成的向量。
 
 ```toml
 [memory.embedding]

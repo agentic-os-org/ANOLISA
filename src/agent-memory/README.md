@@ -119,6 +119,11 @@ For single-line list entries, `memory_summary` concept and file rankings remain
 available after a `mem_export` / `mem_import` round trip, including literal commas.
 Import replaces ASCII control characters in frontmatter, including newlines, with spaces.
 
+Embedding providers selected in TOML also accept their `MEMORY_OPENAI_*` or
+`MEMORY_OLLAMA_*` field overrides without repeating the backend selector. See
+the [configuration guide](../../docs/user-guide/en/agent-memory/index.md)
+for credential precedence and model-change indexing limits.
+
 ## Architecture
 
 Single-process Tokio async runtime exposing 38 MCP tools over stdio JSON-RPC 2.0:

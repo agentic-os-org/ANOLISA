@@ -78,6 +78,10 @@ OpenClaw 自动记录通过 `memory_capture` 在写入前检查当前采集授�
 对于单行列表条目，`memory_summary` 的概念和文件排名在 `mem_export` / `mem_import`
 往返后仍然可用，包括名称中含逗号的条目。导入时会将 frontmatter 中的换行等 ASCII 控制字符替换为空格。
 
+在 TOML 中选择 embedding provider 后，无需重复设置后端环境变量，也可使用对应的
+`MEMORY_OPENAI_*` 或 `MEMORY_OLLAMA_*` 字段覆盖。密钥优先级和模型变更时的索引限制
+见[配置指南](../../docs/user-guide/zh/agent-memory/index.md)。
+
 ## 架构
 
 单进程 Tokio 异步运行时，通过 stdio JSON-RPC 2.0 暴露 38 个 MCP 工具：
