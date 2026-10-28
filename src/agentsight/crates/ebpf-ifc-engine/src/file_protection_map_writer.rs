@@ -64,19 +64,46 @@ impl FileProtectionSlot {
     /// Builds a verifier-compatible exact slot key.
     pub fn new(parent: TreePathIdentity, name: &str) -> io::Result<Self> {
         let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.len() > FILE_PROTECTION_NAME_MAX || bytes.contains(&0) {
+        if bytes.len() > FILE_PROTECTION_NAME_MAX {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "file protection basename must be 1..=255 NUL-free bytes",
+                "file protection basename exceeds 255 bytes",
             ));
         }
         let mut stored = [0; FILE_PROTECTION_NAME_MAX + 1];
         stored[..bytes.len()].copy_from_slice(bytes);
-        Ok(Self {
+        let slot = Self {
             parent,
             name: stored,
             name_len: bytes.len() as u32,
-        })
+        };
+        slot.validate()?;
+        Ok(slot)
+    }
+
+    /// Rejects malformed public-field keys before they reach a map writer.
+    pub(crate) fn validate(&self) -> io::Result<()> {
+        if !(1..=FILE_PROTECTION_NAME_MAX as u32).contains(&self.name_len) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file protection basename length must be 1..=255",
+            ));
+        }
+        let name = &self.name[..self.name_len as usize];
+        if name.contains(&0)
+            || name.contains(&b'/')
+            || name == b"."
+            || name == b".."
+            || self.name[self.name_len as usize..]
+                .iter()
+                .any(|byte| *byte != 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file protection basename must be a NUL-free component with a zeroed tail",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -300,9 +327,16 @@ mod tests {
                 .name_len as usize,
             FILE_PROTECTION_NAME_MAX
         );
-        for rejected in ["", &"n".repeat(FILE_PROTECTION_NAME_MAX + 1), "bad\0name"] {
+        for rejected in [
+            "",
+            &"n".repeat(FILE_PROTECTION_NAME_MAX + 1),
+            "bad\0name",
+            "a/b",
+            ".",
+            "..",
+        ] {
             let error = FileProtectionSlot::new(IDENTITY, rejected)
-                .expect_err("basename outside 1..=255 NUL-free bytes must be rejected");
+                .expect_err("invalid basename must be rejected");
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }

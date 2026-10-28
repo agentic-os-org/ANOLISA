@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -250,6 +250,31 @@ fn manifest_rejects_conflicting_expectations_for_one_resolution_mode() {
         .add_directory(&tree)
         .expect("directory mode stays recorded");
     manifest.validate(&root).expect("fixture is unchanged");
+}
+
+#[test]
+fn chmod_preserves_type_identity_and_prepared_manifest_validity() {
+    let fixture = Fixture::new("fp-manifest-chmod");
+    fixture.write("/config");
+    let root = fixture_root(&fixture.root);
+    if !openat2_available(&root) {
+        eprintln!("skipping: host kernel does not provide openat2");
+        return;
+    }
+    fs::set_permissions(fixture.host("/config"), fs::Permissions::from_mode(0o600))
+        .expect("set initial permissions");
+    let before = open_held(&root, "/config").expect("hold config before chmod");
+    let mut manifest = IdentityManifest::default();
+    manifest.add_existing(&before).expect("prepare manifest");
+    fs::set_permissions(fixture.host("/config"), fs::Permissions::from_mode(0o400))
+        .expect("chmod config");
+    let after = open_held(&root, "/config").expect("hold config after chmod");
+    assert_eq!(before.identity.mode, libc::S_IFREG as u16);
+    assert_eq!(before.identity.mode, after.identity.mode);
+    assert_eq!(before.identity, after.identity);
+    manifest
+        .validate(&root)
+        .expect("chmod does not change identity");
 }
 
 #[test]
