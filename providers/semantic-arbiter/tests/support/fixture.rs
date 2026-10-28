@@ -48,7 +48,7 @@ impl Fixture {
     pub fn config(&self, endpoint: &str) -> Value {
         json!({
             "version":1,
-            "task":{"session_id":"session/long+native", "version":"v1", "text":TASK_TEXT,
+            "task":{"version":"v1", "text":TASK_TEXT,
                 "provenance":provenance(TASK_TEXT),
                 "allowed_resource_ids":["greeting"],"preserve_resource_ids":[]},
             "adapter":"qoder", "workspace_path":self.root.path(), "workspace_id":"synthetic-workspace",

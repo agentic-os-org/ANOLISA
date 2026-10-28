@@ -24,6 +24,7 @@
     "aw-provider-sec-core/test/provider",
     "aw-provider-semantic-arbiter/bin/aw-provider-semantic-arbiter",
     "aw-provider-semantic-arbiter/test/provider",
+    "aw-provider-semantic-arbiter/test/session_parallel",
     "aw-provider-semantic-arbiter/test/storage_deadline",
     "aw-provider-tokenless/test/managed_rtk",
     "aw-provider-tokenless/test/pretool",
@@ -120,7 +121,51 @@
     },
     "semantic-concurrency": {
       "target": "aw-provider-semantic-arbiter/test/storage_deadline",
-      "test": "record_lock_is_nonblocking_and_concurrency_cannot_overreserve"
+      "test": "record_lock_wait_obeys_original_budget_and_concurrency_cannot_overreserve"
+    },
+    "semantic-lock-release": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "released_record_lock_allows_inference_with_remaining_budget"
+    },
+    "semantic-parallel-sessions": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_aw_instance_parallel_sessions_share_task_without_identity_collision"
+    },
+    "semantic-parallel-instances": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_native_session_parallel_aw_instances_are_isolated"
+    },
+    "semantic-session-domains": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_native_session_parallel_adapter_and_binding_domains_are_isolated"
+    },
+    "semantic-session-continuity": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_session_later_call_keeps_task_session_and_changes_candidate"
+    },
+    "semantic-parallel-tasks": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "parallel_distinct_aw_tasks_keep_text_provenance_and_versions_isolated"
+    },
+    "semantic-context-revisions": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "aw_revision_task_version_and_workspace_changes_keep_context_distinct"
+    },
+    "semantic-unsupported-first": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "unsupported_first_event_does_not_bind_task_and_later_valid_event_evaluates"
+    },
+    "semantic-rejected-first": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "rejected_first_context_and_size_do_not_publish_task_or_poison_later_calls"
+    },
+    "semantic-malformed-session": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "schema_permitted_malformed_sessions_reject_before_task_publication_and_network"
+    },
+    "semantic-session-schema": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "aw_schema_rejects_overlong_native_session_without_private_records_or_model"
     },
     "semantic-interruption": {
       "target": "aw-provider-semantic-arbiter/test/storage_deadline",
@@ -1258,6 +1303,17 @@
       "semantic-private-root",
       "semantic-quotas",
       "semantic-concurrency",
+      "semantic-lock-release",
+      "semantic-parallel-sessions",
+      "semantic-parallel-instances",
+      "semantic-session-domains",
+      "semantic-session-continuity",
+      "semantic-parallel-tasks",
+      "semantic-context-revisions",
+      "semantic-unsupported-first",
+      "semantic-rejected-first",
+      "semantic-malformed-session",
+      "semantic-session-schema",
       "semantic-interruption",
       "semantic-directory-binding",
       "semantic-atomic-record",

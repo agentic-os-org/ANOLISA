@@ -28,7 +28,6 @@ pub(crate) struct Config {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TaskConfig {
-    pub session_id: String,
     pub version: String,
     pub text: String,
     pub provenance: TaskProvenance,
@@ -87,7 +86,6 @@ impl Config {
         if self.version != 1
             || !["qoder", "openclaw", "hermes", "qwenpaw", "pi", "claude-sdk", "qoder-sdk", "agentscope"]
                 .contains(&self.adapter.as_str())
-            || !text(&self.task.session_id, 512)
             || !id(&self.task.version)
             || !id(&self.workspace_id)
             || self.task.text.trim().is_empty()

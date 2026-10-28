@@ -245,4 +245,10 @@ CLI 在入口捕获墙钟和单调时钟。准备、推理、正文读取、校�
 
 完整合法的判定退出码为 `0`，包括模型歧义或推理失败导致的 `unknown` 答案加候选 `nop`，以及任何合法 `block`。零退出码表示完成，不表示许可。请求/配置非法或缺失、凭证不可用或缺失、绑定非法及 I/O 失败均退出 `2`，并在 stderr 输出脱敏错误 JSON。允许结果使用非阻塞写入，受事件截止时间、配置上限和采用证据的失效时间约束。输出期间过期时，以 `deadline_exceeded` 退出 `2`；丢弃全部部分 stdout。仅接受零退出码对应的完整响应，检查候选处置，并在使用前重新校验。
 
-AW Adapter 尚待实现，应位于仓库的 `providers/` 目录。本 CLI 不能配置为 AW Provider。接入必须认证任务/证据投递、留存不可变关联、将阻断映射到原生拒绝，并在必要保护确认成功且复核通过前保持候选暂停。不支持的保护必须保持阻断。
+独立的 [AW 旁路 Provider](../../../../providers/semantic-arbiter/README_zh.md) 使用 `aw-provider/v1alpha1`；本 CLI 不能配置为 AW Provider。其私有配置要求 `version: 1`，且只接受已声明字段。会话身份由 AW 事件提供，因此私有配置不包含 `task.session_id` 字段。AW 公共线协议版本和两种核心判断协议均不变。公共 evaluation 任务仍携带投影后的 `task.session_id`，要求与 `binding.session_id` 匹配；移除的只是私有配置中的预设字段。
+
+不可变的 AW Host 配置固定一份操作者任务模板。AW 已传入经过校验的 event/原生 session、instance、binding 和配置修订。每个原生会话的首个合法且受支持的 `tool.before`，在投影和大小检查后具体化并记录各自任务上下文。有效 `session_id` 对完整元组 `[adapter, binding_id, instance_id, native_session_id]` 进行域分离哈希。后续每个以 EOF 分隔请求的独立进程确定性重建相同上下文，不使用持久化首事件锁存、当前会话单例或数据库。会话和实例可并行推理；不同任务须使用独立 AW 配置/实例，不从原生 prompt 发现任务，也不自动分配多任务。原生 session 必须非空白、最多 512 个 UTF-8 字节且不含控制字符；adapter/cwd 和身份检查保持有效，但不再检查与预设 session 是否匹配。
+
+`05-task.json` 格式版本 1 保留 `native_session_id`、作用域隔离的 `session_id`、AW `adapter`/`binding_id`/`instance_id`、AW `config_revision` 哈希、`task_version`、操作者 provenance、声明/投影原文摘要和 `text_bytes`。只有合法且未超限的投影才生成此文件；uncovered 输入不生成任务记录。根目录配额 `flock` 竞争通过 Tokio 协作等待，受原始 ingress 预算（AW `budget_ms` 和模型 timeout 的较小值）限制，并在推理前释放锁。等待锁、准备和推理共用该 deadline，不续期、不进行网络重试。现有私有 `0700` 目录、`0600` 文件和固定 4 MiB 预留量保持不变；这些敏感观察既不是身份认证，也不是会话状态。
+
+Provider 保持 observe-only：合法调用返回原始 AW 请求 digest、`status: ok` 和 `effects: []`，包括建议拒绝和语义错误。它既不阻断工具，也不执行 obligation。产生真实效果的接入必须认证任务/证据投递、留存不可变关联、将阻断映射到原生拒绝，并在必要保护确认成功且复核通过前保持候选暂停。不支持的保护必须保持阻断；不支持或未确认结果绝不授予权限。

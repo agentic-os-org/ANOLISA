@@ -1,4 +1,4 @@
-# Synthetic template only: replace paths and session explicitly before use.
+# Synthetic template only: replace paths explicitly before use.
 # No Agent or model server is started by this Provider.
 apiVersion: aw/v1alpha1
 kind: AWConfiguration
@@ -31,7 +31,6 @@ spec:
       config:
         version: 1
         task:
-          session_id: synthetic-session
           version: task-v1
           text: Update the synthetic greeting, preserving the synthetic reference file.
           provenance:

@@ -29,9 +29,15 @@ pub(crate) fn project(
     if request["operation"] != "evaluate_task_scope" || event["name"] != "tool.before" {
         return Err("unsupported_operation");
     }
-    if event["session_id"] != config.task.session_id || event["agent"]["adapter"] != config.adapter
-    {
+    if event["agent"]["adapter"] != config.adapter {
         return Err("context_mismatch");
+    }
+    let native_session = event["session_id"].as_str().ok_or("missing_identity")?;
+    if native_session.trim().is_empty()
+        || native_session.len() > 512
+        || native_session.chars().any(char::is_control)
+    {
+        return Err("missing_identity");
     }
     let cwd = std::env::current_dir().map_err(|_| "context_mismatch")?;
     if cwd.to_str() != Some(&config.workspace_path)
@@ -81,14 +87,16 @@ pub(crate) fn project(
                 "candidate_invalid"
             }
         })?;
-    let session_id = identity("session", &event["session_id"])?;
+    let session_id = identity(
+        "session",
+        &json!([
+            event["agent"]["adapter"],
+            event["agent"]["binding_id"],
+            event["agent"]["instance_id"],
+            native_session
+        ]),
+    )?;
     let config_revision = identity("aw-config-revision", &request["config_revision"])?;
-    let opened_at_ms = ingress.now_ms().saturating_sub(ingress.elapsed_ms());
-    // AW JSON Schema accepts integral decimal and exponent number forms.
-    let duration = request["budget_ms"]
-        .as_f64()
-        .ok_or("invalid_budget")?
-        .min(config.model.timeout_ms as f64) as u64;
     Ok(EvaluationRequest {
         api_version: EVALUATION_API_VERSION.into(),
         request_id: identity("request", &request["request_id"])?,
@@ -116,13 +124,7 @@ pub(crate) fn project(
             )?,
             candidate_revision,
         },
-        budget: Budget {
-            opened_at_ms,
-            deadline_ms: opened_at_ms.saturating_add(duration),
-            max_evidence_items: 0,
-            // Even an empty evidence array occupies two JSON bytes.
-            max_evidence_bytes: 2,
-        },
+        budget: budget(request, config, ingress)?,
         scenarios: vec![Scenario::TaskScope],
         task: Some(Task {
             session_id,
@@ -135,5 +137,25 @@ pub(crate) fn project(
         candidate,
         evidence: vec![],
         gaps: vec![],
+    })
+}
+
+pub(crate) fn budget(
+    request: &Value,
+    config: &Config,
+    ingress: Ingress,
+) -> Result<Budget, &'static str> {
+    let opened_at_ms = ingress.now_ms().saturating_sub(ingress.elapsed_ms());
+    // AW JSON Schema accepts integral decimal and exponent number forms.
+    let duration = request["budget_ms"]
+        .as_f64()
+        .ok_or("invalid_budget")?
+        .min(config.model.timeout_ms as f64) as u64;
+    Ok(Budget {
+        opened_at_ms,
+        deadline_ms: opened_at_ms.saturating_add(duration),
+        max_evidence_items: 0,
+        // Even an empty evidence array occupies two JSON bytes.
+        max_evidence_bytes: 2,
     })
 }

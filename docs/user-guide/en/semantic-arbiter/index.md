@@ -12,8 +12,8 @@ The complete target design covers six business scenarios: protect results, enfor
 |---|---|
 | **Implemented core** | Preservation/task-scope judgments, frozen inline evidence, bounded EvidenceSource collection, closed-scenario JudgmentUnit replacement, deterministic Outcome composition, consumer-side executor contracts, deterministic `check` and Noul model evaluation through Bailian/TypeSafe |
 | **Contract types/validation only** | Full `nop < allow < ask < block` CandidateControl vocabulary, wider Outcome types, Directive projection and receipt validation exist; current scenarios do not produce `ask` or wider actions |
-| **AW shadow Provider** | A separate Provider binds an explicit operator task to one session, records how that task text was captured, retains complete mapped candidates and local records, and returns no execution effects |
-| **Pending consumer integration** | Automatic task/history delivery, native admission and blocking, real Executors, native adoption verification, persistent production claims/audit and effect verification still require integration |
+| **AW shadow Provider** | A separate Provider independently associates each native session with the operator task fixed by immutable AW configuration on its first valid supported `tool.before`; parallel sessions/instances retain scoped context and complete mapped candidates, with no execution effects |
+| **Pending consumer integration** | Automatic native task discovery/history delivery, native admission and blocking, real Executors, native adoption verification, persistent production claims/audit and effect verification still require integration |
 | **External capability requires verification** | AgentSight, AW, ws-ckpt and native Adapter interfaces must be checked against target-version source and deployment behavior; historical capability inventories establish no support |
 
 | Business scenario | Purpose | Proposed output | Availability |
@@ -299,4 +299,26 @@ For local development checks:
 make check
 ```
 
-This runs formatting checks, clippy, tests and strict rustdoc. Local checks cannot establish remote availability or model accuracy. For AW observation, use the separate [semantic Provider](../../../../providers/semantic-arbiter/README.md): it binds one explicit operator task, preserves complete native arguments and records task-scope judgments locally with empty execution effects. Configure `aw-provider-semantic-arbiter` as the Provider command; this core CLI retains its own protocol.
+This runs formatting checks, clippy, tests and strict rustdoc. Local checks cannot establish remote availability or model accuracy.
+
+### AW shadow observation
+
+Use the separate [semantic Provider](../../../../providers/semantic-arbiter/README.md) to compare supported native single-file calls with an operator task without changing execution. There is no installer/RPM integration for this Provider; follow its source-build instructions. Configure `aw-provider-semantic-arbiter` as the Provider command, not this core CLI. Review the paired synthetic [JSON](../../../../providers/semantic-arbiter/examples/config.json) and [AW YAML](../../../../providers/semantic-arbiter/examples/aw.yaml) templates, replace paths and supply the real operator task before use.
+
+Private Provider config requires `version: 1` and accepts only declared fields. Omit `task.session_id`; session identity comes from AW events. This changes neither `aw/v1alpha1` nor `aw-provider/v1alpha1`, nor either core judgment protocol. The immutable AW Host configuration fixes one task template: `task.version`, `task.text`, provenance and optional allowed/preserved resource limits. Keep `model.config_revision: aw_request`; invocation substitutes a domain-separated hash of the full AW request configuration revision. Verify the provenance digest over exact task text bytes; `user_prompt_verbatim` remains an operator assertion, not authenticated native task discovery.
+
+Each native session independently receives that configured task on its first valid supported `tool.before`, after projection and size checks. AW already supplies validated event/session, instance, binding and configuration revision. The Provider hashes the complete tuple `[adapter, binding_id, instance_id, native_session_id]` into effective `session_id`. Later independent EOF-delimited processes deterministically reconstruct the same task context; they use no persistent first-event latch, current-session singleton or database, and records are not session state. Different sessions/instances can infer in parallel; the same native session string in another binding/instance has a different scope. New sessions need no config edit. Different tasks require separate AW configurations/instances, not prompt/history discovery or automatic multi-task assignment.
+
+The native session must be nonblank, at most 512 UTF-8 bytes and contain no control characters. It is not compared with a preset session. Adapter, cwd and instance/binding/call identity validation still applies: both Provider cwd and `event.native.cwd` must equal the configured workspace. Only explicitly mapped supported single-file inputs are covered; unsupported operations, context failures and oversized candidates are `uncovered`, without inference or `05-task.json`. Complete native arguments remain bounded to 64 KiB and the evaluation to 256 KiB; oversized input is retained intact in `00-input.json`, never truncated for the model.
+
+After configuring the supported Agent and authorized backend, start AW from the exact configured workspace:
+
+```bash
+aw run --config /absolute/path/to/aw.yaml --agent target
+```
+
+**Authorize retention and outbound payloads first.** The private store contains full AW requests, task/candidate text and model observations; AW `metadata_only` audit does not disable it. Precreate the runtime-owned `0700` root without symlink components, preferably outside the Agent-writable workspace. Per-invocation directories remain private and files `0600`. `05-task.json` format version 1 records `native_session_id`, scoped `session_id`, AW `adapter`/`binding_id`/`instance_id`, the `config_revision` hash, `task_version`, provenance, declared/projected text digests and `text_bytes`, only after valid projection and size checks. It does not duplicate task text or establish authorization.
+
+Quotas remain `max_records: 1..=10000` and `max_storage_bytes: 4 MiB..=1 GiB`, consuming a fixed 4 MiB reservation per record, including incomplete ones. Root quota `flock` contention waits cooperatively with Tokio only within the remaining original ingress budget, then skips inference on expiration. The lock is released before inference. Input waiting, parsing, projection, lock waiting, persistence and inference share the original minimum of AW `budget_ms` and model timeout: there is no separate renewed deadline or network retry. Partial records still consume their reservations; stop users of the root before manually reviewing, archiving or deleting owned records.
+
+Keep `effects: [observe]` and `on_error: report`. Valid invocations return `status: ok`, the original request digest and `effects: []`, even for advisory `block` or semantic failure. Inspect `40-result.json` for `evaluated`, `uncovered` or `skipped`, and the retained evaluation for actual judgments. No record or unsupported/unconfirmed result grants permission, performs protection or proves execution; native security and permissions remain authoritative.

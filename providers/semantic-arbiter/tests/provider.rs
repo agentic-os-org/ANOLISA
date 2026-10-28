@@ -145,6 +145,8 @@ fn invalid_config_and_duplicate_fields_are_sanitized() {
     let fixture = Fixture::new();
     for (pointer, value) in [
         ("/version", json!(2)),
+        ("/version", json!(3)),
+        ("/task/session_id", json!("unexpected-session")),
         ("/task/unknown", json!(true)),
         (
             "/tools/Bash",
@@ -362,7 +364,14 @@ fn preserve_overrides_allowance_without_model_call() {
 #[test]
 fn mismatches_missing_identity_and_unmapped_tools_are_uncovered() {
     for (pointer, value, expected) in [
-        ("/event/session_id", json!("other"), "context_mismatch"),
+        ("/event/session_id", json!(" "), "missing_identity"),
+        (
+            "/event/session_id",
+            json!("\u{4f1a}".repeat(200)),
+            "missing_identity",
+        ),
+        ("/event/session_id", Value::Null, "missing_identity"),
+        ("/event/session_id", json!("session\n"), "missing_identity"),
         ("/event/agent/adapter", json!("pi"), "context_mismatch"),
         ("/event/native/cwd", json!("/other"), "context_mismatch"),
         ("/event/agent/instance_id", Value::Null, "missing_identity"),
@@ -422,6 +431,7 @@ fn mismatches_missing_identity_and_unmapped_tools_are_uncovered() {
             read(&fixture.records()[0].join("40-result.json"))["status"],
             "uncovered"
         );
+        assert!(!fixture.records()[0].join("05-task.json").exists());
         assert!(server.received.try_recv().is_err());
     }
 }
