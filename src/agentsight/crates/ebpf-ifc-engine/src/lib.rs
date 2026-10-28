@@ -24,9 +24,16 @@ use aya::programs::{Lsm, ProgramFd, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
 
 pub mod capability;
+mod file_protection_map_writer;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
+};
+pub use file_protection_map_writer::{
+    FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
+    FileProtectionSlot, FileProtectionSlotValue, FileProtectionTargetValue, TreeGuard,
+    TreePathIdentity, FILE_PROTECTION_MAP_CAPACITY, FILE_PROTECTION_MAX_TARGETS,
+    FILE_PROTECTION_NAME_MAX,
 };
 
 const BPF_ANY: u64 = 0;
@@ -217,6 +224,10 @@ pub const INODE_GUARD_UNLINK: u32 = 1;
 pub const INODE_GUARD_RENAME: u32 = 2;
 /// Inode guard flag: block write.
 pub const INODE_GUARD_WRITE: u32 = 4;
+/// Guard flag marking a directory-tree target, whose protection covers entries
+/// discovered below it. Traversal is bounded to 256 dentry/mount steps;
+/// undecidable destructive paths deny.
+pub const INODE_GUARD_TREE: u32 = 8;
 
 /// Must match BPF `struct inode_guard_val` layout.
 #[repr(C)]
@@ -227,6 +238,91 @@ pub struct InodeGuardVal {
     pub rule_id: u32,
     pub _pad: u32,
 }
+
+// Mirrors BPF te_path_key; statx mount IDs must fit kernel mount.mnt_id (u32).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TreePathKey {
+    ino: u64,
+    dev: u32,
+    mnt_id: u32,
+    domain_id: u32,
+    generation: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyRootVal {
+    root_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyStableVal {
+    target_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicySlotKey {
+    parent: TreePathKey,
+    name_len: u32,
+    name: [u8; FILE_PROTECTION_NAME_MAX + 1],
+    // Explicit tail storage avoids indeterminate repr(C) padding in map keys.
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicySlotVal {
+    direct_mask: u64,
+    exact_exclude_mask: u64,
+    subtree_exclude_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyTargetKey {
+    domain_id: u32,
+    generation: u32,
+    target_id: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyTargetVal {
+    guard: InodeGuardVal,
+    flags: u32,
+    target_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyDomainVal {
+    generation: u32,
+    target_count: u32,
+    tree_mask: u64,
+    delete_mask: u64,
+    ordinary_write_mask: u64,
+    protection_set_id: u64,
+    guard: InodeGuardVal,
+}
+
+// The structured file-protection map ABI is shared with process.bpf.c by layout
+// alone; pin every key and value size/alignment so a C-side edit cannot silently
+// reinterpret staged generations. Sizes are the BTF sizes of the C structs.
+const _: () = assert!(std::mem::size_of::<InodeGuardVal>() == 16);
+const _: () = assert!(std::mem::size_of::<TreePathKey>() == 24);
+const _: () = assert!(std::mem::align_of::<TreePathKey>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicyRootVal>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicyStableVal>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicySlotKey>() == 288);
+const _: () = assert!(std::mem::align_of::<PolicySlotKey>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicySlotVal>() == 24);
+const _: () = assert!(std::mem::size_of::<PolicyTargetKey>() == 16);
+const _: () = assert!(std::mem::size_of::<PolicyTargetVal>() == 24);
+const _: () = assert!(std::mem::size_of::<PolicyDomainVal>() == 56);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -246,6 +342,14 @@ unsafe impl aya::Pod for FileDomainId {}
 unsafe impl aya::Pod for InodePathVal {}
 unsafe impl aya::Pod for FileId {}
 unsafe impl aya::Pod for InodeGuardVal {}
+unsafe impl aya::Pod for TreePathKey {}
+unsafe impl aya::Pod for PolicyRootVal {}
+unsafe impl aya::Pod for PolicyStableVal {}
+unsafe impl aya::Pod for PolicySlotKey {}
+unsafe impl aya::Pod for PolicySlotVal {}
+unsafe impl aya::Pod for PolicyTargetKey {}
+unsafe impl aya::Pod for PolicyTargetVal {}
+unsafe impl aya::Pod for PolicyDomainVal {}
 unsafe impl aya::Pod for CUpdate {}
 unsafe impl aya::Pod for CRule {}
 unsafe impl aya::Pod for ProcState {}
@@ -889,6 +993,13 @@ fn pinned_engine_present_inner(
         "ts_root",
         "te_protected_pids",
         "te_inode_guard",
+        "te_policy_roots",
+        "te_policy_dirs",
+        "te_policy_stable",
+        "te_policy_slots",
+        "te_policy_targets",
+        "te_policy_domains",
+        "te_policy_slot_scratch",
         "te_inode_path",
     ] {
         if !paths.map(name).try_exists()? {
@@ -4341,6 +4452,16 @@ mod tests {
         assert_eq!(std::mem::size_of::<FileId>(), 16);
         assert_eq!(std::mem::size_of::<FileDomainId>(), 24);
         assert_eq!(std::mem::size_of::<InodeGuardVal>(), 16);
+        assert_eq!(std::mem::size_of::<TreePathKey>(), 24);
+        assert_eq!(std::mem::align_of::<TreePathKey>(), 8);
+        assert_eq!(std::mem::size_of::<PolicyRootVal>(), 8);
+        assert_eq!(std::mem::size_of::<PolicyStableVal>(), 8);
+        assert_eq!(std::mem::size_of::<PolicySlotKey>(), 288);
+        assert_eq!(std::mem::align_of::<PolicySlotKey>(), 8);
+        assert_eq!(std::mem::size_of::<PolicySlotVal>(), 24);
+        assert_eq!(std::mem::size_of::<PolicyTargetKey>(), 16);
+        assert_eq!(std::mem::size_of::<PolicyTargetVal>(), 24);
+        assert_eq!(std::mem::size_of::<PolicyDomainVal>(), 56);
         assert_eq!(std::mem::size_of::<InodePathVal>(), 127);
         assert_eq!(std::mem::size_of::<ProcState>(), 16);
         assert_eq!(std::mem::size_of::<CapState>(), 56);
@@ -4353,6 +4474,128 @@ mod tests {
         assert_eq!(std::mem::size_of::<CConfig>(), 74_760);
         assert_eq!(std::mem::align_of::<Event>(), 8);
         assert_eq!(std::mem::size_of::<Event>(), 384);
+    }
+
+    // Structured-policy map keys are hashed by their byte image, so the Rust
+    // mirrors must contain no implicit repr(C) padding the kernel would compare
+    // as uninitialized bytes, and every declared tail byte must be zeroed.
+    #[test]
+    fn policy_map_keys_have_deterministic_byte_images() {
+        assert_eq!(
+            std::mem::size_of::<TreePathKey>(),
+            std::mem::size_of::<u64>() + 4 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            std::mem::size_of::<PolicyTargetKey>(),
+            4 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            std::mem::size_of::<PolicySlotKey>(),
+            std::mem::size_of::<TreePathKey>()
+                + std::mem::size_of::<u32>()
+                + FILE_PROTECTION_NAME_MAX
+                + 1
+                + std::mem::size_of::<u32>()
+        );
+
+        let slot = FileProtectionSlot::new(
+            TreePathIdentity {
+                ino: 9,
+                dev: 0x0801,
+                mnt_id: 0,
+            },
+            "etc",
+        )
+        .expect("valid basename");
+        let key = PolicySlotKey {
+            parent: TreePathKey {
+                ino: slot.parent.ino,
+                dev: slot.parent.dev,
+                mnt_id: slot.parent.mnt_id,
+                domain_id: 3,
+                generation: 4,
+            },
+            name_len: slot.name_len,
+            name: slot.name,
+            _pad: 0,
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&key as *const PolicySlotKey).cast::<u8>(),
+                std::mem::size_of::<PolicySlotKey>(),
+            )
+        };
+        let name_offset = std::mem::size_of::<TreePathKey>() + std::mem::size_of::<u32>();
+        assert_eq!(&bytes[name_offset..name_offset + 3], b"etc");
+        assert!(
+            bytes[name_offset + 3..].iter().all(|byte| *byte == 0),
+            "slot-key name tail and explicit padding must be zero"
+        );
+    }
+
+    // Normalized target ids are 1-based so each one maps to exactly one bit of
+    // the 64-bit masks carried by te_policy_domain_val.
+    #[test]
+    fn target_ids_are_bounded_and_cover_the_domain_masks() {
+        for flag in [
+            INODE_GUARD_UNLINK,
+            INODE_GUARD_RENAME,
+            INODE_GUARD_WRITE,
+            INODE_GUARD_TREE,
+        ] {
+            assert_eq!(flag.count_ones(), 1, "guard flags must be single bits");
+        }
+
+        let mut covered = 0u64;
+        for target_id in 1..=FILE_PROTECTION_MAX_TARGETS as u32 {
+            let value = PolicyTargetVal {
+                guard: InodeGuardVal {
+                    flags: INODE_GUARD_UNLINK | INODE_GUARD_TREE,
+                    domain_id: 5,
+                    rule_id: target_id,
+                    _pad: 0,
+                },
+                flags: 0b11,
+                target_id,
+            };
+            assert_eq!(
+                value.guard.rule_id, value.target_id,
+                "events must report the stable target id"
+            );
+            covered |= 1u64 << (value.target_id - 1);
+        }
+        assert_eq!(covered, u64::MAX, "64 target ids must fill the mask width");
+
+        let domain = PolicyDomainVal {
+            generation: 1,
+            target_count: FILE_PROTECTION_MAX_TARGETS as u32,
+            tree_mask: covered,
+            delete_mask: covered,
+            ordinary_write_mask: 0,
+            protection_set_id: 7,
+            guard: InodeGuardVal {
+                flags: INODE_GUARD_UNLINK,
+                domain_id: 5,
+                rule_id: 0,
+                _pad: 0,
+            },
+        };
+        assert_eq!(domain.generation, 1);
+        assert_eq!(domain.target_count, domain.tree_mask.count_ones());
+        assert_eq!(domain.delete_mask & domain.ordinary_write_mask, 0);
+        assert_eq!(domain.protection_set_id, 7);
+        assert_eq!(domain.guard.flags, INODE_GUARD_UNLINK);
+
+        let root = PolicyRootVal { root_mask: 0b1 };
+        let stable = PolicyStableVal { target_mask: 0b1 };
+        let slot = PolicySlotVal {
+            direct_mask: 0b1,
+            exact_exclude_mask: 0b10,
+            subtree_exclude_mask: 0b100,
+        };
+        assert_eq!(root.root_mask, stable.target_mask);
+        assert_eq!(slot.direct_mask & slot.exact_exclude_mask, 0);
+        assert_eq!(slot.subtree_exclude_mask, 0b100);
     }
 
     #[test]
@@ -5729,6 +5972,13 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -5841,6 +6091,13 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -5884,6 +6141,13 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");

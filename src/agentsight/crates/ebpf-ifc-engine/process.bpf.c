@@ -240,6 +240,119 @@ static __always_inline const struct inode_guard_val *te_inode_guarded(
 	return domain && *domain == val->domain_id ? val : NULL;
 }
 
+/* Mount- and domain-scoped path identity shared by every structured policy map.
+ * Registration must hold O_PATH identities so the recorded (ino, dev, mnt_id)
+ * cannot drift; mnt_id = 0 is reserved for the underlying-directory form that
+ * anchors a directory independently of the mounts exposing it. The generation
+ * makes a staged topology invisible until its activation record is published. */
+struct te_path_key {
+	__u64 ino;
+	__u32 dev;
+	__u32 mnt_id;
+	__u32 domain_id;
+	__u32 generation;
+};
+
+/* Production structured-policy map ABI. Root ids are stable normalized target
+ * ids in [1,64]. Masks keep exclusions scoped to their owning directory target,
+ * so an overlapping target can still protect an entry excluded by another root. */
+#define TE_POLICY_MAX_TARGETS 64
+#define TE_POLICY_NAME_MAX 255
+#define TE_POLICY_TARGET_DELETE 1
+#define TE_POLICY_TARGET_TREE   2
+
+struct te_policy_root_val {
+	__u64 root_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_path_key);
+	__type(value, struct te_policy_root_val);
+} te_policy_roots SEC(".maps");
+
+struct te_policy_dir_val {
+	__u64 root_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_path_key); /* mnt_id = 0 */
+	__type(value, struct te_policy_dir_val);
+} te_policy_dirs SEC(".maps");
+
+struct te_policy_stable_val {
+	__u64 target_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_path_key);
+	__type(value, struct te_policy_stable_val);
+} te_policy_stable SEC(".maps");
+
+struct te_policy_slot_key {
+	struct te_path_key parent;
+	__u32 name_len;
+	char name[TE_POLICY_NAME_MAX + 1];
+	__u32 _pad; /* Map-key tail bytes must be deterministic across languages. */
+};
+struct te_policy_slot_val {
+	__u64 direct_mask;
+	__u64 exact_exclude_mask;
+	__u64 subtree_exclude_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_policy_slot_key);
+	__type(value, struct te_policy_slot_val);
+} te_policy_slots SEC(".maps");
+
+struct te_policy_target_key {
+	__u32 domain_id;
+	__u32 generation;
+	__u32 target_id;
+	__u32 _pad;
+};
+struct te_policy_target_val {
+	struct inode_guard_val guard;
+	__u32 flags;
+	__u32 target_id;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_policy_target_key);
+	__type(value, struct te_policy_target_val);
+} te_policy_targets SEC(".maps");
+
+struct te_policy_domain_val {
+	__u32 generation;
+	__u32 target_count;
+	__u64 tree_mask;
+	__u64 delete_mask;
+	__u64 ordinary_write_mask;
+	__u64 protection_set_id;
+	struct inode_guard_val guard;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32);
+	__type(value, struct te_policy_domain_val);
+} te_policy_domains SEC(".maps");
+
+struct te_policy_slot_scratch {
+	struct te_policy_slot_key key;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct te_policy_slot_scratch);
+} te_policy_slot_scratch SEC(".maps");
+
 static __always_inline int te_pid_protected(pid_t pid)
 {
 	__u32 *v = bpf_map_lookup_elem(&te_protected_pids, &pid);
