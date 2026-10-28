@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 from agent_sec_cli.observability.session_report import (
     SessionReport,
+    _safe_int,
     build_session_report,
     format_text,
 )
@@ -42,6 +43,40 @@ def _fake_sec_event(category, result="succeeded"):
     e.category = category
     e.result = result
     return e
+
+
+class TestSafeInt:
+    """Non-numeric metrics values must degrade to 0, not crash."""
+
+    def test_int(self) -> None:
+        assert _safe_int(42) == 42
+
+    def test_numeric_str(self) -> None:
+        assert _safe_int("42") == 42
+
+    def test_non_numeric_str(self) -> None:
+        assert _safe_int("abc") == 0
+
+    def test_list(self) -> None:
+        assert _safe_int([1, 2, 3]) == 0
+
+    def test_none(self) -> None:
+        assert _safe_int(None) == 0
+
+    def test_non_numeric_metrics_does_not_crash_build(self) -> None:
+        reader = MagicMock()
+        reader.list_sessions.return_value = [_fake_session()]
+        reader.list_runs.return_value = [_fake_run()]
+        ev = MagicMock()
+        ev.hook = "after_llm_call"
+        ev.metrics_json = json.dumps(
+            {"request_payload_bytes": "not_a_number", "response_stream_bytes": [1, 2]}
+        )
+        reader.list_events.return_value = [ev]
+        rpt = build_session_report("sess-1", reader)
+        assert rpt.llm_calls == 1
+        assert rpt.request_bytes == 0
+        assert rpt.response_bytes == 0
 
 
 class TestBuildSessionReport:
