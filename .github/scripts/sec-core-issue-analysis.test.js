@@ -74,7 +74,7 @@ function harness(t) {
       github, context: { repo: { owner: 'agentic-os-org', repo: 'ANOLISA' }, actor: 'test-maintainer',
         payload: {}, runId: 1234, sha },
       core: { setOutput: (key, value) => { outputs[key] = value; }, notice: () => {} },
-      env: { INPUT_ISSUE_NUMBER: '12', INPUT_TARGET_REF: 'main', ANALYSIS_ROOT: root },
+      env: { INPUT_ISSUE_NUMBER: '12', INPUT_TARGET_REF: 'main', ANALYSIS_ROOT: root, ISSUE_ANALYSIS_COMPONENTS: 'sec-core' },
     },
     outputs,
   };
@@ -995,9 +995,100 @@ test('keeps unknown scope unresolved and withholds publication', async (t) => {
   assert.match(report, /Suggested priority: unresolved/);
   const plan = JSON.parse(fs.readFileSync(path.join(h.root, 'output/writeback-plan.json')));
   assert.equal(plan.approved_priority, null);
-  assert.deepEqual(plan.operations, []);
+  assert.deepEqual(plan.operations, [{ action: 'record_completion', input_fingerprint: h.snapshot.input_fingerprint }]);
   assert.equal((await h.publish()).status, 'skipped');
-  assert.deepEqual(h.writes, []);
+  assert.equal(h.writes.length, 1);
+  assert.match(h.writes[0].body, /^<!-- issue-analysis-complete:sec-core:42:/);
+  assert.equal((await h.publish()).status, 'skipped');
+  assert.equal(h.writes.length, 1);
+});
+
+test('historical batches advance past completed no-priority results and workers recheck completion', async (t) => {
+  const { discover } = require('./issue-analysis-discovery');
+  for (const outcome of ['refuted', 'scope_unresolved', 'out_of_scope']) await t.test(outcome, async (t) => {
+    const h = await publicationHarness(t);
+    h.result.priority.label = null;
+    if (outcome === 'refuted') {
+      h.result.claims[0].assessment = 'refuted';
+      h.result.problem_type = 'not_applicable';
+    } else {
+      h.result.scope.status = outcome;
+      h.result.disposition = outcome;
+      h.result.claims = [];
+      if (outcome === 'out_of_scope') h.result.problem_type = 'not_applicable';
+    }
+    h.validate();
+    for (const directory of ['input', 'output']) {
+      fs.writeFileSync(path.join(h.root, directory, 'analysis.json'), JSON.stringify(h.result));
+    }
+    analysis.finish(h.root);
+    await h.publish();
+    assert.equal(h.issue.labels.some((label) => label.name.startsWith('priority:')), false);
+    h.github.rest.issues.listForRepo = async () => ({ data: [h.issue, { ...h.issue, id: 43, number: 13 }] });
+    const summary = { addHeading: () => summary, addCodeBlock: () => summary, write: async () => {} };
+    const args = { ...h.args, core: { setOutput: () => {}, summary },
+      env: { ISSUE_ANALYSIS_COMPONENTS: 'sec-core', INPUT_MODE: 'batch', INPUT_MAX_ISSUES: '1' } };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await discover(args);
+      assert.deepEqual(result.selected, [13]);
+      assert.equal(result.skipped.already_analyzed, 1);
+    }
+    await analysis.prepare({ ...h.args, env: { ...h.args.env, SKIP_COMPLETED: 'true' } });
+    assert.equal(h.outputs.skip_analysis, 'true');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(h.root, 'output/run.json'))).stage, 'already_analyzed');
+    assert.deepEqual((await discover({ ...args,
+      env: { ...args.env, INPUT_MODE: 'single', INPUT_ISSUE_NUMBER: '12' } })).selected, [12]);
+    h.issue.body += '\nNew Issue input.';
+    assert.deepEqual((await discover(args)).selected, [12]);
+  });
+});
+
+test('historical completion is bound to source, rules and a trusted first-line marker', async (t) => {
+  const h = await publicationHarness(t);
+  h.result.claims[0].assessment = 'refuted';
+  h.result.problem_type = 'not_applicable';
+  h.result.priority.label = null;
+  for (const directory of ['input', 'output']) {
+    fs.writeFileSync(path.join(h.root, directory, 'analysis.json'), JSON.stringify(h.result));
+  }
+  analysis.finish(h.root);
+  await h.publish();
+  assert.equal(analysis.hasCompletedAnalysis(h.snapshot, h.comments), true);
+  const changed = structuredClone(h.snapshot);
+  changed.target.source_commit_sha = 'f'.repeat(40);
+  changed.input_fingerprint = analysis.inputFingerprint(changed);
+  assert.equal(analysis.hasCompletedAnalysis(changed, h.comments), false);
+  changed.target = h.snapshot.target;
+  changed.rules[0].rule_id = 'new-definition';
+  changed.input_fingerprint = analysis.inputFingerprint(changed);
+  assert.equal(analysis.hasCompletedAnalysis(changed, h.comments), false);
+  assert.equal(analysis.hasCompletedAnalysis(h.snapshot,
+    h.comments.map((comment) => ({ ...comment, user: { login: 'external-user' } }))), false);
+});
+
+test('completion writes require the preview operation and preserve intervening receipt edits', async (t) => {
+  const h = await publicationHarness(t);
+  h.result.scope.status = 'scope_unresolved';
+  h.result.disposition = 'scope_unresolved';
+  h.result.priority.label = null;
+  h.result.claims = [];
+  for (const directory of ['input', 'output']) {
+    fs.writeFileSync(path.join(h.root, directory, 'analysis.json'), JSON.stringify(h.result));
+  }
+  analysis.finish(h.root);
+  const file = path.join(h.root, 'output/writeback-plan.json');
+  const plan = JSON.parse(fs.readFileSync(file));
+  fs.writeFileSync(file, JSON.stringify({ ...plan, operations: [] }));
+  await assert.rejects(h.publish(), /Completion operations/);
+  assert.equal(h.writes.length, 0);
+  fs.writeFileSync(file, JSON.stringify(plan));
+  await h.publish();
+  h.snapshot.comments = structuredClone(h.comments);
+  fs.writeFileSync(path.join(h.root, 'output/snapshot.json'), JSON.stringify(h.snapshot));
+  h.comments.at(-1).body += '\nMaintainer correction.';
+  analysis.finish(h.root);
+  await assert.rejects(h.publish(), /completion receipt changed/);
+  assert.equal(h.writes.length, 1);
 });
 
 test('shows a provisional grade, reason, review objection, and source-only scope without applying an unapproved label', async (t) => {

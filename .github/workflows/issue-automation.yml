@@ -6,8 +6,8 @@
 # Actions is the only writer: it validates the decision against repository
 # metadata, applies the component label, optionally assigns owners for
 # allowlisted reporters, comments as github-actions[bot], and notifies the
-# component owners in the same run. Applied SecCore routes also call the source
-# analysis workflow to review the Issue and publish its result.
+# component owners in the same run. Applied routes also call the component-gated
+# source analysis workflow to review the Issue and publish its result.
 ###############################################################################
 
 name: Automation / Issue Router
@@ -203,19 +203,18 @@ jobs:
               decisionId: process.env.DECISION_ID,
             });
 
-  sec-core-analysis:
-    name: Analyze the routed SecCore issue
+  issue-analysis:
+    name: Analyze the routed issue
     needs: triage
     if: >-
       !cancelled() &&
       github.repository_id == '1195873793' &&
-      needs.triage.outputs.mutated == 'true' &&
-      needs.triage.outputs.component_label == 'component:sec-core'
+      needs.triage.outputs.mutated == 'true'
     permissions:
       contents: read
       issues: write
       actions: read
-    uses: ./.github/workflows/sec-core-issue-analysis.yml
+    uses: ./.github/workflows/issue-analysis.yml
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       target_ref: main

@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   analyze:
-    uses: ./.github/workflows/issue-analysis-worker.yml
+    uses: ./.github/workflows/issue-analysis.yml
     with:
       issue_number: ${{ inputs.issue_number }}
       target_ref: ${{ inputs.target_ref }}

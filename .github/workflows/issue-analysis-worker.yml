@@ -12,12 +12,18 @@ on:
       publish:
         default: false
         type: boolean
+      skip_completed:
+        default: false
+        type: boolean
     secrets:
       QODER_PERSONAL_ACCESS_TOKEN:
         required: true
 
 permissions:
   contents: read
+
+env:
+  ISSUE_ANALYSIS_COMPONENTS: ${{ vars.ISSUE_ANALYSIS_COMPONENTS }}
 
 concurrency:
   group: issue-analysis-${{ inputs.issue_number }}
@@ -71,6 +77,7 @@ jobs:
           INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
           INPUT_TARGET_REF: ${{ inputs.target_ref }}
           PUBLISH_ALLOWED: ${{ inputs.publish }}
+          SKIP_COMPLETED: ${{ inputs.skip_completed }}
         with:
           script: |
             const analysis = require(`${process.env.GITHUB_WORKSPACE}/workflow/.github/scripts/issue-analysis.js`);

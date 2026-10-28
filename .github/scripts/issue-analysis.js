@@ -7,8 +7,7 @@ const { execFileSync, spawnSync } = require('node:child_process');
 
 const CLI_VERSION = '1.1.77';
 const MODEL_ALIAS = 'auto';
-const COMPONENTS = require('../components.json');
-const PROFILES = require('../issue-analysis/components.json');
+const { componentForIssue, componentScope, enabledComponents, selectIssue } = require('./issue-analysis-config');
 const PRIORITIES = ['priority:p0', 'priority:p1', 'priority:p2', 'priority:p3'];
 const PUBLICATION_BUDGET = 1600;
 const VERIFICATION_NOTICE = 'Source analysis only; no dynamic reproduction or functional tests were executed for this Issue.';
@@ -72,29 +71,14 @@ function inputFingerprint(snapshot) {
   return sha256(JSON.stringify({
     repository_id: snapshot.repository.id, issue_id: snapshot.issue.id,
     title: snapshot.issue.title, body: snapshot.issue.body, state: snapshot.issue.state,
-    labels: snapshot.issue.labels.map((label) => label.name).filter((name) => !name.startsWith('priority:')).sort(),
+    labels: snapshot.issue.labels.map((label) => typeof label === 'string' ? label : label.name)
+      .filter((name) => !name.startsWith('priority:')).sort(),
     component: snapshot.component, scope: snapshot.scope,
     source_commit_sha: snapshot.target.source_commit_sha,
     rules: snapshot.rules.map((rule) => rule.rule_id),
   }));
 }
 
-
-function componentForIssue(issue) {
-  const labels = issue.labels.map((label) => typeof label === 'string' ? label : label.name)
-    .filter((name) => name.startsWith('component:'));
-  if (labels.length !== 1) return { reason: labels.length ? 'ambiguous_component' : 'missing_component' };
-  const component = COMPONENTS.components.find((item) => item.label === labels[0] && item.status !== 'internal');
-  if (!component || !PROFILES[component.id]) return { reason: 'unsupported_component' };
-  return { component };
-}
-
-function componentScope(component) {
-  const profile = PROFILES[component.id];
-  check(profile, 'Missing component analysis policy');
-  const policy = fs.readFileSync(path.join(__dirname, '../issue-analysis/policy.md'), 'utf8');
-  return { ...profile, policy_sha256: sha256(policy + JSON.stringify(profile)) };
-}
 
 async function prepare({ github, context, core, env }) {
   const { data: repository } = await github.rest.repos.get(context.repo);
@@ -114,12 +98,11 @@ async function prepare({ github, context, core, env }) {
     permissions: { github_write: false, modify_source: false,
       publish_issue_results: env.PUBLISH_ALLOWED === 'true' },
   };
-  const selection = componentForIssue(issue);
+  const selection = selectIssue(issue, enabledComponents(env.ISSUE_ANALYSIS_COMPONENTS));
   const priorities = issue.labels.map((label) => typeof label === 'string' ? label : label.name)
     .filter((name) => name.startsWith('priority:'));
   core.setOutput('issue_number', String(number));
-  const skipReason = issue.state !== 'open' ? 'closed_issue' : selection.reason ||
-    (priorities.length ? 'existing_priority_skipped' : '');
+  const skipReason = selection.reason || '';
   core.setOutput('skip_analysis', String(Boolean(skipReason)));
   if (skipReason) {
     const reason = priorities.length ? `Issue #${number} already has priority labels: ${priorities.join(', ')}` : skipReason;
@@ -137,7 +120,8 @@ async function prepare({ github, context, core, env }) {
   // Keep only publication metadata; discussion is not an analysis input.
   const comments = (await github.paginate(github.rest.issues.listComments, { ...params, per_page: 100 }))
     .filter((comment) => comment.user?.login === 'github-actions[bot]' &&
-      comment.body?.startsWith(commentPrefix({ issue, component })));
+      (comment.body?.startsWith(commentPrefix({ issue, component })) ||
+        comment.body?.startsWith(completionPrefix({ issue, component }))));
   const labels = await github.paginate(github.rest.issues.listLabelsForRepo, { ...context.repo, per_page: 100 });
   const { data: latest } = await github.rest.issues.get(params);
   check(!latest.pull_request && issueRevision(latest) === issueRevision(issue),
@@ -164,6 +148,14 @@ async function prepare({ github, context, core, env }) {
   };
   snapshot.input_fingerprint = inputFingerprint(snapshot);
   writeJson(path.join(root, 'output/snapshot.json'), snapshot);
+  if (env.SKIP_COMPLETED === 'true' && hasCompletedAnalysis(snapshot, comments)) {
+    core.setOutput('skip_analysis', 'true');
+    writeJson(path.join(root, 'output/run.json'), { ...run, stage: 'already_analyzed',
+      target: snapshot.target, finished_at_utc: new Date().toISOString() });
+    writeManifest(root);
+    core.notice('An analysis of these exact inputs has already completed');
+    return;
+  }
   const agentSnapshot = { ...snapshot };
   delete agentSnapshot.comments;
   delete agentSnapshot.labels;
@@ -625,6 +617,46 @@ function commentPrefix(snapshot) {
     `<!-- issue-analysis:${snapshot.component.id}:${snapshot.issue.id}:`;
 }
 
+function completionPrefix(snapshot) {
+  return `<!-- issue-analysis-complete:${snapshot.component.id}:${snapshot.issue.id}:`;
+}
+
+function hasCompletedAnalysis(snapshot, comments) {
+  const completed = `${completionPrefix(snapshot)}${snapshot.input_fingerprint} -->`;
+  const report = `${commentPrefix(snapshot)}${snapshot.input_fingerprint}:`;
+  return comments.some((comment) => {
+    if (comment.user?.login !== 'github-actions[bot]') return false;
+    const firstLine = String(comment.body || '').split('\n')[0];
+    return firstLine === completed || (firstLine.startsWith(report) &&
+      /^[a-f0-9]{64} -->$/.test(firstLine.slice(report.length)));
+  });
+}
+
+async function recordCompletion({ github, context, snapshot, analysis }) {
+  const params = { ...context.repo, issue_number: snapshot.issue.number };
+  const { data: current } = await github.rest.issues.get(params);
+  check(!current.pull_request && issueRevision(current) === issueRevision(snapshot.issue),
+    'Issue changed before recording analysis completion');
+  const comments = await github.paginate(github.rest.issues.listComments, { ...params, per_page: 100 });
+  const marker = `${completionPrefix(snapshot)}${snapshot.input_fingerprint} -->`;
+  const previous = comments.find((comment) => comment.user?.login === 'github-actions[bot]' &&
+    comment.body?.startsWith(completionPrefix(snapshot)));
+  const body = `${marker}\nSource analysis completed: ${analysis.scope.status}; ${analysis.disposition}.\n` +
+    `[Report](https://github.com/${snapshot.repository.full_name}/actions/runs/${context.runId}).`;
+  if (previous && previous.body !== body) {
+    const captured = snapshot.comments.find((comment) => comment.id === previous.id);
+    check(captured?.body === previous.body, 'Analysis completion receipt changed; rerun before publication');
+  }
+  const { data: written } = previous?.body === body ? { data: previous } : previous ?
+    await github.rest.issues.updateComment({ ...context.repo, comment_id: previous.id, body }) :
+    await github.rest.issues.createComment({ ...params, body });
+  const { data: verified } = await github.rest.issues.getComment({ ...context.repo, comment_id: written.id });
+  const { data: latest } = await github.rest.issues.get(params);
+  check(verified.body === body && !latest.pull_request && issueRevision(latest) === issueRevision(snapshot.issue),
+    'Analysis completion readback did not match the snapshot');
+  return { id: written.id, body_sha256: sha256(body) };
+}
+
 function publicationMarker(snapshot, analysis, review) {
   const digest = sha256(JSON.stringify({ analysis, review }));
   return `${commentPrefix(snapshot)}${snapshot.input_fingerprint}:${digest} -->`;
@@ -724,6 +756,8 @@ function finish(root) {
       ...(approvedPriority && !existing.includes(approvedPriority) ? [{ action: 'add_label', label: approvedPriority }] : []),
       commentOperation(snapshot, comment),
     ];
+  } else if (authorized) {
+    plan.operations = [{ action: 'record_completion', input_fingerprint: snapshot.input_fingerprint }];
   }
   writeJson(path.join(root, 'output/writeback-plan.json'), plan);
   const runFile = path.join(root, 'output/run.json');
@@ -792,6 +826,12 @@ async function publish({ github, context, core, env }) {
       'Publication plan does not match the reviewed decision');
     await authorizeActor(github, context);
     if (!isPublishable(analysis)) {
+      check(JSON.stringify(plan.operations) === JSON.stringify([
+        { action: 'record_completion', input_fingerprint: snapshot.input_fingerprint },
+      ]), 'Completion operations do not match the reviewed snapshot');
+      const completion = await recordCompletion({ github, context, snapshot, analysis });
+      result.completion_comment_id = completion.id;
+      result.operations.push({ action: 'record_completion', ...completion });
       result.status = 'skipped';
       result.reason = 'Only active in-scope or V1-only reports are published';
       return result;
@@ -880,7 +920,7 @@ async function publish({ github, context, core, env }) {
   }
 }
 
-module.exports = { main, componentForIssue, componentScope, inputFingerprint, commentPrefix, assertRepository, priorityRules, prepare, stageSource, parseResult,
+module.exports = { main, hasCompletedAnalysis, completionPrefix, authorizeActor, componentForIssue, componentScope, inputFingerprint, commentPrefix, assertRepository, priorityRules, prepare, stageSource, parseResult,
   validateAnalysis, validateReview, inlineReview, reviewReasons, reviewIfNeeded, agentArguments, runAgent, reviewContext, revise, finish, publish, parseCliResult, phasePolicy };
 
 function main() {
