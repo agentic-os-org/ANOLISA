@@ -59,6 +59,28 @@ def patterns(text):
 
 
 class RpmSplitTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("rpmspec"), "rpmspec is required")
+    def test_rpm_build_modes_select_matching_sources_and_commands(self):
+        with tempfile.TemporaryDirectory(prefix="sec-rpm-spec-") as temporary:
+            spec = Path(temporary) / "agent-sec-core.spec"
+            spec.write_text(SPEC.read_text().replace("@VERSION@", "1.1.2"))
+            command = [
+                "rpmspec", "-P",
+                "--define", "systemd_post /bin/true",
+                "--define", "systemd_preun /bin/true",
+                "--define", "systemd_postun_with_restart /bin/true",
+            ]
+            offline = subprocess.check_output(command + [str(spec)], text=True)
+            online = subprocess.check_output(
+                command + ["--define", "_with_nightly_online 1", str(spec)], text=True
+            )
+        self.assertRegex(offline, r"(?m)^Source1:\s+agent-sec-core-1\.1\.2-vendor\.tar\.gz$")
+        self.assertIn("make build-all-v2-offline", offline)
+        self.assertNotIn("make build-all-v2 NPM_INSTALL=", offline)
+        self.assertNotRegex(online, r"(?m)^Source1:")
+        self.assertIn("make build-all-v2 NPM_INSTALL='npm ci ", online)
+        self.assertNotIn("make build-all-v2-offline", online)
+
     def test_exact_package_set_and_compatibility_requirements(self):
         text = SPEC.read_text()
         parsed = sections(text)

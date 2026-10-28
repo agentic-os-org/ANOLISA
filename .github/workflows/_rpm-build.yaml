@@ -29,6 +29,11 @@ on:
         required: false
         type: string
         default: ""
+      sec-core-nightly-online:
+        description: "Build sec-core V2 nightly with locked dependencies fetched online"
+        required: false
+        type: boolean
+        default: false
 
 env:
   RUSTUP_DIST_SERVER: https://static.rust-lang.org
@@ -237,6 +242,17 @@ jobs:
           SPEC_IN=""
           if [ "$COMPONENT" = "agent-sec-core" ]; then
             SPEC_IN=$(find "$EXTRACT_DIR" -name "agent-sec-core.spec.v2.in" -print -quit)
+            if [ "${{ inputs.sec-core-nightly-online }}" = "true" ] && \
+               [ -n "$SPEC_IN" ] && \
+               ! grep -q '^%bcond_with nightly_online' "$SPEC_IN"; then
+              LEGACY_SPEC=$(find "$EXTRACT_DIR" -name "agent-sec-core.spec.in" -print -quit)
+              if [ -z "$LEGACY_SPEC" ]; then
+                echo "ERROR: sec-core release branch has neither a nightly-capable V2 spec nor a V1 spec" >&2
+                exit 1
+              fi
+              echo "WARNING: sec-core release branch does not support V2 nightly; using its V1 spec"
+              SPEC_IN="$LEGACY_SPEC"
+            fi
           fi
           if [ -z "$SPEC_IN" ]; then
             SPEC_IN=$(find "$EXTRACT_DIR" -name "${COMPONENT}.spec.in" -print -quit)
@@ -264,7 +280,13 @@ jobs:
 
       - name: Build RPM
         run: |
-          rpmbuild -bb --nodeps \
+          args=()
+          if [ "${{ inputs.sec-core-nightly-online }}" = "true" ] && \
+             [ "${{ inputs.component }}" = "agent-sec-core" ] && \
+             [ "$SPEC_BASENAME" = "agent-sec-core.spec.v2" ]; then
+            args+=(--with nightly_online)
+          fi
+          rpmbuild -bb --nodeps "${args[@]}" \
             --define "_topdir $HOME/rpmbuild" \
             ~/rpmbuild/SPECS/${SPEC_BASENAME}
 
@@ -281,7 +303,13 @@ jobs:
 
           # Every declared package must be present, including split and compatibility RPMs.
           package_format='%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n'
-          rpmspec -q --rpms --qf "$package_format" \
+          args=()
+          if [ "${{ inputs.sec-core-nightly-online }}" = "true" ] && \
+             [ "${{ inputs.component }}" = "agent-sec-core" ] && \
+             [ "$SPEC_BASENAME" = "agent-sec-core.spec.v2" ]; then
+            args+=(--define '_with_nightly_online 1')
+          fi
+          rpmspec -q --rpms "${args[@]}" --qf "$package_format" \
             "$HOME/rpmbuild/SPECS/$SPEC_BASENAME" | sort -u > /tmp/rpm-expected.txt
           : > /tmp/rpm-built.txt
           while IFS= read -r rpm_path; do

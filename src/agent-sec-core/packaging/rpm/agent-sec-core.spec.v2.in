@@ -1,6 +1,7 @@
 
 %define anolis_release 1
 %global debug_package %{nil}
+%bcond_with nightly_online
 
 # Use default zstd compression (level 3) instead of -19 to speed up packaging.
 %define _binary_payload w.zstdio
@@ -18,7 +19,9 @@ Summary:        Agent Security V2 runtime and sandbox
 License:        Apache-2.0
 URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
+%if ! %{with nightly_online}
 Source1:        %{name}-%{version}-vendor.tar.gz
+%endif
 
 # Source1 supplies every Cargo crate and npm package. gcc links the Rust
 # binaries and compiles the C sources of ring and bundled libsqlite3-sys.
@@ -319,10 +322,18 @@ Skill reference files and workflow scripts for Agent security integration.
 %prep
 # Source1 overlays the two Cargo vendor trees and the OpenClaw npm cache at
 # their project-relative paths before the offline build starts.
+%if %{with nightly_online}
+%setup -q
+%else
 %setup -q -a 1
+%endif
 
 %build
+%if %{with nightly_online}
+make build-all-v2 NPM_INSTALL='npm ci --include=dev --omit=optional --ignore-scripts --no-audit --no-fund'
+%else
 make build-all-v2-offline
+%endif
 
 %install
 rm -rf $RPM_BUILD_ROOT
