@@ -205,6 +205,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Oct 28 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.12-1
+- Enforce automatic capture consent and attribute new observations to agents
+- Preserve files on failed edits and validate snapshots before restoration
+- Keep startup indexes current and report search failures with recovery guidance
+- Preserve imported metadata, summary rankings, Unicode and index links
+- Preview OpenClaw lifecycle changes and advertise all 38 MCP tools
+
 * Sun Oct 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.11-1
 - Correct category filtering and keep keyword and vector indexes current
 - Avoid duplicate consolidation facts and sanitized search-marker interests
