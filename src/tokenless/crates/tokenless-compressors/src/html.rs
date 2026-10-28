@@ -1233,7 +1233,20 @@ impl Renderer<'_> {
                     // `contains` for every prefix length is quadratic in
                     // the run length, which untrusted HTML controls.
                     let ticks = "`".repeat(longest_backtick_run(&text) + 1);
-                    let _ = write!(out, "{ticks}{text}{ticks}");
+                    // Adjacent code elements must not join their closing and
+                    // opening fences. A comment separates syntax without adding
+                    // a space to the page's visible text.
+                    if out.ends_with('`') {
+                        out.push_str("<!-- -->");
+                    }
+                    // Edge backticks would merge into the delimiter run. CommonMark
+                    // removes one space from both ends of a padded code span.
+                    let pad = if text.starts_with('`') || text.ends_with('`') {
+                        " "
+                    } else {
+                        ""
+                    };
+                    let _ = write!(out, "{ticks}{pad}{text}{pad}{ticks}");
                 }
                 "label" => {
                     // Adjacent labels (content-tab titles) must not run together.

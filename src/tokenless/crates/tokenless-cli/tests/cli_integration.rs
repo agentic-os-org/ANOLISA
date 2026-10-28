@@ -4374,3 +4374,75 @@ fn mode_mismatch_notice_survives_an_unwritable_stderr() {
         },
     );
 }
+
+#[test]
+fn html_code_edges_preserve_syntax_and_recover_the_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("data");
+    for (body, expected) in [
+        (
+            "<p>Use <code>`orders`</code>, <kbd>``literal`</kbd> and <samp>`</samp>.</p>",
+            "Use `` `orders` ``, ``` ``literal` ``` and `` ` ``.",
+        ),
+        (
+            "<p><code>alpha</code><code>beta</code></p>",
+            "`alpha`<!-- -->`beta`",
+        ),
+    ] {
+        let html = format!(
+            "<!DOCTYPE html><html><head><title>Reference</title></head><body>\
+             <p>This reference preserves command syntax and numbered steps so readers \
+             can follow the instructions without changing their meaning.</p>{body}\
+             <script>{}</script></body></html>",
+            "var padding = 12345; ".repeat(100)
+        );
+        let mut request: serde_json::Value = serde_json::from_str(&post_tool_request_json(
+            &html,
+            true,
+            "html_code_edges_preserve_syntax_and_recover_the_page",
+        ))
+        .unwrap();
+        request["input"]["capabilities"]["replace_with_text"] = true.into();
+        let output = spawn_with_stdin(
+            tokenless_bin()
+                .env("TOKENLESS_DATA_DIR", &state)
+                .env_remove("TOKENLESS_STATS_DB")
+                .env_remove("TOKENLESS_STASH_DB")
+                .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        assert_eq!(result["content_type"], "html");
+
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["html_extraction"])
+        );
+        assert_eq!(result["recoverability"], "retrievable");
+        let rendered = result["output"].as_str().unwrap();
+        assert!(rendered.contains(expected), "{rendered}");
+
+        let hash = result["stash_keys"][0].as_str().unwrap();
+        let retrieved = tokenless_bin()
+            .env("TOKENLESS_DATA_DIR", &state)
+            .env_remove("TOKENLESS_STASH_DB")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args(["retrieve", hash])
+            .output()
+            .unwrap();
+        assert!(retrieved.status.success());
+        assert_eq!(retrieved.stdout, html.as_bytes());
+    }
+}
