@@ -30,6 +30,10 @@ use uuid::Uuid;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+// Normalization and resolution primitives land before the topology stage that
+// consumes them, so they stay test-scoped until a production caller exists.
+#[cfg(test)]
+mod file_protection_policy;
 mod inode_policy;
 use inode_policy::InodePolicy;
 
