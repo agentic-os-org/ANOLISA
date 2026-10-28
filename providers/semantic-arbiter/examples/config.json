@@ -1,7 +1,6 @@
 {
   "version": 1,
   "task": {
-    "session_id": "synthetic-session",
     "version": "task-v1",
     "text": "Update the synthetic greeting, preserving the synthetic reference file.",
     "provenance": {

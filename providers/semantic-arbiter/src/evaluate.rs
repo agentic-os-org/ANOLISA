@@ -84,7 +84,12 @@ impl ModelBackend for RecordingBackend {
 }
 
 pub(crate) async fn invoke(request: &Value, config: Config, ingress: Ingress) -> &'static str {
-    let record = match Record::create(&config) {
+    let budget = match mapping::budget(request, &config, ingress) {
+        Ok(budget) => budget,
+        Err(code) => return code,
+    };
+    let deadline = ingress.deadline_at(budget.deadline_ms, config.model.timeout_ms);
+    let record = match Record::create(&config, deadline).await {
         Ok(record) => Arc::new(record),
         Err(code) => return code,
     };
@@ -92,22 +97,6 @@ pub(crate) async fn invoke(request: &Value, config: Config, ingress: Ingress) ->
         "version":1, "mode":"private_local_shadow", "filesystem_attested":false,
         "aw_request":request, "ingress_unix_ms":ingress.now_ms().saturating_sub(ingress.elapsed_ms())
     })) { return code; }
-    // The capture metadata is recorded without the text, which stays in the
-    // evaluation stage, so the claim can be rechecked without a second copy.
-    if let Err(code) = record.save(
-        "05-task.json",
-        &json!({
-            "version":1, "origin":"operator", "session_id":config.task.session_id,
-            "task_version":config.task.version, "source":config.task.provenance.source,
-            "captured_by":config.task.provenance.captured_by,
-            "captured_at_ms":config.task.provenance.captured_at_ms,
-            "declared_text_sha256":config.task.provenance.text_sha256,
-            "evaluated_text_sha256":config.task.text_digest(),
-            "text_bytes":config.task.text.len()
-        }),
-    ) {
-        return code;
-    }
     let result = run(request, config, ingress, record.clone()).await;
     let (status, code, response) = match result {
         Ok(response) => ("evaluated", "shadow_evaluated", Some(response)),
@@ -154,6 +143,24 @@ async fn run(
     if encoded.len() > semantic_arbiter::protocol::MAX_MESSAGE_BYTES {
         return Err("oversized_candidate");
     }
+    record.save(
+        "05-task.json",
+        &json!({
+            "version":1, "origin":"operator",
+            "native_session_id":request["event"]["session_id"],
+            "session_id":evaluation.binding.session_id,
+            "adapter":request["event"]["agent"]["adapter"],
+            "binding_id":request["event"]["agent"]["binding_id"],
+            "instance_id":request["event"]["agent"]["instance_id"],
+            "config_revision":evaluation.binding.config_revision,
+            "task_version":config.task.version, "source":config.task.provenance.source,
+            "captured_by":config.task.provenance.captured_by,
+            "captured_at_ms":config.task.provenance.captured_at_ms,
+            "declared_text_sha256":config.task.provenance.text_sha256,
+            "evaluated_text_sha256":config.task.text_digest(),
+            "text_bytes":config.task.text.len()
+        }),
+    )?;
     record.save("10-evaluation.json", &evaluation)?;
     config.model.config_revision = evaluation.binding.config_revision.clone();
     if ingress.expired(&evaluation.budget, config.model.timeout_ms) {

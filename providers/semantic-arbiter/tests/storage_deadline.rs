@@ -76,19 +76,18 @@ fn private_files_and_fixed_reserve_enforce_both_quotas() {
 }
 
 #[test]
-fn record_lock_is_nonblocking_and_concurrency_cannot_overreserve() {
+fn record_lock_wait_obeys_original_budget_and_concurrency_cannot_overreserve() {
     let fixture = Fixture::new();
     let root = File::open(&fixture.records).unwrap();
     // SAFETY: a live file descriptor is the only flock precondition.
     assert_eq!(unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut request = fixture.request(fixture.config("http://127.0.0.1:1"));
+    request["budget_ms"] = json!(100);
     let start = Instant::now();
-    let (_, diagnostic) = invoke(
-        &fixture,
-        fixture.request(fixture.config("http://127.0.0.1:1")),
-        false,
-    );
-    assert_eq!(diagnostic["code"], "record_unavailable");
+    let (_, diagnostic) = invoke(&fixture, request, false);
+    assert_eq!(diagnostic["code"], "budget_exceeded");
     assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(fixture.records().is_empty());
     assert_eq!(unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_UN) }, 0);
     let mut config = fixture.config("http://127.0.0.1:1");
     config["max_records"] = json!(1);
@@ -113,6 +112,34 @@ fn record_lock_is_nonblocking_and_concurrency_cannot_overreserve() {
         recorded += usize::from(code == "missing_credentials");
     }
     assert_eq!(recorded, 1);
+}
+
+#[test]
+fn released_record_lock_allows_inference_with_remaining_budget() {
+    let fixture = Fixture::new();
+    let server = Server::new("0.99", 200, Duration::ZERO);
+    let root = File::open(&fixture.records).unwrap();
+    // SAFETY: flock only accesses the live descriptor.
+    assert_eq!(unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let request = fixture.request(fixture.config(&server.endpoint));
+    std::thread::scope(|scope| {
+        let pending = scope.spawn(|| invoke(&fixture, request, true));
+        assert!(matches!(
+            server.received.recv_timeout(Duration::from_millis(150)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(fixture.records().is_empty());
+        assert_eq!(unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_UN) }, 0);
+        let (_, diagnostic) = pending.join().unwrap();
+        assert_eq!(diagnostic["code"], "shadow_evaluated");
+    });
+    assert_eq!(fixture.records().len(), 1);
+    let evaluation = read(&fixture.records()[0].join("10-evaluation.json"));
+    assert_eq!(
+        evaluation["budget"]["deadline_ms"].as_u64().unwrap()
+            - evaluation["budget"]["opened_at_ms"].as_u64().unwrap(),
+        2000
+    );
 }
 
 #[test]
@@ -223,14 +250,7 @@ fn preparation_time_consumes_original_aw_and_config_budgets() {
         let output = finish(child, request.to_string().as_bytes());
         let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(diagnostic["code"], "budget_exceeded");
-        let dir = &fixture.records()[0];
-        let evaluation = read(&dir.join("10-evaluation.json"));
-        assert_eq!(
-            evaluation["budget"]["deadline_ms"].as_u64().unwrap()
-                - evaluation["budget"]["opened_at_ms"].as_u64().unwrap(),
-            20
-        );
-        assert_eq!(read(&dir.join("40-result.json"))["code"], "budget_exceeded");
+        assert!(fixture.records().is_empty());
         assert!(server.received.try_recv().is_err());
     }
 }

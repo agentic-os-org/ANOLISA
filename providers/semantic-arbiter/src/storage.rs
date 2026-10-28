@@ -7,9 +7,10 @@ use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use tokio::time::Instant;
 
 use crate::config::Config;
 
@@ -73,13 +74,25 @@ pub(crate) fn open_root(path: &str) -> io::Result<File> {
 
 struct Lock<'a>(&'a File);
 impl<'a> Lock<'a> {
-    fn acquire(file: &'a File) -> io::Result<Self> {
-        // SAFETY: flock only accesses the live descriptor. Nonblocking avoids
-        // consuming the inference budget waiting for another reservation.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(io::Error::last_os_error());
+    async fn acquire(file: &'a File, deadline: Instant) -> io::Result<Self> {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            // SAFETY: flock only accesses the live descriptor.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self(file));
+            }
+            let error = io::Error::last_os_error();
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                return Err(error);
+            }
+            tokio::time::sleep_until((Instant::now() + Duration::from_millis(1)).min(deadline))
+                .await;
         }
-        Ok(Self(file))
     }
 }
 impl Drop for Lock<'_> {
@@ -159,14 +172,23 @@ pub(crate) struct Record {
 }
 
 impl Record {
-    pub(crate) fn create(config: &Config) -> Result<Self, &'static str> {
-        Self::create_io(config).map_err(|_| "record_unavailable")
+    pub(crate) async fn create(config: &Config, deadline: Instant) -> Result<Self, &'static str> {
+        Self::create_io(config, deadline).await.map_err(|error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                "budget_exceeded"
+            } else {
+                "record_unavailable"
+            }
+        })
     }
 
-    fn create_io(config: &Config) -> io::Result<Self> {
+    async fn create_io(config: &Config, deadline: Instant) -> io::Result<Self> {
         let root = open_root(&config.record_dir)?;
-        let lock = Lock::acquire(&root)?;
+        let lock = Lock::acquire(&root, deadline).await?;
         check_existing(&root, config)?;
+        if Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| denied())?
