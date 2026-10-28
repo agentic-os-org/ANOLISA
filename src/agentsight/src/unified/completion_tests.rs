@@ -133,6 +133,36 @@ fn runtime_paces_real_delivery_and_reports_queue_accounting() {
 }
 
 #[test]
+fn unused_pending_bytes_allow_capture_receiving_while_cpu_admission_is_busy() {
+    let mut fixture = RuntimeFixture::new(100);
+    let mut aggregator = Aggregator::new();
+    let first = capture(&mut aggregator, "buffered-first", &"a".repeat(4096));
+    let second = capture(&mut aggregator, "buffered-second", &"b".repeat(4096));
+    let bytes = first.retained_bytes() + second.retained_bytes();
+    fixture.runtime_limits.pending_genai_max_bytes = bytes;
+    fixture.runtime_limits.pending_genai_max_count = 2;
+    let budget = fixture.completions.budget.clone().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _permit = budget.acquire(WorkClass::Maintenance).unwrap();
+        ready_tx.send(()).unwrap();
+        // A bounded timeout lets the old blocking behavior fail rather than hang.
+        let _ = release_rx.recv_timeout(Duration::from_millis(300));
+    });
+    ready_rx.recv().unwrap();
+    fixture.process_aggregated_results(vec![first, second]);
+    assert_eq!(fixture.completions.len(), 2);
+    assert_eq!(fixture.completions.bytes, bytes);
+    assert!(fixture.rows().is_empty());
+    release_tx.send(()).unwrap();
+    worker.join().unwrap();
+    fixture.flush_completions();
+    assert_eq!(fixture.rows(), ["buffered-first", "buffered-second"]);
+    assert_eq!(fixture.completions.bytes, 0);
+}
+
+#[test]
 fn runtime_preserves_fifo_under_backpressure_and_delivers_oversized_captures() {
     let mut fixture = RuntimeFixture::new(100);
     fixture.runtime_limits.pending_genai_max_count = 1;

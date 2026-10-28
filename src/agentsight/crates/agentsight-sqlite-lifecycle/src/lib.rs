@@ -11,8 +11,9 @@ mod worker_tests;
 use std::path::PathBuf;
 
 pub use connection::{
-    CheckpointOutcome, ConnectionMode, ConnectionOptions, checkpoint_passive, checkpoint_truncate,
-    disable_auto_checkpoint, is_retryable_lock, open_connection, retry_with_backoff,
+    CheckpointOutcome, CheckpointStats, ConnectionMode, ConnectionOptions, checkpoint_passive,
+    checkpoint_passive_stats, checkpoint_truncate, disable_auto_checkpoint, is_retryable_lock,
+    open_connection, retry_with_backoff,
 };
 pub use lock::{MaintenanceLock, MaintenanceLockAcquire};
 pub use measurement::{SizeSnapshot, measure_database};

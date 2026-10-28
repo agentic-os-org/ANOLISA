@@ -69,6 +69,13 @@ IDs in the existing retroactive fix-up registry; a later file write repairs both
 and completed-event JSON. FFI and active non-SQLite exporters keep deferred delivery because an
 already delivered event cannot be repaired in those consumers.
 
+Raw completions and deferred GenAI calls share the configured pending byte and count bounds.
+The raw queue can use unused bytes in that shared allowance instead of stopping at an additional
+half-budget limit while event reception waits for CPU admission. Hard-limit backpressure and
+oversized-task admission remain synchronous to preserve bounded ownership and FIFO delivery.
+The standalone loop ticks once per receive attempt; FFI polling keeps the same maintenance path.
+The `completion_backpressure` stage records synchronous admission and delivery at the hard shared limit.
+
 Registered sinks report their current activity; unknown exporters default to active. The default
 Logtail sink checks the same required-file and telemetry-sentinel gates for routing and writing.
 Dynamic sinks also re-read their current path so a paused exporter can resume without registration
@@ -97,6 +104,13 @@ payload target, allowing one oversized row to make progress. Batches yield betwe
 write contention defers the remaining work. A passive checkpoint copies WAL frames before a
 non-waiting truncate attempt, and an incomplete checkpoint stops further capacity pruning.
 Separate age, pruning and checkpoint timings identify which maintenance phase is slow.
+Paced workers check WAL growth every 20 ms and request a passive checkpoint after 1 MiB of growth
+or 50 ms, including during resumable cleanup. Admission still depends on the shared CPU budget;
+these are scheduling targets, not a bound on WAL size or checkpoint duration. Capacity passes use
+SQLite's live page count, excluding freelist pages and reusable WAL space, and truncate at their
+entry and completion instead of after every deletion batch. Passive checkpoints between batches
+retain the reader-contention gate. Metrics record WAL bytes, total/copied/pending frames, checkpoint
+outcomes and separate passive/truncate durations. PASSIVE can copy the whole available WAL in one call.
 
 FFI delivery moves calls and records into boxed queue items. A byte reservation survives dequeue
 until callbacks return, and failed sends or receiver destruction refund it. Large JSON fields are
