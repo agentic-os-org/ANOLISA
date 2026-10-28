@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
 from tests.v2.e2e.conftest import daemon_bin as daemon_bin
 from tests.v2.e2e.conftest import daemon_settings as daemon_settings
 from tests.v2.e2e.conftest import start_daemon as start_daemon

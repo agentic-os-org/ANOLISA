@@ -20,6 +20,7 @@ from queue import Queue
 from typing import Any
 
 import pytest
+
 from tests.v2.e2e.conftest import DaemonHandle
 
 _V2 = Path(__file__).resolve().parents[3] / "v2"
