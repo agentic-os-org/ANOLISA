@@ -57,6 +57,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_semantic_arbiter:
+        description: 'Force run semantic-arbiter tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
 
 # Only superseded PR runs share a group; pushes and manual runs stay independent.
 concurrency:
@@ -88,6 +93,7 @@ jobs:
       skillfs: ${{ steps.changes.outputs.skillfs }}
       cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
       ktuner: ${{ steps.changes.outputs.ktuner }}
+      semantic_arbiter: ${{ steps.changes.outputs.semantic_arbiter }}
       cache_environment: >-
         ${{ github.ref == 'refs/heads/main' && github.ref_protected &&
             (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
@@ -122,6 +128,7 @@ jobs:
           SKILLFS=false
           COSH_NG=false
           KTUNER=false
+          SEMANTIC_ARBITER=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^deprecated/copilot-shell/"; then
@@ -153,6 +160,9 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/ktuner/"; then
             KTUNER=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/semantic-arbiter/"; then
+            SEMANTIC_ARBITER=true
           fi
 
           # Exercise cache consumers when the runner image or cache bootstrap changes.
@@ -193,6 +203,9 @@ jobs:
           if [[ "${{ inputs.run_ktuner }}" == "true" ]]; then
             KTUNER=true
           fi
+          if [[ "${{ inputs.run_semantic_arbiter }}" == "true" ]]; then
+            SEMANTIC_ARBITER=true
+          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
@@ -204,6 +217,7 @@ jobs:
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
           echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
+          echo "semantic_arbiter=$SEMANTIC_ARBITER" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -218,6 +232,7 @@ jobs:
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
           echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
           echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
+          echo "| semantic-arbiter | $SEMANTIC_ARBITER |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Validate component version metadata
@@ -1599,3 +1614,30 @@ jobs:
         run: |
           cd src/ktuner
           cargo test
+
+  # =========================================================================
+  # Step 13: Test semantic-arbiter (independent library and deterministic check CLI)
+  # =========================================================================
+  test-semantic-arbiter:
+    name: Test semantic-arbiter
+    needs: detect-changes
+    if: needs.detect-changes.outputs.semantic_arbiter == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: src/semantic-arbiter
+    env:
+      RUSTUP_TOOLCHAIN: '1.93.1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+          components: 'rustfmt, clippy'
+
+      - name: Run quality checks
+        run: make check
+
+      - name: Build library and check CLI
+        run: cargo build --locked

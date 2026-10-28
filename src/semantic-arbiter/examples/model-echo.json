@@ -1,0 +1,53 @@
+{
+  "api_version": "semantic-arbiter/v1alpha1",
+  "request_id": "model-echo",
+  "mode": "deterministic_check",
+  "binding": {
+    "session_id": "synthetic-session",
+    "instance_id": "synthetic-instance",
+    "workspace_id": "synthetic-workspace",
+    "task_version": "task-v1",
+    "config_revision": "policy-v1",
+    "candidate_id": "candidate-1",
+    "candidate_revision": "candidate-v1"
+  },
+  "budget": {
+    "opened_at_ms": 1000,
+    "deadline_ms": 2000,
+    "max_evidence_items": 4,
+    "max_evidence_bytes": 8192
+  },
+  "check_at_ms": 1500,
+  "scenarios": ["preservation", "task_scope"],
+  "task": {
+    "session_id": "synthetic-session",
+    "version": "task-v1",
+    "origin": "operator",
+    "text": "Synthetic task: replace the result; model repetition is not local verification.",
+    "allowed_resource_ids": ["result-1"],
+    "preserve_resource_ids": []
+  },
+  "candidate": {"operation": "replace", "resource_id": "result-1"},
+  "evidence": [{
+    "id": "rebuild-1",
+    "source_id": "synthetic-model",
+    "source_revision": "source-v1",
+    "provenance": "model_echo",
+    "binding": {
+      "session_id": "synthetic-session",
+      "instance_id": "synthetic-instance",
+      "workspace_id": "synthetic-workspace",
+      "task_version": "task-v1",
+      "config_revision": "policy-v1",
+      "candidate_id": "candidate-1",
+      "candidate_revision": "candidate-v1"
+    },
+    "captured_at_ms": 1200,
+    "valid_until_ms": 1900,
+    "fact": {
+      "kind": "rebuild",
+      "parameters": {"resource_id": "result-1", "result": "identical"}
+    }
+  }],
+  "gaps": []
+}
