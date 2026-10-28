@@ -17,6 +17,7 @@ pub(crate) const RESERVE_BYTES: u64 = 4 * 1024 * 1024;
 const FILE_LIMIT: usize = 1100 * 1024;
 const FILES: &[&str] = &[
     "00-input.json",
+    "05-task.json",
     "10-evaluation.json",
     "20-model-request.json",
     "30-model-result.json",

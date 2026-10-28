@@ -92,6 +92,22 @@ pub(crate) async fn invoke(request: &Value, config: Config, ingress: Ingress) ->
         "version":1, "mode":"private_local_shadow", "filesystem_attested":false,
         "aw_request":request, "ingress_unix_ms":ingress.now_ms().saturating_sub(ingress.elapsed_ms())
     })) { return code; }
+    // The capture metadata is recorded without the text, which stays in the
+    // evaluation stage, so the claim can be rechecked without a second copy.
+    if let Err(code) = record.save(
+        "05-task.json",
+        &json!({
+            "version":1, "origin":"operator", "session_id":config.task.session_id,
+            "task_version":config.task.version, "source":config.task.provenance.source,
+            "captured_by":config.task.provenance.captured_by,
+            "captured_at_ms":config.task.provenance.captured_at_ms,
+            "declared_text_sha256":config.task.provenance.text_sha256,
+            "evaluated_text_sha256":config.task.text_digest(),
+            "text_bytes":config.task.text.len()
+        }),
+    ) {
+        return code;
+    }
     let result = run(request, config, ingress, record.clone()).await;
     let (status, code, response) = match result {
         Ok(response) => ("evaluated", "shadow_evaluated", Some(response)),

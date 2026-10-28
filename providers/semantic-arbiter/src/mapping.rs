@@ -8,7 +8,7 @@ use semantic_arbiter::evaluation::{EvaluationMode, EvaluationRequest, EVALUATION
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::config::{resolve, single_file_input, Config};
+use crate::config::{derive, resolve, single_file_input, Config};
 
 pub(crate) fn identity(domain: &str, value: &Value) -> Result<String, &'static str> {
     let bytes = serde_json::to_vec(value).map_err(|_| "mapping_failed")?;
@@ -61,11 +61,10 @@ pub(crate) fn project(
         .and_then(Value::as_str)
         .ok_or("unsupported_input")?;
     let resolved = resolve(path, &config.workspace_path).ok_or("unmapped_resource")?;
-    let resource_id = config
-        .resources
-        .get(&resolved)
-        .ok_or("unmapped_resource")?
-        .clone();
+    let resource_id = match config.resources.get(&resolved) {
+        Some(label) => label.clone(),
+        None => derive(&resolved, &config.workspace_path).ok_or("unmapped_resource")?,
+    };
     let candidate = Candidate {
         operation: mapping.operation,
         resource_id,
