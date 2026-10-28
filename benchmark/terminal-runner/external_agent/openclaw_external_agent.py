@@ -106,6 +106,34 @@ _log = logging.getLogger(__name__)
 _LOG_PREFIX = "OpenClaw"
 
 
+def _strip_trailing_shell_comment(line: str) -> str:
+    """Remove a shell comment only when its hash starts an unquoted word."""
+    quote: str | None = None
+    escaped = False
+    at_word_boundary = True
+
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            at_word_boundary = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            at_word_boundary = False
+        elif char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            at_word_boundary = False
+        elif quote is None:
+            if char == "#" and at_word_boundary:
+                return line[:index].rstrip()
+            at_word_boundary = char in " \t"
+
+    return line
+
+
 class OpenClawExternalAgent(BaseAgent):
     """Route between an OpenClaw process on the **host** and a Harbor Docker container.
 
@@ -812,9 +840,8 @@ class OpenClawExternalAgent(BaseAgent):
                 steps.append("\n".join(block))
                 continue
 
-            # Regular command line – strip trailing comments.
-            if " #" in line and not line.startswith("#"):
-                line = line[:line.index(" #")].strip()
+            # Regular command line – strip only shell comments outside quotes.
+            line = _strip_trailing_shell_comment(line)
             if line:
                 steps.append(line)
             i += 1

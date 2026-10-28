@@ -169,6 +169,7 @@ Skill 提示按优先级从高到低加载：
 2. **`dataset/<task>/solution/solve.sh`** — 自动解析为分步提示。**默认禁用**，设置 `SKILL_FROM_SOLUTION=1` 启用。
 
 数据集目录通过 `DATASET_DIR` 环境变量解析（默认 `dataset`，相对于 `harbor run` 的工作目录）。
+设置 `SKILL_FROM_SOLUTION=1` 时，自动解析会移除未加引号的行尾 shell 注释，并保留引号内或转义命令文本中的 `#`。
 
 ---
 

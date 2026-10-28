@@ -174,6 +174,7 @@ Skill hints are loaded per-task (highest priority first):
 2. **`dataset/<task>/solution/solve.sh`** — auto-parsed into a step-by-step hint. **Disabled by default**; enable with `SKILL_FROM_SOLUTION=1`.
 
 The dataset directory is resolved via the `DATASET_DIR` env var (default `dataset`, relative to the `harbor run` working directory).
+When `SKILL_FROM_SOLUTION=1`, auto-parsing removes unquoted trailing shell comments while preserving `#` inside quoted or escaped command text.
 
 ---
 
