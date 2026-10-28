@@ -228,15 +228,31 @@ fn snapshot_excludes_meta_directory() {
 use std::time::Duration;
 
 fn age_file(path: &std::path::Path, secs_ago: i64) {
-    let old = nix::sys::time::TimeSpec::new(secs_ago, 0);
+    // utimensat takes an absolute epoch timestamp; compute "now minus n"
+    // so the caller's "N seconds ago" is relative to the test run, not 1970.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mtime = nix::sys::time::TimeSpec::new(now - secs_ago, 0);
     nix::sys::stat::utimensat(
         None,
         path,
-        &old,
-        &old,
+        &mtime,
+        &mtime,
         nix::sys::stat::UtimensatFlags::NoFollowSymlink,
     )
     .unwrap();
+}
+
+fn sidecar_info(id: &str) -> agent_memory::snapshot::SnapshotInfo {
+    agent_memory::snapshot::SnapshotInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+        created_at: "2026-01-01T00:00:00+00:00".into(),
+        size: 1,
+        backend: "tar.gz".into(),
+    }
 }
 
 #[test]
@@ -267,7 +283,7 @@ fn reclaim_removes_sidecar_less_archive_but_not_complete_pair() {
     std::fs::create_dir_all(&dir).unwrap();
 
     // Complete pair: archive + parseable sidecar — must survive.
-    let info = agent_memory::snapshot::reclaim::test_sidecar_info("snap_KEEP");
+    let info = sidecar_info("snap_KEEP");
     std::fs::write(dir.join("snap_KEEP.tar.gz"), b"archive").unwrap();
     std::fs::write(
         dir.join("snap_KEEP.json"),
@@ -285,10 +301,7 @@ fn reclaim_removes_sidecar_less_archive_but_not_complete_pair() {
     // Orphan sidecar (no archive), old — removed.
     std::fs::write(
         dir.join("snap_GONE.json"),
-        serde_json::to_string(&agent_memory::snapshot::reclaim::test_sidecar_info(
-            "snap_GONE",
-        ))
-        .unwrap(),
+        serde_json::to_string(&sidecar_info("snap_GONE")).unwrap(),
     )
     .unwrap();
     age_file(&dir.join("snap_GONE.json"), 2 * 24 * 3600);
@@ -315,11 +328,32 @@ fn reclaim_sweep_at_mount_open_does_not_block_or_delete_live_data() {
     cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
     cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
     cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
-    // Default config has reclaim enabled — a normal open must succeed and
-    // leave user files untouched.
+    // Seed the snapshots dir before the first open: an old orphan partial,
+    // an old orphan sidecar, and a complete pair. Default config has reclaim
+    // enabled, so opening the service must sweep the orphans while leaving
+    // the complete pair — and all user files — untouched.
+    let dir = tmp
+        .path()
+        .join("user-reclaim-open-tester/.anolisa/snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("snap_ORPH.tar.gz.partial"), b"junk").unwrap();
+    age_file(&dir.join("snap_ORPH.tar.gz.partial"), 2 * 24 * 3600);
+    std::fs::write(dir.join("snap_GONE.json"), b"{}").unwrap();
+    age_file(&dir.join("snap_GONE.json"), 2 * 24 * 3600);
+    std::fs::write(dir.join("snap_KEEP.tar.gz"), b"archive").unwrap();
+    std::fs::write(
+        dir.join("snap_KEEP.json"),
+        serde_json::to_string(&sidecar_info("snap_KEEP")).unwrap(),
+    )
+    .unwrap();
+
     let svc = MemoryService::new(cfg).unwrap();
     svc.write("note.md", "survives", false).unwrap();
     assert_eq!(svc.read("note.md").unwrap(), "survives");
+    assert!(!dir.join("snap_ORPH.tar.gz.partial").exists());
+    assert!(!dir.join("snap_GONE.json").exists());
+    assert!(dir.join("snap_KEEP.tar.gz").exists());
+    assert!(dir.join("snap_KEEP.json").exists());
 }
 
 #[test]
@@ -354,4 +388,93 @@ fn reclaim_disabled_config_leaves_artifacts() {
             .join("snap_X.tar.gz.partial")
             .exists()
     );
+}
+
+#[test]
+fn reclaim_repairs_truncated_sidecar_from_intact_archive() {
+    let (_tmp, svc) = setup();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Intact archive + truncated sidecar (simulating a crash mid
+    // write_sidecar): the archive is restorable, so the sweep must repair
+    // the sidecar rather than remove either file.
+    std::fs::write(dir.join("snap_FIX.tar.gz"), b"archive-bytes").unwrap();
+    std::fs::write(dir.join("snap_FIX.json"), b"{\"id\": \"snap_").unwrap();
+    age_file(&dir.join("snap_FIX.tar.gz"), 2 * 24 * 3600);
+    age_file(&dir.join("snap_FIX.json"), 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.sidecars_repaired, 1);
+    assert_eq!(report.archives_removed, 0);
+    assert!(dir.join("snap_FIX.tar.gz").exists());
+
+    // The repaired sidecar must parse and round-trip through list/restore.
+    let list = svc.mem_snapshot_list().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, "snap_FIX");
+    assert_eq!(list[0].name, "snap_FIX");
+    assert_eq!(list[0].backend, "tar.gz");
+    assert_eq!(list[0].size, b"archive-bytes".len() as u64);
+}
+
+#[test]
+fn reclaim_keeps_truncated_sidecar_pair_below_age_guard() {
+    let (_tmp, svc) = setup();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("snap_YOUNG.tar.gz"), b"archive-bytes").unwrap();
+    std::fs::write(dir.join("snap_YOUNG.json"), b"{\"id\": \"snap_").unwrap();
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.sidecars_repaired, 0);
+    assert_eq!(report.kept_young, 1);
+    assert!(dir.join("snap_YOUNG.tar.gz").exists());
+    assert!(dir.join("snap_YOUNG.json").exists());
+}
+
+#[test]
+fn reclaim_just_past_the_age_guard_is_reclaimed_and_just_below_is_kept() {
+    let (_tmp, svc) = setup();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    // `older_than` removes when age >= min_age. Age the two artefacts a
+    // minute apart around the guard so both outcomes are stable regardless
+    // of the milliseconds the test spends between aging and sweeping.
+    let over = dir.join("snap_OVER.tar.gz.partial");
+    let under = dir.join("snap_UNDER.tar.gz.partial");
+    std::fs::write(&over, b"junk").unwrap();
+    std::fs::write(&under, b"junk").unwrap();
+    age_file(&over, 24 * 3600 + 60);
+    age_file(&under, 24 * 3600 - 60);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.partials_removed, 1);
+    assert_eq!(report.kept_young, 1);
+    assert!(!over.exists());
+    assert!(under.exists());
+}
+
+#[test]
+fn config_validate_rejects_sub_minute_reclaim_age() {
+    let mut cfg = AppConfig::default();
+    cfg.memory.snapshot_reclaim.min_artifact_age_secs = 0;
+    assert!(
+        cfg.validate().is_err(),
+        "age guard of 0 must be rejected: it is the only protection an \
+         in-flight snapshot in another process has"
+    );
+    cfg.memory.snapshot_reclaim.min_artifact_age_secs = 59;
+    assert!(cfg.validate().is_err());
+    cfg.memory.snapshot_reclaim.min_artifact_age_secs = 60;
+    assert!(cfg.validate().is_ok());
 }

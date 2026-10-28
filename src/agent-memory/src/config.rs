@@ -229,7 +229,7 @@ impl Default for SnapshotReclaimConfig {
 }
 
 fn default_reclaim_min_age_secs() -> u64 {
-    24 * 60 * 60
+    crate::snapshot::reclaim::DEFAULT_MIN_ARTIFACT_AGE.as_secs()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -510,6 +510,19 @@ impl AppConfig {
                  a larger weight lets the recency boost swamp BM25 relevance"
             )));
         }
+        // The age guard is the only protection an in-flight create_tarball in
+        // another process has — there is no lock or pid file on the snapshot
+        // write — so a value below one minute must never reach the sweeper.
+        const MIN_RECLAIM_AGE_SECS: u64 = 60;
+        let age = self.memory.snapshot_reclaim.min_artifact_age_secs;
+        if age < MIN_RECLAIM_AGE_SECS {
+            return Err(MemoryError::InvalidArgument(format!(
+                "[memory.snapshot_reclaim].min_artifact_age_secs = {age} must be >= \
+                 {MIN_RECLAIM_AGE_SECS}; the age guard is the only protection an in-flight \
+                 snapshot in another process has, and a shorter window lets the sweep delete \
+                 live snapshot state"
+            )));
+        }
         Ok(())
     }
 
@@ -676,7 +689,16 @@ impl AppConfig {
         );
         if let Ok(v) = std::env::var("MEMORY_SNAPSHOT_RECLAIM_MIN_AGE") {
             match v.parse::<u64>() {
-                Ok(n) => self.memory.snapshot_reclaim.min_artifact_age_secs = n,
+                // Values below the floor are ignored here rather than left
+                // for validate() to reject the whole config: an env var is
+                // usually a per-invocation tweak, and the age guard is the
+                // only protection an in-flight snapshot in another process
+                // has, so there is no safe interpretation of a tiny value.
+                Ok(n) if n >= 60 => self.memory.snapshot_reclaim.min_artifact_age_secs = n,
+                Ok(n) => tracing::warn!(
+                    "MEMORY_SNAPSHOT_RECLAIM_MIN_AGE={n} below the 60 s floor would let the \
+                     sweep delete an in-flight snapshot; ignoring"
+                ),
                 Err(e) => {
                     tracing::warn!("MEMORY_SNAPSHOT_RECLAIM_MIN_AGE={v:?} not a u64: {e}; ignoring")
                 }
