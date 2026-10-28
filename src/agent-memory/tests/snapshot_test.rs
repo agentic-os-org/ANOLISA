@@ -478,3 +478,55 @@ fn config_validate_rejects_sub_minute_reclaim_age() {
     cfg.memory.snapshot_reclaim.min_artifact_age_secs = 60;
     assert!(cfg.validate().is_ok());
 }
+
+#[test]
+fn reclaim_removes_stale_staging_dir_and_keeps_young_one() {
+    let (_tmp, svc) = setup();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A stale staging dir with content (as a crashed restore leaves it),
+    // a young staging dir (a restore in flight in another process), and an
+    // unrelated directory that is not a snapshot artefact at all.
+    let stale = dir.join(".snap_DEAD.staging");
+    let young = dir.join(".snap_LIVE.staging");
+    let unrelated = dir.join("not-a-staging-dir");
+    std::fs::create_dir_all(stale.join("notes/inner")).unwrap();
+    std::fs::write(stale.join("notes/inner/deep.md"), b"extracted").unwrap();
+    std::fs::create_dir_all(&young).unwrap();
+    std::fs::create_dir_all(&unrelated).unwrap();
+    std::fs::write(unrelated.join("keep.md"), b"stays").unwrap();
+    age_file(&stale, 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.staging_dirs_removed, 1);
+    assert_eq!(report.kept_young, 1); // the young staging dir
+    assert!(!stale.exists());
+    assert!(young.exists());
+    assert!(unrelated.join("keep.md").exists());
+}
+
+#[test]
+fn reclaim_staging_dir_around_the_age_guard() {
+    let (_tmp, svc) = setup();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let over = dir.join(".snap_OVER.staging");
+    let under = dir.join(".snap_UNDER.staging");
+    std::fs::create_dir_all(&over).unwrap();
+    std::fs::create_dir_all(&under).unwrap();
+    age_file(&over, 24 * 3600 + 60);
+    age_file(&under, 24 * 3600 - 60);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.staging_dirs_removed, 1);
+    assert_eq!(report.kept_young, 1);
+    assert!(!over.exists());
+    assert!(under.exists());
+}

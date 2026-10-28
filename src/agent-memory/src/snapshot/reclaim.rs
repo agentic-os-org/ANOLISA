@@ -19,10 +19,13 @@
 //!    (sidecar regenerated from the archive's own metadata) rather than
 //!    deleted; removing the sidecar would orphan a good backup and the
 //!    next sweep would then destroy it under rule 2.
-//!
-//! `.<id>.staging` directories from a crashed restore are out of scope
-//! here (tracked in #9193); they fall through the extension match and are
-//! left untouched.
+//! 5. `.<id>.staging` directories — `restore_tarball` extracts the full
+//!    mount tree into a staging dir and removes it only on its own error
+//!    path. A SIGKILL (or power loss) mid-restore leaves the complete
+//!    extraction behind; `list_tarballs` never sees it, so it is the
+//!    largest orphaned-artefact class byte-for-byte. A restore holds no
+//!    reservation on the name (a re-run recreates staging from scratch),
+//!    so past the age guard the directory can be removed wholesale.
 //!
 //! The sweeper is age-guarded: an artefact younger than
 //! `min_artifact_age_secs` is never touched, so an in-flight snapshot in
@@ -30,6 +33,7 @@
 //! always older than the guard when reclaimed. The sweep runs once per
 //! mount open, not continuously.
 
+use std::os::fd::AsFd;
 use std::time::Duration;
 
 use super::snapshots_dir;
@@ -54,6 +58,8 @@ pub struct ReclaimReport {
     /// Truncated sidecars whose archive was intact — repaired by
     /// regenerating the sidecar from the archive's metadata.
     pub sidecars_repaired: usize,
+    /// `.<id>.staging` directories from crashed restores, removed whole.
+    pub staging_dirs_removed: usize,
     /// Artefacts seen but kept because they are younger than the age guard.
     pub kept_young: usize,
     /// Removal/regeneration attempts that failed (permissions, ...). Kept
@@ -64,7 +70,10 @@ pub struct ReclaimReport {
 
 impl ReclaimReport {
     pub fn total_removed(&self) -> usize {
-        self.partials_removed + self.archives_removed + self.sidecars_removed
+        self.partials_removed
+            + self.archives_removed
+            + self.sidecars_removed
+            + self.staging_dirs_removed
     }
 }
 
@@ -103,11 +112,31 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
     let mut partials = Vec::new();
     let mut archives = Vec::new();
     let mut sidecars = Vec::new();
+    let mut staging_dirs = Vec::new();
     for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            // A `.<id>.staging` directory is the extract-and-rename working
+            // area of `restore_tarball`; the name is claimed fresh on every
+            // restore, so a stale one belongs to no live writer once old
+            // enough. Other directories are not snapshot artefacts — leave
+            // them alone.
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.starts_with('.') && n.ends_with(".staging"))
+            {
+                staging_dirs.push(path);
+            }
             continue;
         }
-        let path = entry.path();
+        if !file_type.is_file() {
+            continue;
+        }
         match path.extension().and_then(|s| s.to_str()) {
             Some("partial") => partials.push(path),
             Some("gz") => {
@@ -266,15 +295,57 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         }
     }
 
+    // 5. `.<id>.staging` — the restore working area. The relative path is
+    //    rebuilt here the same way `restore_tarball` builds it so the
+    //    symlink-hardened `remove_dir_all_safe` (anchored at the mount
+    //    root) can be used; a plain `std::fs::remove_dir_all` would follow
+    //    symlinks planted inside a crashed extraction.
+    for staging in &staging_dirs {
+        if !older_than(staging, min_age, now) {
+            report.kept_young += 1;
+            continue;
+        }
+        let rel = match staging.strip_prefix(&mount.root) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => {
+                // Cannot happen for entries read from snapshots_dir, but a
+                // failed strip must never reach the rooted removal call.
+                tracing::warn!(
+                    "snapshot reclaim: staging path {} escapes mount root, skipping",
+                    staging.display()
+                );
+                report.removal_failures += 1;
+                continue;
+            }
+        };
+        match crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), &rel, staging) {
+            Ok(()) => {
+                report.staging_dirs_removed += 1;
+                tracing::info!(
+                    "snapshot reclaim: removed stale staging dir {}",
+                    staging.display()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "snapshot reclaim: could not remove staging dir {}: {e}",
+                    staging.display()
+                );
+                report.removal_failures += 1;
+            }
+        }
+    }
+
     if report.total_removed() > 0 || report.sidecars_repaired > 0 || report.removal_failures > 0 {
         tracing::info!(
             "snapshot reclaim: removed {} partial, {} orphaned archive, {} orphaned sidecar \
-             file(s), repaired {} truncated sidecar(s) under {} ({} below the age guard, \
-             {} removal failures)",
+             file(s), repaired {} truncated sidecar(s), removed {} stale staging dir(s) \
+             under {} ({} below the age guard, {} removal failures)",
             report.partials_removed,
             report.archives_removed,
             report.sidecars_removed,
             report.sidecars_repaired,
+            report.staging_dirs_removed,
             dir.display(),
             report.kept_young,
             report.removal_failures
