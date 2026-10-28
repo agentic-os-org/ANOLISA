@@ -3,7 +3,7 @@ anolisa_min_version = "0.3.15"
 
 [component]
 name = "ws-ckpt"
-version = "0.6.0"
+version = "0.6.1"
 layer = "runtime"
 description = "ws-ckpt adapters for OpenClaw and Hermes"
 

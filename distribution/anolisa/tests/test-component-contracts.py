@@ -37,10 +37,10 @@ OLD_OWNERS = {
     "cosh-ng": "0.28.1",
     "agent-sec-cli": "1.1.2",
     "agentsight": "0.15.1",
-    "tokenless": "0.9.1",
+    "tokenless": "0.9.2",
     "skillfs": "0.5.5",
     "ws-ckpt": "0.6.1",
-    "agent-memory": "0.2.12",
+    "agent-memory": "0.2.13",
 }
 
 

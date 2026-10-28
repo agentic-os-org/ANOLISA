@@ -65,16 +65,22 @@ class RpmSplitTests(unittest.TestCase):
             spec = Path(temporary) / "agent-sec-core.spec"
             spec.write_text(SPEC.read_text().replace("@VERSION@", "1.1.2"))
             command = [
-                "rpmspec", "-P",
-                "--define", "systemd_post /bin/true",
-                "--define", "systemd_preun /bin/true",
-                "--define", "systemd_postun_with_restart /bin/true",
+                "rpmspec",
+                "-P",
+                "--define",
+                "systemd_post /bin/true",
+                "--define",
+                "systemd_preun /bin/true",
+                "--define",
+                "systemd_postun_with_restart /bin/true",
             ]
             offline = subprocess.check_output(command + [str(spec)], text=True)
             online = subprocess.check_output(
                 command + ["--define", "_with_nightly_online 1", str(spec)], text=True
             )
-        self.assertRegex(offline, r"(?m)^Source1:\s+agent-sec-core-1\.1\.2-vendor\.tar\.gz$")
+        self.assertRegex(
+            offline, r"(?m)^Source1:\s+agent-sec-core-1\.1\.2-vendor\.tar\.gz$"
+        )
         self.assertIn("make build-all-v2-offline", offline)
         self.assertNotIn("make build-all-v2 NPM_INSTALL=", offline)
         self.assertNotRegex(online, r"(?m)^Source1:")
@@ -87,7 +93,8 @@ class RpmSplitTests(unittest.TestCase):
         real = {"agent-sec-core", "agent-sec-plugins", "agent-sec-skills"}
         self.assertEqual({name for kind, name in parsed if kind == "files"}, real)
         self.assertEqual(
-            {name for kind, name in parsed if kind == "package"}, real - {"agent-sec-core"}
+            {name for kind, name in parsed if kind == "package"},
+            real - {"agent-sec-core"},
         )
         header = text.split("%description", 1)[0]
         self.assertNotIn("Requires:       agent-sec-plugins", header)
@@ -95,11 +102,12 @@ class RpmSplitTests(unittest.TestCase):
         self.assertIn("Requires:       bubblewrap", header)
         self.assertIn("%define anolis_release 1", header)
         self.assertIn("Provides:       agent-sec-cli = %{version}-%{release}", header)
-        self.assertIn("Obsoletes:      agent-sec-cli < 1.1.1-2", header)
+        self.assertIn("Obsoletes:      agent-sec-cli < 1.1.2", header)
         self.assertNotIn("agent-sec-cosh-hook", header)
         for package in ("agent-sec-plugins", "agent-sec-skills"):
             self.assertIn(
-                "Requires:       %{name} = %{version}-%{release}", parsed["package", package]
+                "Requires:       %{name} = %{version}-%{release}",
+                parsed["package", package],
             )
         for previous_owner in HOOKS:
             self.assertIn(
@@ -107,7 +115,7 @@ class RpmSplitTests(unittest.TestCase):
                 parsed["package", "agent-sec-plugins"],
             )
             self.assertIn(
-                f"Obsoletes:      {previous_owner} < 1.1.1-2",
+                f"Obsoletes:      {previous_owner} < 1.1.2",
                 parsed["package", "agent-sec-plugins"],
             )
         self.assertNotIn("components/sec-core", parsed["files", "agent-sec-core"])
@@ -156,15 +164,23 @@ class RpmSplitTests(unittest.TestCase):
         self.assertIn("cleanup_migration", parsed["posttrans", "agent-sec-core"])
         self.assertIn("legacy-user", parsed["posttrans", "agent-sec-core"])
         self.assertIn("%systemd_preun", parsed["preun", "agent-sec-core"])
-        self.assertIn("%systemd_postun_with_restart", parsed["postun", "agent-sec-core"])
+        self.assertIn(
+            "%systemd_postun_with_restart", parsed["postun", "agent-sec-core"]
+        )
         self.assertIn("make build-all-v2-offline", parsed["build", "agent-sec-core"])
-        self.assertIn("make install-all-for-rpmbuild-v2", parsed["install", "agent-sec-core"])
+        self.assertIn(
+            "make install-all-for-rpmbuild-v2", parsed["install", "agent-sec-core"]
+        )
 
     def test_adapter_managed_packages_cover_materialized_rpm_resources(self):
-        contract = tomllib.loads((ROOT / "packaging/anolisa/component.toml").read_text())
+        contract = tomllib.loads(
+            (ROOT / "packaging/anolisa/component.toml").read_text()
+        )
         parsed = sections(SPEC.read_text())
         file_patterns = {
-            package: patterns(body) for (kind, package), body in parsed.items() if kind == "files"
+            package: patterns(body)
+            for (kind, package), body in parsed.items()
+            if kind == "files"
         }
 
         def installed_owners(path):
@@ -172,7 +188,8 @@ class RpmSplitTests(unittest.TestCase):
                 package
                 for package, owned in file_patterns.items()
                 if any(
-                    fnmatch.fnmatchcase(path, pattern) or path.startswith(pattern.rstrip("/") + "/")
+                    fnmatch.fnmatchcase(path, pattern)
+                    or path.startswith(pattern.rstrip("/") + "/")
                     for pattern in owned
                 )
             }
@@ -262,11 +279,15 @@ class RpmSplitTests(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            self.assertFalse((destination / "usr/share/anolisa/components/sec-core").exists())
+            self.assertFalse(
+                (destination / "usr/share/anolisa/components/sec-core").exists()
+            )
             sandbox = destination / "usr/bin/linux-sandbox"
             self.assertTrue(sandbox.is_file())
             self.assertTrue(sandbox.stat().st_mode & 0o111)
-            self.assertEqual(installed_owners("/usr/bin/linux-sandbox"), {"agent-sec-core"})
+            self.assertEqual(
+                installed_owners("/usr/bin/linux-sandbox"), {"agent-sec-core"}
+            )
             self.assertFalse((destination / "usr/local/bin/linux-sandbox").exists())
             legacy_destination = Path(temporary) / "legacy-installed"
             subprocess.run(
@@ -284,24 +305,38 @@ class RpmSplitTests(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            self.assertTrue((legacy_destination / "usr/local/bin/linux-sandbox").is_file())
+            self.assertTrue(
+                (legacy_destination / "usr/local/bin/linux-sandbox").is_file()
+            )
             self.assertFalse((legacy_destination / "usr/bin/linux-sandbox").exists())
             for adapter in contract["adapters"]:
                 with self.subTest(framework=adapter["framework"]):
                     rpm = adapter["backends"]["rpm"]
-                    resource_root = destination / resolve(rpm["resource_root"]).lstrip("/")
-                    self.assertTrue((resource_root / adapter["bundle"]["entry"]).is_file())
-                    files = {path for path in resource_root.rglob("*") if path.is_file()}
-                    for skill in adapter.get(adapter["framework"], {}).get("skills", []):
+                    resource_root = destination / resolve(rpm["resource_root"]).lstrip(
+                        "/"
+                    )
+                    self.assertTrue(
+                        (resource_root / adapter["bundle"]["entry"]).is_file()
+                    )
+                    files = {
+                        path for path in resource_root.rglob("*") if path.is_file()
+                    }
+                    for skill in adapter.get(adapter["framework"], {}).get(
+                        "skills", []
+                    ):
                         skill_root = destination / resolve(skill["source"]).lstrip("/")
                         self.assertTrue((skill_root / "SKILL.md").is_file())
-                        files.update(path for path in skill_root.rglob("*") if path.is_file())
+                        files.update(
+                            path for path in skill_root.rglob("*") if path.is_file()
+                        )
                     owners = set()
                     for path in files:
                         installed_path = "/" + str(path.relative_to(destination))
                         actual = installed_owners(installed_path)
                         self.assertEqual(len(actual), 1, installed_path)
-                        self.assertTrue(actual.issubset(rpm["managed_packages"]), installed_path)
+                        self.assertTrue(
+                            actual.issubset(rpm["managed_packages"]), installed_path
+                        )
                         owners.update(actual)
                     self.assertEqual(owners, set(rpm["managed_packages"]))
 

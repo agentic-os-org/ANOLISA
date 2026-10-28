@@ -7,8 +7,12 @@ on:
       - 'src/**/tests/*rpm*.py'
       - 'src/agentsight/scripts/benchmark/tests/test_delivery.py'
       - 'src/cosh-ng/tests/test-package-rpm.sh'
+      - 'src/os-skills/component.toml'
+      - 'src/os-skills/os-skills.spec.in'
       - 'scripts/rpm-build.sh'
+      - 'scripts/check-component-versions.py'
       - 'tests/test-component-*.py'
+      - 'tests/test-os-skills-rpm-version.sh'
       - 'tests/test-root-makefile.py'
       - 'Makefile'
       - '.github/workflows/*rpm*.yaml'
@@ -18,8 +22,12 @@ on:
       - 'src/**/tests/*rpm*.py'
       - 'src/agentsight/scripts/benchmark/tests/test_delivery.py'
       - 'src/cosh-ng/tests/test-package-rpm.sh'
+      - 'src/os-skills/component.toml'
+      - 'src/os-skills/os-skills.spec.in'
       - 'scripts/rpm-build.sh'
+      - 'scripts/check-component-versions.py'
       - 'tests/test-component-*.py'
+      - 'tests/test-os-skills-rpm-version.sh'
       - 'tests/test-root-makefile.py'
       - 'Makefile'
       - '.github/workflows/*rpm*.yaml'
@@ -56,3 +64,6 @@ jobs:
 
       - name: Check shared builder syntax
         run: bash -n scripts/rpm-build.sh
+
+      - name: Verify OS Skills RPM version selection
+        run: bash tests/test-os-skills-rpm-version.sh

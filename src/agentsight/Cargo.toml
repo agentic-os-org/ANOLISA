@@ -51,7 +51,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [package]
 name = "agentsight"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 
 [features]

@@ -56,7 +56,7 @@ name but carry the template bytes. The raw contract must declare
 `render = "anolisa-paths-v1"` for this mapping so ANOLISA resolves `{bindir}` at
 installation time for both user and system layouts. The raw MCP descriptor uses
 `anolisa-json-command-v1` to render its command without changing the public JSON
-input. The complete raw contract requires ANOLISA 0.3.20 or later. Keep the unit
+input. The complete raw contract requires ANOLISA 0.3.21 or later. Keep the unit
 identity, session/config paths and opt-in activation policy unchanged when
 adjusting delivery paths.
 

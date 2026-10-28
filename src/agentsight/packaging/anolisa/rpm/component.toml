@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.0"
 
 [component]
 name = "agentsight"
-version = "0.15.0"
+version = "0.15.1"
 layer = "runtime"
 domain = "observability"
 description = "eBPF-based AI agent observability tool"

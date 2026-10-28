@@ -1,7 +1,7 @@
 # Distribution-owned integration contract; version follows the component Cargo.toml.
 [component]
 name = "agent-memory"
-version = "0.2.12"
+version = "0.2.13"
 layer = "runtime"
 domain = "state"
 display_name = "Agent Memory"
@@ -12,7 +12,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.3.20"
+min_anolisa_version = "0.3.21"
 
 [backends.rpm]
 package = "agent-memory"

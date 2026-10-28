@@ -24,11 +24,11 @@ BuildRequires:  make
 # These older payload owners install the registry files now supplied by ANOLISA.
 # An absent component is allowed; an installed old owner must upgrade with us.
 Conflicts:      cosh-ng < 0.28.1
-Conflicts:      tokenless < 0.9.1
+Conflicts:      tokenless < 0.9.2
 Conflicts:      agentsight < 0.15.1
 Conflicts:      skillfs < 0.5.5
 Conflicts:      ws-ckpt < 0.6.1
-Conflicts:      agent-memory < 0.2.12
+Conflicts:      agent-memory < 0.2.13
 Conflicts:      agent-sec-cli < 1.1.2
 
 # Runtime: the `anolisa` CLI stages/downloads OS components on demand and has

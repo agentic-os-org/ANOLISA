@@ -53,6 +53,7 @@ TOML_CONTRACTS = (
         "src/os-skills/component.toml",
         "distribution/anolisa/manifests/components/os-skills/component.toml",
     ),
+    ("src/os-skills/component.toml", "src/os-skills/cosh-extension.json"),
     (
         "src/tokenless/Cargo.toml",
         "distribution/anolisa/manifests/components/tokenless/component.toml",

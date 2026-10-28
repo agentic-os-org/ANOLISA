@@ -424,15 +424,22 @@ build_agentic_os_skills() {
         return 1
     fi
 
-    # Version from env or default
+    # Match the component contract shipped in the RPM unless explicitly overridden.
     local version="${VERSION:-}"
-    if [ -z "$version" ]; then
-        # Try to read from spec changelog (first entry)
-        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    if [ -z "$version" ] && [ -f "${SKILLS_DIR}/component.toml" ]; then
+        version=$(awk '
+            /^\[component\][[:space:]]*$/ { in_component = 1; next }
+            /^\[/ { in_component = 0 }
+            in_component && /^version[[:space:]]*=/ {
+                gsub(/^[^\"]*\"|\".*$/, "")
+                print
+                exit
+            }
+        ' "${SKILLS_DIR}/component.toml")
     fi
     if [ -z "$version" ]; then
-        version="0.0.1"
-        warn "No version specified for os-skills, using default: ${version}"
+        err "Cannot determine os-skills version. Set VERSION or provide component.toml."
+        return 1
     fi
 
     local pkg_name
