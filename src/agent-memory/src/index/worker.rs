@@ -417,12 +417,19 @@ fn flush(
             Err(e) => tracing::warn!("index file removal failed for {rel}: {e}"),
         }
     }
+    let mut failed_text = HashSet::new();
     for (rel, mtime, size, body) in to_upsert {
         if let Err(e) = store.upsert(&rel, mtime, size, &body, agent_id.as_deref()) {
             tracing::warn!("index upsert failed for {rel}: {e}");
+            failed_text.insert(rel);
         }
     }
     for (rel, vec) in to_upsert_vec {
+        // A rolled-back text update must retain its old vector too; a failed
+        // insert must not leave a standalone vector for unindexed content.
+        if failed_text.contains(&rel) {
+            continue;
+        }
         if let Err(e) = store.upsert_vec(&rel, &vec) {
             tracing::warn!("index vector upsert failed for {rel}: {e}");
         }
@@ -439,6 +446,7 @@ fn full_scan(
 ) -> Result<()> {
     use walkdir::WalkDir;
 
+    let mut failed_text = HashSet::new();
     {
         let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen: HashSet<String> = HashSet::new();
@@ -488,6 +496,7 @@ fn full_scan(
             }
             if let Err(e) = store.upsert(&rel, mtime, meta.len(), &body, agent_id.as_deref()) {
                 tracing::warn!("index full-scan upsert failed for {rel}: {e}");
+                failed_text.insert(rel.clone());
             }
             seen.insert(rel);
         }
@@ -508,7 +517,7 @@ fn full_scan(
     // vector — e.g. pre-existing files at startup, or files recovered after
     // an inotify overflow. Without this, vector/hybrid search would miss any
     // file that never received a modify event after the provider was enabled.
-    backfill_vectors(mount, store, embedding, rt_handle)?;
+    backfill_vectors(mount, store, embedding, rt_handle, &failed_text)?;
 
     Ok(())
 }
@@ -522,6 +531,7 @@ fn backfill_vectors(
     store: &Arc<Mutex<BM25Store>>,
     embedding: Option<&dyn EmbeddingProvider>,
     rt_handle: Option<&tokio::runtime::Handle>,
+    failed_text: &HashSet<String>,
 ) -> Result<()> {
     if embedding.is_none() {
         return Ok(());
@@ -539,6 +549,11 @@ fn backfill_vectors(
     // embedding HTTP call would block every concurrent search.
     let mut to_upsert: Vec<(String, Vec<f32>)> = Vec::new();
     for rel in missing {
+        // The disk body may be newer than the row whose update just failed.
+        // Leave that row without a vector until its text can be reconciled.
+        if failed_text.contains(&rel) {
+            continue;
+        }
         let rel_path = Path::new(&rel);
         let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
             Some(b) => b,
@@ -828,6 +843,45 @@ mod tests {
             .expect("lock")
             .index_stat_for(rel)
             .unwrap_or_else(|| panic!("{rel} should be indexed"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_text_write_preserves_other_vectors_in_same_flush() {
+        let (_tmp, mount, _) = setup();
+        let db = mount.meta_dir.join("batch.db");
+        let store = Arc::new(Mutex::new(BM25Store::open(&db, 0.0, 0.0, false).unwrap()));
+        for path in ["failed.md", "healthy.md"] {
+            seed_file(&mount, &store, path);
+            write(&mount.root, path, "heliotrope replacement");
+        }
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_text_update BEFORE UPDATE ON files
+             WHEN OLD.path = 'failed.md'
+             BEGIN SELECT RAISE(ABORT, 'controlled text failure'); END;",
+        )
+        .unwrap();
+        let embedding = CountingEmbedding::new();
+        flush_rels(
+            &mount,
+            &store,
+            Some(&embedding),
+            &["failed.md", "healthy.md"],
+        );
+        let store = store.lock().unwrap();
+        assert_eq!(embedding.calls(), 2);
+        assert_eq!(
+            store.search("cobaltzebra", 10, false).unwrap()[0].path,
+            "failed.md"
+        );
+        assert_eq!(
+            store.search("heliotrope", 10, false).unwrap()[0].path,
+            "healthy.md"
+        );
+        let vectors = store.search_vec(&[1.0, 0.0], 10).unwrap();
+        assert_eq!(vectors.len(), 2);
+        assert_eq!(vectors.iter().find(|v| v.0 == "failed.md").unwrap().1, 1.0);
+        assert_eq!(vectors.iter().find(|v| v.0 == "healthy.md").unwrap().1, 0.5);
     }
 
     #[test]
