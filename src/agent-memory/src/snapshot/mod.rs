@@ -6,6 +6,7 @@
 //! `detect_btrfs()` is in place so future Btrfs subvol snapshots can
 //! slot in transparently.
 
+pub mod reclaim;
 pub mod tar;
 
 use std::path::{Path, PathBuf};

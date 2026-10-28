@@ -222,3 +222,136 @@ fn snapshot_excludes_meta_directory() {
         );
     }
 }
+
+// ---- artefact reclaim (#9193) ----
+
+use std::time::Duration;
+
+fn age_file(path: &std::path::Path, secs_ago: i64) {
+    let old = nix::sys::time::TimeSpec::new(secs_ago, 0);
+    nix::sys::stat::utimensat(
+        None,
+        path,
+        &old,
+        &old,
+        nix::sys::stat::UtimensatFlags::NoFollowSymlink,
+    )
+    .unwrap();
+}
+
+#[test]
+fn reclaim_removes_stale_partial_and_keeps_young() {
+    let (_tmp, svc) = setup();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("snap_OLD.tar.gz.partial");
+    let young = dir.join("snap_NEW.tar.gz.partial");
+    std::fs::write(&old, b"junk").unwrap();
+    std::fs::write(&young, b"junk").unwrap();
+    age_file(&old, 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        agent_memory::snapshot::reclaim::DEFAULT_MIN_ARTIFACT_AGE,
+    );
+    assert_eq!(report.partials_removed, 1);
+    assert_eq!(report.kept_young, 1);
+    assert!(!old.exists());
+    assert!(young.exists());
+}
+
+#[test]
+fn reclaim_removes_sidecar_less_archive_but_not_complete_pair() {
+    let (_tmp, svc) = setup();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Complete pair: archive + parseable sidecar — must survive.
+    let info = agent_memory::snapshot::reclaim::test_sidecar_info("snap_KEEP");
+    std::fs::write(dir.join("snap_KEEP.tar.gz"), b"archive").unwrap();
+    std::fs::write(
+        dir.join("snap_KEEP.json"),
+        serde_json::to_string(&info).unwrap(),
+    )
+    .unwrap();
+
+    // Sidecar-less archive, old — removed.
+    std::fs::write(dir.join("snap_LOST.tar.gz"), b"archive").unwrap();
+    age_file(&dir.join("snap_LOST.tar.gz"), 2 * 24 * 3600);
+
+    // Sidecar-less archive, young — kept.
+    std::fs::write(dir.join("snap_INFLIGHT.tar.gz"), b"archive").unwrap();
+
+    // Orphan sidecar (no archive), old — removed.
+    std::fs::write(
+        dir.join("snap_GONE.json"),
+        serde_json::to_string(&agent_memory::snapshot::reclaim::test_sidecar_info(
+            "snap_GONE",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    age_file(&dir.join("snap_GONE.json"), 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.archives_removed, 1);
+    assert_eq!(report.sidecars_removed, 1);
+    assert_eq!(report.kept_young, 1); // snap_INFLIGHT
+    assert!(dir.join("snap_KEEP.tar.gz").exists());
+    assert!(dir.join("snap_KEEP.json").exists());
+    assert!(!dir.join("snap_LOST.tar.gz").exists());
+    assert!(dir.join("snap_INFLIGHT.tar.gz").exists());
+    assert!(!dir.join("snap_GONE.json").exists());
+}
+
+#[test]
+fn reclaim_sweep_at_mount_open_does_not_block_or_delete_live_data() {
+    let tmp = tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.global.user_id = "reclaim-open-tester".into();
+    cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    // Default config has reclaim enabled — a normal open must succeed and
+    // leave user files untouched.
+    let svc = MemoryService::new(cfg).unwrap();
+    svc.write("note.md", "survives", false).unwrap();
+    assert_eq!(svc.read("note.md").unwrap(), "survives");
+}
+
+#[test]
+fn reclaim_disabled_config_leaves_artifacts() {
+    let tmp = tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.global.user_id = "reclaim-off-tester".into();
+    cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg.memory.snapshot_reclaim.enabled = false;
+    let svc = MemoryService::new(cfg).unwrap();
+    let dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("snap_X.tar.gz.partial");
+    std::fs::write(&old, b"junk").unwrap();
+    age_file(&old, 2 * 24 * 3600);
+
+    // Re-open: sweep disabled, artefact survives.
+    drop(svc);
+    let mut cfg2 = AppConfig::default();
+    cfg2.global.user_id = "reclaim-off-tester".into();
+    cfg2.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg2.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
+    cfg2.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg2.memory.snapshot_reclaim.enabled = false;
+    let svc2 = MemoryService::new(cfg2).unwrap();
+    assert!(
+        svc2.mount
+            .meta_dir
+            .join("snapshots")
+            .join("snap_X.tar.gz.partial")
+            .exists()
+    );
+}

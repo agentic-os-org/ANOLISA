@@ -60,6 +60,12 @@ pub struct MemoryConfig {
     /// Consolidation: auto-extract facts from session audit logs on shutdown.
     #[serde(default)]
     pub consolidation: ConsolidationConfig,
+    /// Snapshot artefact reclaim: at mount open, remove orphaned snapshot
+    /// artefacts (stale `*.partial`, sidecar-less `*.tar.gz`, orphan
+    /// `*.json`) older than `min_artifact_age_secs`. The age guard keeps
+    /// an in-flight snapshot from another process out of the sweep.
+    #[serde(default)]
+    pub snapshot_reclaim: SnapshotReclaimConfig,
     /// Agent memory scope: "shared" (default, all agents see all memories),
     /// "isolated" (each agent only sees its own memories), or
     /// "filter" (each agent sees its own + unscoped memories).
@@ -103,6 +109,7 @@ impl Default for MemoryConfig {
             cgroup: crate::cgroup::CgroupConfig::default(),
             git: crate::git_repo::GitConfig::default(),
             consolidation: ConsolidationConfig::default(),
+            snapshot_reclaim: SnapshotReclaimConfig::default(),
             agent_scope: "shared".to_string(),
             max_read_bytes: default_max_read_bytes(),
             max_write_bytes: default_max_write_bytes(),
@@ -196,6 +203,33 @@ fn default_max_facts() -> usize {
 
 fn default_min_calls() -> usize {
     3
+}
+
+/// Configuration for the snapshot artefact reclaim sweep at mount open.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotReclaimConfig {
+    /// Enable the sweep. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum artefact age before it is eligible for removal, in seconds.
+    /// Default: 86400 (24 h) — an in-flight snapshot in another process is
+    /// never older than this while its writer is alive.
+    #[serde(default = "default_reclaim_min_age_secs")]
+    pub min_artifact_age_secs: u64,
+}
+
+impl Default for SnapshotReclaimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_artifact_age_secs: default_reclaim_min_age_secs(),
+        }
+    }
+}
+
+fn default_reclaim_min_age_secs() -> u64 {
+    24 * 60 * 60
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -633,6 +667,18 @@ impl AppConfig {
                 Ok(n) => self.memory.consolidation.conflict_bm25_threshold = n,
                 Err(e) => {
                     tracing::warn!("MEMORY_CONFLICT_THRESHOLD={v:?} not a f64: {e}; ignoring")
+                }
+            }
+        }
+        self.memory.snapshot_reclaim.enabled = env_bool(
+            "MEMORY_SNAPSHOT_RECLAIM_ENABLED",
+            self.memory.snapshot_reclaim.enabled,
+        );
+        if let Ok(v) = std::env::var("MEMORY_SNAPSHOT_RECLAIM_MIN_AGE") {
+            match v.parse::<u64>() {
+                Ok(n) => self.memory.snapshot_reclaim.min_artifact_age_secs = n,
+                Err(e) => {
+                    tracing::warn!("MEMORY_SNAPSHOT_RECLAIM_MIN_AGE={v:?} not a u64: {e}; ignoring")
                 }
             }
         }

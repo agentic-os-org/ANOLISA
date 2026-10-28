@@ -516,6 +516,10 @@ min_episode_steps = 3
 max_episodes_per_session = 10
 conflict_detection = true
 conflict_bm25_threshold = -2.0
+
+[memory.snapshot_reclaim]
+enabled = true
+min_artifact_age_secs = 86400
 ```
 
 ### Environment variables
@@ -557,6 +561,8 @@ Every config key has a matching `MEMORY_*` env var. Priority: **env > config.tom
 | `MEMORY_MAX_EPISODES` | max episodes per session | 10 |
 | `MEMORY_CONFLICT_DETECTION` | conflict detection | true |
 | `MEMORY_CONFLICT_THRESHOLD` | BM25 conflict threshold | -2.0 |
+| `MEMORY_SNAPSHOT_RECLAIM_ENABLED` | reclaim orphaned snapshot artefacts at mount open | true |
+| `MEMORY_SNAPSHOT_RECLAIM_MIN_AGE` | minimum artefact age (seconds) before removal | 86400 |
 
 Data storage: `~/.anolisa/memory/<namespace>/`.
 

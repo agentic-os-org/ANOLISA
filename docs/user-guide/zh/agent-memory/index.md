@@ -487,6 +487,10 @@ min_episode_steps = 3
 max_episodes_per_session = 10
 conflict_detection = true
 conflict_bm25_threshold = -2.0
+
+[memory.snapshot_reclaim]
+enabled = true
+min_artifact_age_secs = 86400
 ```
 
 ### 环境变量
@@ -528,6 +532,8 @@ conflict_bm25_threshold = -2.0
 | `MEMORY_MAX_EPISODES` | 每会话最多情景数 | 10 |
 | `MEMORY_CONFLICT_DETECTION` | 冲突检测 | true |
 | `MEMORY_CONFLICT_THRESHOLD` | BM25 冲突阈值 | -2.0 |
+| `MEMORY_SNAPSHOT_RECLAIM_ENABLED` | 挂载打开时回收孤儿快照产物 | true |
+| `MEMORY_SNAPSHOT_RECLAIM_MIN_AGE` | 产物删除前的最短保留时长（秒） | 86400 |
 
 数据存储：`~/.anolisa/memory/<namespace>/`。
 
