@@ -24,16 +24,18 @@ use aya::programs::{Lsm, ProgramFd, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
 
 pub mod capability;
+mod file_protection_generation;
 mod file_protection_map_writer;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
 };
+pub use file_protection_generation::FileProtectionStaging;
 pub use file_protection_map_writer::{
     FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
-    FileProtectionSlot, FileProtectionSlotValue, FileProtectionTargetValue, TreeGuard,
-    TreePathIdentity, FILE_PROTECTION_MAP_CAPACITY, FILE_PROTECTION_MAX_TARGETS,
-    FILE_PROTECTION_NAME_MAX,
+    FileProtectionMapWriter, FileProtectionSlot, FileProtectionSlotValue,
+    FileProtectionTargetValue, TreeGuard, TreePathIdentity, FILE_PROTECTION_MAP_CAPACITY,
+    FILE_PROTECTION_MAX_TARGETS, FILE_PROTECTION_NAME_MAX,
 };
 
 const BPF_ANY: u64 = 0;

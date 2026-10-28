@@ -1,5 +1,6 @@
 //! Map writer contract and value types shared by structured-policy generations.
 
+use std::fmt;
 use std::io;
 use std::num::NonZeroU32;
 
@@ -164,6 +165,95 @@ impl FileProtectionMapCounts {
         }
         Ok(())
     }
+}
+
+/// Narrow writer seam used by pinned maps and in-memory transaction tests.
+pub trait FileProtectionMapWriter: fmt::Debug {
+    /// Returns `(existing entries, maximum entries)` for a named map.
+    fn usage(&mut self, map: &'static str) -> io::Result<(usize, usize)>;
+    /// Inserts one canonical, alias, or submount root mask.
+    fn insert_root(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        root_mask: u64,
+    ) -> io::Result<()>;
+    /// Removes one root key.
+    fn remove_root(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one underlying-directory root mask.
+    fn insert_directory(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        root_mask: u64,
+    ) -> io::Result<()>;
+    /// Removes one underlying-directory key.
+    fn remove_directory(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one stable direct directory or configured ancestor mask.
+    fn insert_stable_path(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        target_mask: u64,
+    ) -> io::Result<()>;
+    /// Removes one stable-path key.
+    fn remove_stable_path(
+        &mut self,
+        key: TreePathIdentity,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one exact basename slot.
+    fn insert_slot(
+        &mut self,
+        key: FileProtectionSlot,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        value: FileProtectionSlotValue,
+    ) -> io::Result<()>;
+    /// Removes one exact basename slot.
+    fn remove_slot(
+        &mut self,
+        key: FileProtectionSlot,
+        domain: u32,
+        generation: FileProtectionGeneration,
+    ) -> io::Result<()>;
+    /// Inserts one stable target record.
+    fn insert_target(
+        &mut self,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        value: FileProtectionTargetValue,
+    ) -> io::Result<()>;
+    /// Removes one target record.
+    fn remove_target(
+        &mut self,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        target_id: u32,
+    ) -> io::Result<()>;
+    /// Activates a generation after every path record is staged.
+    fn activate(
+        &mut self,
+        domain: u32,
+        generation: FileProtectionGeneration,
+        value: FileProtectionDomainValue,
+    ) -> io::Result<()>;
+    /// Deactivates only when the currently active generation matches.
+    fn deactivate(&mut self, domain: u32, generation: FileProtectionGeneration) -> io::Result<()>;
 }
 
 #[cfg(test)]
