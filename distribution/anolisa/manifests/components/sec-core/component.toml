@@ -290,7 +290,7 @@ adapter_type = "extension"
 trust = "first-party"
 plugin_id = "agent-sec-core"
 source = "adapters/sec-core/cosh"
-dest = "{datadir}/extensions/{component}/"
+dest = "{datadir}/extensions/agent-sec-core/"
 detect = { binary = "cosh" }
 
 [adapters.backends.rpm]

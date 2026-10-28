@@ -84,9 +84,9 @@ rm -rf $RPM_BUILD_ROOT
 install -d -m 0755 %{buildroot}%{_bindir}
 install -d -m 0755 %{buildroot}%{_unitdir}
 install -d -m 0755 %{buildroot}/etc/ws-ckpt
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/skills/ws-ckpt
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/plugins/ws-ckpt/openclaw
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/plugins/ws-ckpt/hermes
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes
@@ -97,12 +97,12 @@ install -p -m 0644 src/config.toml.sample %{buildroot}/etc/ws-ckpt/config.toml.s
 # Ship the live config too; %config(noreplace) preserves admin edits on
 # upgrade and saves them as .rpmsave on erase (issue #3070).
 install -p -m 0644 src/config.toml.sample %{buildroot}/etc/ws-ckpt/config.toml
-cp -pr src/skills/ws-ckpt/. %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt/
-cp -pr src/plugins/openclaw/dist %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
-install -p -m 0644 src/plugins/openclaw/package.json %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
-install -p -m 0644 src/plugins/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
-cp -pr src/plugins/hermes/. %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes/
-find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
+cp -pr src/skills/ws-ckpt/. %{buildroot}%{_datadir}/anolisa/skills/ws-ckpt/
+cp -pr src/plugins/openclaw/dist %{buildroot}%{_datadir}/anolisa/plugins/ws-ckpt/openclaw/
+install -p -m 0644 src/plugins/openclaw/package.json %{buildroot}%{_datadir}/anolisa/plugins/ws-ckpt/openclaw/
+install -p -m 0644 src/plugins/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/plugins/ws-ckpt/openclaw/
+cp -pr src/plugins/hermes/. %{buildroot}%{_datadir}/anolisa/plugins/ws-ckpt/hermes/
+find %{buildroot}%{_datadir}/anolisa/plugins/ws-ckpt/hermes \
     \( -type d -name __pycache__ -o -type d -name tests \
        -o -type f -name '*.pyc' -o -type f -name '.coverage' \) \
     -exec rm -rf {} +
@@ -128,12 +128,12 @@ install -p -m 0755 scripts/hermes/uninstall-hermes.sh %{buildroot}%{_datadir}/an
 /etc/ws-ckpt/config.toml.sample
 
 %files skills
-%dir %{_datadir}/anolisa/runtime
-%dir %{_datadir}/anolisa/runtime/skills
-%{_datadir}/anolisa/runtime/skills/ws-ckpt/
+%dir %{_datadir}/anolisa/skills
+%{_datadir}/anolisa/skills/ws-ckpt/
 
 %files plugins
-%{_datadir}/anolisa/runtime/ws-ckpt/
+%dir %{_datadir}/anolisa/plugins
+%{_datadir}/anolisa/plugins/ws-ckpt/
 %{_datadir}/anolisa/adapters/ws-ckpt/
 
 %post core

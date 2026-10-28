@@ -50,7 +50,7 @@ stage_payload() {
     install -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
     make -s -C "$SOURCE_ROOT" install-core-files install-skills-files \
         SOURCE_DIR="$SOURCE_ROOT" BINARY="$BIN_DIR/skillfs" DESTDIR="$stage" \
-        BINDIR=/bin DOCDIR=/share/doc/skillfs SKILLDIR=/share/anolisa/runtime/skills/skillfs
+        BINDIR=/bin DOCDIR=/share/doc/skillfs SKILLDIR=/share/anolisa/skills/skillfs-mount
     find "$stage" -type d -exec chmod 0755 {} +
     find "$stage" -type f -exec chmod 0644 {} +
     chmod 0755 "$stage/bin/skillfs"

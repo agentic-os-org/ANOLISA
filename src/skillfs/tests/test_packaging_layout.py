@@ -82,7 +82,7 @@ class PackagingLayout(unittest.TestCase):
         result = self.make("install-skills", AWPRJ="owner")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(
-            (self.destination / "usr/share/owner/skillfs/skills/skillfs-mount/SKILL.md").is_file()
+            (self.destination / "usr/share/owner/skills/skillfs-mount/SKILL.md").is_file()
         )
         self.assertFalse((self.destination / "usr/bin").exists())
         self.assertFalse((self.destination / "usr/share/doc").exists())
@@ -160,12 +160,20 @@ class PackagingLayout(unittest.TestCase):
         self.assertTrue((self.destination / "usr/share/doc/skillfs/LICENSE").is_file())
         self.assertFalse((self.destination / "usr/share/anolisa/components").exists())
 
+    def test_namespaced_install_honors_datadir_override(self) -> None:
+        result = self.make("install", AWPRJ="anolisa", DATADIR="/opt/skills-data")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (self.destination / "opt/skills-data/skills/skillfs-mount/SKILL.md").is_file()
+        )
+        self.assertFalse((self.destination / "usr/share/anolisa/skills").exists())
+
     def test_explicit_legacy_layout_retains_raw_paths(self) -> None:
         result = self.make("install", PROFILE="legacy-anolisa")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.destination / "usr/local/bin/skillfs").is_file())
         self.assertTrue(
-            (self.destination / "usr/share/anolisa/runtime/skills/skillfs/SKILL.md").is_file()
+            (self.destination / "usr/share/anolisa/skills/skillfs-mount/SKILL.md").is_file()
         )
         self.assertTrue(
             (self.destination / "usr/share/anolisa/components/skillfs/component.toml").is_file()
@@ -176,7 +184,7 @@ class PackagingLayout(unittest.TestCase):
         result = self.make("install", DESTDIR="", PREFIX=str(prefix), AWPRJ="owner")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((prefix / "bin" / COMPONENT.name).read_bytes(), self.binary.read_bytes())
-        self.assertTrue((prefix / "share/owner" / COMPONENT.name).is_dir())
+        self.assertTrue((prefix / "share/owner/skills/skillfs-mount").is_dir())
         self.assertIn("no build, framework registration, or service activation", result.stdout)
         self.assertFalse(self.destination.exists())
 

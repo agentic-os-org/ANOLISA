@@ -78,6 +78,7 @@ class DeliveryTests(unittest.TestCase):
             "LIBEXECDIR",
             "DATADIR",
             "ADAPTERDIR",
+            "EXTENSIONDIR",
             "SKILLDIR",
             "UNITDIR",
             "SYSCONFDIR",
@@ -132,9 +133,13 @@ class DeliveryTests(unittest.TestCase):
         result = self.make("layout", "PREFIX=/usr", "AWPRJ=anolisa")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SKILLDIR=/usr/share/anolisa/skills\n", result.stdout)
+        self.assertIn(
+            "EXTENSIONDIR=/usr/share/anolisa/extensions/agent-sec-core\n", result.stdout
+        )
         result = self.make("layout", "AWPRJ=anolisa", "DATADIR=/srv/data")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SKILLDIR=/srv/data/skills\n", result.stdout)
+        self.assertIn("EXTENSIONDIR=/srv/data/adapters/cosh\n", result.stdout)
         result = self.make("layout", "AWPRJ=anolisa", "SKILLDIR=/srv/skills")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SKILLDIR=/srv/skills\n", result.stdout)
@@ -145,6 +150,7 @@ class DeliveryTests(unittest.TestCase):
             "LIBEXECDIR",
             "DATADIR",
             "ADAPTERDIR",
+            "EXTENSIONDIR",
             "SKILLDIR",
             "UNITDIR",
             "SYSCONFDIR",
@@ -416,13 +422,24 @@ class DeliveryTests(unittest.TestCase):
         adapters = stage / "usr/share/suite/agent-sec-core/adapters"
         self.assertEqual(
             {path.name for path in adapters.iterdir()},
-            {"cosh", "codex", "qoder", "openclaw", "hermes", "qwencode"},
+            {"codex", "qoder", "openclaw", "hermes", "qwencode"},
+        )
+        self.assertTrue(
+            (
+                stage / "usr/share/suite/extensions/agent-sec-core/cosh-extension.json"
+            ).is_file()
         )
         self.assertTrue((adapters / "openclaw/dist/index.js").is_file())
         self.assertFalse((stage / "usr/bin").exists())
         self.assertFalse((stage / "etc").exists())
         self.assertFalse((adapters.parent / "LICENSE").exists())
         self.assertFalse((adapters.parent / "skills").exists())
+
+        result = self.make(
+            "uninstall", f"DESTDIR={stage}", "AWPRJ=suite", "PREFIX=/usr"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((stage / "usr/share/suite/extensions/agent-sec-core").exists())
 
     def test_skills_install_requires_no_core_or_plugin_inputs(self):
         for path in self.build.iterdir():

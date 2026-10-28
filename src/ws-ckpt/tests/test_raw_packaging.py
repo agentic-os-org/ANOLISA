@@ -130,15 +130,15 @@ class WsCkptPackagingTests(unittest.TestCase):
             self.assertEqual(
                 result.stdout.splitlines(),
                 [
-                    str(payload / f"share/anolisa/runtime/ws-ckpt/plugins/{framework}"),
-                    str(payload / "share/anolisa/runtime/skills/ws-ckpt"),
+                    str(payload / f"share/anolisa/plugins/ws-ckpt/{framework}"),
+                    str(payload / "share/anolisa/skills/ws-ckpt"),
                 ],
             )
         adapter = payload / "share/anolisa/adapters/ws-ckpt/openclaw"
         subprocess.run(
             ["bash", "-c", 'source "$1/lib-openclaw.sh"', "bash", str(adapter)], check=True
         )
-        hermes = payload / "share/anolisa/runtime/ws-ckpt/plugins/hermes"
+        hermes = payload / "share/anolisa/plugins/ws-ckpt/hermes"
         self.assertEqual(
             (hermes / "cron.py").read_bytes(),
             (COMPONENT / "src/plugins/hermes/cron.py").read_bytes(),

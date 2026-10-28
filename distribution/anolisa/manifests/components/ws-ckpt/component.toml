@@ -54,10 +54,6 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "share/anolisa/runtime/skills/ws-ckpt/"
-target = "{datadir}/runtime/skills/ws-ckpt"
-
-[[component.layout.files]]
 source = "share/anolisa/skills/ws-ckpt/"
 target = "{datadir}/skills/ws-ckpt"
 
@@ -116,8 +112,8 @@ display_name = "ws-ckpt for OpenClaw"
 adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
-source = "share/anolisa/runtime/ws-ckpt/plugins/openclaw"
-dest = "{datadir}/runtime/ws-ckpt/plugins/openclaw/"
+source = "share/anolisa/plugins/ws-ckpt/openclaw"
+dest = "{datadir}/plugins/ws-ckpt/openclaw/"
 detect = { binary = "openclaw" }
 
 [adapters.compat]
@@ -132,7 +128,7 @@ schema = 1
 entry = "openclaw.plugin.json"
 
 [adapters.backends.rpm]
-resource_root = "/usr/share/anolisa/runtime/ws-ckpt/plugins/openclaw/"
+resource_root = "/usr/share/anolisa/plugins/ws-ckpt/openclaw/"
 managed_packages = ["ws-ckpt-plugins"]
 
 [[adapters]]
@@ -142,8 +138,8 @@ display_name = "ws-ckpt for Hermes"
 adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
-source = "share/anolisa/runtime/ws-ckpt/plugins/hermes"
-dest = "{datadir}/runtime/ws-ckpt/plugins/hermes/"
+source = "share/anolisa/plugins/ws-ckpt/hermes"
+dest = "{datadir}/plugins/ws-ckpt/hermes/"
 detect = { binary = "hermes" }
 
 [adapters.bundle]
@@ -155,5 +151,5 @@ schema = 1
 entry = "plugin.yaml"
 
 [adapters.backends.rpm]
-resource_root = "/usr/share/anolisa/runtime/ws-ckpt/plugins/hermes/"
+resource_root = "/usr/share/anolisa/plugins/ws-ckpt/hermes/"
 managed_packages = ["ws-ckpt-plugins"]

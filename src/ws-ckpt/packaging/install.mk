@@ -15,12 +15,12 @@ LIBDIR ?= $(PREFIX)/lib
 DATADIR ?= $(PREFIX)/share
 SYSCONFDIR ?= /etc
 RUNTIME_DIR ?= $(DATADIR)/anolisa/runtime
-RUNTIME_SKILLS_DIR ?= $(RUNTIME_DIR)/skills/ws-ckpt
+RUNTIME_SKILLS_DIR ?= $(DATADIR)/anolisa/skills/ws-ckpt
 COSH_SKILLS_DIR ?= $(DATADIR)/anolisa/skills/ws-ckpt
 
 COMPONENT_DIR ?= $(DATADIR)/anolisa/components/ws-ckpt
 ADAPTER_DIR ?= $(DATADIR)/anolisa/adapters/ws-ckpt
-PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
+PLUGINS_DIR ?= $(DATADIR)/anolisa/plugins/ws-ckpt
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 CONFIG_DIR ?= $(SYSCONFDIR)/ws-ckpt
 BINARY ?= src/target/release/ws-ckpt

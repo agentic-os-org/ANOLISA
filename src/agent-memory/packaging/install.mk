@@ -99,5 +99,13 @@ uninstall: ## Remove installed files
 	rm -f "$(DESTDIR)$(BINDIR)/$(NAME)"
 	rm -f "$(DESTDIR)$(CONFIGDIR)/default.toml"
 	rm -f "$(DESTDIR)$(MCPDIR)/agent-memory.json"
+	rm -f "$(DESTDIR)$(UNITDIR)/anolisa-memory@.service"
+	rm -f "$(DESTDIR)$(DOCDIR)/LICENSE"
+	rm -f $(foreach file,$(DELIVERY_PLUGINS_FILES),$(call delivery-quote,$(DESTDIR)$(DELIVERY_ADAPTERDIR)/$(file)))
+	@for dir in openclaw/dist openclaw/scripts openclaw; do \
+		rmdir $(call delivery-quote,$(DESTDIR)$(DELIVERY_ADAPTERDIR))/"$$dir" 2>/dev/null || true; \
+	done
+	@rmdir $(call delivery-quote,$(DESTDIR)$(DELIVERY_ADAPTERDIR)) 2>/dev/null || true
 	rmdir "$(DESTDIR)$(CONFIGDIR)" 2>/dev/null || true
 	rmdir "$(DESTDIR)$(MCPDIR)" 2>/dev/null || true
+	rmdir "$(DESTDIR)$(DOCDIR)" 2>/dev/null || true

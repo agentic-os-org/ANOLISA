@@ -46,22 +46,22 @@ stage_payload() {
     if [ -d "$stage" ] && [ -n "$(find "$stage" -mindepth 1 -print -quit)" ]; then
         die "staging directory must be empty: $stage"
     fi
-    local runtime="$stage/share/anolisa/runtime"
+    local plugins="$stage/share/anolisa/plugins"
     install -d -m 0755 "$stage/.anolisa" "$stage/share/anolisa/hooks/ws-ckpt" "$stage/share/doc/ws-ckpt"
     install -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
     make -s -C "$SOURCE_ROOT" install-core-files install-plugin-files install-skills-files \
         DESTDIR="$stage" BINARY="$BIN_DIR/ws-ckpt" BINDIR=/bin \
         SYSTEMD_SYSTEM_DIR=/share/anolisa/ws-ckpt CONFIG_DIR=/share/anolisa/ws-ckpt \
         SERVICE_BINDIR='{bindir}' INSTALL_LIVE_CONFIG=0 \
-        RUNTIME_SKILLS_DIR=/share/anolisa/runtime/skills/ws-ckpt \
+        RUNTIME_SKILLS_DIR=/share/anolisa/skills/ws-ckpt \
         COSH_SKILLS_DIR=/share/anolisa/skills/ws-ckpt \
-        ADAPTER_DIR=/share/anolisa/adapters/ws-ckpt PLUGINS_DIR=/share/anolisa/runtime/ws-ckpt/plugins
+        ADAPTER_DIR=/share/anolisa/adapters/ws-ckpt PLUGINS_DIR=/share/anolisa/plugins/ws-ckpt
     install -m 0755 "$SCRIPT_DIR/assets/hooks/pre-uninstall.sh" \
         "$stage/share/anolisa/hooks/ws-ckpt/"
-    find "$runtime/ws-ckpt/plugins" \
+    find "$plugins/ws-ckpt" \
         \( -type d \( -name __pycache__ -o -name __tests__ -o -name tests \) \
         -o -type f \( -name '*.pyc' -o -name '.coverage' \) \) -exec rm -rf {} +
-    rm -f "$runtime/ws-ckpt/plugins/openclaw/dist/vitest.config."*
+    rm -f "$plugins/ws-ckpt/openclaw/dist/vitest.config."*
     # LICENSE is a source symlink in the monorepo; install copies its bytes.
     install -m 0644 "$SOURCE_ROOT/LICENSE" "$SOURCE_ROOT/README.md" "$stage/share/doc/ws-ckpt/"
     python3 - "$stage" "$VERSION" <<'PY'

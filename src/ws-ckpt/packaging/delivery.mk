@@ -25,15 +25,15 @@ DELIVERY_BINARY := $(call delivery-input,BINARY,$(DELIVERY_ROOT)/src/target/rele
 ifeq ($(DELIVERY_PROFILE),legacy-anolisa)
 DELIVERY_DATADIR := $(call delivery-input,DATADIR,$(DELIVERY_PREFIX)/share/anolisa)
 DELIVERY_ADAPTERDIR := $(call delivery-input,ADAPTERDIR,$(DELIVERY_DATADIR)/adapters/ws-ckpt)
-DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(DELIVERY_DATADIR)/runtime/skills/ws-ckpt)
-DELIVERY_PLUGINDIR := $(call delivery-input,PLUGINDIR,$(DELIVERY_DATADIR)/runtime/ws-ckpt/plugins)
+DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(DELIVERY_DATADIR)/skills/ws-ckpt)
+DELIVERY_PLUGINDIR := $(call delivery-input,PLUGINDIR,$(DELIVERY_DATADIR)/plugins/ws-ckpt)
 DELIVERY_COMPONENTDIR := $(call delivery-input,COMPONENTDIR,$(DELIVERY_DATADIR)/components/ws-ckpt)
 DELIVERY_SECOND_SKILLDIR := $(call delivery-input,SECOND_SKILLDIR,$(DELIVERY_DATADIR)/skills/ws-ckpt)
 else
 DELIVERY_DATADIR := $(call delivery-input,DATADIR,$(DELIVERY_PREFIX)/share/$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_AWPRJ)/)ws-ckpt)
-DELIVERY_ADAPTERDIR := $(call delivery-input,ADAPTERDIR,$(DELIVERY_DATADIR)/adapters)
-DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(DELIVERY_DATADIR)/skills)
-DELIVERY_PLUGINDIR := $(call delivery-input,PLUGINDIR,$(DELIVERY_LIBEXECDIR)/plugins)
+DELIVERY_ADAPTERDIR := $(call delivery-input,ADAPTERDIR,$(if $(filter command line environment override,$(origin DATADIR)),$(DELIVERY_DATADIR)/adapters,$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_PREFIX)/share/$(DELIVERY_AWPRJ)/adapters/ws-ckpt,$(DELIVERY_DATADIR)/adapters)))
+DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(if $(filter command line environment override,$(origin DATADIR)),$(DELIVERY_DATADIR)/skills,$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_PREFIX)/share/$(DELIVERY_AWPRJ)/skills/ws-ckpt,$(DELIVERY_DATADIR)/skills)))
+DELIVERY_PLUGINDIR := $(call delivery-input,PLUGINDIR,$(if $(strip $(DELIVERY_AWPRJ)),$(if $(filter command line environment override,$(origin DATADIR)),$(DELIVERY_DATADIR)/plugins,$(DELIVERY_PREFIX)/share/$(DELIVERY_AWPRJ)/plugins/ws-ckpt),$(DELIVERY_LIBEXECDIR)/plugins))
 DELIVERY_COMPONENTDIR := $(call delivery-input,COMPONENTDIR,$(DELIVERY_DATADIR)/component)
 DELIVERY_SECOND_SKILLDIR := $(call delivery-input,SECOND_SKILLDIR,$(DELIVERY_SKILLDIR))
 endif
@@ -137,7 +137,9 @@ install-skills: delivery-check-skills-install delivery-check-skills-inputs ## In
 	$(MAKE) -C $(call delivery-quote,$(DELIVERY_ROOT)) install-skills-files $(DELIVERY_INSTALL_ARGS)
 
 install: delivery-check-install delivery-check-inputs ## Install all prebuilt groups without building or activation
-	$(MAKE) -C $(call delivery-quote,$(DELIVERY_ROOT)) install-core install-plugins install-skills $(DELIVERY_INSTALL_ARGS)
+	$(MAKE) -C $(call delivery-quote,$(DELIVERY_ROOT)) install-core install-plugins install-skills $(DELIVERY_INSTALL_ARGS) \
+		$(call delivery-quote,ADAPTERDIR=$(DELIVERY_ADAPTERDIR)) $(call delivery-quote,PLUGINDIR=$(DELIVERY_PLUGINDIR)) \
+		$(call delivery-quote,SKILLDIR=$(DELIVERY_SKILLDIR)) $(call delivery-quote,SECOND_SKILLDIR=$(DELIVERY_SECOND_SKILLDIR))
 	@echo 'Installed prebuilt files; no build, framework registration, or service activation performed.'
 	@echo 'Runtime discovery and configuration-path policies are unchanged.'
 

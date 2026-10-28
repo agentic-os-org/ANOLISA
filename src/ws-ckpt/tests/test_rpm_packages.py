@@ -114,17 +114,17 @@ class RpmPackages(unittest.TestCase):
         self.assertIn("ExecStart=/usr/bin/ws-ckpt daemon", unit)
         self.assertIn("ExecReload=/usr/bin/ws-ckpt reload", unit)
         self.assertNotIn("/usr/local/bin/", unit)
-        cron = buildroot / "usr/share/anolisa/runtime/ws-ckpt/plugins/hermes/cron.py"
+        cron = buildroot / "usr/share/anolisa/plugins/ws-ckpt/hermes/cron.py"
         self.assertEqual(
             cron.read_bytes(), (self.source / "src/plugins/hermes/cron.py").read_bytes()
         )
         self.fixture.assert_installed_cron_uses_path_binary(cron, buildroot / "usr/bin/ws-ckpt")
-        self.assertEqual(owners["usr/share/anolisa/runtime/skills/ws-ckpt/SKILL.md"], "skills")
+        self.assertEqual(owners["usr/share/anolisa/skills/ws-ckpt/SKILL.md"], "skills")
         self.assertEqual(
             owners["usr/share/anolisa/adapters/ws-ckpt/openclaw/install-openclaw.sh"], "plugins"
         )
         self.assertEqual(
-            owners["usr/share/anolisa/runtime/ws-ckpt/plugins/openclaw/dist/src/index.js"],
+            owners["usr/share/anolisa/plugins/ws-ckpt/openclaw/dist/src/index.js"],
             "plugins",
         )
 

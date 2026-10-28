@@ -36,10 +36,14 @@ DELIVERY_CONFIGDIR := $(call delivery-input,CONFIGDIR,$(DELIVERY_DATADIR)/agent-
 DELIVERY_MCPDIR := $(call delivery-input,MCPDIR,$(DELIVERY_DATADIR)/mcp-servers)
 else
 DELIVERY_DATADIR := $(call delivery-input,DATADIR,$(DELIVERY_DATA_ROOT)/$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_AWPRJ)/)agent-memory)
+ifneq ($(strip $(DELIVERY_AWPRJ)),)
+DELIVERY_ADAPTERDIR := $(call delivery-input,ADAPTERDIR,$(if $(filter $(DELIVERY_DATA_ROOT)/$(DELIVERY_AWPRJ)/agent-memory,$(patsubst %/,%,$(DELIVERY_DATADIR))),$(DELIVERY_DATA_ROOT)/$(DELIVERY_AWPRJ)/adapters/agent-memory,$(DELIVERY_DATADIR)/adapters))
+else
 ifeq ($(DELIVERY_INSTALL_PROFILE),user)
 DELIVERY_ADAPTERDIR := $(call delivery-input,ADAPTERDIR,$(DELIVERY_DATADIR)/adapters)
 else
 DELIVERY_ADAPTERDIR := $(call delivery-input,ADAPTERDIR,$(DELIVERY_LIBEXECDIR)/adapters)
+endif
 endif
 DELIVERY_CONFIGDIR := $(call delivery-input,CONFIGDIR,$(DELIVERY_DATADIR))
 DELIVERY_MCPDIR := $(call delivery-input,MCPDIR,$(DELIVERY_DATADIR)/mcp-servers)
@@ -53,6 +57,13 @@ DELIVERY_INSTALL_ARGS = $(call delivery-quote,INSTALL_PROFILE=$(DELIVERY_INSTALL
 	$(call delivery-quote,CONFIGDIR=$(DELIVERY_CONFIGDIR)) $(call delivery-quote,MCPDIR=$(DELIVERY_MCPDIR)) $(call delivery-quote,UNITDIR=$(DELIVERY_UNITDIR)) $(call delivery-quote,DOCDIR=$(DELIVERY_DOCDIR))
 
 delivery-quote = '$(subst ','"'"',$(1))'
+
+# Uninstall the same paths as the public installer for the selected layout.
+uninstall: BINDIR := $(DELIVERY_BINDIR)
+uninstall: CONFIGDIR := $(DELIVERY_CONFIGDIR)
+uninstall: MCPDIR := $(DELIVERY_MCPDIR)
+uninstall: UNITDIR := $(DELIVERY_UNITDIR)
+uninstall: DOCDIR := $(DELIVERY_DOCDIR)
 
 .PHONY: layout install install-core install-plugins delivery-check-layout \
         delivery-check-install delivery-check-core-install delivery-check-plugins-install \
@@ -81,6 +92,14 @@ DELIVERY_CORE_WRITE_TARGETS = $(call delivery-quote,file:$(DELIVERY_BINDIR)/agen
 	$(call delivery-quote,file:$(DELIVERY_MCPDIR)/agent-memory.json) \
 	$(call delivery-quote,file:$(DELIVERY_DOCDIR)/LICENSE)
 DELIVERY_PLUGINS_WRITE_TARGETS = $(call delivery-quote,tree:$(DELIVERY_ADAPTERDIR))
+DELIVERY_PLUGINS_FILES := manifest.json openclaw/package.json openclaw/openclaw.plugin.json \
+	openclaw/dist/index.js openclaw/scripts/detect.sh openclaw/scripts/install.sh \
+	openclaw/scripts/uninstall.sh
+DELIVERY_PLUGINS_UNINSTALL_TARGETS = $(foreach file,$(DELIVERY_PLUGINS_FILES),$(call delivery-quote,file:$(DELIVERY_ADAPTERDIR)/$(file)))
+
+uninstall: delivery-check-uninstall
+delivery-check-uninstall: delivery-check-layout
+	python3 $(call delivery-quote,$(DELIVERY_ROOT)/packaging/check-install.py) $(call delivery-quote,$(DESTDIR)) $(DELIVERY_CORE_WRITE_TARGETS) $(DELIVERY_PLUGINS_UNINSTALL_TARGETS)
 
 # Complete installation validates both groups before either group can write.
 delivery-check-install: delivery-check-core-install delivery-check-plugins-install

@@ -489,7 +489,7 @@ gateway_service_file = {
 }
 task_checkpoint_skill_file = {
     "source": "share/anolisa/skills/manage-task-checkpoints/SKILL.md",
-    "target": "{datadir}/anolisa/skills/manage-task-checkpoints/SKILL.md",
+    "target": "{datadir}/skills/manage-task-checkpoints/SKILL.md",
     "mode": "0644",
 }
 assert gateway_service_file in linux_common["layout"]["files"]

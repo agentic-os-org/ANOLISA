@@ -16,8 +16,11 @@ Without an explicit `INSTALL_PROFILE`, effective UID 0 selects system installati
 with `PREFIX=/usr/local`; other UIDs select user installation with
 `PREFIX=$HOME/.local`. User resources, documentation and the MCP descriptor use
 `${XDG_DATA_HOME:-$HOME/.local/share}` and the user unit under its `systemd/user/`.
-The user plugin bundle defaults to `DATADIR/adapters`; system installations use
-`LIBEXECDIR/adapters`. An explicit `ADAPTERDIR` overrides either default.
+The standalone user plugin bundle defaults to `DATADIR/adapters`; standalone
+system installations use `LIBEXECDIR/adapters`. With `AWPRJ`, both profiles use
+`<AWPRJ>/adapters/agent-memory` under their data root when `DATADIR` uses its
+default value; a different `DATADIR` places the bundle under `DATADIR/adapters`.
+An explicit `ADAPTERDIR` overrides the default.
 Explicit path variables take precedence. Keep `PREFIX` independent of the XDG
 data root; `DESTDIR` only prepends a temporary root. RPM installs retain `/usr`; package staging must explicitly select `INSTALL_PROFILE=system`.
 Do not infer profiles from `PREFIX`, migrate runtime paths, or treat

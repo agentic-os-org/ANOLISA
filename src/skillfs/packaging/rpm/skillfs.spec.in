@@ -61,9 +61,9 @@ rm -rf %{buildroot}
 install -d -m 0755 %{buildroot}%{_bindir}
 install -p -m 0755 target/release/skillfs %{buildroot}%{_bindir}/skillfs
 
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/skills/skillfs-mount
 cp -rp docs/skills/skillfs-mount/. \
-    %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs/
+    %{buildroot}%{_datadir}/anolisa/skills/skillfs-mount/
 
 %files
 
@@ -73,9 +73,8 @@ cp -rp docs/skills/skillfs-mount/. \
 %attr(0755,root,root) %{_bindir}/skillfs
 
 %files skills
-%dir %{_datadir}/anolisa/runtime
-%dir %{_datadir}/anolisa/runtime/skills
-%{_datadir}/anolisa/runtime/skills/skillfs/
+%dir %{_datadir}/anolisa/skills
+%{_datadir}/anolisa/skills/skillfs-mount/
 
 %changelog
 * Wed Oct 28 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.4-1

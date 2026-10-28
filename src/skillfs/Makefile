@@ -14,7 +14,7 @@ PREFIX ?= /usr
 BINARY ?= target/release/skillfs
 BINDIR ?= /usr/local/bin
 DOCDIR ?= $(PREFIX)/share/doc/skillfs
-SKILLDIR ?= $(PREFIX)/share/anolisa/runtime/skills/skillfs
+SKILLDIR ?= $(PREFIX)/share/anolisa/skills/skillfs-mount
 
 .PHONY: install-core-files install-skills-files
 install-core-files:

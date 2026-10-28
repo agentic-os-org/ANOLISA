@@ -14,6 +14,8 @@ DELIVERY_LIBDIR := $(call delivery_input,LIBDIR,$(DELIVERY_PREFIX_BASE)/lib/$(DE
 DELIVERY_LIBEXECDIR := $(call delivery_input,LIBEXECDIR,$(DELIVERY_PREFIX_BASE)/libexec/$(DELIVERY_NAMESPACE)agent-sec-core)
 DELIVERY_DATADIR := $(call delivery_input,DATADIR,$(DELIVERY_PREFIX_BASE)/share/$(DELIVERY_NAMESPACE)agent-sec-core)
 DELIVERY_ADAPTERDIR := $(call delivery_input,ADAPTERDIR,$(DELIVERY_DATADIR)/adapters)
+DELIVERY_EXTENSIONDIR_DEFAULT := $(if $(filter command line environment,$(origin ADAPTERDIR) $(origin DATADIR)),$(DELIVERY_ADAPTERDIR)/cosh,$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_PREFIX_BASE)/share/$(DELIVERY_NAMESPACE)extensions/agent-sec-core,$(DELIVERY_ADAPTERDIR)/cosh))
+DELIVERY_EXTENSIONDIR := $(call delivery_input,EXTENSIONDIR,$(DELIVERY_EXTENSIONDIR_DEFAULT))
 DELIVERY_SKILLDIR_DEFAULT := $(if $(filter command line environment,$(origin DATADIR)),$(DELIVERY_DATADIR)/skills,$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_PREFIX_BASE)/share/$(DELIVERY_NAMESPACE)skills,$(DELIVERY_DATADIR)/skills))
 DELIVERY_SKILLDIR := $(call delivery_input,SKILLDIR,$(DELIVERY_SKILLDIR_DEFAULT))
 DELIVERY_SYSCONFDIR := $(call delivery_input,SYSCONFDIR,$(if $(filter /usr,$(DELIVERY_PREFIX_BASE)),/etc,$(DELIVERY_PREFIX_BASE)/etc))
@@ -25,7 +27,7 @@ DELIVERY_BUILD_OUTPUT := $(abspath $(DELIVERY_BUILD_DIR))
 DELIVERY_INSTALL_ARGS = INSTALL_PROFILE=system V2_BIN_BUILD_DIR="$(DELIVERY_BUILD_OUTPUT)/v2/bin" BUILD_DIR="$(DELIVERY_BUILD_OUTPUT)" DESTDIR="$(DELIVERY_DESTDIR)" \
 	PREFIX="$(DELIVERY_PREFIX)" BINDIR="$(DELIVERY_BINDIR)" LIBDIR="$(DELIVERY_LIBDIR)" \
 	LIBEXECDIR="$(DELIVERY_LIBEXECDIR)" SKILLDIR="$(DELIVERY_SKILLDIR)" \
-	EXTENSIONDIR="$(DELIVERY_ADAPTERDIR)/cosh" \
+	EXTENSIONDIR="$(DELIVERY_EXTENSIONDIR)" \
 	OPENCLAW_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/openclaw" \
 	HERMES_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/hermes" \
 	CODEX_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/codex" \
@@ -38,11 +40,12 @@ DELIVERY_INSTALL_ARGS = INSTALL_PROFILE=system V2_BIN_BUILD_DIR="$(DELIVERY_BUIL
 
 # The public uninstall must remove the skills selected by the public installer.
 uninstall: SKILLDIR := $(DELIVERY_SKILLDIR)
+uninstall: EXTENSIONDIR := $(DELIVERY_EXTENSIONDIR)
 
 delivery-validate-layout:
 	@test "$(DELIVERY_INSTALL_PROFILE)" = system || { echo 'Public install supports INSTALL_PROFILE=system only; use an explicit legacy installer for other profiles' >&2; exit 1; }
 	@case "$(DELIVERY_AWPRJ)" in *[!a-zA-Z0-9._-]*|.|..) echo 'AWPRJ must be empty or a single namespace name' >&2; exit 1;; esac
-	@for path in "$(DELIVERY_PREFIX)" "$(DELIVERY_BINDIR)" "$(DELIVERY_LIBDIR)" "$(DELIVERY_LIBEXECDIR)" "$(DELIVERY_DATADIR)" "$(DELIVERY_ADAPTERDIR)" "$(DELIVERY_SKILLDIR)" "$(DELIVERY_UNITDIR)" "$(DELIVERY_SYSCONFDIR)" "$(DELIVERY_CONFIGDIR)"; do \
+	@for path in "$(DELIVERY_PREFIX)" "$(DELIVERY_BINDIR)" "$(DELIVERY_LIBDIR)" "$(DELIVERY_LIBEXECDIR)" "$(DELIVERY_DATADIR)" "$(DELIVERY_ADAPTERDIR)" "$(DELIVERY_EXTENSIONDIR)" "$(DELIVERY_SKILLDIR)" "$(DELIVERY_UNITDIR)" "$(DELIVERY_SYSCONFDIR)" "$(DELIVERY_CONFIGDIR)"; do \
 		case "$$path" in /*) ;; *) echo "Expected an absolute system path: $$path" >&2; exit 1;; esac; \
 		case "$$path" in *[!a-zA-Z0-9_./-]*|*/../*|*/./*|*/..|*/.) echo "Expected a normalized system path using letters, digits, _, ., / or -: $$path" >&2; exit 1;; esac; \
 	done
@@ -50,7 +53,7 @@ delivery-validate-layout:
 layout: delivery-validate-layout ## Show the public build/install layout
 	@printf '%s\n' 'INSTALL_PROFILE=system' 'AWPRJ=$(DELIVERY_AWPRJ)' 'PREFIX=$(DELIVERY_PREFIX)' 'DESTDIR=$(DELIVERY_DESTDIR)' 'BINDIR=$(DELIVERY_BINDIR)' \
 		'LIBDIR=$(DELIVERY_LIBDIR)' 'LIBEXECDIR=$(DELIVERY_LIBEXECDIR)' 'DATADIR=$(DELIVERY_DATADIR)' \
-		'ADAPTERDIR=$(DELIVERY_ADAPTERDIR)' 'SKILLDIR=$(DELIVERY_SKILLDIR)' 'UNITDIR=$(DELIVERY_UNITDIR)' \
+		'ADAPTERDIR=$(DELIVERY_ADAPTERDIR)' 'EXTENSIONDIR=$(DELIVERY_EXTENSIONDIR)' 'SKILLDIR=$(DELIVERY_SKILLDIR)' 'UNITDIR=$(DELIVERY_UNITDIR)' \
 		'SYSCONFDIR=$(DELIVERY_SYSCONFDIR)' 'CONFIGDIR=$(DELIVERY_CONFIGDIR)'
 
 # Keep each role's complete preflight separate from its file-only copier.
@@ -84,7 +87,7 @@ DELIVERY_PLUGIN_INPUTS = \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension/scripts/deploy.sh" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension/hooks/observability_hook.py" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension/hooks/skill_ledger_hook.py" \
-	--tree "$(DELIVERY_BUILD_OUTPUT)/cosh-extension" "$(DELIVERY_ADAPTERDIR)/cosh" \
+	--tree "$(DELIVERY_BUILD_OUTPUT)/cosh-extension" "$(DELIVERY_EXTENSIONDIR)" \
 	--tree "$(DELIVERY_BUILD_OUTPUT)/codex-plugin" "$(DELIVERY_ADAPTERDIR)/codex" \
 	--tree "$(DELIVERY_BUILD_OUTPUT)/qoder-plugin" "$(DELIVERY_ADAPTERDIR)/qoder" \
 	--tree "$(DELIVERY_BUILD_OUTPUT)/openclaw-plugin" "$(DELIVERY_ADAPTERDIR)/openclaw" \

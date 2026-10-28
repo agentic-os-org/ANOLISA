@@ -22,7 +22,7 @@ adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
 source = "scripts/openclaw"
-dest = "{datadir}/runtime/ws-ckpt/plugins/openclaw/"
+dest = "{datadir}/plugins/ws-ckpt/openclaw/"
 detect = { binary = "openclaw" }
 
 [adapters.backends.rpm]
@@ -47,7 +47,7 @@ adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
 source = "scripts/hermes"
-dest = "{datadir}/runtime/ws-ckpt/plugins/hermes/"
+dest = "{datadir}/plugins/ws-ckpt/hermes/"
 detect = { binary = "hermes" }
 
 [adapters.backends.rpm]

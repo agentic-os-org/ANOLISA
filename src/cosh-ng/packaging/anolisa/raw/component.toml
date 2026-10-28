@@ -78,7 +78,7 @@ render = "anolisa-paths-v1"
 
 [[component.layout.files]]
 source = "share/anolisa/skills/manage-task-checkpoints/SKILL.md"
-target = "{datadir}/anolisa/skills/manage-task-checkpoints/SKILL.md"
+target = "{datadir}/skills/manage-task-checkpoints/SKILL.md"
 mode = "0644"
 
 [[component.layout.files]]

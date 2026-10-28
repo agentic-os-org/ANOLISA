@@ -40,8 +40,8 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "share/anolisa/runtime/skills/skillfs/"
-target = "{datadir}/runtime/skills/skillfs"
+source = "share/anolisa/skills/skillfs-mount/"
+target = "{datadir}/skills/skillfs-mount"
 
 [component.health_check]
 type = "binary_version"

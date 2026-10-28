@@ -107,7 +107,7 @@ class SkillfsPackagingTests(unittest.TestCase):
                         archive.extractfile("./share/doc/skillfs/LICENSE").read(),
                         (COMPONENT / "LICENSE").read_bytes(),
                     )
-                    self.assertIn("share/anolisa/runtime/skills/skillfs/SKILL.md", members)
+                    self.assertIn("share/anolisa/skills/skillfs-mount/SKILL.md", members)
                     self.assertTrue(all(not member.issym() for member in members.values()))
 
     def test_legacy_stage_reuses_component_inventory(self) -> None:

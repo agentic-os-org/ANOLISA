@@ -88,7 +88,7 @@ class RpmPackages(unittest.TestCase):
         self.assertFalse((buildroot / "usr/local/bin/skillfs").exists())
         self.assertNotIn("", owners.values())
         self.assertEqual(owners["usr/bin/skillfs"], "core")
-        self.assertEqual(owners["usr/share/anolisa/runtime/skills/skillfs/SKILL.md"], "skills")
+        self.assertEqual(owners["usr/share/anolisa/skills/skillfs-mount/SKILL.md"], "skills")
         self.assertNotIn("%post", self.spec)
 
 

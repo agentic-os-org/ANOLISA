@@ -31,11 +31,12 @@ discover_dir() {
 find_plugin_src() {
     local component="${1:?usage: find_plugin_src COMPONENT}"
     local candidates=()
-    [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/ws-ckpt/plugins/${component}")
+    [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/plugins/ws-ckpt/${component}" "${ANOLISA_TARGET_DIR}/libexec/ws-ckpt/plugins/${component}")
     [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/plugins/${component}")
-    candidates+=("/usr/share/anolisa/runtime/ws-ckpt/plugins/${component}")
-    candidates+=("/usr/local/share/anolisa/runtime/ws-ckpt/plugins/${component}")
-    candidates+=("${HOME}/.local/share/anolisa/runtime/ws-ckpt/plugins/${component}")
+    candidates+=("/usr/share/anolisa/plugins/ws-ckpt/${component}")
+    candidates+=("/usr/local/share/anolisa/plugins/ws-ckpt/${component}")
+    candidates+=("/usr/local/libexec/ws-ckpt/plugins/${component}" "/usr/libexec/ws-ckpt/plugins/${component}")
+    candidates+=("${HOME}/.local/share/anolisa/plugins/ws-ckpt/${component}")
     case "$component" in
         openclaw)
             discover_dir package.json openclaw.plugin.json dist/src/index.js -- "${candidates[@]}"
@@ -53,11 +54,12 @@ find_plugin_src() {
 #   Searches skill source paths in priority order.
 find_skill_src() {
     local candidates=()
-    [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/skills/ws-ckpt")
+    [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/skills/ws-ckpt" "${ANOLISA_TARGET_DIR}/share/ws-ckpt/skills")
     [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/skills/ws-ckpt")
-    candidates+=("/usr/share/anolisa/runtime/skills/ws-ckpt")
-    candidates+=("/usr/local/share/anolisa/runtime/skills/ws-ckpt")
-    candidates+=("${HOME}/.local/share/anolisa/runtime/skills/ws-ckpt")
+    candidates+=("/usr/share/anolisa/skills/ws-ckpt")
+    candidates+=("/usr/local/share/anolisa/skills/ws-ckpt")
+    candidates+=("/usr/local/share/ws-ckpt/skills" "/usr/share/ws-ckpt/skills")
+    candidates+=("${HOME}/.local/share/anolisa/skills/ws-ckpt")
     discover_dir SKILL.md -- "${candidates[@]}"
 }
 
@@ -65,10 +67,12 @@ find_skill_src() {
 #   Prints a standard error message listing all searched paths.
 print_search_error() {
     echo "ERROR: no plugin or skill source found. Searched paths:"
-    echo "  - \${ANOLISA_TARGET_DIR}/share/anolisa/runtime/... (ANOLISA_TARGET_DIR=${ANOLISA_TARGET_DIR:-<unset>})"
-    echo "  - /usr/share/anolisa/runtime/..."
-    echo "  - /usr/local/share/anolisa/runtime/..."
-    echo "  - ~/.local/share/anolisa/runtime/..."
+    echo "  - \${ANOLISA_TARGET_DIR}/share/anolisa/... (ANOLISA_TARGET_DIR=${ANOLISA_TARGET_DIR:-<unset>})"
+    echo "  - /usr/share/anolisa/..."
+    echo "  - /usr/local/share/anolisa/..."
+    echo "  - /usr/local/libexec/ws-ckpt/plugins and /usr/local/share/ws-ckpt/skills"
+    echo "  - /usr/libexec/ws-ckpt/plugins and /usr/share/ws-ckpt/skills"
+    echo "  - ~/.local/share/anolisa/..."
     echo "  - \${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/... (ANOLISA_PROJECT_ROOT=${ANOLISA_PROJECT_ROOT:-<unset>})"
     echo "Please install ws-ckpt or set ANOLISA_TARGET_DIR to staged output."
 }

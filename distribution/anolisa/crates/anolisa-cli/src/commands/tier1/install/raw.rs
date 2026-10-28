@@ -1263,7 +1263,7 @@ mod tests {
             for framework in ["openclaw", "hermes"] {
                 let plugin = layout
                     .datadir
-                    .join(format!("runtime/ws-ckpt/plugins/{framework}/fixture.txt"));
+                    .join(format!("plugins/ws-ckpt/{framework}/fixture.txt"));
                 assert_eq!(std::fs::read(plugin).unwrap(), b"fixture");
             }
         }

@@ -116,17 +116,17 @@ class PackagingLayout(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(
             (
-                self.destination / "usr/libexec/owner/ws-ckpt/plugins/openclaw/dist/src/index.js"
+                self.destination / "usr/share/owner/plugins/ws-ckpt/openclaw/dist/src/index.js"
             ).is_file()
         )
         self.assertTrue(
             (
-                self.destination / "usr/share/owner/ws-ckpt/adapters/hermes/install-hermes.sh"
+                self.destination / "usr/share/owner/adapters/ws-ckpt/hermes/install-hermes.sh"
             ).is_file()
         )
         self.assertFalse((self.destination / "usr/bin").exists())
         self.assertFalse((self.destination / "usr/lib/systemd").exists())
-        self.assertFalse((self.destination / "usr/share/owner/ws-ckpt/skills").exists())
+        self.assertFalse((self.destination / "usr/share/owner/skills/ws-ckpt").exists())
 
     def test_skills_install_requires_no_core_or_plugin_files(self) -> None:
         self.binary.unlink()
@@ -137,10 +137,42 @@ class PackagingLayout(unittest.TestCase):
         shutil.rmtree(self.source / "scripts")
         result = self.make("install-skills", AWPRJ="owner")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((self.destination / "usr/share/owner/ws-ckpt/skills/SKILL.md").is_file())
+        self.assertTrue((self.destination / "usr/share/owner/skills/ws-ckpt/SKILL.md").is_file())
         self.assertFalse((self.destination / "usr/bin").exists())
         self.assertFalse((self.destination / "usr/libexec").exists())
-        self.assertFalse((self.destination / "usr/share/owner/ws-ckpt/adapters").exists())
+        self.assertFalse((self.destination / "usr/share/owner/adapters/ws-ckpt").exists())
+
+    def test_adapter_discovers_independent_and_namespaced_installations(self) -> None:
+        for namespace in ("", "anolisa"):
+            with self.subTest(namespace=namespace):
+                shutil.rmtree(self.destination, ignore_errors=True)
+                result = self.make("install", AWPRJ=namespace)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for framework in ("openclaw", "hermes"):
+                    helper = self.source / "scripts" / framework / "lib-discover.sh"
+                    discovery = subprocess.run(
+                        ["bash", "-c", 'source "$1"; find_plugin_src "$2"; find_skill_src',
+                         "_", str(helper), framework],
+                        env={**os.environ, "ANOLISA_TARGET_DIR": str(self.destination / "usr"),
+                             "ANOLISA_PROJECT_ROOT": "", "HOME": str(self.work / "empty-home")},
+                        text=True, capture_output=True,
+                    )
+                    self.assertEqual(discovery.returncode, 0, discovery.stderr)
+                    plugin, skill = discovery.stdout.splitlines()
+                    self.assertTrue(Path(plugin).is_relative_to(self.destination))
+                    self.assertTrue(Path(skill).is_relative_to(self.destination))
+
+    def test_namespaced_install_honors_datadir_override(self) -> None:
+        result = self.make("install", AWPRJ="anolisa", DATADIR="/opt/ws-data")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.destination / "opt/ws-data/skills/SKILL.md").is_file())
+        self.assertTrue(
+            (self.destination / "opt/ws-data/adapters/hermes/install-hermes.sh").is_file()
+        )
+        self.assertTrue(
+            (self.destination / "opt/ws-data/plugins/openclaw/dist/src/index.js").is_file()
+        )
+        self.assertFalse((self.destination / "usr/share/anolisa/skills").exists())
 
     def test_complete_install_checks_all_plugin_scripts_before_core_writes(self) -> None:
         (self.source / "scripts/hermes/install-hermes.sh").unlink()
@@ -211,17 +243,17 @@ class PackagingLayout(unittest.TestCase):
         self.assertTrue((self.destination / "usr/share/doc/ws-ckpt/LICENSE").is_file())
         self.assertTrue(
             (
-                self.destination / "usr/share/custom/ws-ckpt/adapters/openclaw/install-openclaw.sh"
+                self.destination / "usr/share/custom/adapters/ws-ckpt/openclaw/install-openclaw.sh"
             ).is_file()
         )
         self.assertTrue(
             (
-                self.destination / "usr/libexec/custom/ws-ckpt/plugins/openclaw/dist/src/index.js"
+                self.destination / "usr/share/custom/plugins/ws-ckpt/openclaw/dist/src/index.js"
             ).is_file()
         )
         self.assertTrue((self.destination / "opt/skills/ws-ckpt/SKILL.md").is_file())
         self.assert_installed_cron_uses_path_binary(
-            self.destination / "usr/libexec/custom/ws-ckpt/plugins/hermes/cron.py",
+            self.destination / "usr/share/custom/plugins/ws-ckpt/hermes/cron.py",
             self.destination / "opt/ws/bin/ws-ckpt",
         )
         self.assertIn("Runtime discovery", result.stdout)
@@ -240,7 +272,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertTrue(
             (
                 self.destination
-                / "usr/share/anolisa/runtime/ws-ckpt/plugins/openclaw/dist/src/index.js"
+                / "usr/share/anolisa/plugins/ws-ckpt/openclaw/dist/src/index.js"
             ).is_file()
         )
         self.assertTrue(
@@ -261,7 +293,7 @@ class PackagingLayout(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((prefix / "bin" / COMPONENT.name).read_bytes(), self.binary.read_bytes())
-        self.assertTrue((prefix / "share/owner" / COMPONENT.name).is_dir())
+        self.assertTrue((prefix / "share/owner/skills/ws-ckpt").is_dir())
         self.assertTrue((prefix / "etc/ws-ckpt/config.toml").is_file())
         self.assertTrue((prefix / "lib/systemd/system/ws-ckpt.service").is_file())
         self.assertIn("no build, framework registration, or service activation", result.stdout)

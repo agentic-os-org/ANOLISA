@@ -18,11 +18,11 @@ DELIVERY_BINARY := $(call delivery-input,BINARY,$(DELIVERY_ROOT)/target/release/
 
 ifeq ($(DELIVERY_PROFILE),legacy-anolisa)
 DELIVERY_DATADIR := $(call delivery-input,DATADIR,$(DELIVERY_PREFIX)/share/anolisa)
-DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(DELIVERY_DATADIR)/runtime/skills/skillfs)
+DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(DELIVERY_DATADIR)/skills/skillfs-mount)
 DELIVERY_COMPONENTDIR := $(call delivery-input,COMPONENTDIR,$(DELIVERY_DATADIR)/components/skillfs)
 else
 DELIVERY_DATADIR := $(call delivery-input,DATADIR,$(DELIVERY_PREFIX)/share/$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_AWPRJ)/)skillfs)
-DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(DELIVERY_DATADIR)/skills/skillfs-mount)
+DELIVERY_SKILLDIR := $(call delivery-input,SKILLDIR,$(if $(filter command line environment override,$(origin DATADIR)),$(DELIVERY_DATADIR)/skills/skillfs-mount,$(if $(strip $(DELIVERY_AWPRJ)),$(DELIVERY_PREFIX)/share/$(DELIVERY_AWPRJ)/skills/skillfs-mount,$(DELIVERY_DATADIR)/skills/skillfs-mount)))
 DELIVERY_COMPONENTDIR := $(call delivery-input,COMPONENTDIR,$(DELIVERY_DATADIR)/component)
 endif
 

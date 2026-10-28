@@ -96,7 +96,7 @@ class PackagingLayout(unittest.TestCase):
         shutil.rmtree(self.source / "packaging/systemd")
         result = self.make("install-plugins", AWPRJ="suite")
         self.assertEqual(result.returncode, 0, result.stderr)
-        adapter = self.destination / "usr/libexec/suite/agent-memory/adapters"
+        adapter = self.destination / "usr/share/suite/adapters/agent-memory"
         self.assertTrue((adapter / "manifest.json").is_file())
         self.assertTrue((adapter / "openclaw/dist/index.js").is_file())
         self.assertTrue(os.access(adapter / "openclaw/scripts/install.sh", os.X_OK))
@@ -104,7 +104,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse((adapter / "openclaw/src").exists())
         self.assertFalse((self.destination / "usr/bin").exists())
         self.assertFalse((self.destination / "usr/lib/systemd").exists())
-        self.assertFalse((self.destination / "usr/share").exists())
+        self.assertFalse((self.destination / "usr/libexec").exists())
         self.assertNotIn("unexpected-activation-or-build", result.stderr)
 
     def test_missing_plugin_input_blocks_complete_install_before_core_writes(self) -> None:
@@ -182,7 +182,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertIn("Environment=MEMORY_SESSION_DIR=%t/anolisa/sessions/%i", unit)
         config = (self.destination / "usr/share/custom/agent-memory/default.toml").read_text()
         self.assertIn('base_dir = "~/.anolisa/memory"', config)
-        adapter = self.destination / "usr/libexec/custom/agent-memory/adapters"
+        adapter = self.destination / "usr/share/custom/adapters/agent-memory"
         self.assertTrue((adapter / "manifest.json").is_file())
         self.assertTrue((adapter / "openclaw/dist/index.js").is_file())
         self.assertTrue(os.access(adapter / "openclaw/scripts/install.sh", os.X_OK))
@@ -347,7 +347,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertTrue((staged_prefix / "bin/agent-memory").is_file())
         self.assertFalse((staged_prefix / "libexec").exists())
         self.assertTrue(
-            (staged_data / "suite/agent-memory/adapters/openclaw/dist/index.js").is_file()
+            (staged_data / "suite/adapters/agent-memory/openclaw/dist/index.js").is_file()
         )
         self.assertTrue((staged_data / "suite/agent-memory/default.toml").is_file())
         self.assertTrue((staged_data / "doc/agent-memory/LICENSE").is_file())
@@ -422,6 +422,113 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse((self.destination / str(data).lstrip("/")).exists())
         self.assertFalse((self.destination / "usr/libexec").exists())
         self.assertFalse(data.exists())
+
+    def test_explicit_default_datadir_keeps_namespaced_adapter_path(self) -> None:
+        data = self.work / "xdg-data"
+        for profile, values, default in (
+            ("system", {"PREFIX": "/usr"}, "/usr/share/anolisa/agent-memory"),
+            (
+                "user",
+                {"XDG_DATA_HOME": str(data)},
+                str(data / "anolisa/agent-memory"),
+            ),
+        ):
+            with self.subTest(profile=profile):
+                settings = {"INSTALL_PROFILE": profile, "AWPRJ": "anolisa", **values}
+                implicit = self.make("layout", **settings)
+                explicit = self.make("layout", **settings, DATADIR=default)
+                trailing = self.make("layout", **settings, DATADIR=default + "/")
+                for result in (implicit, explicit, trailing):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                adapters = [
+                    next(line for line in result.stdout.splitlines() if line.startswith("ADAPTERDIR="))
+                    for result in (implicit, explicit, trailing)
+                ]
+                self.assertEqual(len(set(adapters)), 1, adapters)
+                self.assertTrue(adapters[0].endswith("/anolisa/adapters/agent-memory"))
+
+                custom = self.make("layout", **settings, DATADIR="/opt/custom-memory")
+                self.assertEqual(custom.returncode, 0, custom.stderr)
+                self.assertIn("ADAPTERDIR=/opt/custom-memory/adapters\n", custom.stdout)
+                override = self.make(
+                    "layout", **settings, DATADIR=default, ADAPTERDIR="/opt/custom-adapter"
+                )
+                self.assertEqual(override.returncode, 0, override.stderr)
+                self.assertIn("ADAPTERDIR=/opt/custom-adapter\n", override.stdout)
+
+    def test_uninstall_uses_install_layout_and_preserves_other_files(self) -> None:
+        data = self.work / "xdg-data"
+        cases = (
+            {
+                "INSTALL_PROFILE": "system",
+                "PREFIX": "/usr/local",
+                "AWPRJ": "anolisa",
+            },
+            {
+                "INSTALL_PROFILE": "system",
+                "PREFIX": "/usr",
+                "AWPRJ": "anolisa",
+                "PROFILE": "legacy-anolisa",
+            },
+            {
+                "INSTALL_PROFILE": "user",
+                "PREFIX": str(self.work / "home/.local"),
+                "XDG_DATA_HOME": str(data),
+                "AWPRJ": "anolisa",
+            },
+            {
+                "INSTALL_PROFILE": "system",
+                "PREFIX": "/opt/custom",
+                "BINDIR": "/opt/overrides/bin",
+                "CONFIGDIR": "/opt/overrides/config",
+                "MCPDIR": "/opt/overrides/mcp",
+                "UNITDIR": "/opt/overrides/unit",
+                "DOCDIR": "/opt/overrides/doc",
+                "ADAPTERDIR": "/opt/overrides/adapters",
+            },
+        )
+        for settings in cases:
+            with self.subTest(settings=settings):
+                result = self.make("install", **settings)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                installed = {p for p in self.destination.rglob("*") if p.is_file()}
+                self.assertEqual(len(installed), 12)
+                layout = self.make("layout", **settings)
+                self.assertEqual(layout.returncode, 0, layout.stderr)
+                adapter = next(
+                    line.removeprefix("ADAPTERDIR=")
+                    for line in layout.stdout.splitlines()
+                    if line.startswith("ADAPTERDIR=")
+                )
+                adapter = self.destination / adapter.lstrip("/")
+                user_file = adapter / "openclaw/dist/user-file.js"
+                user_file.write_text("keep user data")
+                other_link = adapter / "openclaw/dist/user-link"
+                other_link.symlink_to(user_file)
+                sentinel = self.destination / "unrelated-user-data"
+                sentinel.write_text("keep")
+                result = self.make("uninstall", **settings)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("unexpected-activation-or-build", result.stderr)
+                self.assertTrue(sentinel.is_file())
+                self.assertEqual(user_file.read_text(), "keep user data")
+                self.assertTrue(other_link.is_symlink())
+                for path in installed:
+                    self.assertFalse(path.exists(), path)
+                shutil.rmtree(self.destination)
+
+    def test_uninstall_rejects_linked_plugin_ancestor_before_removing_core(self) -> None:
+        result = self.make("install-core")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        adapter = self.destination / "usr/libexec/agent-memory/adapters"
+        adapter.parent.mkdir(parents=True)
+        outside = self.work / "outside"
+        outside.mkdir()
+        adapter.symlink_to(outside, target_is_directory=True)
+        result = self.make("uninstall")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.destination / "usr/bin/agent-memory").is_file())
+        self.assertTrue(adapter.is_symlink())
 
     def test_system_install_ignores_user_xdg_roots(self) -> None:
         home = self.work / "home"
