@@ -711,7 +711,7 @@ python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970
 
 ## 前置依赖
 
-- **Rust** toolchain >= 1.89 — RTK（edition 2024）所需
+- **Rust** toolchain >= 1.91 — 工作区 MSRV，RTK 同样需要
 - **just** — 用于下载并应用 RTK Patch
 - **Git** — 用于通过 justfile 下载 RTK 源码
 - **CPython 3.11+ 开发环境与 uv** — 仅构建 Python Wheel 或显式包含全部

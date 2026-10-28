@@ -3,6 +3,7 @@ name = "tokenless-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Versioned lifecycle transport shared by Tokenless frontends"
 
 [dependencies]

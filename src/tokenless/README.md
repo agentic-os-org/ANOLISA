@@ -1153,7 +1153,7 @@ layout and single-target interface.
 
 ## Prerequisites
 
-- **Rust** toolchain >= 1.89 — required by rtk (edition 2024). Install via [rustup](https://rustup.rs)
+- **Rust** toolchain >= 1.91 — the workspace MSRV, which RTK also requires. Install via [rustup](https://rustup.rs)
 - **just** — build runner for rtk setup (clone + patch orchestration)
 - **Git** — for rtk source download via justfile
 - **CPython 3.11+ development environment and uv** — only for the Python wheel

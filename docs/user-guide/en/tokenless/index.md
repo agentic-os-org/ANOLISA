@@ -131,7 +131,7 @@ Prerequisites depend on which path the script takes:
 | Path | Taken when | Requires | Installs |
 |------|-----------|----------|----------|
 | npm | npm is present and the platform is glibc Linux or macOS | `curl`, `tar`, Node.js 16.7+ with `npm` | `tokenless`, `rtk`, and the adapter resources |
-| Source build (Linux only) | chosen **before** npm runs: npm is missing, the platform is musl Linux, or `TOKENLESS_FORCE_BUILD=1`. Not selected automatically once `npm install` has been invoked — see the failure note above | `curl`, `tar`, a Rust toolchain (`cargo`) | the `tokenless` CLI only — no `rtk` and no adapters |
+| Source build (Linux only) | chosen **before** npm runs: npm is missing, the platform is musl Linux, or `TOKENLESS_FORCE_BUILD=1`. Not selected automatically once `npm install` has been invoked — see the failure note above | `curl`, `tar`, a Rust toolchain (`cargo`) 1.91 or later | the `tokenless` CLI only — no `rtk` and no adapters |
 
 The script supports Linux and macOS only; on Windows it exits with an error, so use WSL2 there. Its source-build path is Linux-only as well: on macOS the installer either takes the npm path or exits with an error, and never invokes `cargo`.
 
@@ -358,7 +358,7 @@ cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](index.md).
+The build needs Rust 1.91 or later. This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI, npm, curl, or Skill method as described in the [Quick Start](index.md).
 
 ## Build and install component files from source
 

@@ -27,6 +27,8 @@ exclude = [
 version = "0.9.2"
 edition = "2024"
 license = "Apache-2.0"
+# RTK (third_party/rtk) requires Rust 1.91, so one toolchain builds both.
+rust-version = "1.91"
 
 [workspace.dependencies]
 actix-web = { version = "4", default-features = false, features = ["macros"] }

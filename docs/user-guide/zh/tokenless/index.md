@@ -124,7 +124,7 @@ curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tok
 | 路径 | 触发条件 | 依赖 | 安装内容 |
 |------|----------|------|----------|
 | npm | 存在 npm，且平台为 glibc Linux 或 macOS | `curl`、`tar`、Node.js 16.7+（含 `npm`） | `tokenless`、`rtk` 以及 Adapter 资源 |
-| 源码构建（仅 Linux） | 在**执行 npm 之前**选定：无 npm、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1`。调用 `npm install` 之后不再自动切换——见上文失败处理说明 | `curl`、`tar`、Rust 工具链（`cargo`） | 仅 `tokenless` CLI —— 不含 `rtk`，也不含 Adapter |
+| 源码构建（仅 Linux） | 在**执行 npm 之前**选定：无 npm、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1`。调用 `npm install` 之后不再自动切换——见上文失败处理说明 | `curl`、`tar`、Rust 工具链（`cargo`）1.91 或更高版本 | 仅 `tokenless` CLI —— 不含 `rtk`，也不含 Adapter |
 
 脚本只支持 Linux 和 macOS；在 Windows 上会直接报错退出，请改用 WSL2。源码构建路径同样只支持 Linux：在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会调用 `cargo`。
 
@@ -347,7 +347,7 @@ cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](index.md)通过 anolisa CLI、npm、curl 或 Skill 安装。
+构建需要 Rust 1.91 或更高版本。这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](index.md)通过 anolisa CLI、npm、curl 或 Skill 安装。
 
 ## 从源码构建并安装组件文件
 
