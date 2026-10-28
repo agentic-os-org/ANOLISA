@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.0"
 
 [component]
 name = "skillfs"
-version = "0.5.3"
+version = "0.5.4"
 layer = "runtime"
 domain = "tools"
 description = "AI agent skill management via virtual filesystem"
