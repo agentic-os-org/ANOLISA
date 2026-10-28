@@ -4,7 +4,7 @@
 #[path = "launcher/support.rs"]
 mod support;
 use serde_json::{json, Value};
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command, time::Duration};
 use support::{Fixture, Service};
 
 #[path = "qoder_sdk/tool_scope.rs"]
@@ -171,7 +171,8 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk/bridge.test.mjs"),
         );
-    let output = f.run(command);
+    // The bridge runs 120 Node tests, including deliberate deadline waits.
+    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(45));
     assert!(
         output.status.success(),
         "{}\n{}",

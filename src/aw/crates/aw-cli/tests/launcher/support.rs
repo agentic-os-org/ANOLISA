@@ -297,8 +297,11 @@ impl Process {
             fs::read_to_string(&self.stderr).unwrap_or_else(|error| format!("unreadable: {error}")),
         ))
     }
-    pub fn finish(mut self) -> Output {
-        let deadline = Instant::now() + TIMEOUT;
+    pub fn finish(self) -> Output {
+        self.finish_with_timeout(TIMEOUT)
+    }
+    pub fn finish_with_timeout(mut self, timeout: Duration) -> Output {
+        let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
