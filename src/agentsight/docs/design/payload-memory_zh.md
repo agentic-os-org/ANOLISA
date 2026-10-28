@@ -8,6 +8,9 @@ AgentSight 为保留的捕获 payload 设置限额，并在配对提前结束时
 
 ## 所有权边界
 
+SSL executable 扫描使用 SIMD 子串搜索，按 4 MiB 有界窗口保留特征重叠区。重叠匹配与跨窗口的
+起始位置均保持原有语义；inode 缓存与符号选择规则不变。
+
 ```mermaid
 flowchart LR
     Probe[Probe payload] --> Capture[按条数和字节限额的队列]

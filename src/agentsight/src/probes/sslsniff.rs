@@ -17,7 +17,6 @@ use super::shared_maps::{MapKind, SharedMaps};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Read,
     mem::{self, MaybeUninit},
     path::Path,
     slice,
@@ -28,6 +27,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+mod scan;
+#[cfg(test)]
+use scan::ssl_exe_markers;
+use scan::{collect_pattern_hits, file_has_ssl_markers, fill_buf};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
 #[allow(
@@ -793,32 +797,6 @@ pub(super) struct StaticSslOffsets {
     pub read_is_ex: bool,
 }
 
-/// Appends the absolute offset of every pattern match starting in `window`
-/// below `limit`, one vector per entry of `patterns`, in ascending order.
-///
-/// Walks the window once and tests every pattern at each position, rather than
-/// walking it once per pattern. The signatures are all function prologues that
-/// share a leading byte run, so each comparison rejects a position on its first
-/// byte and the extra signatures cost close to nothing. Walking per pattern
-/// instead means a binary matching none of them is scanned once for every
-/// signature before it can be rejected, on the synchronous attach path.
-fn collect_pattern_hits(
-    window: &[u8],
-    patterns: &[&[u8]],
-    base: usize,
-    limit: usize,
-    hits: &mut [Vec<usize>],
-) {
-    for pos in 0..limit.min(window.len()) {
-        let tail = &window[pos..];
-        for (slot, pattern) in hits.iter_mut().zip(patterns) {
-            if tail.len() >= pattern.len() && &tail[..pattern.len()] == *pattern {
-                slot.push(base + pos);
-            }
-        }
-    }
-}
-
 /// Bytes read per window by [`scan_file_patterns`].
 ///
 /// Caps the scan's peak memory. Agent binaries reach hundreds of megabytes (a
@@ -865,51 +843,6 @@ fn scan_file_patterns(path: &str, patterns: &[&[u8]]) -> Option<Vec<Vec<usize>>>
         carry = overlap;
     }
     Some(hits)
-}
-
-/// Reads until `dst` is full or the file ends, returning the byte count.
-///
-/// `Read::read` is free to return short of the request before EOF, and a short
-/// window would split a pattern that is actually present, so the fill has to be
-/// driven to completion rather than trusted to one call.
-///
-/// # Errors
-///
-/// Returns `None` on any I/O error other than an interrupted call.
-fn fill_buf(file: &mut fs::File, mut dst: &mut [u8]) -> Option<usize> {
-    let mut total = 0;
-    while !dst.is_empty() {
-        match file.read(dst) {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                dst = &mut dst[n..];
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return None,
-        }
-    }
-    Some(total)
-}
-
-/// String markers whose presence in an executable indicates a statically
-/// linked BoringSSL, regardless of the binary's name. BoringSSL builds keep
-/// vendor path strings (`vendor/boringssl/...`) and the
-/// `openssl_is_boringssl` symbol name in .rodata even when stripped.
-/// Deliberately BoringSSL-only: statically-linked OpenSSL binaries stay
-/// opt-in through the name-based fast path (codex, python3.x), keeping this
-/// fallback scoped to the Bun/Node binary shape it was built for. This is a
-/// cheap prefilter, not a verdict: a hit only justifies running the
-/// (expensive) three-tier detection, which remains the source of truth.
-///
-/// The marker is stored reversed and reassembled at runtime so the
-/// contiguous string never appears in AgentSight's own binary: AgentSight
-/// resolves the https-rule domains itself, and a self-match would trigger a
-/// pointless full byte-pattern scan of its own executable. (A capitalized
-/// `BoringSSL` variant is unusable anyway: the aws-lc dependency embeds
-/// that exact string, which would self-match the same way.)
-fn ssl_exe_markers() -> Vec<Vec<u8>> {
-    vec![b"lssgnirob".iter().copied().rev().collect()]
 }
 
 /// Probe the main executable of `pid` for statically-linked SSL when maps
@@ -989,45 +922,6 @@ fn stat_dev_to_key(dev: u64) -> u64 {
     let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff_u64);
     let minor = (dev & 0xff) | ((dev >> 12) & !0xff_u64);
     (major << 32) | minor
-}
-
-/// True when any marker from [`ssl_exe_markers`] occurs in the file at
-/// `path`.
-///
-/// Streams the file in rounds of [`SCAN_CHUNK_BYTES`] fresh bytes (the
-/// buffer additionally holds the `max_marker_len - 1` bytes carried over
-/// from the previous round, so a marker straddling a round boundary is
-/// still seen) and stops at the first hit, so a matching binary costs only
-/// the read up to its first marker.
-fn file_has_ssl_markers(path: &str) -> bool {
-    let markers = ssl_exe_markers();
-    let overlap = markers.iter().map(|m| m.len()).max().unwrap_or(1) - 1;
-    let Ok(mut file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = vec![0u8; overlap + SCAN_CHUNK_BYTES];
-    let mut carry = 0usize;
-    loop {
-        let Some(read) = fill_buf(&mut file, &mut buf[carry..]) else {
-            return false;
-        };
-        let filled = carry + read;
-        if filled == 0 {
-            return false;
-        }
-        let window = &buf[..filled];
-        if markers
-            .iter()
-            .any(|marker| window.windows(marker.len()).any(|w| w == marker.as_slice()))
-        {
-            return true;
-        }
-        if filled < buf.len() {
-            return false;
-        }
-        buf.copy_within(filled - overlap..filled, 0);
-        carry = overlap;
-    }
 }
 
 fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
