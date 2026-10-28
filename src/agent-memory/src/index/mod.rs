@@ -114,8 +114,18 @@ impl IndexHandle {
     /// are filtered before ranking and never consume the `top_k` budget.
     /// Vector rows without a matching file entry remain eligible.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
+        self.search_vec_in_category(query_vec, top_k, None)
+    }
+
+    /// Rank vector matches within a fact category before applying `top_k`.
+    pub fn search_vec_in_category(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        let raw = store.search_vec(query_vec, top_k)?;
+        let raw = store.search_vec_in_category(query_vec, top_k, category)?;
         Ok(raw
             .into_iter()
             .map(|(path, score)| SearchHit {
@@ -133,8 +143,19 @@ impl IndexHandle {
         query_vec: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
+        self.search_hybrid_in_category(query, query_vec, top_k, None)
+    }
+
+    /// Restrict both hybrid candidate lists to a fact category before ranking.
+    pub fn search_hybrid_in_category(
+        &self,
+        query: &str,
+        query_vec: &[f32],
+        top_k: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.search_hybrid(query, query_vec, top_k)
+        store.search_hybrid_in_category(query, query_vec, top_k, category)
     }
 
     /// Synchronously upsert a single file into the BM25 index. Used by

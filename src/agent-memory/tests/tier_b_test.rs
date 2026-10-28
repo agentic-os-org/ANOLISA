@@ -572,6 +572,58 @@ struct KeywordEmbedding {
     dim: usize,
 }
 
+fn assert_embedding_category_precedes_limit(mode: &str) {
+    let (_tmp, mut svc) = setup();
+    svc.embedding = Some(Arc::new(KeywordEmbedding { dim: 3 }));
+    let store = svc.index.as_ref().unwrap().store_arc();
+    {
+        // Insert directly so vector readiness does not depend on watcher timing.
+        let mut store = store.lock().unwrap();
+        for i in 0..6 {
+            let path = format!("facts/lesson/{i}.md");
+            store.upsert(&path, 0, 4, "rust", None).unwrap();
+            store.upsert_vec(&path, &[1.0, 0.0, 0.0]).unwrap();
+        }
+        for i in 0..2 {
+            let path = format!("facts/interest/{i}.md");
+            store
+                .upsert(&path, 0, 23, "rust additional context", None)
+                .unwrap();
+            store.upsert_vec(&path, &[0.8, 0.6, 0.0]).unwrap();
+        }
+    }
+
+    let unfiltered = svc
+        .memory_search("rust", 2, Some(mode), None, None)
+        .unwrap();
+    assert_eq!(unfiltered.len(), 2);
+    assert!(
+        unfiltered
+            .iter()
+            .all(|h| h.path.starts_with("facts/lesson/"))
+    );
+
+    let hits = svc
+        .memory_search("rust", 2, Some(mode), Some("interest"), None)
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        2,
+        "{mode} lost eligible category hits: {hits:?}"
+    );
+    assert!(hits.iter().all(|h| h.path.starts_with("facts/interest/")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vector_category_precedes_limit() {
+    assert_embedding_category_precedes_limit("vector");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hybrid_category_precedes_limit() {
+    assert_embedding_category_precedes_limit("hybrid");
+}
+
 #[async_trait]
 impl EmbeddingProvider for KeywordEmbedding {
     async fn embed(&self, text: &str) -> agent_memory::Result<Embedding> {

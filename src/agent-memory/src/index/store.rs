@@ -890,7 +890,18 @@ impl BM25Store {
     /// are filtered before ranking so they never consume the `top_k` budget.
     /// Vector rows without a matching `files` entry remain eligible.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
-        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search)
+        self.search_vec_in_category(query_vec, top_k, None)
+    }
+
+    /// Rank vector matches within a fact category before applying `top_k`.
+    /// `None` preserves unfiltered search, including standalone vector rows.
+    pub fn search_vec_in_category(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
+        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search, category)
     }
 
     // Keep this override private: vector searches use the store default,
@@ -901,6 +912,7 @@ impl BM25Store {
         query_vec: &[f32],
         top_k: usize,
         exclude_cold: bool,
+        category: Option<&str>,
     ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
@@ -910,15 +922,19 @@ impl BM25Store {
             "SELECT v.path, v.embedding, f.mtime_ms \
              FROM files_vec v LEFT JOIN files f ON f.path = v.path \
              WHERE COALESCE(f.is_superseded, 0) = 0 \
-               AND (?1 = 0 OR COALESCE(f.is_cold, 0) = 0)",
+               AND (?1 = 0 OR COALESCE(f.is_cold, 0) = 0) \
+               AND (?2 IS NULL OR v.path GLOB ?2)",
         )?;
-        let rows = stmt.query_map(params![exclude_cold], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![exclude_cold, category.map(category_glob_pattern)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
 
         let mut scores: Vec<(String, f64)> = Vec::new();
         for row in rows {
@@ -959,7 +975,25 @@ impl BM25Store {
         query_vec: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.search_hybrid_inner(query, query_vec, top_k, self.exclude_cold_on_search)
+        self.search_hybrid_in_category(query, query_vec, top_k, None)
+    }
+
+    /// Filter both hybrid candidate lists by fact category before ranking.
+    /// `None` preserves unfiltered reciprocal rank fusion.
+    pub fn search_hybrid_in_category(
+        &self,
+        query: &str,
+        query_vec: &[f32],
+        top_k: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_hybrid_inner(
+            query,
+            query_vec,
+            top_k,
+            self.exclude_cold_on_search,
+            category,
+        )
     }
 
     /// Hybrid search with explicit cold control.
@@ -970,7 +1004,7 @@ impl BM25Store {
         top_k: usize,
         exclude_cold: bool,
     ) -> Result<Vec<SearchHit>> {
-        self.search_hybrid_inner(query, query_vec, top_k, exclude_cold)
+        self.search_hybrid_inner(query, query_vec, top_k, exclude_cold, None)
     }
 
     fn search_hybrid_inner(
@@ -979,10 +1013,11 @@ impl BM25Store {
         query_vec: &[f32],
         top_k: usize,
         exclude_cold: bool,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         // Run both search strategies.
-        let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold);
+        let bm25_hits = self.search_scoped(query, top_k * 2, exclude_cold, None, category);
+        let vec_hits = self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold, category);
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
