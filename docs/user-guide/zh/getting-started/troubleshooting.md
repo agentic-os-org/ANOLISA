@@ -130,11 +130,14 @@ anolisa env
 **解决**：
 
 ```bash
-# 验证 hook 安装
-ls ~/.copilot-shell/cosh/hooks/
+# 验证 Tokenless cosh 扩展已安装
+ls ~/.copilot-shell/extensions/tokenless/
 
-# 重新安装 hook
-/usr/share/tokenless/scripts/install.sh --cosh
+# 检查适配器状态
+anolisa adapter status tokenless
+
+# 重新安装适配器
+anolisa adapter enable tokenless cosh
 
 # 检查 cosh hook 配置
 cat ~/.copilot-shell/config.toml | grep -A5 hooks
