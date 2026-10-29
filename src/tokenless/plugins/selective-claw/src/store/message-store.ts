@@ -168,6 +168,55 @@ export class MessageStore {
     return rows.map(toMessageRecord);
   }
 
+  /** Replace one window atomically; null means its live turn has no complete archive anchor. */
+  replaceRecallAliases(sessionId: string, aliases: ReadonlyMap<number, number | null>): void {
+    // Include old keys absent from the incoming window before taking a writer lock.
+    const current = this.prepare(
+      "SELECT live_turn_seq, archive_turn_seq FROM recall_aliases WHERE session_id = ?",
+    ).all(sessionId) as Array<{ live_turn_seq: number; archive_turn_seq: number | null }>;
+    if (
+      current.length === aliases.size &&
+      current.every((row) => aliases.has(row.live_turn_seq) &&
+        aliases.get(row.live_turn_seq) === row.archive_turn_seq)
+    ) {
+      return;
+    }
+    this.db.exec("SAVEPOINT recall_aliases");
+    try {
+      this.prepare("DELETE FROM recall_aliases WHERE session_id = ?").run(sessionId);
+      const insert = this.prepare(`
+        INSERT INTO recall_aliases (session_id, live_turn_seq, archive_turn_seq)
+        VALUES (?, ?, ?)
+      `);
+      for (const [liveTurn, archiveTurn] of aliases) {
+        insert.run(sessionId, liveTurn, archiveTurn);
+      }
+      this.db.exec("RELEASE recall_aliases");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK TO recall_aliases");
+        this.db.exec("RELEASE recall_aliases");
+      } catch (cleanupError) {
+        // SQLite may have already rolled back the savepoint; preserve the write error.
+        console.warn(
+          "[selective-claw] recall alias update failed; savepoint cleanup also failed",
+          cleanupError,
+        );
+      }
+      throw error;
+    }
+  }
+
+  getRecallAliases(sessionId: string, turnSeqs: number[]): Map<number, number | null> {
+    if (turnSeqs.length === 0) return new Map();
+    const placeholders = turnSeqs.map(() => "?").join(",");
+    const rows = this.db.prepare(`
+      SELECT live_turn_seq, archive_turn_seq FROM recall_aliases
+      WHERE session_id = ? AND live_turn_seq IN (${placeholders})
+    `).all(sessionId, ...turnSeqs) as Array<{ live_turn_seq: number; archive_turn_seq: number | null }>;
+    return new Map(rows.map((row) => [row.live_turn_seq, row.archive_turn_seq]));
+  }
+
   setTurnSummary(sessionId: string, turnSeq: number, summary: string): void {
     this.prepare(`
       UPDATE messages SET summary = ?
