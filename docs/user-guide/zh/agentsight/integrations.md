@@ -132,9 +132,34 @@ hook 并未挂载——引擎仍会以 `effect=block` 且 `blocked=false` 的 vi
 报告，说明该策略实际无法拒绝；请检查引擎 profile（`ACTPLANE_HOOK_PROFILE` /
 `ACTPLANE_PINNED_PROFILE`）与内核 LSM 配置。
 
-协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。当前后端会拒绝
-结构化策略且不改变已有绑定，新增文件保护能力保持 false。旧 DSL 语义不变，但协议 v4 帧会
-被拒绝，因此客户端需与 enforcer 一起升级。
+协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。mock 后端仍然拒绝
+结构化策略。旧 DSL 语义不变，但协议 v4 帧会被拒绝，因此客户端需与 enforcer 一起升级。
+
+### 结构化文件保护：一期边界
+
+`file_protection_policy` 支持保护精确文件目录项或整个目录树（含未来子项），并按目标排除精确目录项
+或子目录树。`delete` 与 `ordinary_write` 独立选择。下发前通过 `/api/enforcement/health` 检查
+`file_entry_delete_protection`、`directory_tree_delete_protection`、`ordinary_write_protection`
+和 `static_mount_topology` 是否支持相应能力。ActPlane 后端要求结构化策略显式设置
+`policy_mode: "enforce"`；省略模式或设置 `audit/observe` 会在拓扑准备和内核修改前被拒绝，
+不改变旧 DSL 的处理方式。
+
+- 普通写保护阻止通过受保护路径执行的 `write/pwrite`，包括策略生效前已打开的 FD；读取和打开
+  可写 FD 仍允许。
+- 每次祖先遍历最多 256 步，挂载切换也占用步数；预算内无法确定保护时分类为 UNKNOWN，
+  普通写放行；仅当当前策略域请求删除保护时，删除和重命名才会保守拒绝。因此过深的子项
+  可能可写；同样深度下的显式文件目标或附近的目录树保护根仍可命中，并非所有深路径都会放行。
+- 策略范围外、未被其他目标保护的硬链接仍可写入同一 inode，从而改变受保护文件内容；需要保护
+  该别名时应显式加入目标。删除外部硬链接仍允许，因为它不会删除受保护的目录项。
+- 即使文件受保护，`truncate/ftruncate`、`O_TRUNC`、共享可写 `mmap/mprotect` 和 `fallocate` 打洞
+  也不在该保护契约内。io_uring/AIO 与 chmod/chown 同样不在一期覆盖保证内；
+  `complete_content_protection` 保持 false。
+- 挂载拓扑固定在 Apply 时；已有受支持的 bind 别名与子挂载会被解析，生效后的
+  mount/bind/unmount 及动态 overlay 变化不支持。
+- 准备结束和激活前会重新解析路径身份，但不会原子锁定路径直到激活完成。Apply 返回前需保持
+  目标、排除项、祖先与进程根目录稳定；Apply 期间并发 rename/exchange 或根目录变化不支持。
+
+这是限定操作范围的保护，并不保证受保护文件内容不可变。
 
 ## cosh：用自然语言提问
 

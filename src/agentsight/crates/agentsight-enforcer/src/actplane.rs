@@ -602,16 +602,19 @@ impl EnforcementBackend for ActPlaneBackend {
         // state so a host without an active BPF-LSM reports file_delete_guard=false
         // (fail-closed) instead of advertising a capability that silently enforces
         // nothing.
-        capabilities.file_delete_guard = self.structured_delete_ready();
-        capabilities.file_delete_guard_mode = if capabilities.file_delete_guard {
-            if self.engine.bpf_d_path_in_lsm_available() {
-                Some("path".into())
+        let file_guard_ready = self.structured_delete_ready();
+        capabilities.file_delete_guard = file_guard_ready;
+        capabilities.file_delete_guard_mode = file_guard_ready.then(|| {
+            if self.engine.inode_guard_mode() {
+                "inode".into()
             } else {
-                Some("inode".into())
+                "path".into()
             }
-        } else {
-            None
-        };
+        });
+        capabilities.file_entry_delete_protection = file_guard_ready;
+        capabilities.directory_tree_delete_protection = file_guard_ready;
+        capabilities.ordinary_write_protection = self.structured_ordinary_write_ready();
+        capabilities.static_mount_topology = file_guard_ready;
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
