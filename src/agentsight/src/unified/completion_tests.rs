@@ -47,17 +47,14 @@ fn bounded_raw_queue_keeps_rejected_ownership_and_drains_complete_payloads_in_or
     assert_eq!(scheduler.bytes, bytes);
     assert_eq!(scheduler.len(), 1);
     let mapper = ResponseSessionMapper::new();
+    let builder = GenAIBuilder::new();
     for (index, id) in ["paced-first", "paced-second"].iter().enumerate() {
         let raw = scheduler.pop().unwrap();
         assert_eq!(scheduler.bytes, 0);
         let mut analysis = Analyzer::new().analyze_for_delivery(&raw, true);
         drop(raw);
-        let (mut output, _) = GenAIBuilder::new().build_for_owned_delivery(
-            &analysis,
-            &mapper,
-            &HashMap::new(),
-            false,
-        );
+        let (mut output, _) =
+            builder.build_for_owned_delivery(&analysis, &mapper, &HashMap::new(), false);
         output.take_raw_bodies(&mut analysis);
         drop(analysis);
         assert_eq!(output.events.len(), 1);
@@ -77,6 +74,14 @@ fn bounded_raw_queue_keeps_rejected_ownership_and_drains_complete_payloads_in_or
         let GenAISemanticEvent::LLMCall(call) = saved else {
             panic!("expected LLM call")
         };
+        use sha2::{Digest, Sha256};
+        let conversation = format!(
+            "{:x}",
+            Sha256::digest(format!("conversation{id}").as_bytes())
+        );
+        assert_eq!(call.metadata["conversation_id"], conversation[..32]);
+        let session = format!("{:x}", Sha256::digest(b"sessionpaced-first"));
+        assert_eq!(call.metadata["session_id"], session[..32]);
         assert!(
             call.request
                 .raw_body

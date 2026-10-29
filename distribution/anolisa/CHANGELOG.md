@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20] - 2026-10-29
+
+### Added
+
+- Add `--no-deps` to `anolisa install` for raw artifacts, including `--all`,
+  so users who manage runtime dependencies separately can skip their checks
+  and installation. Successful installs print a reminder to stderr unless
+  `--quiet` is set; batch installs print it once when any component was
+  installed. RPM rejects this option, and default dependency handling remains
+  unchanged ([#9126](https://github.com/agentic-os-org/ANOLISA/pull/9126)).
+
+### Changed
+
+- Update the component catalog to Agent Memory `0.2.11`, AgentSight `0.15.0`,
+  SkillFS `0.5.4`, and Tokenless `0.9.0`.
+
+### Fixed
+
+- Explain how to recover when adapter status or disable, including dry-run,
+  rejects a path outside the allowed framework directories. Human and JSON
+  errors now advise checking framework directory configuration and ancestor
+  symlinks, and restoring the original directory if it was redirected.
+  Boundary checks, retained installation records, and exit codes are unchanged
+  ([#9220](https://github.com/agentic-os-org/ANOLISA/pull/9220)).
+
 ## [0.3.19] - 2026-10-25
 
 ### Changed

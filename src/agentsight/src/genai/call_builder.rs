@@ -279,19 +279,27 @@ impl GenAIBuilder {
             .and_then(|rid| response_mapper.get_session_by_response_id(rid))
             .or_else(|| response_mapper.get_session_by_pid(http.pid))
             .map(|s| s.to_string());
-        let session_id = metadata_session.or(mapper_session).or_else(|| {
-            self.id_resolver
-                .resolve_session_id(&agent_name, pid_i32, &first_user_raw, &response_id)
+        let session_id = metadata_session.or(mapper_session);
+        let (session_key, conversation_key) = self.id_resolver.message_keys(
+            &agent_name,
+            pid_i32,
+            &first_user_raw,
+            &last_user_raw,
+            user_message_count,
+            session_id.is_none(),
+        );
+        let session_id = session_id.or_else(|| {
+            session_key.as_ref().and_then(|key| {
+                self.id_resolver
+                    .resolve_session_id_with_key(key, &response_id)
+            })
         });
 
         // conversation_id: SHA256("conversation" + 该 conversation 内最早 response_id)
-        let conversation_id = self.id_resolver.resolve_conversation_id(
-            &agent_name,
-            pid_i32,
-            &last_user_raw,
-            &response_id,
-            user_message_count,
-        );
+        let conversation_id = conversation_key.as_ref().and_then(|key| {
+            self.id_resolver
+                .resolve_conversation_id_with_key(key, &response_id)
+        });
 
         // 若本次响应的 finish_reason 表明本轮对话已经结束（非 tool_calls/tool_use 等
         // 表示流程尚在继续的取值），显式驱逐 (agent_name, pid, last_user_raw) 对应的
@@ -326,12 +334,9 @@ impl GenAIBuilder {
                     })
                     .unwrap_or(false);
                 if !has_tool_call {
-                    self.id_resolver.finish_conversation(
-                        &agent_name,
-                        pid_i32,
-                        &last_user_raw,
-                        user_message_count,
-                    );
+                    if let Some(key) = &conversation_key {
+                        self.id_resolver.finish_conversation_with_key(key);
+                    }
                 }
             }
         }

@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.1
+
+**Breaking Changes**
+
+- Removed the unsupported `--cgroup-id` flag from `scope create`; cgroup assignment
+  was never accepted by PAP or the AgentSight Adapter, and the flag now fails locally
+  with exit code 2. Select target processes with `--pid`, `--process-name`, or
+  `--executable` instead. (#9134)
+
+**Code Scanning**
+
+- Evaluated command strings passed to Python process APIs (`os.system`, `os.popen`,
+  `subprocess`) against the existing Shell rules, with native rule IDs, severity, and
+  evidence retained; dynamically built commands and argv arrays remain uninferred.
+  (#9128)
+
+**Skill Ledger Runtime**
+
+- Added `skillsec` as the primary `agent-sec-cli` command group name, retaining
+  `skill-ledger` as a compatible alias with identical arguments, output, and exit
+  codes. (#8907)
+- Escaped the YAML-sensitive characters that JSON quoting leaves literal in a pending
+  Skill placeholder, so accepted Skill names containing control characters or Unicode
+  separators survive publication and frontmatter parsing unchanged. (#8948)
+
 ## 1.1.0
 
 **Breaking Changes**

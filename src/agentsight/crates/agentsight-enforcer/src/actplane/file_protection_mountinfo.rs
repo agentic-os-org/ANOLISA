@@ -144,6 +144,7 @@ pub(super) fn underlying_mount_path(
     join_mount_path(covering, path).ok_or_else(|| invalid("mountpoint component relation changed"))
 }
 
+// Candidates require caller re-resolution to exclude hidden or overmounted paths.
 pub(super) fn visible_paths_for_mount_root(
     mounts: &[MountInfo],
     mounted: &MountInfo,
@@ -158,7 +159,8 @@ pub(super) fn visible_paths_for_mount_root(
         .filter_map(|candidate| join_root_path(candidate, &mounted.root))
         .filter(|path| path != &mounted.mountpoint)
         .collect();
-    candidates.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    candidates
+        .sort_by(|a, b| (std::cmp::Reverse(a.len()), a).cmp(&(std::cmp::Reverse(b.len()), b)));
     candidates.dedup();
     candidates
 }

@@ -367,13 +367,16 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 在 daemon 启动时加载 `/etc/agent-sec/pii-checker/rules.yaml`，也可通过
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` 指定其他文件；重启后更新。
-V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.0.0"`；
+V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.1.1"`；
 覆盖不完整时的 `pass` 不代表检测完整。本阶段保持 Hook 契约，不切换真实宿主，也不新增 PDP 执行控制。
 公共 CLI `--trace-context` 适配通过顶层 OTel 信封传播关联信息，不支持 `params.traceContext`。
 
 正式版 OpenClaw `>=2026.5.12` 在模型运行入口扫描，记录为 `source=model_input`；
 此输入 hook 只扫描本轮 `prompt`，不扫描 system prompt 或历史消息。
 较旧的受支持版本保留入站扫描。输入是否阻断取决于策略，工具输出 hook 仍只用于观测。
+
+`test` 等测试标记只有匹配完整词时才会降低置信度；`latest 13812345678` 保留手机号 finding，
+`test-only` 仍沿用原有的测试上下文处理。
 
 详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-sec-core/pii-checker.md)。
 

@@ -10,6 +10,7 @@ use super::file_protection_map_writer::{
 };
 
 /// A generation that has not yet published its domain activation record.
+/// Callers must merge same-key masks before staging each key once; counts are distinct map keys.
 #[derive(Debug)]
 pub struct FileProtectionStaging<W: FileProtectionMapWriter> {
     writer: Option<W>,
@@ -175,6 +176,7 @@ impl<W: FileProtectionMapWriter> FileProtectionStaging<W> {
         slot: FileProtectionSlot,
         value: FileProtectionSlotValue,
     ) -> io::Result<()> {
+        slot.validate()?;
         validate_identity(slot.parent)?;
         if value.direct_mask | value.exact_exclude_mask | value.subtree_exclude_mask == 0 {
             return Err(other("file protection slot has no classification bits"));
@@ -479,12 +481,15 @@ fn remove_tracked<K: Copy>(
 
 fn with_cleanup(context: &str, error: io::Error, cleanup: Vec<String>) -> io::Error {
     if cleanup.is_empty() {
-        other(format!("{context}: {error}"))
+        io::Error::new(error.kind(), format!("{context}: {error}"))
     } else {
-        other(format!(
-            "{context}: {error}; rollback failed: {}",
-            cleanup.join("; ")
-        ))
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{context}: {error}; rollback failed: {}",
+                cleanup.join("; ")
+            ),
+        )
     }
 }
 

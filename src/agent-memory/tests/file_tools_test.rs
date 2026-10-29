@@ -507,3 +507,64 @@ mod symlink_attacks {
         assert!(!outside.path().join("escape/inside").exists());
     }
 }
+
+fn setup_edit_overlap() -> (tempfile::TempDir, MemoryService) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.memory.paths.base_dir = tmp.path().join("data").to_string_lossy().into_owned();
+    cfg.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().into_owned();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg.memory.index.enabled = false;
+    cfg.memory.git.enabled = false;
+    (tmp, MemoryService::new(cfg).unwrap())
+}
+
+#[test]
+fn overlapping_edits_require_more_context_and_preserve_the_file() {
+    let (_tmp, svc) = setup_edit_overlap();
+    for (body, old) in [
+        ("ababa", "aba"),
+        ("哈哈哈", "哈哈"),
+        ("   code", "  "),
+        ("aaa", "aa"),
+        ("prefix ababa", "aba"),
+        ("前缀哈哈哈", "哈哈"),
+        ("前缀ababa", "aba"),
+    ] {
+        svc.write("note.md", body, true).unwrap();
+        let result = svc.edit("note.md", old, "replacement");
+        assert!(
+            matches!(result, Err(MemoryError::InvalidArgument(ref message))
+            if message.contains("multiple occurrences")),
+            "expected ambiguity for {body:?} / {old:?}, got {result:?}"
+        );
+        assert_eq!(svc.read("note.md").unwrap(), body);
+    }
+}
+
+#[test]
+fn unique_context_and_disjoint_repetition_keep_their_behavior() {
+    let (_tmp, svc) = setup_edit_overlap();
+    svc.write("note.md", "哈哈哈", false).unwrap();
+    svc.edit("note.md", "哈哈哈", "done").unwrap();
+    assert_eq!(svc.read("note.md").unwrap(), "done");
+    svc.write("note.md", "aba aba", true).unwrap();
+    assert!(svc.edit("note.md", "aba", "changed").is_err());
+    assert_eq!(svc.read("note.md").unwrap(), "aba aba");
+    assert!(svc.edit("note.md", "missing", "").is_err());
+}
+
+#[test]
+fn unique_edits_after_multibyte_prefix_and_at_eof() {
+    let (_tmp, svc) = setup_edit_overlap();
+    for (body, old, expected) in [
+        ("prefix aba", "aba", "prefix done"),
+        ("前缀哈哈", "哈哈", "前缀done"),
+        ("前缀aba", "aba", "前缀done"),
+        ("前缀aba tail", "aba", "前缀done tail"),
+    ] {
+        svc.write("note.md", body, true).unwrap();
+        svc.edit("note.md", old, "done").unwrap();
+        assert_eq!(svc.read("note.md").unwrap(), expected);
+    }
+}

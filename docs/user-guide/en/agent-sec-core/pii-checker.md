@@ -46,7 +46,7 @@ V2 keeps the existing top-level result fields and adds evidence metadata under `
 | `coverage.reasons` | Safe codes for truncation, invalid rules, matching limits, or scan failure |
 | `input_sha256` | SHA-256 of text received by the detector; never a claim about omitted input |
 | `scanned_input_sha256`, `scanned_bytes` | Digest and byte length of the prefix actually scanned |
-| `scanner_version` | Detection semantics version; V2 currently reports `2.0.1` |
+| `scanner_version` | Detection semantics version; V2 currently reports `2.1.1` |
 | `ruleset_id` | Identity of the scanner version and immutable built-in/custom rule configuration |
 
 `bytes_scanned` retains the V1 prefix counter and can include an incomplete UTF-8 tail excluded
@@ -84,7 +84,7 @@ transport failure while the worker still finalizes its safe scan error and relea
 ## Detection semantics version
 
 `summary.scanner_version` identifies detection behavior independently of the AgentSecCore package
-version and RPC schema. V2 reports `2.0.1` in successful and failed scan reports and audit results;
+version and RPC schema. V2 reports `2.1.1` in successful and failed scan reports and audit results;
 built-in findings use engine `regex_v2`, custom findings use `fancy_regex`. `ruleset_id` includes
 this version plus the built-in patterns and custom configuration, so rule-engine changes remain
 traceable even when the YAML bytes are unchanged. A CI commit SHA identifies the tested build;
@@ -103,6 +103,9 @@ with these intentional changes from V1:
   confirm that a card number has been issued; version 2.0.1 adds the structural checks below.
 - Custom patterns use the native dialect described below. A behavior difference from Python alone
   does not make a valid V2 rule invalid or its coverage partial.
+
+Version 2.1.1 corrects fixture-word boundaries in confidence scoring, as described under
+[Built-in detection](#built-in-detection).
 
 The retained V1 corpus checks unchanged behavior; separate positive, negative and resource-limit
 cases define V2 changes. These checks cover the supported formats, not a guarantee of zero errors
@@ -199,9 +202,13 @@ adjustment.
 | Secret fields | `generic_secret_field` | `deny` |
 
 Credit card, Chinese ID, and JWT candidates are validated before becoming findings. Surrounding
-security keywords can increase confidence, while fixture markers such as `example`, `dummy`,
-`test`, and `sample` can lower it. Findings below the default `0.5` threshold are omitted unless
-`--include-low-confidence` is set.
+security keywords can increase confidence. Fixture markers `example`, `dummy`, `test`, and
+`sample` lower confidence only as whole words, ignoring ASCII case. Letters, numbers, and
+underscores continue a word; hyphens separate words. For example, `latest 13812345678` retains
+its phone finding, while `test-only 13812345678` remains a low-confidence fixture match.
+The `.invalid` marker retains substring matching; email and private-key findings retain their
+existing exemptions from this context penalty. Findings below the default `0.5` threshold are
+omitted unless `--include-low-confidence` is set.
 
 Email detection accepts sentence-ending ASCII periods, including an ellipsis, when the period run
 is followed by end of input, whitespace, or a supported sentence/closing delimiter. For example,

@@ -392,7 +392,7 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 loads custom business rules from `/etc/agent-sec/pii-checker/rules.yaml` at daemon startup;
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` selects an alternative. Restart to update.
-V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.0.0"`;
+V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.1.1"`;
 a `pass` result with partial coverage does not establish complete detection. This phase preserves
 Hook contracts without switching live hosts or adding PDP enforcement.
 The shared CLI `--trace-context` adapter propagates attribution through the top-level OTel
@@ -402,6 +402,9 @@ OpenClaw records model-entry scans as `source=model_input` on stable `>=2026.5.1
 this input hook scans only the current `prompt`, excluding system prompts and history.
 Older supported hosts retain inbound scanning. Input blocking depends on policy,
 and tool-output hooks remain observation-only.
+
+Fixture words such as `test` lower confidence only when matched as whole words.
+`latest 13812345678` retains its phone finding; `test-only` keeps its existing fixture treatment.
 
 Details: [PII Checker User Guide](../../docs/user-guide/en/agent-sec-core/pii-checker.md).
 
