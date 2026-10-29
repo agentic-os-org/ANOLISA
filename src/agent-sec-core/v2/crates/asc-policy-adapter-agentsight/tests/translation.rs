@@ -6,11 +6,13 @@ include!(concat!(
 
 use asc_policy_adapter_agentsight::{
     ACTPLANE_POLICY_MEDIA_TYPE, AGENTSIGHT_BINDING_PLAN_FORMAT,
-    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AgentSightAdapter, AgentSightBindingPlan,
-    AgentSightScopePlan,
+    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AGENTSIGHT_FILE_PROTECTION_POLICY_VERSION,
+    AGENTSIGHT_STRUCTURED_BINDING_PLAN_FORMAT, AGENTSIGHT_STRUCTURED_BINDING_PLAN_SCHEMA_VERSION,
+    AgentSightAdapter, AgentSightBindingPlan, AgentSightFileProtectionExclusionKind,
+    AgentSightFileProtectionTargetKind, AgentSightScopePlan, AgentSightStructuredBindingPlan,
 };
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::{Action, Effect, Resource};
+use asc_policy_types::authoring::{Action, Effect, PolicyTemplate, Resource};
 use asc_policy_types::binding::PreparedBinding;
 use asc_policy_types::scope::ScopeSelector;
 use asc_policy_types::target::TranslationOutcome;
@@ -28,6 +30,34 @@ fn complete_binding_fixture() -> PreparedBinding {
 fn binding_with_files(files: Vec<String>) -> PreparedBinding {
     let mut binding = complete_binding_fixture();
     binding.policy.template = file_policy(files);
+    binding
+}
+
+fn structured_binding() -> PreparedBinding {
+    let mut binding = complete_binding_fixture();
+    binding.policy.template = serde_json::from_value(serde_json::json!({
+        "specVersion": "0.2",
+        "fileProtection": {
+            "topology": "static_at_apply",
+            "targets": [
+                {
+                    "path": "/etc/agent/config.yaml",
+                    "kind": "exact_file",
+                    "protections": {"delete": true, "ordinaryWrite": true}
+                },
+                {
+                    "path": "/workspace/important",
+                    "kind": "directory_tree",
+                    "protections": {"delete": true, "ordinaryWrite": false},
+                    "exclusions": [
+                        {"path": "/workspace/important/cache.db", "kind": "exact_entry"},
+                        {"path": "/workspace/important/tmp", "kind": "directory_subtree"}
+                    ]
+                }
+            ]
+        }
+    }))
+    .unwrap();
     binding
 }
 
@@ -73,6 +103,98 @@ fn complete_binding_translates_to_the_frozen_agentsight_output() {
         }
     );
     assert_eq!(plan.format, AGENTSIGHT_BINDING_PLAN_FORMAT);
+}
+
+#[test]
+fn structured_binding_translates_all_targets_protections_and_exclusions_to_v3() {
+    let binding = structured_binding();
+    binding.validate().unwrap();
+    let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&binding).unwrap()
+    else {
+        panic!("expected structured target plan");
+    };
+    assert_eq!(plan.format, AGENTSIGHT_STRUCTURED_BINDING_PLAN_FORMAT);
+    let decoded: AgentSightStructuredBindingPlan = serde_json::from_slice(&plan.content).unwrap();
+    assert_eq!(
+        decoded.schema_version,
+        AGENTSIGHT_STRUCTURED_BINDING_PLAN_SCHEMA_VERSION
+    );
+    assert_eq!(
+        decoded.file_protection_policy.version,
+        AGENTSIGHT_FILE_PROTECTION_POLICY_VERSION
+    );
+    assert_eq!(decoded.file_protection_policy.targets.len(), 2);
+    assert_eq!(
+        decoded.file_protection_policy.targets[0].kind,
+        AgentSightFileProtectionTargetKind::ExactFile
+    );
+    assert!(decoded.file_protection_policy.targets[0].protections.delete);
+    assert!(
+        decoded.file_protection_policy.targets[0]
+            .protections
+            .ordinary_write
+    );
+    assert_eq!(
+        decoded.file_protection_policy.targets[1].kind,
+        AgentSightFileProtectionTargetKind::DirectoryTree
+    );
+    assert_eq!(
+        decoded.file_protection_policy.targets[1].exclusions[0].kind,
+        AgentSightFileProtectionExclusionKind::ExactEntry
+    );
+    assert_eq!(
+        decoded.file_protection_policy.targets[1].exclusions[1].kind,
+        AgentSightFileProtectionExclusionKind::DirectorySubtree
+    );
+    assert_eq!(decoded.source.binding_id, binding.binding_id);
+    assert_eq!(decoded.scope, translate_scope_fixture(&binding));
+    let wire: serde_json::Value = serde_json::from_slice(&plan.content).unwrap();
+    assert_eq!(
+        wire["fileProtectionPolicy"]["topology_mode"],
+        "static_at_apply"
+    );
+    assert_eq!(
+        wire["fileProtectionPolicy"]["targets"][0]["protections"]["ordinary_write"],
+        true
+    );
+    assert!(wire.get("policy").is_none());
+}
+
+fn translate_scope_fixture(binding: &PreparedBinding) -> AgentSightScopePlan {
+    AgentSightScopePlan::ProcessTree {
+        root_pid: 4242,
+        process: binding.scope.process.clone(),
+    }
+}
+
+#[test]
+fn invalid_structured_policy_rejects_the_whole_binding_without_a_plan() {
+    for template in [
+        serde_json::json!({
+            "specVersion":"0.2",
+            "fileProtection":{"topology":"static_at_apply","targets":[]}
+        }),
+        serde_json::json!({
+            "specVersion":"0.2",
+            "rules":[{
+                "effect":"block","category":"file","action":"write",
+                "target":{"type":"file","path":"/legacy"}
+            }],
+            "fileProtection":{"topology":"static_at_apply","targets":[{
+                "path":"/structured","kind":"exact_file",
+                "protections":{"delete":true,"ordinaryWrite":false}
+            }]}
+        }),
+    ] {
+        let mut binding = structured_binding();
+        binding.policy.template = serde_json::from_value::<PolicyTemplate>(template).unwrap();
+        assert_eq!(
+            AgentSightAdapter.translate(&binding).unwrap(),
+            TranslationOutcome::Rejected(asc_policy_types::target::TranslationRejection {
+                code: "INVALID_BINDING".into()
+            })
+        );
+    }
 }
 
 #[test]

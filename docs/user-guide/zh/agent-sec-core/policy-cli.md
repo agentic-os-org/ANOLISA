@@ -93,15 +93,36 @@ PolicyTemplate 是可被多个 Scope 按 ID/revision 选用的可复用策略。
 block/allow/require_confirmation 决策均可保存；Network 和 AgentHook 的目标格式尚未定义，
 目前不能保存。
 
-AgentSight Adapter 当前只执行不带历史条件的 block + file/write + operation=delete 规则。
+对于 spec 0.1，AgentSight Adapter 只转换不带历史条件的 block + file/write + operation=delete 规则。
 任意规则不支持，整个 Binding 失败，例如返回有界错误码 `RULE_1_UNSUPPORTED_EFFECT`，
 不发送受支持的规则子集。目标 DSL 不支持转义语法，because 包含引号、反斜杠或控制字符时
 转换失败，普通 Unicode 文本保持原样；省略理由时使用 Adapter 默认值。
 创建策略成功不代表执行后端支持这些规则。
 
-生成的 DSL 表达禁止删除；真实内核是否仅阻止删除仍需单独验证，当前 ActPlane 的
-unlink/write 共用底层操作映射。旧 kind JSON 和包含该格式的开发期数据库不提供迁移，
-也不自动重建；已有部署应先用兼容的旧二进制完成清理，再安排新库。
+旧 DSL 仍使用 unlink/write 共用映射，并非结构化保护契约。目录树保护使用 spec 0.2
+和字面目录路径，不使用 `/**`。exact_file/directory_tree 分别选择删除与普通写，
+并可为目录树设置 exact_entry 或 directory_subtree 排除：
+
+```json
+{
+  "specVersion": "0.2",
+  "fileProtection": {
+    "topology": "static_at_apply",
+    "targets": [{
+      "path": "/workspace/important",
+      "kind": "directory_tree",
+      "protections": {"delete": true, "ordinaryWrite": false},
+      "exclusions": [{"path": "/workspace/important/cache", "kind": "directory_subtree"}]
+    }]
+  }
+}
+```
+
+0.2 接受 1–64 个目标，不可混入非空旧 rules。路径必须为绝对字面路径；排除项必须是
+目标的严格后代，exact_file 不可设置排除。下发前检查静态拓扑和各项请求能力；普通写
+仅保证 write/pwrite，不保证内容不可变。Apply 返回前需保持目标和祖先路径稳定。
+旧 kind JSON/开发期数据库不提供自动迁移或重建。
+存在 spec 0.2 Scope 或未完成目标清理责任时不要降级；先用兼容版本撤销分配并完成清理。
 
 ```bash
 agent-sec-cli --socket "$SOCKET" policy create --name "protect files" --file policy.json

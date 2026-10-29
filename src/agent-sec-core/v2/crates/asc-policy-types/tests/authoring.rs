@@ -132,3 +132,141 @@ fn recursive_predicates_have_a_depth_and_total_node_budget() {
     value["where"] = json!({"or":vec![json!({"operation":{"eq":"delete"}});4096]});
     assert!(policy(&value).validate().is_err());
 }
+
+fn structured_policy(targets: &Json) -> Json {
+    json!({
+        "specVersion": "0.2",
+        "fileProtection": {
+            "topology": "static_at_apply",
+            "targets": targets
+        }
+    })
+}
+
+#[test]
+fn structured_file_protection_round_trips_all_contract_variants() {
+    let value = structured_policy(&json!([
+        {
+            "path": "/etc/agent/config.yaml",
+            "kind": "exact_file",
+            "protections": {"delete": true, "ordinaryWrite": true}
+        },
+        {
+            "path": "/workspace/important",
+            "kind": "directory_tree",
+            "protections": {"delete": true, "ordinaryWrite": false},
+            "exclusions": [
+                {"path": "/workspace/important/cache.db", "kind": "exact_entry"},
+                {"path": "/workspace/important/tmp", "kind": "directory_subtree"}
+            ]
+        }
+    ]));
+    let authored: PolicyTemplate = serde_json::from_value(value.clone()).unwrap();
+    authored.validate().unwrap();
+    assert_eq!(serde_json::to_value(authored).unwrap(), value);
+}
+
+#[test]
+fn policy_versions_select_exactly_one_authoring_representation() {
+    let legacy = json!({"specVersion":"0.1","rules":[rule()]});
+    let decoded: PolicyTemplate = serde_json::from_value(legacy.clone()).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+
+    for value in [
+        json!({"specVersion":"0.1","rules":[rule()],"fileProtection":{"topology":"static_at_apply","targets":[]}}),
+        json!({"specVersion":"0.2","rules":[rule()],"fileProtection":{"topology":"static_at_apply","targets":[]}}),
+        json!({"specVersion":"0.2"}),
+        json!({"specVersion":"0.3","rules":[rule()]}),
+    ] {
+        let decoded: PolicyTemplate = serde_json::from_value(value).unwrap();
+        assert!(decoded.validate().is_err());
+    }
+}
+
+#[test]
+fn structured_targets_enforce_paths_scopes_protections_and_cardinality() {
+    let valid_target = json!({
+        "path": "/workspace/tree",
+        "kind": "directory_tree",
+        "protections": {"delete": false, "ordinaryWrite": true},
+        "exclusions": [{"path": "/workspace/tree/cache", "kind": "directory_subtree"}]
+    });
+    for path in [
+        "",
+        "relative",
+        "/with\0nul",
+        "/trailing/",
+        "/a//b",
+        "/a/./b",
+        "/a/../b",
+        "/a/*",
+        "/a/?",
+        "/a/[b]",
+        "/a/{b}",
+        "/a/\\b",
+    ] {
+        let mut target = valid_target.clone();
+        target["path"] = json!(path);
+        assert!(
+            serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([target])))
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+
+    let mut no_protection = valid_target.clone();
+    no_protection["protections"] = json!({"delete":false,"ordinaryWrite":false});
+    let mut exact_with_exclusion = valid_target.clone();
+    exact_with_exclusion["kind"] = json!("exact_file");
+    let mut non_descendant = valid_target.clone();
+    non_descendant["exclusions"][0]["path"] = json!("/workspace/treehouse/cache");
+    for targets in [
+        json!([]),
+        json!([no_protection]),
+        json!([exact_with_exclusion]),
+        json!([non_descendant]),
+        Json::Array(vec![valid_target.clone(); 65]),
+    ] {
+        assert!(
+            serde_json::from_value::<PolicyTemplate>(structured_policy(&targets))
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn structured_paths_reject_duplicate_targets_and_duplicate_or_conflicting_exclusions() {
+    let target = json!({
+        "path": "/workspace/tree",
+        "kind": "directory_tree",
+        "protections": {"delete": true, "ordinaryWrite": false},
+        "exclusions": []
+    });
+    assert!(
+        serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([
+            target.clone(),
+            target.clone()
+        ])))
+        .unwrap()
+        .validate()
+        .is_err()
+    );
+
+    for second_kind in ["exact_entry", "directory_subtree"] {
+        let mut with_exclusions = target.clone();
+        with_exclusions["exclusions"] = json!([
+            {"path":"/workspace/tree/cache","kind":"exact_entry"},
+            {"path":"/workspace/tree/cache","kind":second_kind}
+        ]);
+        assert!(
+            serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([with_exclusions])))
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+}

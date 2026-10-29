@@ -539,7 +539,7 @@ reconcile Runtime。当前 Scope 自动管理 Binding，生产使用 SQLite，�
 deployments 与写回执不进入公共响应。历史内存组合测试不作为真实 PEP 或物理断电验收。
 
 Policy CREATE/UPDATE 在 PAP 内校验 `PolicyTemplate` 并保存完整模板。
-PolicyTemplate 是可被多个 Scope 复用的策略；内容使用 `specVersion`、可选 description 和
+PolicyTemplate 是可被多个 Scope 复用的策略；0.1 内容使用 `specVersion`、可选 description 和
 非空 rules，每条规则包含 effect/category/action/typed target 及可选 where/previous/because。
 当前定义文件目标和 read/write/exec 动作，合法但 AgentSight 不支持的规则可以保存。
 Adapter 只转换不带历史条件的 block + file/write + operation=delete 规则；任意一条不支持，
@@ -547,9 +547,11 @@ Adapter 只转换不带历史条件的 block + file/write + operation=delete 规
 完整结构与校验边界见 [对象契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md#7-通用规则结构改造计划)；
 固定输出见 `v2/fixtures/adapters/agentsight/prevent-file-deletion/`。
 
-AgentSight Client 已能消费内部结构化 plan v3，保留 DSL plan v2 和 prepared Apply v2；
-这不改变 PAP 方法或 authoring 准入，当前仍只接受 spec 0.1。结构化 spec 0.2 与 Adapter
-v3 输出需在后续接入中同时启用，不能仅因 Client 支持就宣称公开 CLI 已可下发目录树保护。
+spec 0.2 使用 `fileProtection` 而不包含非空 `rules`，支持 exact_file/directory_tree、
+static_at_apply、独立 delete/ordinaryWrite 和目标内排除；Adapter 输出结构化 plan v3。
+0.1 必须有非空 rules 且无 fileProtection，仍输出 DSL/v2。Client prepared Apply 保持 v2。
+0.1 省略 rules 现在解析为空后返回 invalid_argument；null 或错误类型仍为 invalid_request。
+PAP 方法及 CLI 参数不变，后端能力和路径准入仍在下发时检查，不以模板保存成功代表执法生效。
 
 参数 object 拒绝未知字段。基线 ScopeSelector 支持正数 PID 或 cgroup ID；第 14 节
 SCOPE-CR-001 扩展 name/path process selector 与 policyTemplates assignment。PreparedScope

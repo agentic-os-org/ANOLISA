@@ -54,10 +54,10 @@ StoredScope
 以上字段与当前 wire 一致；创建输入用 `policyTemplates`，保存结果用 `policySnapshots`。
 `PreparedPolicy` 只包含 `policyId`、`policyName`、`revision` 和 `template`，Scope 和 Binding
 保存同一个完整模板快照。
-每次 Apply 按 `Binding.policy.template → AgentSight Adapter → ActPlane DSL → Client`
-执行。Adapter 只读取 Binding 快照。
-当前策略内容的格式版本、规则、资源及条件目录校验在 `PolicyTemplate::validate()`；
-AgentSight 的 glob 子集、DSL 字面量、规则数和长度限制由 Adapter 拒绝检查。
+每次 Apply 从 Binding 快照转换：spec 0.1 使用 ActPlane DSL/v2 plan，spec 0.2 使用
+结构化文件保护/v3 plan，Client 的 prepared Apply 保持 v2。Adapter 不重读 Policy 库。
+`PolicyTemplate::validate()` 校验版本互斥、规则或结构化目标；0.2 仅接受字面路径、独立
+删除/普通写及目标内排除，不把目录树支持解释为旧 DSL glob 的执行兼容。
 Scope 没有 `revision`，消费它的请求/响应和 Binding 来源信息也不携带 `scopeRevision`。
 内部模型见 [PreparedPolicy](../../v2/crates/asc-policy-types/src/policy.rs)。
 
@@ -153,7 +153,7 @@ Scope 替换采用不同 Scope/Binding 身份，不能伪装为修改旧 Scope �
 | 删除 | 关闭准入、join worker、复用 Reconciler 清理、失败可查、完成后回收 |
 | 协议 | 12 个 PAP 方法：Policy 5，Scope 5（含 retry），Binding 2（get/list） |
 | 大小 | 编码后 Policy/Scope 最多 1 MiB，列表条目预算 3 MiB；offset 按实际返回条数推进 |
-| AgentSight | Client 接受 DSL plan v2 与结构化 plan v3，prepared Apply 保持 v2；当前 Adapter 仍只输出 DSL/v2 |
+| AgentSight | spec 0.1 转 DSL/v2，spec 0.2 转结构化/v3，Client prepared Apply 保持 v2 |
 | 存储 | `policy-state.db`；WAL/FULL、三表事务、内部 status CAS 和写回执；启动恢复 discovery 与未完成 reconcile |
 
 Scope update、手动 Binding create/update/delete 返回 `unknown_method`；旧 Scope revision
@@ -267,6 +267,11 @@ FileResource
   path: normalized absolute path or supported authoring glob
 ```
 
+上述是保留的 0.1 规则结构。0.2 使用 fileProtection.topology 和 targets，要求 rules
+为空且至少一个目标；每个目标含 path、kind、protections(delete/ordinaryWrite) 和可选
+exclusions。仅支持 static_at_apply、exact_file/directory_tree 与两种排除；目标数量
+1–64，路径拒绝 glob/相对路径，排除须是目标严格后代，exact_file 不允许排除。
+
 wire 沿用当前 camelCase；与语言文档的 snake_case 字段做显式映射，例如 `spec_version`
 对应 `specVersion`，条件中的属性名也遵守相同映射，不能混用两种拼写。
 规则不增加 ID；保留输入顺序，模板相等比较仍使用完整结构，规则重排视为内容变化。
@@ -288,7 +293,7 @@ require_confirmation 和合法历史 Event 验证该边界；保存不代表这�
 
 Scope 继续回答“谁受哪些策略约束”，选择主体并保存精确 revision 的完整快照。
 PolicyTemplate 回答“什么条件、动作、资源、效果及理由”。Binding 保存其中一个模板快照和
-固定实例身份；执行直接走 `Binding.policy.template → Adapter → DSL → Client`。
+固定实例身份；执行从 Binding 快照经 Adapter 转为 DSL/v2 或结构化/v3，再由 Client 下发。
 PAP 进行目标无关的结构与语义校验；Adapter 检查目标能否完整实现全部规则，不重新读模板库。
 
 ### 7.3 首阶段可执行例子

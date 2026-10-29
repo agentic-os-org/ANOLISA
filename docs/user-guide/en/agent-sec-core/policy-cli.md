@@ -108,18 +108,41 @@ File read/write/exec rules, logical conditions, history predicates, and block/al
 require_confirmation decisions can be saved when valid. Network and AgentHook target
 formats are not yet defined and cannot be saved.
 
-The AgentSight Adapter currently executes only block + file/write + operation=delete
+For spec 0.1, the AgentSight Adapter translates only block + file/write + operation=delete
 rules without history. Unsupported rules fail the entire Binding with a bounded code
 such as `RULE_1_UNSUPPORTED_EFFECT`; no supported subset is sent. Quotes, backslashes
 and control characters in `because` are rejected during translation because the target
 DSL has no escape syntax; ordinary Unicode text is preserved. An omitted reason uses
 the Adapter's default. Template creation success does not prove backend support.
 
-The generated DSL expresses deletion prevention. Actual delete-only kernel behavior
-requires separate validation; the current ActPlane backend shares its unlink/write
-operation mapping. Old fixed-kind JSON and development databases containing it are
-not migrated or automatically rebuilt; clean up old deployments with the compatible
-binary before arranging a fresh database.
+Legacy DSL retains its shared unlink/write mapping; it is not the structured
+contract. Use spec 0.2 with a literal directory path for directory-tree protection,
+not `/**`. Exact-file and directory-tree targets choose delete and ordinary write
+independently, with exact-entry or directory-subtree exclusions:
+
+```json
+{
+  "specVersion": "0.2",
+  "fileProtection": {
+    "topology": "static_at_apply",
+    "targets": [{
+      "path": "/workspace/important",
+      "kind": "directory_tree",
+      "protections": {"delete": true, "ordinaryWrite": false},
+      "exclusions": [{"path": "/workspace/important/cache", "kind": "directory_subtree"}]
+    }]
+  }
+}
+```
+
+Version 0.2 accepts 1–64 targets and no nonempty legacy rules. Paths must be
+absolute literals; exclusions must be strict descendants and exact-file targets
+cannot have exclusions. Static topology and requested capabilities are checked
+before delivery. Ordinary-write protection is limited to write/pwrite, not content
+immutability; targets and ancestors must stay stable until Apply returns.
+Old fixed-kind JSON/database formats are not migrated or automatically rebuilt.
+Do not downgrade while spec 0.2 Scopes or target cleanup responsibilities remain;
+remove those assignments with compatible binaries before changing versions.
 
 ```bash
 agent-sec-cli --socket "$SOCKET" policy create --name "protect files" --file policy.json

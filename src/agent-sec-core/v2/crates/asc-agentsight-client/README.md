@@ -48,9 +48,10 @@ directory-tree targets, independent delete/ordinary-write masks and scoped
 exclusions. Requests contain exactly one DSL or structured policy and explicitly
 use enforce mode. Structured response payloads must match the submitted request.
 
-This client-first change does not enable structured Policy authoring: PAP still
-accepts spec 0.1, and the Adapter still emits legacy DSL/v2 plans. Spec 0.2
-admission and v3 translation must land together in the following integration.
+PAP accepts legacy spec 0.1 rules and structured spec 0.2 file protections.
+The Adapter maps these to DSL/v2 and structured/v3 plans respectively. Version
+0.2 cannot mix legacy rules with fileProtection; creation does not prove target
+capability or path admission, which remain deployment-time checks.
 
 `source.policyId` and `source.policyRevision` populate AgentSight's product-policy
 attribution fields. Deployment identity remains the UUID derived from the source
