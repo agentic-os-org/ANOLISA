@@ -153,7 +153,7 @@ Scope 替换采用不同 Scope/Binding 身份，不能伪装为修改旧 Scope �
 | 删除 | 关闭准入、join worker、复用 Reconciler 清理、失败可查、完成后回收 |
 | 协议 | 12 个 PAP 方法：Policy 5，Scope 5（含 retry），Binding 2（get/list） |
 | 大小 | 编码后 Policy/Scope 最多 1 MiB，列表条目预算 3 MiB；offset 按实际返回条数推进 |
-| AgentSight | plan/apply 格式升级到 v2，跨次尝试及下发前校验固定进程身份 |
+| AgentSight | Client 接受 DSL plan v2 与结构化 plan v3，prepared Apply 保持 v2；当前 Adapter 仍只输出 DSL/v2 |
 | 存储 | `policy-state.db`；WAL/FULL、三表事务、内部 status CAS 和写回执；启动恢复 discovery 与未完成 reconcile |
 
 Scope update、手动 Binding create/update/delete 返回 `unknown_method`；旧 Scope revision

@@ -547,6 +547,10 @@ Adapter 只转换不带历史条件的 block + file/write + operation=delete 规
 完整结构与校验边界见 [对象契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md#7-通用规则结构改造计划)；
 固定输出见 `v2/fixtures/adapters/agentsight/prevent-file-deletion/`。
 
+AgentSight Client 已能消费内部结构化 plan v3，保留 DSL plan v2 和 prepared Apply v2；
+这不改变 PAP 方法或 authoring 准入，当前仍只接受 spec 0.1。结构化 spec 0.2 与 Adapter
+v3 输出需在后续接入中同时启用，不能仅因 Client 支持就宣称公开 CLI 已可下发目录树保护。
+
 参数 object 拒绝未知字段。基线 ScopeSelector 支持正数 PID 或 cgroup ID；第 14 节
 SCOPE-CR-001 扩展 name/path process selector 与 policyTemplates assignment。PreparedScope
 必须显式包含 selector，缺失或 null 均拒绝，不再从 scopeId 推导执行域身份。

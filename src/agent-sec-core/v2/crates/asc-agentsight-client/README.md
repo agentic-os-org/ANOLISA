@@ -27,8 +27,8 @@ the prepared-replay path; the former `apply(plan)` and
 prepare a call-local request and register its target before `create` or `update`, then pass saved
 target references to deletion. The former convenience-result enum
 `AgentSightDeploymentState` is now private; mutation results use
-`DeploymentReport`. The HTTP protocol is unchanged. The unreleased cleanup schema
-remains version 1 and contains only Binding ID/revision for deletion.
+`DeploymentReport`. Cleanup schema version 2 retains the endpoint identity and
+Binding ID/revision for deletion; this change preserves that format.
 
 The default target route is `agentsight`. `with_reconcile_route("host-primary")`
 selects another bounded non-secret configuration identity. The registry key must
@@ -38,12 +38,19 @@ the target identity. A wrong route/ID/cleanup tuple is rejected before HTTP.
 
 ## Prepared request contract
 
-Adapter plans include `source.scopeRevision` alongside `source.scopeId` as
-provenance. The Client validates a supplied revision but does not use it in the
-target UUID, cleanup input or HTTP request. Earlier v1 plans without this field
-remain readable; new Adapter output always supplies it. The plan format remains
-`agentsight.actplane.binding.v1`; update the strict Client reader before emitting
-the added field. Already prepared requests are unchanged.
+The Client reads legacy `agentsight.actplane.binding.v2` DSL plans and structured
+`agentsight.binding.v3` plans. Both retain `source.scopeId` and the fixed process
+identity; neither accepts `scopeRevision`. Binding ID/revision determines the
+target UUID, independently of Scope provenance.
+
+Structured plans carry version 1 `file_protection_policy` with exact-file or
+directory-tree targets, independent delete/ordinary-write masks and scoped
+exclusions. Requests contain exactly one DSL or structured policy and explicitly
+use enforce mode. Structured response payloads must match the submitted request.
+
+This client-first change does not enable structured Policy authoring: PAP still
+accepts spec 0.1, and the Adapter still emits legacy DSL/v2 plans. Spec 0.2
+admission and v3 translation must land together in the following integration.
 
 `source.policyId` and `source.policyRevision` populate AgentSight's product-policy
 attribution fields. Deployment identity remains the UUID derived from the source
@@ -61,14 +68,14 @@ addresses or IPv6 `::1`. All other hosts require HTTPS. Use `127.0.0.1` or `[::1
 instead of `localhost` for local HTTP, avoiding reliance on name resolution.
 Certificate verification remains enabled and redirects remain disabled.
 
-Format: `agentsight.enforcement.apply.v1`. Opaque content contains schema version
-1, boot ID, exact POST body bytes and their SHA-256 digest. Cleanup contains only
-schema version 1 and Binding ID/revision. It does not store process identity or
-request digests. Prepared content is call-local and is not persisted.
+Format: `agentsight.enforcement.apply.v2`. Opaque content contains schema version
+2, boot ID, PID namespace, exact POST body bytes and their SHA-256 digest. Cleanup
+schema 2 retains endpoint and Binding ID/revision, not request digests. Prepared
+content is call-local; the core persists target references for cleanup.
 
-Each retry prepares against the current process identity. Cleanup does not compare
-that identity with a previous attempt. The checks below protect the identity
-captured by this particular preparation, not identity continuity across attempts.
+Preparation must match the plan's fixed process instance, and replay rechecks its
+boot ID, PID namespace and start time. Retry does not authorize a new process that
+reuses the same PID. Deletion uses saved cleanup references, not current identity.
 
 Replays check boot ID and `/proc/<pid>/stat` start time without regenerating the
 body. PID reuse, process exit or a different boot rejects Apply. Temporary
@@ -87,13 +94,17 @@ must include the new variant.
 
 ## Failure and update semantics
 
-The Adapter generates DSL without embedding an ActPlane compiler. The Client's
-preflight checks request integrity, process identity and target health/capability;
-it does not prove that the deployed target accepts the DSL. The current Client
-has no remote validate-only call, so compiler rejection is learned from Apply.
-In particular, update can confirm old-target deletion before the new DSL is
-rejected. Validation before cleanup would require a target validation contract
-using the deployed compiler, not a separately pinned local compiler.
+Legacy plans require ready ActPlane with `file_delete_guard`. Structured plans
+also require static mount topology and each requested exact-delete, tree-delete
+or ordinary-write capability; omitted capability fields default to false. These
+checks happen before POST and before update deletes old targets.
+
+The Adapter still generates DSL without embedding an ActPlane compiler. Client
+validation checks request integrity, structured shape and process identity, but
+cannot prove deployed path/topology admission. There is no remote validate-only
+call, so Apply may reject after an update has confirmed old-target deletion.
+Validation before cleanup needs a target validation contract, not a separately
+pinned local compiler.
 
 The return value includes per-target Present/Absent/Unknown and a bounded safe
 error. A timeout, malformed response, rejection or unconfirmed deletion never

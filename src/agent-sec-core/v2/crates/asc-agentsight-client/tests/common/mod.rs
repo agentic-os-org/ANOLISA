@@ -14,6 +14,17 @@ pub const HEALTH: &[u8] =
     include_bytes!("../../../../fixtures/clients/agentsight/file-deletion/health.response.json");
 pub const APPLY: &[u8] =
     include_bytes!("../../../../fixtures/clients/agentsight/file-deletion/apply.response.json");
+pub const STRUCTURED_HEALTH: &[u8] = br#"{
+    "ready":true,
+    "backend":"actplane",
+    "capabilities":{
+        "file_entry_delete_protection":true,
+        "directory_tree_delete_protection":true,
+        "ordinary_write_protection":true,
+        "static_mount_topology":true,
+        "complete_content_protection":false
+    }
+}"#;
 
 pub fn plan(revision: u32) -> TargetBindingPlan {
     let mut value: Value = serde_json::from_str(include_str!(
@@ -23,6 +34,37 @@ pub fn plan(revision: u32) -> TargetBindingPlan {
     value["source"]["bindingRevision"] = json!(revision);
     TargetBindingPlan {
         format: "agentsight.actplane.binding.v2".into(),
+        content: serde_json::to_vec(&value).unwrap(),
+    }
+}
+
+pub fn structured_plan(revision: u32) -> TargetBindingPlan {
+    let mut value: Value = serde_json::from_slice(&plan(revision).content).unwrap();
+    value["schemaVersion"] = json!(3);
+    value.as_object_mut().unwrap().remove("policy");
+    value["fileProtectionPolicy"] = json!({
+        "version": 1,
+        "topology_mode": "static_at_apply",
+        "targets": [
+            {
+                "path": "/etc/agent/config.yaml",
+                "kind": "exact_file",
+                "protections": {"delete": true, "ordinary_write": true},
+                "exclusions": []
+            },
+            {
+                "path": "/workspace/important",
+                "kind": "directory_tree",
+                "protections": {"delete": true, "ordinary_write": false},
+                "exclusions": [
+                    {"path": "/workspace/important/cache.db", "kind": "exact_entry"},
+                    {"path": "/workspace/important/tmp", "kind": "directory_subtree"}
+                ]
+            }
+        ]
+    });
+    TargetBindingPlan {
+        format: "agentsight.binding.v3".into(),
         content: serde_json::to_vec(&value).unwrap(),
     }
 }
