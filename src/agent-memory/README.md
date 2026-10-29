@@ -59,6 +59,11 @@ so `AGENT_MEMORY_SAFE_INSTALL` changes nothing there and install-time safety
 follows the operator-owned `security.installPolicy`. The install log states
 which case applied.
 
+The companion `uninstall.sh` delegates plugin removal and configuration cleanup
+to OpenClaw. A missing or failing CLI returns nonzero; the script does not edit
+configuration or remove plugin files itself. See the user guide for recovery
+and RPM removal behavior.
+
 ### Integration (MCP client)
 
 Add to your MCP config (Claude Code, Cursor, etc.):

@@ -137,10 +137,32 @@ anolisa adapter status agent-memory
 ```
 
 **Prerequisite**: put the `openclaw` CLI on `$PATH`. For an RPM installation,
-select `agent-memory-plugins`. The script logs clearly and exits 0 if the CLI is
-missing; rerun after installing OpenClaw. Removing `agent-memory-plugins` runs its `%preun` uninstall
-script. Removing only the compatibility package leaves a separately retained
-plugins package and its registration in place.
+select `agent-memory-plugins`. The install script logs clearly and exits 0 if
+the CLI is missing; rerun after installing OpenClaw. Removing only the
+compatibility package leaves a separately retained plugins package and its
+registration in place.
+
+To remove the plugin through the standalone script:
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+```
+
+The script calls `openclaw plugins uninstall memory-anolisa --force` and leaves
+configuration routing and managed plugin-directory removal to the host. It does
+not rewrite `openclaw.json` afterward, so it does not add overrides to `$include`
+configurations or touch a different file when `OPENCLAW_CONFIG_PATH` is set.
+A missing CLI now returns 1 before changing any files, including for plain JSON
+configurations that older scripts cleaned manually. Restore the CLI and retry.
+If the CLI fails, its status is propagated and no extra cleanup is attempted;
+OpenClaw may already have made partial changes, so inspect its error before
+retrying. This is not a rollback guarantee.
+
+`ANOLISA_DRY_RUN=1` previews the host command or the missing-CLI refusal and
+returns 0 without modifying files. Removing `agent-memory-plugins` invokes the
+script best-effort through its RPM `%preun`; failure does not abort package
+removal. Run the script successfully before removing `agent-memory-plugins`
+if the plugin is still registered in OpenClaw.
 
 Running `anolisa adapter enable agent-memory openclaw` or the agent-memory OpenClaw `install.sh` accepts the plugin's declared capabilities. Both entry points pass `--accept-capabilities` only when `plugins install --help` advertises that exact option, so older hosts keep working. Set `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` when running `install.sh` to withhold consent — gating hosts then reject the install until you grant it yourself, e.g. via an interactive `openclaw plugins install`.
 
