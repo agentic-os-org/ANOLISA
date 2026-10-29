@@ -1289,6 +1289,7 @@ fn operation_name(operation: u32) -> &'static str {
         4 => "recv",
         5 => "unlink",
         6 => "rename",
+        7 => "rmdir",
         _ => "unknown",
     }
 }
@@ -1589,7 +1590,7 @@ mod tests {
         let mut active = active_binding();
         active.reasons = compiled.reasons;
         active.rule_names = compiled.meta.into_iter().map(|meta| meta.name).collect();
-        for (op, name) in [(5, "unlink"), (6, "rename")] {
+        for (op, name) in [(5, "unlink"), (6, "rename"), (7, "rmdir")] {
             let mut raw = raw_violation(100);
             raw.op = op;
             raw.rule_id = 2;
@@ -1609,7 +1610,7 @@ mod tests {
             (2, "write"),
             (3, "connect"),
             (4, "recv"),
-            (7, "unknown"),
+            (8, "unknown"),
         ] {
             assert_eq!(operation_name(op), name);
         }

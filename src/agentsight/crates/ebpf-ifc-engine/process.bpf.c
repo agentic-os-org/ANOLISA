@@ -400,6 +400,7 @@ struct te_policy_classification {
 	bool stable;
 };
 
+/* A file_permission check needs a parent path without using the BPF stack. */
 struct te_policy_permission_scratch {
 	struct path parent_path;
 	struct te_policy_classification classification;
@@ -2946,8 +2947,10 @@ static __always_inline void te_inode_guard_violation(
 }
 
 SEC("lsm/path_unlink")
-int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
+int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry, int ret)
 {
+	if (ret)
+		return ret;
 	/* Inode guard fast path: O(1) hash lookup, no bpf_d_path needed */
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	const struct inode_guard_val *guard = NULL;
@@ -2959,6 +2962,16 @@ int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
 		return -EPERM;
 	}
 
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (enforce_mode && domain && domain->delete_mask) {
+		struct te_policy_classification classification;
+		te_policy_classify(dir, dentry, true, domain->delete_mask, domain, &classification);
+		if (te_policy_denied(&classification)) {
+			te_inode_guard_violation(pid, dentry, &classification.guard, TE_EVENT_OP_UNLINK);
+			return -EPERM;
+		}
+	}
+
 	/* Existing path-based rule evaluation (fallthrough on 7.1.x) */
 #ifndef INODE_GUARD_ONLY
 	return te_handle_file(TE_REF_PATH_DENTRY, dir, dentry, TE_ACCESS_WRITE,
@@ -2966,6 +2979,31 @@ int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
 #else
 	return 0;
 #endif
+}
+
+SEC("lsm/path_rmdir")
+int BPF_PROG(enforce_path_rmdir, const struct path *dir, struct dentry *dentry, int ret)
+{
+	if (ret)
+		return ret;
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	const struct inode_guard_val *guard = NULL;
+	if (enforce_mode && te_pid_active(pid))
+		guard = te_inode_guarded(dir, dentry, TE_REF_PATH_DENTRY, INODE_GUARD_UNLINK, pid);
+	if (guard) {
+		te_inode_guard_violation(pid, dentry, guard, TE_EVENT_OP_RMDIR);
+		return -EPERM;
+	}
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (enforce_mode && domain && domain->delete_mask) {
+		struct te_policy_classification classification;
+		te_policy_classify(dir, dentry, true, domain->delete_mask, domain, &classification);
+		if (te_policy_denied(&classification)) {
+			te_inode_guard_violation(pid, dentry, &classification.guard, TE_EVENT_OP_RMDIR);
+			return -EPERM;
+		}
+	}
+	return 0;
 }
 
 /* Old path_rename hooks omit flags. Keep syscall context per thread, never

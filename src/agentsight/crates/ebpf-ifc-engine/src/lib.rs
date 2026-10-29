@@ -24,6 +24,8 @@ use aya::programs::{Lsm, ProgramFd, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
 
 pub mod capability;
+#[cfg(test)]
+mod file_protection_delete_tests;
 mod file_protection_generation;
 mod file_protection_map_writer;
 mod file_protection_pinned_maps;
@@ -1927,6 +1929,7 @@ const LSM_PROGS: &[(&str, &str)] = &[
     ("enforce_file_mprotect", "file_mprotect"),
     ("enforce_path_truncate", "path_truncate"),
     ("enforce_path_unlink", "path_unlink"),
+    ("enforce_path_rmdir", "path_rmdir"),
     ("enforce_path_rename", "path_rename"),
     ("enforce_path_rename_legacy", "path_rename"),
     ("enforce_socket_connect", "socket_connect"),
@@ -2144,6 +2147,7 @@ fn lsm_needed(
         | "enforce_file_truncate"
         | "enforce_path_truncate"
         | "enforce_path_unlink"
+        | "enforce_path_rmdir"
         | "enforce_path_rename"
         | "enforce_path_rename_legacy" => block_file,
         _ => false,
