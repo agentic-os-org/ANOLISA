@@ -282,8 +282,10 @@ When there are no conditional blocks, SkillFS also applies a small set of
 heuristic command normalizations, for example:
 
 - Bare `pip install` / `pip3 install` -> `uv pip install`; interpreter-specific
-  `python -m pip` calls stay unchanged. Bare invocations use a conservative
-  command-position heuristic rather than a complete shell parser.
+  `python -m pip` calls and installs with `--user` stay unchanged because uv
+  does not support user-site installs. Bare invocations use a conservative
+  command-position heuristic rather than a complete shell parser; unfinished
+  arguments, including line continuations, stay unchanged.
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 
