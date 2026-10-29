@@ -3069,18 +3069,64 @@ static __always_inline int te_guard_rename(const struct path *old_dir,
 	struct dentry *old_dentry, const struct path *new_dir,
 	struct dentry *new_dentry, unsigned int flags, bool flags_valid)
 {
-	/* Both callers pass the syscall flags; only later stages classify them. */
-	(void)flags;
-	(void)flags_valid;
-	/* Inode guard fast path for the source (renamed-from) file */
+	/* Inode guard fast path for both rename endpoints. */
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
-	const struct inode_guard_val *guard = NULL;
-	if (enforce_mode && te_pid_active(pid))
-		guard = te_inode_guarded(old_dir, old_dentry, TE_REF_PATH_DENTRY,
-					 INODE_GUARD_RENAME, pid);
-	if (guard) {
-		te_inode_guard_violation(pid, old_dentry, guard, TE_EVENT_OP_RENAME);
-		return -EPERM;
+	if (enforce_mode && te_pid_active(pid)) {
+		const struct inode_guard_val *guard = te_inode_guarded(old_dir, old_dentry,
+			TE_REF_PATH_DENTRY, INODE_GUARD_RENAME, pid);
+		if (guard) {
+			te_inode_guard_violation(pid, old_dentry, guard, TE_EVENT_OP_RENAME);
+			return -EPERM;
+		}
+		guard = te_inode_guarded(new_dir, new_dentry, TE_REF_PATH_DENTRY,
+			INODE_GUARD_RENAME, pid);
+		if (guard) {
+			te_inode_guard_violation(pid, new_dentry, guard, TE_EVENT_OP_RENAME);
+			return -EPERM;
+		}
+		const struct te_policy_domain_val *policy_domain = te_policy_domain(pid);
+		if (policy_domain && policy_domain->delete_mask) {
+			struct inode *new_inode = NULL;
+			struct te_policy_classification old_class, new_class;
+			if (BPF_CORE_READ_INTO(&new_inode, new_dentry, d_inode)) {
+				te_inode_guard_violation(pid, new_dentry, &policy_domain->guard,
+							 TE_EVENT_OP_RENAME);
+				return -EPERM;
+			}
+			te_policy_classify(old_dir, old_dentry, true,
+					policy_domain->delete_mask, policy_domain, &old_class);
+			te_policy_classify(new_dir, new_dentry, new_inode != NULL,
+				policy_domain->delete_mask, policy_domain, &new_class);
+			bool old_protected = old_class.kind == TE_POLICY_CLASS_PROTECTED;
+			bool new_protected = new_class.kind == TE_POLICY_CLASS_PROTECTED;
+			if (old_class.kind == TE_POLICY_CLASS_UNKNOWN ||
+			    new_class.kind == TE_POLICY_CLASS_UNKNOWN ||
+			    (!flags_valid && (old_protected || new_protected))) {
+				te_inode_guard_violation(pid, old_dentry, &policy_domain->guard,
+							 TE_EVENT_OP_RENAME);
+				return -EPERM;
+			}
+			if (flags & RENAME_EXCHANGE) {
+				if (old_class.stable || new_class.stable ||
+				    old_protected != new_protected) {
+					const struct inode_guard_val *violation_guard = old_protected ?
+						&old_class.guard : &new_class.guard;
+					te_inode_guard_violation(pid,
+						old_protected ? old_dentry : new_dentry,
+						violation_guard, TE_EVENT_OP_RENAME);
+					return -EPERM;
+				}
+			} else if (old_class.stable ||
+				   (new_inode && (new_class.stable || new_protected)) ||
+				   (old_protected && !new_protected)) {
+				const struct inode_guard_val *violation_guard = old_protected ?
+					&old_class.guard : &new_class.guard;
+				te_inode_guard_violation(pid,
+					old_protected ? old_dentry : new_dentry,
+					violation_guard, TE_EVENT_OP_RENAME);
+				return -EPERM;
+			}
+		}
 	}
 
 	/* Existing path-based rule evaluation */

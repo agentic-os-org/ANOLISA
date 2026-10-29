@@ -29,6 +29,8 @@ mod file_protection_delete_tests;
 mod file_protection_generation;
 mod file_protection_map_writer;
 mod file_protection_pinned_maps;
+#[cfg(test)]
+mod file_protection_rename_tests;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,

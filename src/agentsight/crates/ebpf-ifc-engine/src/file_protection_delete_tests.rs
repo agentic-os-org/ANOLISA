@@ -6,15 +6,15 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use super::*;
 
-struct Fixture {
-    root: PathBuf,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
     pins: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new(prefix: &str) -> Self {
         let id = format!(
-            "fp-delete-{}-{}",
+            "{prefix}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -42,14 +42,14 @@ impl Drop for Fixture {
     }
 }
 
-struct Worker {
+pub(super) struct Worker {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
 }
 
 impl Worker {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut child = Command::new("unshare")
             .args([
                 "-n",
@@ -57,7 +57,10 @@ impl Worker {
                 "-u",
                 "-c",
                 r#"
-import os, sys
+import ctypes, ctypes.util, os, sys
+libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+libc.syscall.restype = ctypes.c_long
+RENAMEAT2 = {'x86_64': 316, 'aarch64': 276}[os.uname().machine]
 print('ready', flush=True)
 for line in sys.stdin:
     op, path = line.rstrip('\n').split('|', 1)
@@ -66,6 +69,14 @@ for line in sys.stdin:
             os.unlink(path)
         elif op == 'rmdir':
             os.rmdir(path)
+        elif op.startswith('rename:'):
+            os.rename(path, op.split(':', 1)[1])
+        elif op.startswith('exchange:'):
+            # errno is only meaningful when the syscall itself reports failure.
+            ctypes.set_errno(0)
+            if libc.syscall(RENAMEAT2, -100, path.encode(), -100,
+                            op.split(':', 1)[1].encode(), 2) != 0:
+                raise OSError(ctypes.get_errno(), 'exchange')
         else:
             raise ValueError(op)
         print('ok', flush=True)
@@ -89,7 +100,11 @@ for line in sys.stdin:
         }
     }
 
-    fn run(&mut self, operation: &str, path: &Path) -> String {
+    pub(super) fn pid(&self) -> i32 {
+        self.child.id() as i32
+    }
+
+    pub(super) fn run(&mut self, operation: &str, path: &Path) -> String {
         writeln!(self.input, "{operation}|{}", path.display()).expect("worker command");
         self.input.flush().expect("flush command");
         let mut response = String::new();
@@ -105,7 +120,7 @@ impl Drop for Worker {
     }
 }
 
-fn identity(path: &Path) -> TreePathKey {
+pub(super) fn identity(path: &Path) -> TreePathKey {
     let metadata = fs::metadata(path).expect("fixture identity");
     TreePathKey {
         ino: metadata.ino(),
@@ -116,7 +131,7 @@ fn identity(path: &Path) -> TreePathKey {
     }
 }
 
-fn slot(parent: &Path, name: &str) -> PolicySlotKey {
+pub(super) fn slot(parent: &Path, name: &str) -> PolicySlotKey {
     let mut bytes = [0; FILE_PROTECTION_NAME_MAX + 1];
     bytes[..name.len()].copy_from_slice(name.as_bytes());
     PolicySlotKey {
@@ -130,7 +145,7 @@ fn slot(parent: &Path, name: &str) -> PolicySlotKey {
 #[test]
 #[ignore = "requires root, BPF LSM, unlimited memlock and --test-threads=1; private pins only"]
 fn structured_deletion_classifier_on_live_kernel() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("fp-delete");
     let tree = fixture.root.join("tree");
     let cache = tree.join("cache");
     let empty = tree.join("empty");
