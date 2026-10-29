@@ -137,10 +137,48 @@ anolisa adapter status agent-memory
 ```
 
 **Prerequisite**: put the `openclaw` CLI on `$PATH`. For an RPM installation,
-select `agent-memory-plugins`. The script logs clearly and exits 0 if the CLI is
-missing; rerun after installing OpenClaw. Removing `agent-memory-plugins` runs its `%preun` uninstall
-script. Removing only the compatibility package leaves a separately retained
-plugins package and its registration in place.
+select `agent-memory-plugins`. The install script logs clearly and exits 0 if
+the CLI is missing; rerun after installing OpenClaw. Removing only the
+compatibility package leaves a separately retained plugins package and its
+registration in place.
+
+To remove the plugin through the standalone script:
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+```
+
+The script calls `openclaw plugins uninstall memory-anolisa --force` and leaves
+configuration routing and managed plugin-directory removal to the host. It does
+not rewrite `openclaw.json` afterward, so it does not add overrides to `$include`
+configurations or touch a different file when `OPENCLAW_CONFIG_PATH` is set.
+A missing CLI now returns 1 before changing any files, including for plain JSON
+configurations that older scripts cleaned manually. Restore the CLI and retry.
+A CLI exit of 1 whose complete diagnostic is only
+`Plugin not found: memory-anolisa` (ignoring surrounding whitespace and case)
+means the plugin is already unregistered. Other CLI failures retain their status;
+no extra cleanup is attempted. After host success or that exact missing-plugin
+result, the script checks `${OPENCLAW_STATE_DIR}/extensions/memory-anolisa` and
+`${OPENCLAW_STATE_DIR}/plugins/memory-anolisa`. A remaining path, including a
+dangling symlink, is reported and returns 1. Inspect it before removing anything
+manually; the script never deletes these paths itself. OpenClaw may already have
+changed configuration before reporting a failure or leaving files behind. This
+is not a rollback guarantee.
+
+Success means the host accepted removal (or the plugin was already unregistered)
+and both known paths are absent. It does not promise deletion of external source
+bundles, linked directories or custom install locations. With OpenClaw 2026.5.7,
+the shipped `install.sh` copies the bundle into the managed extensions directory;
+uninstall removes that copy and retains the source bundle. On that host,
+uninstalling the selected `memory-anolisa` slot resets it to `memory-core`, while
+an existing `none` selection is preserved. Slot handling remains host-owned;
+the wrapper does not enforce these values on other host versions.
+
+`ANOLISA_DRY_RUN=1` previews the host command or the missing-CLI refusal and
+returns 0 without modifying files. Removing `agent-memory-plugins` invokes the
+script best-effort through its RPM `%preun`; failure does not abort package
+removal. Run the script successfully before removing `agent-memory-plugins`
+if the plugin is still registered in OpenClaw.
 
 Running `anolisa adapter enable agent-memory openclaw` or the agent-memory OpenClaw `install.sh` accepts the plugin's declared capabilities. Both entry points pass `--accept-capabilities` only when `plugins install --help` advertises that exact option, so older hosts keep working. Set `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` when running `install.sh` to withhold consent — gating hosts then reject the install until you grant it yourself, e.g. via an interactive `openclaw plugins install`.
 
