@@ -577,6 +577,16 @@ bypass does not read this file:
 
 String format `"jq"` is also supported (auto-converts to object).
 
+## Optional selective-claw context engine
+
+The `selective-claw` context engine requires OpenClaw `2026.5.22` or newer.
+It allows four active summary requests per engine, with at most two per
+`assemble()` or `afterTurn()` invocation so one invocation cannot occupy every slot.
+Request deadlines remain the host's responsibility; multiple stalled batches can
+still exhaust all slots. See the
+[context engine notes](../../docs/user-guide/en/tokenless/framework-integration.md#openclaw)
+for latency and provider-limit boundaries.
+
 ## OpenClaw Plugin
 
 The plugin translates OpenClaw tool hooks and live result middleware into Protocol v2 operations:

@@ -494,6 +494,35 @@ can still limit output. Tokenless does not automatically read a saved full-outpu
 file or restore a discarded tail. Set `post_tool_enabled: false` to stop Tokenless
 from registering this middleware; other plugins may still register their own.
 
+#### selective-claw summary scheduling
+
+For histories with many older turns, `selective-claw` runs at most four summary
+requests at once per engine instance. Each `assemble()` or `afterTurn()` invocation
+uses at most two of those slots and admits its next turn only when one finishes.
+This prevents one invocation from filling the pool or queuing its whole backlog
+ahead of another session. A single batch uses at most two slots even when the
+engine is otherwise idle, so a long import can take longer than four-way execution.
+Both limits are fixed internal limits without configuration options. Summaries keep
+their original turn labels even when requests finish out of order; fresh-tail turns
+need no request, and stored summaries are reused.
+
+The limit is per engine, not global across engines or a requests/token-per-minute
+quota, and does not guarantee compliance with every provider's quota. Large
+imported or resumed histories can also take longer to assemble while waiting
+behind other invocations. One batch with two unsettled requests cannot finish,
+but leaves two slots for other invocations. If unsettled requests from multiple
+invocations occupy all four slots, queued summaries across that engine can stall
+indefinitely.
+Active requests therefore still require host/provider deadlines or cancellation;
+the plugin adds neither. Overlapping invocations for the same session can still
+jointly occupy all four slots and request the same missing summary more than
+once. The existing fallback and persistence behavior is unchanged: the plugin's
+summarizer substitutes an excerpt
+when a provider fails or returns empty text, and that fallback can be stored and
+reused. The queue adds no retries and does not replace already stored fallbacks.
+
+#### selective-claw configuration
+
 The optional `selective-claw` context engine has its own configuration under
 `plugins.entries.selective-claw.config`, separate from the response adapter:
 
