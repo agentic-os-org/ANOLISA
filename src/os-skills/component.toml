@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.15"
 
 [component]
 name = "os-skills"
-version = "0.6.3"
+version = "0.8.0"
 layer = "runtime"
 domain = "tools"
 description = "Curated OS Skill library for agent runtimes"
@@ -61,6 +61,10 @@ source = "{datadir}/skills/github/"
 [[adapters.openclaw.skills]]
 name = "kernel-dev"
 source = "{datadir}/skills/kernel-dev/"
+
+[[adapters.openclaw.skills]]
+name = "mysql-admin"
+source = "{datadir}/skills/mysql-admin/"
 
 [[adapters.openclaw.skills]]
 name = "sysom-agentsight"
@@ -181,6 +185,10 @@ source = "{datadir}/skills/github/"
 [[adapters.hermes.skills]]
 name = "kernel-dev"
 source = "{datadir}/skills/kernel-dev/"
+
+[[adapters.hermes.skills]]
+name = "mysql-admin"
+source = "{datadir}/skills/mysql-admin/"
 
 [[adapters.hermes.skills]]
 name = "sysom-agentsight"

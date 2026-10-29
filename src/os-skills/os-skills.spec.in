@@ -54,6 +54,9 @@ find %{buildroot}%{_datadir}/anolisa/skills -type f \
 %{_datadir}/anolisa/skills/*
 
 %changelog
+* Fri Oct 16 2026 zmiao <zzmiaovo@qq.com> - 0.8.0-1
+- Add the mysql-admin skill for MySQL/MariaDB instance administration.
+
 * Fri Aug 21 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.6.3-1
 - Let anolisa upgrade resolve existing OS Skills through RPM metadata.
 
