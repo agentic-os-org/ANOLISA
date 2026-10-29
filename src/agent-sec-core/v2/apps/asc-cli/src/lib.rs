@@ -133,7 +133,8 @@ impl Cli {
                 } else if arguments.command.is_llm_code_scan() {
                     u32::try_from(asc_model_client::MAX_CODE_SCAN_BUDGET.as_millis())
                         .unwrap_or(u32::MAX)
-                } else if arguments.command.is_skill_sec() {
+                } else if arguments.command.is_skill_sec() || arguments.command.gateway().is_some()
+                {
                     60_000
                 } else {
                     5_000
@@ -248,6 +249,21 @@ impl Cli {
         self.command.is_scan_prompt()
     }
 
+    /// Runs a secret-gateway command, or returns `None` for another command.
+    ///
+    /// # Errors
+    /// Returns daemon transport or output failures.
+    pub fn run_gateway(
+        &self,
+        socket: &Path,
+        stdout: &mut impl std::io::Write,
+        stderr: &mut impl std::io::Write,
+    ) -> Option<std::io::Result<u8>> {
+        self.command
+            .gateway()
+            .map(|command| command.run(socket, self.timeout(), stdout, stderr))
+    }
+
     /// The events query command, or `None` for another command.
     pub const fn events(&self) -> Option<&EventsCommand> {
         self.command.events()
@@ -336,6 +352,9 @@ pub enum InputError {
     /// transport loop, not the single-request path.
     #[error("events requests are resolved through the events transport loop")]
     EventsBatch,
+    /// Invalid secret-gateway input.
+    #[error("gateway: {0}")]
+    Gateway(String),
     /// A scan-prompt input failure; that command owns its variants and
     /// wording, mirroring V1's scan-specific messages.
     #[error(transparent)]
@@ -362,7 +381,8 @@ impl InputError {
             | Self::Json(_)
             | Self::LocalCommand
             | Self::PromptScanBatch
-            | Self::EventsBatch => false,
+            | Self::EventsBatch
+            | Self::Gateway(_) => false,
         }
     }
 }

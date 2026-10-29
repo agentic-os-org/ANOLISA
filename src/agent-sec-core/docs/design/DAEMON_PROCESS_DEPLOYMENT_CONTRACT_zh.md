@@ -758,3 +758,58 @@ obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒�
 组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
 `v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
 以上不替代安装态不同 UID/systemd 验收。
+
+## 14. [TARGET V2][IMPLEMENTED] Secret Gateway 进程、权限与数据目录（DPROC-GW）
+
+daemon 提供 9 个 `gateway.*` 方法。`enable`、`disable`、`register`、`unregister`、`key.add`、
+`key.remove`、`key.list` 仅允许 UDS peer UID 0；非 root PolicyAdministrator 也不得管理网关。
+`status`、`credentials` 为 LocalUser，沿用查询身份规则：root 为 All，非 root 固定为 Own(peer_uid)。
+普通用户不能读取其他 UID 的域或 fake，请求中的归属字段不参与调用者授权。
+
+Agent 独立启动；root 的 `register` 请求包含 `{agent, uid, pid}`，daemon 核验已有进程及后代快照的
+UID 和进程实例后移入该域的 scope。注册可在网关未启用、未配置 Key 时进行，不负责启动 Agent、
+修改环境或安装 CA。Agent 自行加载 `credentials` 返回的 fake/CA 配置。注册前的流量、已有连接以及
+快照外的并发后代不受追溯保护；迁移失败可能留下部分已迁移进程，须核查后重试。
+gateway 方法使用 45s dispatch 预算，CLI 默认超时 60s；数据面加载上限 20s。
+
+数据面是独立的 `agent-sec-gateway.service`，以无特权 `agent-sec-gw` 运行固定版本的
+mitmproxy standalone 构建，不继承 daemon 权限。daemon 仅经 drop-in
+`agent-sec-core.service.d/gateway.conf` 增加 `CAP_NET_ADMIN`，用于替换 nftables 表
+`inet agent_sec_gateway`；Agent 域的 scope 通过 systemd D-Bus 创建。网关账户的主组必须
+以账户同名且没有成员，任何 Agent 域用户不得属于该组，否则 key 添加和下发均被拒绝。
+
+持久状态位于 `/var/lib/agent-sec/gateway/state.json`（0600，目录 0700）和
+`/var/lib/agent-sec/credentials`，不进入 `/var/log/agent-sec`；`AGENT_SEC_DATA_DIR` 覆盖
+两者的父目录。运行目录 `/run/agent-sec-gateway` 为 root:agent-sec-gw 0751，manifest、plan 与
+secrets 快照为 0640，`status/` 归网关账户所有，`ca-bundle.pem` 为 0644。
+
+主动 `disable` 先应用 nft delete 事务撤流，成功后停止 unit，两步均成功后才通过
+`remove_except_ca` 删除运行目录中除 `ca-bundle.pem` 外的全部内容（包括 `status/`），
+并保存 `enabled=false`；持久 Key 与域登记保留。撤流失败立即返回，不停止 unit、不删文件、
+不修改期望 `enabled`；unit 停止失败也立即返回并保留运行文件与期望 `enabled`，但引流已撤除，
+须显式重试 disable。文件清理失败仍尝试保存 `enabled=false` 后返回清理错误；状态保存失败
+也返回错误，不能把任一错误当作完整关闭。成功关闭保留公开 CA 的原路径，避免已有配置悬空；
+`/run` 在主机重启后仍会丢失，CA 不保证跨重启保留。恢复直连不会替换 fake，fake 仍不能用于
+GitHub 鉴权；已有代理连接不保证无缝恢复，须重连。
+
+本版本是可用性优先的有限 fail-open：nft 仅以 `meta nfproto ipv4` 匹配已配置 Key 的 Agent 域
+TCP 80/443，没有 UDP/443 drop 或 filter chain。IPv6 与 HTTP/3/QUIC 不引流、不强制回退或拒绝，
+允许未经网关保护的请求发出，fake 原样发送，鉴权可能失败；完整 IPv6 和 HTTP/3 保护为后续扩展。
+已进入 IPv4 代理的 HTTP(S) 仍执行原安全校验；HTTPS 全部执行 TLS MITM，无 fake 不等于
+TLS 透传或不受影响，generation 未就绪仍拒绝。撤销失败的停止代理与删除整个运行目录
+（`remove_all`）行为保持不变，不适用主动 disable 的 CA 保留规则，不能概括为所有故障都 fail-open。
+
+daemon 启动时在后台恢复已启用的网关，构造或恢复失败只报告，不影响其他能力 READY。
+generation 在每次尝试前持久化且不复用；新增失败保留旧 generation 继续服务，撤销失败则停止
+数据面；首次 enable 失败时停止 unit、删除 nft 表和运行目录。systemd `active` 不代表网关已
+加载，发布流程等待 `status/health.json` 的 loadedGeneration 等于当前 generation 后才更新引流。
+unit 在启动前和停止后都删除 `status/health.json`，避免上一个进程的报告在新进程绑定监听端口前被当作已加载。
+域登记与 Key 独立持久化；移除最后一个 Key 保留域，注销则撤销全部关联 Key 并删除域。
+目标 PID 不持久化，daemon 恢复仅使用已有 scope，不按旧 PID 接管进程。
+
+| ID | 必须验证 | 可执行证据 |
+|---|---|---|
+| DPROC-GW-001 | 方法清单、分发与访问级别一致 | `asc-daemon-protocol/tests/pap_contract.rs::gateway_method_inventory_matches_dispatch_and_access` |
+| DPROC-GW-002 | UID/PID 注册与后代快照、进程身份变化拒绝、UID 查询隔离、generation、撤销/enable 失败收敛、组隔离、运行目录权限 | `asc-gateway-runtime/src/tests.rs` |
+| DPROC-GW-003 | unit、drop-in 与数据面文件 staging | `tests/v2/packaging/test_systemd.py::test_gateway_stages_unit_drop_in_and_data_plane_files` |
+| DPROC-GW-004 | 安装态 root daemon、真实 systemd/nft、fake 下发；IPv4 REST 与 Git clone/push 时上游实际收到真实 Token（Bearer 与 Git Basic）且回显改回 fake；代理内越权 host/方法、明文、真实值、跨域与撤销后 fake 在上游之前被拒绝；域外与 IPv4 UDP/443 不引流；daemon 与网关重启后仍替换；成功关闭仅保留公开 CA（IPv6 匹配边界与撤流/停止失败通过 DPROC-GW-002 的控制面单元测试验证） | `tests/v2/systemd/test_gateway.py`；需 `ASC_GATEWAY_E2E_USER`；全部用例以 `lo` 上的 `198.18.0.1`、临时 CA 与本地 mock 上游闭环，使用生成的 dummy Token，不访问外网 |

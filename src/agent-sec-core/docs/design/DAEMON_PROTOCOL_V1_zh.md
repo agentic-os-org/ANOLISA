@@ -1054,3 +1054,65 @@ obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本�
 历史未知归属使用 `unknown_SessionId`；未重名的 ID 保持原样。组合名称仍有歧义时拒绝；原始存储 ID 和安全关联不变，详见查询设计 §4.1。
 内部 `DaemonDispatcher::handle` 使用命名的 5 秒 convenience budget；真实 UDS dispatch
 使用 transport 配置生成的 `DispatchControl`，不受该默认值替代。
+
+## 18. [TARGET V2][IMPLEMENTED] Secret Gateway 管理
+
+`gateway.*` 是 V2 新增的 method family，不属于 V1 的九个 method。设计见
+[V2 Secret Gateway 设计](V2_SECRET_GATEWAY_DESIGN_zh.md)，进程与权限见
+[部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2implemented-secret-gateway-进程权限与数据目录dproc-gw)。
+方法清单由 `asc-daemon-protocol` 的 `GATEWAY_METHODS` 冻结，
+`pap_contract.rs::gateway_method_inventory_matches_dispatch_and_access` 校验清单、分发与访问级别一致。
+
+| method | 访问级别 | params | result |
+| --- | --- | --- | --- |
+| `gateway.enable` | UID 0 | 无 | `GatewayStatus` |
+| `gateway.disable` | UID 0 | 无 | `GatewayStatus` |
+| `gateway.status` | LocalUser，UID 范围隔离 | 无 | `GatewayStatus` |
+| `gateway.register` | UID 0 | `{agent, uid, pid}` | `AgentStatus` |
+| `gateway.unregister` | UID 0 | `{agent}` | `GatewayStatus` |
+| `gateway.key.add` | UID 0 | `{agent, preset, secretFile}` | `KeyOutcome` |
+| `gateway.key.remove` | UID 0 | `{agent, preset}` | `KeyOutcome` |
+| `gateway.key.list` | UID 0 | 无 | `KeyList` |
+| `gateway.credentials` | LocalUser，UID 范围隔离 | `{agent}` | `CredentialGrant` |
+
+- 无参数的方法只接受省略、`null` 或 `{}`；有参数的方法拒绝未知字段。
+- 管理方法先按 PolicyAdministrator 元数据授权，再要求 UDS peer UID 为 0；非 root 策略管理员
+  不获得 gateway 管理权。注册请求中的 `uid`、`pid` 只是 root 指定的接管目标，不是调用者身份。
+- `secretFile` 是 root 拥有、模式 0600 或更严格的文件的绝对路径，daemon 自己读取；
+  真实值不出现在任何 params 或 result 中。
+- `register` 接管已经运行的 Agent 及其已有后代快照，核验 UID 和进程实例，不启动目标程序；
+  可在网关未启用、尚未配置 Key 时登记。进程迁移不是原子操作，失败可能留下部分已迁移进程。
+- `status` 和 `credentials` 的范围来自 UDS peer UID：root 可读全部，非 root（含策略管理员）
+  仅能读所属 UID 的域。`credentials` 不迁移进程，不要求网关已启用；CA 文件在 enable 成功后可用。
+- 域登记独立于 Key；移除最后一个 Key 不删除域，`unregister` 删除域并撤销所有关联 Key，但不停止进程。
+  PID 不持久化，恢复不按旧 PID 重新接管；Agent 自行重启后需登记新 PID。
+
+result 结构（字段均为 camelCase）：
+
+- `GatewayStatus`：`{enabled, active, generation, loadedGeneration, agents: AgentStatus[]}`。
+  `active` 表示数据面 unit 处于 active，`loadedGeneration` 是数据面报告已加载的 generation，
+  未加载时为 `null`。
+- `AgentStatus`：`{name, uid, port, presets, running}`，`uid` 为登记核验的目标 UID，`presets` 可为空；
+  `running` 表示其 scope 当前存在。域内其他进程可能在已登记的 PID 退出后继续运行。
+- `KeyOutcome`：`{agent, preset, credential, applied}`。`credential` 为 `created`、`unchanged`、
+  `replaced`（真实值已轮换，各域保留 fake）、`fake_retired`（只撤销该域的 fake）或 `retired`
+  （已无域使用，真实值被删除）；网关未启用时 `applied` 为 `false`。
+- `KeyList`：`{credentials, agents}`。`credentials` 的每项为 `{id, state, carriers, fakes}`，
+  fake 只给出 `{agent, retired, suffix}`，`suffix` 是末 4 位。
+- `CredentialGrant`：`{agent, scope, environment}`。`environment` 包含该域的 fake 和 CA bundle 路径，
+  由 Agent 自身配置加载；查询不会修改已运行进程的环境或配置。
+
+错误码：
+
+| code | 场景 |
+| --- | --- |
+| `invalid_argument` | params 无法解码、名称或 preset 非法、secret 文件不合格、域用户为 root 或与网关账户共组 |
+| `not_found` | Agent 域或其中的 preset 不存在 |
+| `conflict` | 已有域绑定了其他 UID、目标进程属于另一域，或真实值与另一凭据的真实值或任何 fake 相同 |
+| `permission_denied` | 管理方法的 peer UID 不是 0；凭据查询越过所属 UID；目标进程 UID 不符或迁移期间身份改变 |
+| `resource_exhausted` | 8 个监听端口都已占用、进程树快照超过上限，或 fake 达到上限 |
+| `unavailable` | daemon 未配置网关、目标进程消失、凭据存储被其他写者锁定、网关账户缺失或其主组不合格、数据面未在限时内加载当前 generation |
+| `internal` | 数据面拒绝某个 generation、存储损坏或宿主命令失败 |
+
+gateway 方法的 dispatch 预算为 45 秒，因为变更需要等待数据面加载和 systemd 作业。message
+可以包含路径、Agent 域名和 UID，但不包含真实值或 fake。

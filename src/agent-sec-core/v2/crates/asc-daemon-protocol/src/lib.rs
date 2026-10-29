@@ -19,6 +19,7 @@ pub use trace::{
     TraceCarrierV1, request_fits_budget,
 };
 mod envelope;
+mod gateway;
 pub mod method;
 mod pap;
 mod response;
@@ -26,6 +27,9 @@ mod response;
 pub use action::{CodeScanParams, PiiScanParams, PromptScanParams, PromptScanWarmupParams};
 pub use common::{ListParams, ListResult, ResourceParams, RevisionParams};
 pub use envelope::{DaemonRequest, V1Request};
+pub use gateway::{
+    GatewayAgentParams, GatewayKeyAddParams, GatewayKeyRemoveParams, GatewayRegisterParams,
+};
 pub use pap::{CreatePolicyParams, CreateScopeParams, UpdatePolicyParams};
 pub use query::SecQueryParams;
 pub use response::{

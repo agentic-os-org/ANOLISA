@@ -1,0 +1,55 @@
+# Secret gateway data plane; started and stopped by agent-sec-core.service.
+# Listener ports must match the daemon's gateway port range (15001-15008).
+[Unit]
+Description=Agent Security Core secret gateway
+After=network.target
+
+[Service]
+Type=simple
+User=agent-sec-gw
+Group=agent-sec-gw
+# Stale health would let the daemon route traffic before listeners are bound.
+ExecStartPre=/usr/bin/rm -f /run/agent-sec-gateway/status/health.json
+ExecStopPost=/usr/bin/rm -f /run/agent-sec-gateway/status/health.json
+ExecStart=/opt/agent-sec-gateway/current/mitmdump \
+    --mode transparent@127.0.0.1:15001 \
+    --mode transparent@127.0.0.1:15002 \
+    --mode transparent@127.0.0.1:15003 \
+    --mode transparent@127.0.0.1:15004 \
+    --mode transparent@127.0.0.1:15005 \
+    --mode transparent@127.0.0.1:15006 \
+    --mode transparent@127.0.0.1:15007 \
+    --mode transparent@127.0.0.1:15008 \
+    --set confdir=/var/lib/agent-sec-gateway \
+    --set flow_detail=0 \
+    --set agent_sec_runtime_dir=/run/agent-sec-gateway \
+    -s {datadir}/asc_gateway_addon.py
+StateDirectory=agent-sec-gateway
+StateDirectoryMode=0700
+# The daemon creates the runtime directory and its status/ subdirectory before starting the unit.
+ReadWritePaths=/run/agent-sec-gateway/status
+UMask=0077
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# MemoryDenyWriteExecute is deliberately absent: the bundled OpenSSL then fails
+# to build TLS contexts and every intercepted connection is dropped.

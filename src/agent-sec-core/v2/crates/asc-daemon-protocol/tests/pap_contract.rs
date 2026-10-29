@@ -511,3 +511,65 @@ fn observability_query_method_inventory_matches_dispatch() {
         );
     }
 }
+
+/// Gateway administration retains administrator metadata; queries accept local peers.
+#[test]
+fn gateway_method_inventory_matches_dispatch_and_access() {
+    use asc_daemon_protocol::method::{AccessPolicy, GatewayMethod, MethodId};
+    let expected = [
+        (GatewayMethod::Enable, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Disable, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Status, AccessPolicy::LocalUser),
+        (GatewayMethod::KeyAdd, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::KeyRemove, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::KeyList, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Register, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Unregister, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Credentials, AccessPolicy::LocalUser),
+    ];
+    assert_eq!(method::GATEWAY_METHODS.len(), expected.len());
+    for (wire, (gateway, access)) in method::GATEWAY_METHODS.into_iter().zip(expected) {
+        assert_eq!(method::resolve(wire), Some(MethodId::Gateway(gateway)));
+        assert_eq!(method::metadata(wire).unwrap().access, access);
+    }
+    assert_eq!(method::resolve("gateway.run"), None);
+    assert_eq!(
+        round_trip::<asc_daemon_protocol::GatewayKeyAddParams>(
+            json!({"agent": "dev", "preset": "github", "secretFile": "/root/token"})
+        ),
+        json!({"agent": "dev", "preset": "github", "secretFile": "/root/token"})
+    );
+    assert!(
+        serde_json::from_value::<asc_daemon_protocol::GatewayKeyAddParams>(
+            json!({"agent": "dev", "runAsUid": 1000, "preset": "github", "secretFile": "/root/token"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        round_trip::<asc_daemon_protocol::GatewayRegisterParams>(
+            json!({"agent": "dev", "uid": 1000, "pid": 42})
+        ),
+        json!({"agent": "dev", "uid": 1000, "pid": 42})
+    );
+    for invalid in [
+        json!({"agent": "dev", "pid": 42}),
+        json!({"agent": "dev", "uid": 1000}),
+        json!({"agent": "dev", "uid": -1, "pid": 42}),
+        json!({"agent": "dev", "uid": 1000, "pid": "42"}),
+        json!({"agent": "dev", "uid": 1000, "pid": 42, "callerUid": 0}),
+    ] {
+        assert!(
+            serde_json::from_value::<asc_daemon_protocol::GatewayRegisterParams>(invalid).is_err()
+        );
+    }
+    assert_eq!(
+        round_trip::<asc_daemon_protocol::GatewayAgentParams>(json!({"agent": "dev"})),
+        json!({"agent": "dev"})
+    );
+    assert!(
+        serde_json::from_value::<asc_daemon_protocol::GatewayAgentParams>(
+            json!({"agent": "dev", "uid": 0})
+        )
+        .is_err()
+    );
+}

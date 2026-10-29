@@ -6,12 +6,14 @@ Application persistence and health endpoints are separate acceptance gates.
 import json
 import os
 import pwd
+import shutil
 import signal
 import socket
 import stat
 import subprocess
 import tempfile
 import time
+import warnings
 from pathlib import Path
 
 import pytest
@@ -115,6 +117,65 @@ def test_native_health_probe_accepts_real_root_daemon(daemon, health_probe):
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def test_default_start_and_restart_do_not_activate_gateway(
+    start_daemon, tmp_path, monkeypatch, record_property
+):
+    data = tmp_path / "data"
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(data))
+    runtime = Path("/run/agent-sec-gateway")
+    assert not runtime.exists(), "requires an environment without an active gateway"
+    nft = shutil.which("nft")
+    nft_unavailable = None
+
+    for phase in ("before_start", "after_start", "after_restart"):
+        if phase != "before_start":
+            daemon = start_daemon()
+            status = daemon.request("gateway", "status")
+            assert status["enabled"] is False
+            assert status["active"] is False
+            assert status["agents"] == []
+            assert status["generation"] == 0
+        if nft is None:
+            nft_unavailable = "nft is not installed"
+        else:
+            tables = subprocess.run(
+                [nft, "--json", "list", "tables"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if tables.returncode != 0 and any(
+                reason in tables.stderr.lower()
+                for reason in ("operation not permitted", "permission denied")
+            ):
+                nft_unavailable = "nft read permission denied"
+            else:
+                assert tables.returncode == 0, tables.stderr
+                assert not any(
+                    entry.get("table", {}).get("name") == "agent_sec_gateway"
+                    for entry in json.loads(tables.stdout)["nftables"]
+                ), f"gateway nftables table exists during {phase}"
+        assert not runtime.exists()
+        assert not (data / "gateway").exists()
+        assert not (data / "credentials").exists()
+        if phase != "before_start":
+            daemon.process.send_signal(signal.SIGTERM)
+            daemon.process.communicate(timeout=5)
+            assert daemon.process.returncode == 0
+            assert not daemon.socket_path.exists()
+    record_property(
+        "gateway_nft_coverage",
+        f"unavailable: {nft_unavailable}" if nft_unavailable else "verified",
+    )
+    if nft_unavailable:
+        warnings.warn(
+            f"Gateway nftables absence was not verified: {nft_unavailable}",
+            pytest.PytestWarning,
+            stacklevel=1,
+        )
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="cross-UID UDS test requires root")

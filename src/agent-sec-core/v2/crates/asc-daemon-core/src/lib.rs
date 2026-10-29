@@ -5,6 +5,8 @@
 mod observability;
 pub use observability::{ObservabilityService, ObservabilitySink, ObservabilityWriteError};
 mod action;
+mod gateway;
+pub use gateway::{GatewayAdministration, GatewayFailure, GatewayFailureKind, GatewayKeyRequest};
 mod identity;
 pub use action::ActionService;
 mod pap;

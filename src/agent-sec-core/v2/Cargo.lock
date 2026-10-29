@@ -243,6 +243,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-credential-store"
+version = "1.1.1"
+dependencies = [
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "asc-daemon"
 version = "1.1.1"
 dependencies = [
@@ -259,6 +271,7 @@ dependencies = [
  "asc-daemon-service",
  "asc-event-sink",
  "asc-foundation-types",
+ "asc-gateway-runtime",
  "asc-model-client",
  "asc-observability",
  "asc-pap",
@@ -413,6 +426,30 @@ version = "1.1.1"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-gateway-plan"
+version = "1.1.1"
+dependencies = [
+ "asc-credential-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-gateway-runtime"
+version = "1.1.1"
+dependencies = [
+ "asc-credential-store",
+ "asc-gateway-plan",
+ "nix",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

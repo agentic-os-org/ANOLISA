@@ -5,6 +5,7 @@ mod capabilities;
 mod common;
 mod events;
 mod events_summary;
+mod gateway;
 mod observability;
 mod policy;
 mod scan_code;
@@ -19,6 +20,7 @@ use clap::Subcommand;
 use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
 pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
+pub(crate) use self::gateway::GatewayCommand;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
@@ -55,6 +57,9 @@ pub(crate) enum Command {
     SkillLedger(skill_ledger::SkillLedgerCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
     Capabilities(CapabilitiesCommand),
+    /// Protect GitHub tokens from Agents with the secret gateway.
+    #[command(subcommand)]
+    Gateway(GatewayCommand),
 }
 
 impl Command {
@@ -85,7 +90,19 @@ impl Command {
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
             Self::Capabilities(_) => Err(InputError::LocalCommand),
+            // Gateway commands own their transport: `run` execs after the response.
+            Self::Gateway(_) => Err(InputError::Gateway(
+                "gateway commands run through their own transport".into(),
+            )),
             Self::SkillLedger(command) => command.request(),
+        }
+    }
+
+    /// Returns the gateway command when this invocation manages the secret gateway.
+    pub(crate) const fn gateway(&self) -> Option<&GatewayCommand> {
+        match self {
+            Self::Gateway(command) => Some(command),
+            _ => None,
         }
     }
 

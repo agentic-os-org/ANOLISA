@@ -114,3 +114,39 @@ def test_shared_manifest_staging(tmp_path):
     )
     component = tomllib.loads(installed.read_text())["component"]
     assert component["services"][0]["scope"] == "system"
+
+
+def test_gateway_stages_unit_drop_in_and_data_plane_files(tmp_path):
+    subprocess.run(
+        ["make", "install-gateway", f"DESTDIR={tmp_path}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    datadir = tmp_path / "usr/share/anolisa/sec-core/gateway"
+    assert sorted(path.name for path in datadir.iterdir()) == [
+        "asc_gateway_addon.py",
+        "asc_gateway_policy.py",
+        "install-mitmproxy.sh",
+        "mitmproxy.provenance",
+    ]
+    units = tmp_path / "usr/lib/systemd/system"
+    unit = (units / "agent-sec-gateway.service").read_text()
+    assert "{datadir}" not in unit
+    assert "-s /usr/share/anolisa/sec-core/gateway/asc_gateway_addon.py" in unit
+    lines = unit.splitlines()
+    for setting in (
+        "User=agent-sec-gw",
+        "CapabilityBoundingSet=",
+        "NoNewPrivileges=true",
+        "ProtectSystem=strict",
+        "ReadWritePaths=/run/agent-sec-gateway/status",
+    ):
+        assert setting in lines
+    listeners = [
+        port for port in range(15001, 15009) if f"transparent@127.0.0.1:{port}" in unit
+    ]
+    assert listeners == list(range(15001, 15009))
+    drop_in = (units / "agent-sec-core.service.d/gateway.conf").read_text()
+    assert "CapabilityBoundingSet=CAP_NET_ADMIN" in drop_in.splitlines()
