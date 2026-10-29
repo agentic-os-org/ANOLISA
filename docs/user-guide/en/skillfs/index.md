@@ -381,6 +381,15 @@ ordered transform pipeline before an agent sees them:
    rewrites distribution-specific literals between Ubuntu/Debian and
    Alinux/Anolis conventions.
 
+When uv is available, heuristic normalization preserves `pip install --user`
+and `pip3 install --user`: uv does not support pip's user-site installation mode.
+The flag may precede or follow package names and descriptor redirections such
+as `2>&1`. Ordinary pip installs can still be rewritten to `uv pip install`,
+including neighboring shell commands, inline code in lists or prose, and commands
+followed by parenthetical notes. Each inline code span is inspected separately.
+Interpreter-specific `python -m pip` calls remain unchanged. Unfinished arguments,
+line continuations, and command substitutions also keep the original pip invocation.
+
 When heuristic normalization selects Yarn, only a bare `npm install` is rewritten
 to `yarn install`. Install commands with package names, flags, or redirections
 remain unchanged: Yarn uses `add` for new dependencies and does not share all npm
