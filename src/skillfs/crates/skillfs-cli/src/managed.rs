@@ -1254,7 +1254,11 @@ fn teardown_instance_with_shutdown(
             send_signal(pid, libc::SIGTERM);
         }
     }
-    if sup_pid.is_none_or(|p| !pid_alive(p)) {
+    // The fallback keys on the verified-supervisor predicate, not raw
+    // liveness: an identity-mismatched (recycled) supervisor pid counts as
+    // absent, so the worker still gets its graceful TERM instead of
+    // waiting out the timeout for a SIGKILL that bypasses cleanup.
+    if sup_pid.is_none_or(|p| !process_live(paths, p, worker_program.as_deref())) {
         if let Some(pid) = worker_pid {
             if signaled(pid) {
                 info!(worker_pid = pid, "stopping managed worker directly");
@@ -1334,6 +1338,21 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// Readiness handshake for stand-in children: spin until
+    /// /proc/<pid>/exe is readable so an identity check in the code under
+    /// test cannot race the child's startup. Bounded so a pathological
+    /// environment fails the test instead of hanging it.
+    fn wait_until_exe_readable(pid: i32) {
+        for _ in 0..100 {
+            if std::fs::read_link(format!("/proc/{pid}/exe")).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("child /proc/{pid}/exe never became readable");
+    }
 
     #[test]
     fn instance_id_is_stable_for_same_path() {
@@ -1965,22 +1984,25 @@ mod tests {
             mount_config: runtime.path().join("instance.mount.toml"),
         };
         let mut state = sample_state("instance");
-        // Record this test binary as the worker program so the child's
-        // /proc/<pid>/exe matches.
-        state.worker_program = std::env::current_exe()
-            .expect("current exe")
-            .to_string_lossy()
-            .into_owned();
+        // Record a real binary the child runs, so /proc/<pid>/exe matches.
+        // `sleep` is used instead of the test binary's --help: the role must
+        // stay alive under the default TERM disposition so the test can
+        // observe that teardown's TERM was actually delivered (exit status
+        // = signal SIGTERM), not merely that the process disappeared.
+        state.worker_program = "/usr/bin/sleep".to_string();
         state.save(&paths.state).expect("save state");
 
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--help")
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn matching stand-in");
         let pid = child.id() as i32;
         std::fs::write(&paths.worker_pid, pid.to_string()).expect("write worker pid");
+        // Readiness handshake: wait until /proc/<pid>/exe is readable, so
+        // the identity check never races interpreter/launcher startup.
+        wait_until_exe_readable(pid);
 
         teardown_instance_with_shutdown(
             &paths,
@@ -1992,16 +2014,95 @@ mod tests {
                     !processes_gone(),
                     "an identity-matched live pid must still count as alive"
                 );
-                // Signal it ourselves the way SIGTERM would (same signal the
-                // teardown sends); --help exits on its own quickly anyway.
-                child.kill().expect("terminate matching child");
-                child.wait().expect("reap matching child");
                 Ok(())
             },
             || Ok(Vec::new()),
         )
         .expect("teardown succeeds");
         assert!(!paths.worker_pid.exists(), "pid file cleaned up");
+
+        // Observe the delivered signal: teardown's TERM (not a forced KILL)
+        // is what ended the child, and it is reaped on this path.
+        let status = child.wait().expect("reap matching child");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "the matching worker must die from teardown's SIGTERM, got {status}"
+        );
+    }
+
+    /// An identity-mismatched supervisor pid must count as *absent* for the
+    /// worker fallback: the orphan worker still receives its graceful TERM
+    /// (instead of waiting out the timeout for a SIGKILL that bypasses its
+    /// cleanup), while the unrelated process sitting on the supervisor pid
+    /// is spared entirely.
+    #[test]
+    fn worker_fallback_fires_when_supervisor_pid_is_recycled() {
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        state.worker_program = "/usr/bin/sleep".to_string();
+        state.save(&paths.state).expect("save state");
+
+        // The worker: a genuine stand-in of the recorded program.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn worker stand-in");
+        let worker_pid = worker.id() as i32;
+        std::fs::write(&paths.worker_pid, worker_pid.to_string()).expect("write worker pid");
+        wait_until_exe_readable(worker_pid);
+
+        // The supervisor slot: an unrelated long-lived process of a
+        // different program (`sh` vs the recorded `sleep`; two commands
+        // keep sh from exec-ing the single sleep).
+        let mut bystander = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30; sleep 30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn supervisor stand-in");
+        let bystander_pid = bystander.id() as i32;
+        std::fs::write(&paths.supervisor_pid, bystander_pid.to_string())
+            .expect("write supervisor pid");
+
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint.path(),
+            |_processes_gone| Ok(()),
+            || Ok(Vec::new()),
+        )
+        .expect("teardown succeeds");
+
+        // The worker must have received TERM (die by signal 15), not the
+        // timeout's KILL — the fallback fired despite the recycled
+        // supervisor pid.
+        let status = worker.wait().expect("reap worker");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "the orphan worker must get graceful SIGTERM, got {status}"
+        );
+
+        // The bystander must have survived both TERM and KILL; reap it.
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            bystander.try_wait().expect("try_wait").is_none(),
+            "an unrelated process in the supervisor slot must not be signaled"
+        );
+        bystander.kill().expect("cleanup bystander");
+        bystander.wait().expect("reap bystander");
     }
 
     /// An unreadable state file leaves no recorded program: direct
