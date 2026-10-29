@@ -16,7 +16,7 @@ guide before changing component internals.
 | Component | Test and quality gate |
 | ----------- | ----------------------- |
 | [AW](../../../../contribute/en/aw/building.md) | `python3 src/aw/scripts/check.py`; Linux only, uses the pinned Rust toolchain, Python 3 and Node.js. |
-| [os-skills](../../../../src/os-skills/README.md) | No compilation target. Validate changed `SKILL.md` files and run changed scripts with their documented interpreter. |
+| [os-skills](../../../../src/os-skills/README.md) | No compilation target. With Python 3.11+, run `python3 -B -m unittest discover -s src/os-skills/tests` for raw-packaging and XLSX CLI regressions. Also validate changed `SKILL.md` files and run other changed scripts with their documented interpreter. |
 | [agent-sec-core](../../../../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make test` runs Python, Rust sandbox, and OpenClaw plugin tests. Python uses uv with Python 3.11.6. |
 | [agentsight](../../../../src/agentsight/README.md) | Linux: `cd src/agentsight && make lint && make test`; macOS: run the tests relevant to the local viewer and trajectory collector. |
 | [tokenless](../../../../src/tokenless/README.md) | `cd src/tokenless && make lint && make test` |
@@ -26,6 +26,10 @@ guide before changing component internals.
 | [anolisa](../../../../distribution/anolisa/README.md) | `cd distribution/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
 | [SkillFS](../../../../src/skillfs/README.md) | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; on Linux, `cd src/skillfs && scripts/test.sh` adds the FUSE smoke test. |
 | [ktuner](../../../../src/ktuner/README.md) | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
+
+The XLSX regressions disable bytecode generation in their CLI subprocess trees,
+including nested row-editor calls. Running them before the raw-packaging tests
+therefore does not add `__pycache__` files to the skill payload.
 
 Agent Memory's `make smoke` requires Python 3.8+ and checks the release binary in
 a temporary userland namespace. It validates MCP responses and read-back data,

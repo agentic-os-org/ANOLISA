@@ -32,6 +32,8 @@ import sys
 import xml.dom.minidom
 import xml.etree.ElementTree as ET
 
+from xlsx_xml import parse_xml, write_xml
+
 NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
@@ -48,7 +50,7 @@ def _tag(local: str) -> str:
 
 
 def _write_tree(tree: ET.ElementTree, path: str) -> None:
-    tree.write(path, encoding="unicode", xml_declaration=False)
+    write_xml(tree, path)
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()
     try:
@@ -103,7 +105,7 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
 
 def add_shared_string(work_dir: str, text: str) -> int:
     ss_path = os.path.join(work_dir, "xl", "sharedStrings.xml")
-    tree = ET.parse(ss_path)
+    tree = parse_xml(ss_path)
     root = tree.getroot()
 
     idx = 0
@@ -138,7 +140,7 @@ def get_cell_style(ws_tree: ET.ElementTree, col: str, row: int) -> int:
 def ensure_numfmt_style(work_dir: str, ref_style_idx: int, numfmt_code: str) -> int:
     """Clone a cellXfs entry with the given numfmt. Returns new style index."""
     styles_path = os.path.join(work_dir, "xl", "styles.xml")
-    tree = ET.parse(styles_path)
+    tree = parse_xml(styles_path)
     root = tree.getroot()
 
     # Find or add numFmt
@@ -194,7 +196,7 @@ def _apply_border_to_row(work_dir: str, ws_path: str, ws_tree: ET.ElementTree,
                          border_style: str, new_col: str) -> None:
     """Apply a top border to ALL cells in the specified row (A through new_col)."""
     styles_path = os.path.join(work_dir, "xl", "styles.xml")
-    st_tree = ET.parse(styles_path)
+    st_tree = parse_xml(styles_path)
     st_root = st_tree.getroot()
 
     # 1. Create a new border entry with the specified top style
@@ -269,7 +271,7 @@ def main() -> None:
     prev_col = col_letter(col_number(col) - 1) if col_number(col) > 1 else "A"
 
     ws_path = find_ws_path(args.work_dir, args.sheet)
-    ws_tree = ET.parse(ws_path)
+    ws_tree = parse_xml(ws_path)
     changes = 0
 
     print(f"Adding column {col} to {os.path.basename(ws_path)}")
@@ -294,7 +296,7 @@ def main() -> None:
     header_idx = add_shared_string(args.work_dir, args.header) if args.header else None
 
     # Re-parse worksheet (sharedStrings write may have changed state)
-    ws_tree = ET.parse(ws_path)
+    ws_tree = parse_xml(ws_path)
     root = ws_tree.getroot()
     sheet_data = root.find(_tag("sheetData"))
 

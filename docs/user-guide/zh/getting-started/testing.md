@@ -13,7 +13,7 @@
 | 组件 | 测试和质量门禁 |
 | ------ | ---------------- |
 | [AW](../../../../contribute/zh/aw/building.md) | `python3 src/aw/scripts/check.py`；仅 Linux，使用固定 Rust 工具链、Python 3 和 Node.js。 |
-| [os-skills](../../../../src/os-skills/README_zh.md) | 没有编译目标。检查变更过的 `SKILL.md`，并按文件说明的解释器运行变更脚本。 |
+| [os-skills](../../../../src/os-skills/README_zh.md) | 没有编译目标。使用 Python 3.11+ 执行 `python3 -B -m unittest discover -s src/os-skills/tests`，覆盖原始打包和 XLSX CLI 回归。还需检查变更过的 `SKILL.md`，并按文件说明的解释器运行其他变更脚本。 |
 | [agent-sec-core](../../../../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make test` 会运行 Python、Rust sandbox 和 OpenClaw plugin 测试。Python 使用 uv 与 Python 3.11.6。 |
 | [agentsight](../../../../src/agentsight/README_zh.md) | Linux 使用 `cd src/agentsight && make lint && make test`；macOS 运行 local viewer 和 trajectory collector 相关测试。 |
 | [tokenless](../../../../src/tokenless/README_zh.md) | `cd src/tokenless && make lint && make test` |
@@ -23,6 +23,9 @@
 | [anolisa](../../../../distribution/anolisa/README_zh.md) | `cd distribution/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
 | [SkillFS](../../../../src/skillfs/README_zh.md) | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`；Linux 上再运行 `cd src/skillfs && scripts/test.sh` 执行 FUSE smoke test。 |
 | [ktuner](../../../../src/ktuner/README.md) | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
+
+XLSX 回归测试会禁止整个 CLI 子进程树生成字节码，包括行编辑器启动的嵌套调用。
+因此，先运行这些测试再运行原始打包测试，不会向技能载荷添加 `__pycache__` 文件。
 
 Agent Memory 的 `make smoke` 需要 Python 3.8+，在临时 userland 命名空间中检查
 release 二进制。它校验 MCP 响应和回读数据，在服务出错或超过协议检查期限时失败，

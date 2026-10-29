@@ -26,8 +26,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Run OS Skills unit tests
+        run: python3 -B -m unittest discover -s src/os-skills/tests
       - name: Verify raw package and action
         run: |
-          python3 -m unittest discover -s src/os-skills/tests
           python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
           bash .github/actions/build-os-skills-prebuilt/test.sh
