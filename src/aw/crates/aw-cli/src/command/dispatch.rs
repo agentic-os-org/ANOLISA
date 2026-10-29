@@ -196,6 +196,35 @@ fn config(command: Config) -> Result<Exit> {
             args.native = value.arguments;
             return configure(args, value.prefix.output);
         }
+        Config::NativeSources(value) => (
+            "native-sources",
+            options([
+                ("config", Some(value.configuration.config)),
+                ("agent", Some(value.agent)),
+            ])
+            .flags,
+            crate::output::Options::default(),
+        ),
+        Config::AddNativeSource(value) => (
+            "add-native-source",
+            options([
+                ("config", Some(value.target.configuration.config)),
+                ("agent", Some(value.target.agent)),
+                ("definition", Some(value.definition)),
+            ])
+            .flags,
+            value.output,
+        ),
+        Config::RemoveNativeSource(value) => (
+            "remove-native-source",
+            options([
+                ("config", Some(value.target.configuration.config)),
+                ("agent", Some(value.target.agent)),
+                ("id", Some(value.id)),
+            ])
+            .flags,
+            value.output,
+        ),
         Config::Show(value) => (
             "show",
             options([
@@ -265,6 +294,9 @@ fn config(command: Config) -> Result<Exit> {
     };
     crate::output::complete(
         match action {
+            "native-sources" => "config native-sources",
+            "add-native-source" => "config add-native-source",
+            "remove-native-source" => "config remove-native-source",
             "show" => "config show",
             "add-provider" => "config add-provider",
             "remove-provider" => "config remove-provider",

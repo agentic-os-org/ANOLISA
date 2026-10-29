@@ -74,3 +74,13 @@ imports and declarative role assets. Setup and permission requirements are in th
 The matrix is generated from the [regression manifest](../../../../src/aw/tests/regression-matrix.json). The [native manifest](../../../../src/aw/tests/native-matrix.json) records pinned versions and coverage; see [contributing](../../../../src/aw/CONTRIBUTING.md) for validation.
 
 Framework releases use the [native integration checks](../../../developer-guide/en/aw/native-agents.md). The recorded test baselines identify reproducible validation inputs; other releases can use the same native contracts.
+
+## Native configuration loading
+
+The common native-loader API and offline source-reference editor preserve
+original files and keep declaration, load, admission and activation distinct.
+Required deterministic consumer tests cover unknown native fields, source order,
+credential references, updates and covered-call failures. Built-in Adapter
+source selection and native configuration restrictions remain documented in
+their Agent guides; this API alone does not remove them or certify business SDK
+acceptance. See [configuration](configuration.md#record-native-configuration-sources).

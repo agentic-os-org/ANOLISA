@@ -96,3 +96,7 @@ MCP and policy updates by Adapter and launch mode, with links to verified baseli
 
 The [architecture overview](docs/design/en/architecture.md) describes framework and Provider ownership and call paths.
 See [Contributing](CONTRIBUTING.md) for source builds, tests and CI entrypoints.
+
+`aw config add-native-source` records native source references without opening or
+rewriting their files. The shared loader API retains native configuration and
+reports admission separately from activation; see [configuration](../../docs/user-guide/en/aw/configuration.md#record-native-configuration-sources).

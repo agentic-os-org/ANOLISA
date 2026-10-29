@@ -80,3 +80,34 @@ Wait for `AW openclaw native hooks ready`, then use a client connected to that G
 
 Custom rules can read tool events and return a JSON boolean; see the [Hook tutorial](../../../developer-guide/en/aw/providers/hooks.md).
 Application deployers configure resident [policy updates](../../../developer-guide/en/aw/deployment/policy-updates.md), [external process attachment](../../../developer-guide/en/aw/deployment/process-attach.md), and [shutdown and concurrency](../../../developer-guide/en/aw/deployment/lifecycle.md).
+
+## Record native configuration sources
+
+For applications integrating the shared native-loader API, AW can record source
+references alongside its policy. Keep native configuration in its original
+files. The built-in `aw run` Adapters still select sources through their existing
+options; a source declaration alone does not change loading or activate coverage.
+
+With the existing private `AW_HOME` and `qoder` target from installation, record
+an already selected native project source:
+
+```bash
+cat > "$AW_HOME/native-source.json" <<'JSON'
+{"id":"project","kind":"file","scope":"project","reference":"./native.yaml"}
+JSON
+chmod 600 "$AW_HOME/native-source.json"
+aw config add-native-source --config "$AW_HOME/aw.yaml" --agent qoder \
+  --definition "$AW_HOME/native-source.json"
+aw config native-sources --config "$AW_HOME/aw.yaml" --agent qoder
+```
+
+Expect `declared_not_loaded` / `not_admitted` and the source's index and category.
+No native contents or credentials are printed. The Adapter owns relative-path
+resolution and actual source precedence. To remove the reference, run:
+
+```bash
+aw config remove-native-source --config "$AW_HOME/aw.yaml" --agent qoder --id project
+```
+
+The original native file is retained. See the [editor and loader reference](../../../developer-guide/en/aw/reference/configuration-editor.md#native-source-references)
+for source fields, atomic editing, load/admission states and current integration scope.

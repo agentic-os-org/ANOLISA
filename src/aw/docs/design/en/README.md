@@ -8,7 +8,7 @@ Design documents explain implementation ownership, protocol invariants and trade
 
 | Area | Contract |
 | --- | --- |
-| Configuration | [Configuration](configuration/configuration.md) · [Editing](configuration/configuration-editing.md) |
+| Configuration | [Configuration](configuration/configuration.md) · [Editing and native sources](configuration/configuration-editing.md) |
 | Native wiring | [Adapter dispatch](adapters/adapter-dispatch.md) |
 | Runtime | [Service](runtime/local-service.md) · [Policy updates](runtime/policy-reload.md) · [Host](runtime/provider-host.md) · [Bounded execution](runtime/bounded-execution.md) |
 | Capability plans | [Core execution](core-execution.md) |

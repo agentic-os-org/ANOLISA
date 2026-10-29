@@ -8,7 +8,7 @@
 
 | 主题 | 合同 |
 | --- | --- |
-| 配置 | [配置](configuration/configuration.md) · [编辑](configuration/configuration-editing.md) |
+| 配置 | [配置](configuration/configuration.md) · [编辑与原生来源](configuration/configuration-editing.md) |
 | 原生接线 | [Adapter 分派](adapters/adapter-dispatch.md) |
 | 运行时 | [本地服务](runtime/local-service.md) · [策略更新](runtime/policy-reload.md) · [Provider Host](runtime/provider-host.md) · [有界执行](runtime/bounded-execution.md) |
 | 能力计划 | [Core 执行](core-execution.md) |

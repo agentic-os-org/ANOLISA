@@ -44,7 +44,9 @@
     "aw-package/test/management",
     "aw-exec/test/packages",
     "aw-cli/test/legacy_migration",
-    "aw-cli/test/qoder_sdk"
+    "aw-cli/test/qoder_sdk",
+    "aw-cli/test/native_configuration",
+    "aw-config/test/native_sources"
   ],
   "cases": {
     "package-unified-bootstrap": {
@@ -794,6 +796,34 @@
     "resident-policy-deadline": {
       "target": "aw-cli/lib/aw_cli",
       "test": "cli::hook::deadline_tests::discovery_consumes_one_transport_budget_without_renewal"
+    },
+    "native-config-consumer": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "original_native_loader_and_host_preserve_sources_and_enforce_only_admitted_scope"
+    },
+    "native-config-failures": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "native_errors_and_covered_provider_failures_never_become_uncovered_success"
+    },
+    "native-config-updates": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "native_live_handle_retains_updates_without_mutating_admitted_policy"
+    },
+    "native-config-editor": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "editor_conflicts_invalid_candidates_and_stale_saves_preserve_native_files"
+    },
+    "native-config-cli": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "cli_records_and_removes_only_descriptors_and_reports_no_runtime_claims"
+    },
+    "native-source-schema": {
+      "target": "aw-config/test/native_sources",
+      "test": "native_references_preserve_spelling_and_keep_public_schema_strict"
+    },
+    "native-config-context": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "native_loader_receives_original_context_and_runs_once_with_or_without_descriptors"
     }
   },
   "agents": {

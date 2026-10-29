@@ -73,3 +73,10 @@ Qoder SDK 应用还可接入固定摘要的 Bash 凭据消费者、Worker import
 矩阵由[回归清单](../../../../src/aw/tests/regression-matrix.json)生成。[原生验收清单](../../../../src/aw/tests/native-matrix.json)记录固定版本及验证范围，操作方法见[贡献指南](../../../../src/aw/CONTRIBUTING_zh.md)。
 
 框架版本沿用[原生接入检查](../../../developer-guide/zh/aw/native-agents.md)。记录的测试基线用于复现验收，其他版本可通过相同原生合同接入。
+
+## 原生配置加载
+
+通用 native-loader API 和离线来源引用编辑器保留原文件，区分声明、加载、准入和激活。
+必跑的确定性消费者测试覆盖未知原生字段、来源顺序、凭据引用、更新和覆盖内调用失败。
+内置 Adapter 的来源选择及原生配置限制仍以各 Agent 指南为准；通用 API 本身不解除
+这些限制，也不代表业务 SDK 已验收。用法见[配置说明](configuration.md#记录原生配置来源)。

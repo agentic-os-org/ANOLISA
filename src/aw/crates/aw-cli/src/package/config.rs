@@ -14,6 +14,9 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
     let path = Path::new(required("--config")?);
     // Validate every action's options before opening any user files.
     match action {
+        "native-sources" | "add-native-source" | "remove-native-source" => {
+            required("--agent")?;
+        }
         "show" => {
             if (flags.contains_key("--provider") && flags.contains_key("--event"))
                 || (flags.contains_key("--id") && !flags.contains_key("--event"))
@@ -34,11 +37,28 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
     if action.starts_with("add-") {
         required("--definition")?;
     }
-    if action == "remove-hook" {
+    if matches!(action, "remove-hook" | "remove-native-source") {
         required("--id")?;
     }
     let mut editor = ConfigurationEditor::open(path)?;
     match action {
+        "native-sources" => {
+            let sources = editor.native_sources(required("--agent")?)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "native": "declared_not_loaded", "aw": "not_admitted", "sources": sources
+                }))?
+            );
+            return Ok(None);
+        }
+        "add-native-source" => {
+            editor
+                .add_native_source(required("--agent")?, definition(required("--definition")?)?)?;
+        }
+        "remove-native-source" => {
+            editor.remove_native_source(required("--agent")?, required("--id")?)?;
+        }
         "show" => {
             let value = if let Some(name) = flags.get("--provider") {
                 editor.provider(name)

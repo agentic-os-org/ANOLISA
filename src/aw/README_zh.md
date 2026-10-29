@@ -94,3 +94,6 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需�
 
 [架构总览](docs/design/zh/architecture.md)说明框架与 Provider 的职责和调用流程。
 源码构建、测试与 CI 入口见[贡献指南](CONTRIBUTING_zh.md)。
+
+`aw config add-native-source` 记录原生来源引用，保留原文件。通用 loader API 保留原生
+配置，分别报告加载、准入与激活状态；用法见[配置说明](../../docs/user-guide/zh/aw/configuration.md#记录原生配置来源)。
