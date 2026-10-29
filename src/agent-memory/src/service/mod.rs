@@ -78,9 +78,10 @@ impl MemoryService {
         let mount = MountPoint::ensure_with(ns.clone(), &base, picked.strategy.as_ref())?;
 
         // Reclaim orphaned snapshot artefacts (stale `*.partial`, sidecar-less
-        // archives, orphan sidecars) before anything lists or quota-checks
-        // them. Age-guarded so an in-flight snapshot in another process is
-        // never touched; best-effort so a failed sweep never blocks open.
+        // archives, orphan sidecars, crashed-restore staging dirs) before
+        // anything lists or quota-checks them. Age-guarded so an in-flight
+        // snapshot in another process is never touched; best-effort so a
+        // failed sweep never blocks open.
         if config.memory.snapshot_reclaim.enabled {
             let min_age = std::time::Duration::from_secs(
                 config.memory.snapshot_reclaim.min_artifact_age_secs,
