@@ -253,7 +253,7 @@ impl Event<'_> {
             .providers
             .get(&step.provider)
             .ok_or(Error::Invalid("prepared Provider is missing"))?;
-        let record = self.host.record(
+        let mut record = self.host.record(
             &step.provider,
             if matches!(step.execution, StepExecution::Native) {
                 Method::NativeHook
@@ -281,8 +281,20 @@ impl Event<'_> {
             .as_ref()
             .map(|(value, _)| value)
             .unwrap_or(&self.value);
-        let (record, result) = if !step.matches_tool(value) {
-            transport.skipped(record, value)
+        // Missing identity is an invocation failure, never evidence of non-coverage.
+        // Native hooks need the same normalized contract as structured Providers.
+        let started = Instant::now();
+        let validation = (|| -> Result<(), Failure> {
+            check(self.deadline, self.cancelled)?;
+            self.host.protocol.validate_event(value)?;
+            check(self.deadline, self.cancelled)?;
+            Ok(())
+        })();
+        record.elapsed = started.elapsed();
+        let (record, result) = if let Err(error) = validation {
+            (record, Err(error))
+        } else if !step.matches_tool(value) {
+            (record, Ok(StepOutput::Skipped))
         } else {
             match &step.execution {
                 StepExecution::Native => {

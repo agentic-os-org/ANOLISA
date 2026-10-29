@@ -107,7 +107,9 @@ blocked. See [local package management](packaging/package-management.md).
 
 These implementations each own an independent Cargo workspace and lockfile at
 the repository root. They connect as separate processes and are not part of the
-ten framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
+ten framework crates. Tokenless Provider tests also depend on the sec-core Provider.
+sec-core coverage tests use host, adapter and package as test-only dependencies to exercise generated configuration,
+normalization and the real Provider process together. Other teams
 can develop and distribute Providers independently; see the [collaboration guide](../../../../../docs/developer-guide/en/aw/providers/index.md).
 
 ## Native configuration ownership

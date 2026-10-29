@@ -233,6 +233,11 @@ class ArchiveTests(Fixture):
                 )
                 self.assertEqual(set(config["tools"]), {"Bash", "exec"})
                 self.assertEqual(scan["on_error"], "block")
+                after = template["events"]["tool.after"]
+                observe = next(
+                    step for step in after["steps"] if step["id"] == "observe-completion"
+                )
+                self.assertEqual(observe["match"], scan["match"])
 
     def test_invalid_architecture_or_missing_inputs_publish_nothing(self) -> None:
         self.prepare("core")

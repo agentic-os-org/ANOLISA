@@ -13,6 +13,10 @@ A selected unmapped tool returns an error by default;
 Required security steps use `mode: block` and `on_error: block` to reject risks
 and failed checks.
 
+The shipped Qoder example selects native `Bash` in both phases. Unlisted tools
+remain native and are recorded as skipped. SDK mappings and extraction rules
+are listed in the [configuration guide](../../docs/developer-guide/en/aw/providers/sec-core.md#configure-a-provider).
+
 Maintained by @kongche-jbw under [CODEOWNERS](../../.github/CODEOWNERS).
 Bridge code uses [Apache-2.0](../../LICENSE); backend source is
 [agent-sec-core](../../src/agent-sec-core/README.md).

@@ -226,3 +226,31 @@ fn cancellation_and_expiry_cannot_become_successful_skips() {
         fixture.assert_reaped();
     }
 }
+
+#[test]
+fn selected_native_hooks_reject_invalid_identity_before_execution() {
+    let fixture = Fixture::new();
+    let mut document = document(&fixture, "native-hook/v1alpha1");
+    document["spec"]["events"]["tool.before"]["steps"][0]["match"] =
+        json!({"tools":["native:qoder:Bash"]});
+    let host = fixture.prepare(&document);
+    let cancelled = AtomicBool::new(false);
+    for field in ["name", "call_id", "input", "result"] {
+        let mut input = event("tool.before", "block");
+        input["tool"]["native_name"] = json!("Bash");
+        input["tool"].as_object_mut().unwrap().remove(field);
+        let event = host
+            .hook_event(input, b"{}".to_vec(), Instant::now() + TIMEOUT, &cancelled)
+            .unwrap();
+        let result = event.invoke("check").unwrap();
+        assert!(
+            matches!(result.result, Err(Failure::Protocol(_))),
+            "{field}"
+        );
+        assert_eq!(result.failure_action, Some(FailureAction::Block));
+        assert!(result.record.process.is_none());
+        assert!(event.invoke("check").is_err());
+    }
+    assert!(!fixture.0.join("hook-event.json").exists());
+    fixture.assert_reaped();
+}

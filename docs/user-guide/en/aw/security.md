@@ -7,6 +7,13 @@ required check fails. The distribution template selects Qoder `Bash` and
 OpenClaw `exec` with `native:qoder:Bash` and `native:openclaw:exec`. Scanning other tools requires explicit
 selectors and input mappings. This uses native Hooks and does not provide an OS sandbox.
 
+Before scanning and after observation share the declared tool range. Unlisted
+native tools, MCP calls and future tools keep their native behavior; the security
+step records `skipped`, which grants no permission. Native denials remain in force.
+For selected tools, missing mappings, invalid input, timeouts and Provider/backend
+failures block execution. See the [template name mapping](../../../developer-guide/en/aw/providers/sec-core.md#configure-a-provider)
+when adding SDK tools: Qoder CLI `Bash` and Qoder SDK `bash` use different mapping keys.
+
 ## Prepare programs and backend
 
 Install the backend using the [sec-core guide](../agent-sec-core/index.md), including

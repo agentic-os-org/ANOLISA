@@ -159,6 +159,10 @@ Provider or Hook invocation process and emits no candidate effects. Enabled
 structured Providers still complete preparation discovery and configuration
 validation. Skipped steps keep their claim, correlated record and ordinary
 completion path, allowing successor steps and terminal cleanup to proceed.
+Every protocol validates the normalized event before selection or execution,
+including native hooks. Missing tool identity fails the claimed invocation and
+retains its configured error action; no hook process starts for malformed data.
+
 The service records `kind: skipped` in its completed metadata audit. Invalid,
 expired or cancelled events remain failures under the configured `on_error`.
 

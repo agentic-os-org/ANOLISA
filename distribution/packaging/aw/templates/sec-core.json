@@ -64,6 +64,7 @@
       "steps": [
         {
           "id": "observe-completion",
+          "match": {"tools": ["native:qoder:Bash", "native:openclaw:exec"]},
           "provider": "security",
           "operation": "observe_tool",
           "effects": [

@@ -75,14 +75,30 @@ AW 卸载只移除其管理的桥接程序/资源，保留独立管理的系统�
 ## 配置 Provider
 
 复制[完整示例](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)为
-`aw.sec-core.yaml`，替换可执行文件与 socket 路径。示例使用 `mode: observe` 和
-`on_error: report`，本地评估不会请求阻断。before 步骤通过 `native:qoder:shell`
-和 `native:qoder:python` 选择合成的 Qoder `shell`、`python` 事件；
-其他工具跳过该步骤，不调用此 Provider。
-同时配置步骤和事件选择条件时，两者都须匹配。
-必需的安全检查使用 `mode: block`，并在 before 步骤中准入 `[observe, block]`、
-设置 `on_error: block`。缺少映射、无效提取输入和后端失败均通过 Host 的错误策略
-阻断选中的调用；扫描器发现的风险保留独立的 `code_risk` 结果。
+`aw.sec-core.yaml`，替换可执行文件与 socket 路径。示例用 `native:qoder:Bash`
+选择 Qoder CLI 的 `Bash`，将 `Bash` 映射到 `/command`，并使用 `mode: block`、
+`[observe, block]` 和 `on_error: block`。执行前扫描和执行后观察使用相同的明确范围。
+其他原生工具、MCP 调用和新增工具名称保留原生行为，这些步骤记录为 `skipped`。
+跳过检查不授予安全许可，原生权限拒绝继续有效。
+
+步骤和事件选择器取交集。已选中调用的映射缺失、输入提取错误、超时、Provider
+崩溃和后端故障通过 `on_error: block` 阻断执行。事件身份缺失在选择前作为输入错误处理。
+扫描发现风险保留独立的 `code_risk` 结果。需要明确的只观察策略时，使用
+`mode: observe` 和 `on_error: report`。
+
+现有模板使用以下精确名称，所有映射均提取 `/command`：
+
+| 模板 | 原生选择器 | Provider 映射键 |
+| --- | --- | --- |
+| 发行模板 / Qoder CLI | `native:qoder:Bash` | `Bash` |
+| 发行模板 / OpenClaw | `native:openclaw:exec` | `exec` |
+| SDK 安全 / Qoder SDK | `native:qoder-sdk:Bash` | `bash` |
+| SDK 安全 / QwenPaw | `native:qwenpaw:execute_shell_command` | `execute_shell_command` |
+
+[SDK 安全示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+还包含应用 Hook，各自保留选择器和错误动作。原生参数变化须经过 Adapter 现有的重新授权路径，
+或在派发前拒绝；之前的扫描结果不能授权变化后的参数。结构化 MCP 授权使用独立策略合同，
+shell/Python 输入映射不授予远端 MCP 权限。
 
 Host 选择器支持 `*`、标准名称 `bash`、`file_read`、`file_write`，以及
 `native:<adapter>:<native_name>`。原生选择器匹配事件的 Adapter 和保留的
@@ -145,9 +161,9 @@ Qoder、Qoder SDK 和 Claude SDK 优先使用原生 `tool_use_id` 标识工具�
 在 `src/aw` 中编辑好 `aw.sec-core.yaml`，将 `mode` 改为 `block` 后执行：
 
 ```bash
-./target/debug/examples/host aw.sec-core.yaml tool.before shell '{"command":"echo safe"}'
-./target/debug/examples/host aw.sec-core.yaml tool.before shell '{"command":"rm -rf /"}'
-./target/debug/examples/host aw.sec-core.yaml tool.after shell '{"command":"echo safe"}'
+./target/debug/examples/host aw.sec-core.yaml tool.before Bash '{"command":"echo safe"}'
+./target/debug/examples/host aw.sec-core.yaml tool.before Bash '{"command":"rm -rf /"}'
+./target/debug/examples/host aw.sec-core.yaml tool.after Bash '{"command":"echo safe"}'
 ```
 
 这些命令提交合成工具事件，不执行待扫描代码。使用内置 regex 规则时，预期候选效果

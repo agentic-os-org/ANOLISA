@@ -29,6 +29,9 @@
 | 私有执行 | [执行租约](adapters/private-execution.md) |
 | sec-core | [Provider](providers/sec-core/sec-core-provider.md) · [健康诊断](providers/sec-core/sec-core-health.md) |
 
+工具选择与格式错误事件的失败语义见 [Provider Host 合同](runtime/provider-host.md)；
+随附模板的名称与输入映射见 [sec-core 配置参考](../../../../../docs/developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
+
 ## 证据与观测
 
 [来源连接器](integrations/agentsight/agentsight-readonly.md) · [证据上下文](runtime/evidence-context.md) · [集成规划](integrations/agentsight/agentsight-integration.md)

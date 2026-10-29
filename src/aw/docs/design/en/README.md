@@ -30,6 +30,10 @@ connect through the process protocol without AW package records.
 | Private execution | [Execution leases](adapters/private-execution.md) |
 | sec-core | [Provider](providers/sec-core/sec-core-provider.md) · [Health](providers/sec-core/sec-core-health.md) |
 
+Tool selection and malformed-event failures are defined in the
+[Provider Host contract](runtime/provider-host.md); shipped names and input
+mappings are listed in the [sec-core configuration reference](../../../../../docs/developer-guide/en/aw/providers/sec-core.md#configure-a-provider).
+
 ## Evidence and observation
 
 [Connector](integrations/agentsight/agentsight-readonly.md) · [Evidence context](runtime/evidence-context.md) · [Integration roadmap](integrations/agentsight/agentsight-integration.md)

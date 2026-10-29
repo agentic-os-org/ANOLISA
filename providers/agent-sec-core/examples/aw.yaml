@@ -28,12 +28,11 @@ spec:
       max_output_bytes: 4096
       config:
         version: 1
-        mode: observe
+        mode: block
         unmapped_tool: error
         # Match normalized tool names supplied by the Agent adapter exactly.
         tools:
-          shell: {language: bash, input_pointer: /command}
-          python: {language: python, input_pointer: /code}
+          Bash: {language: bash, input_pointer: /command}
   events:
     tool.before:
       enabled: true
@@ -43,10 +42,10 @@ spec:
         - id: scan-code
           provider: security
           operation: scan_code
-          # Exact native names used by the synthetic Host example.
-          match: {tools: ["native:qoder:shell", "native:qoder:python"]}
+          # Qoder CLI preserves Bash as its normalized name.
+          match: {tools: ["native:qoder:Bash"]}
           effects: [observe, block]
-          on_error: report
+          on_error: block
     tool.after:
       enabled: true
       required: true
@@ -55,5 +54,6 @@ spec:
         - id: observe-completion
           provider: security
           operation: observe_tool
+          match: {tools: ["native:qoder:Bash"]}
           effects: [observe]
           on_error: report

@@ -85,6 +85,7 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中的
 
 这两个实现在仓库根目录下各自拥有 Cargo workspace 和锁文件，通过独立进程
 接入，不计入 10 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
+sec-core 覆盖测试通过仅测试依赖 host、adapter 和 package 联合验证生成配置、标准化与实际 Provider 进程。
 其他团队可独立开发、分发 Provider，见[协作指南](../../../../../docs/developer-guide/zh/aw/providers/index.md)。
 
 ## 原生配置归属

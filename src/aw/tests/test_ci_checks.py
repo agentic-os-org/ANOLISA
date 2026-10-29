@@ -337,6 +337,16 @@ class GateTests(GateFixture):
                            metadata["provider_workspaces"][:1] * 2):
             with self.assertRaises(ValueError):
                 gate.structure({**metadata, "provider_workspaces": workspaces}, self.root)
+        for name in ("aw-host", "aw-adapter", "aw-package", "serde_yaml_ng"):
+            candidate = deepcopy(metadata)
+            dependency = {"name": name, "kind": "dev", "source": "registry+fixture"}
+            if name.startswith("aw-"):
+                dependency.update(path=str(self.root / "crates" / name), source=None)
+            candidate["provider_workspaces"][0]["packages"][0]["dependencies"].append(dependency)
+            gate.structure(candidate, self.root)
+            dependency["kind"] = None
+            with self.subTest(dependency=name), self.assertRaisesRegex(ValueError, "test-only"):
+                gate.structure(candidate, self.root)
         invalid = deepcopy(metadata)
         invalid["workspace_members"].append("aw-provider-sec-core")
         with self.assertRaises(ValueError):

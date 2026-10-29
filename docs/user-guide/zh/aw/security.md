@@ -8,6 +8,12 @@ Qoder 的 `Bash` 和 OpenClaw 的 `exec`。
 扫描其他工具须另行配置选择器和输入映射。
 这项能力通过原生 Hook 生效，不提供 OS 沙箱隔离。
 
+执行前扫描和执行后观察使用同一工具范围。未列出的原生工具、MCP 调用和新增工具
+保留原生行为，安全步骤记录为 `skipped`，不授予权限。原生拒绝继续有效。
+已选中的工具遇到映射缺失、无效输入、超时或 Provider/后端故障时阻断执行。
+增加 SDK 工具时请核对[模板名称映射](../../../developer-guide/zh/aw/providers/sec-core.md#配置-provider)：
+Qoder CLI 的 `Bash` 与 Qoder SDK 的 `bash` 使用不同映射键。
+
 ## 准备程序与后台
 
 按 [sec-core 指南](../agent-sec-core/index.md)安装后端 CLI、daemon，并管理其服务

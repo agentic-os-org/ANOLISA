@@ -42,6 +42,10 @@ def structure(metadata: dict, root: Path) -> None:
             "aw-provider-sec-core",
         },
         "aw-provider-sec-core": {
+            "serde_yaml_ng",
+            "aw-host",
+            "aw-adapter",
+            "aw-package",
             "aw-exec",
             "aw-provider",
             "serde",
@@ -116,6 +120,10 @@ def structure(metadata: dict, root: Path) -> None:
             if not any(source.is_relative_to(path.resolve()) for path in source_roots):
                 raise ValueError(f"{name}: Cargo target is outside the audited source layout")
         for dependency in package["dependencies"]:
+            if (name == "aw-provider-sec-core"
+                    and dependency["name"] in {"aw-host", "aw-adapter", "aw-package", "serde_yaml_ng"}
+                    and dependency.get("kind") != "dev"):
+                raise ValueError("sec-core coverage consumers must remain test-only dependencies")
             if dependency["name"] not in allowed[name]:
                 raise ValueError(f"{name}: unreviewed dependency {dependency['name']}")
             if dependency["name"] in locations:

@@ -10,6 +10,9 @@
 选中的工具缺少映射时默认返回错误；显式配置 `unmapped_tool: observe` 可只观察而不扫描。
 必需的安全步骤使用 `mode: block` 和 `on_error: block`，阻断风险和检查失败。
 
+随附 Qoder 示例在前后两个阶段都选择原生 `Bash`。未列出的工具保留原生行为，
+步骤记录为跳过。SDK 映射与输入提取规则见[配置指南](../../docs/developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
+
 维护人按 [CODEOWNERS](../../.github/CODEOWNERS) 由 @kongche-jbw 负责。
 桥接代码使用 [Apache-2.0](../../LICENSE)，后端来源见 [agent-sec-core](../../src/agent-sec-core/README_zh.md)。
 

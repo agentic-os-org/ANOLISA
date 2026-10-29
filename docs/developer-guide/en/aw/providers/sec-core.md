@@ -85,16 +85,34 @@ has no automatic service installation, upgrade or removal bridge.
 ## Configure a Provider
 
 Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)
-to `aw.sec-core.yaml` and replace its executable and socket paths. The sample
-starts in `mode: observe` with `on_error: report` so local evaluation does not
-request blocking. The before step selects synthetic Qoder `shell` and `python`
-events with `native:qoder:shell` and `native:qoder:python`; other tools skip that
-step without invoking this Provider.
-Step selection and event-level selection both apply when configured.
-For required security, set `mode: block`, admit `[observe, block]` and use
-`on_error: block` in the before step. Missing mappings, invalid extraction input
-and backend failures then block the selected call through the Host's error
-policy. Scanner risks retain their separate `code_risk` result.
+to `aw.sec-core.yaml` and replace its executable and socket paths. It selects
+Qoder CLI `Bash` with `native:qoder:Bash`, maps `Bash` to `/command`, and uses
+`mode: block`, `[observe, block]` and `on_error: block`. Both before scanning and
+after observation use this explicit range. Other native tools, MCP calls and
+new tool names retain native behavior and produce `skipped` for these steps.
+A skip carries no security approval; native permission denial remains effective.
+
+Step and event selectors intersect. For a selected call, missing mappings,
+invalid extraction input, timeouts, Provider crashes and backend failures block
+execution through `on_error: block`. Missing event identity is an input failure
+before selection. Scanner risks retain their separate `code_risk` result.
+Use `mode: observe` with `on_error: report` only for an explicit observation policy.
+
+The shipped templates use these exact names; all mappings select `/command`:
+
+| Template | Native selector | Provider mapping key |
+| --- | --- | --- |
+| Distribution / Qoder CLI | `native:qoder:Bash` | `Bash` |
+| Distribution / OpenClaw | `native:openclaw:exec` | `exec` |
+| SDK security / Qoder SDK | `native:qoder-sdk:Bash` | `bash` |
+| SDK security / QwenPaw | `native:qwenpaw:execute_shell_command` | `execute_shell_command` |
+
+The [SDK security example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+adds application Hooks with their own selectors and failure actions. Native
+argument changes must pass the Adapter's existing reauthorization path or be
+rejected before dispatch. A previous scan does not authorize changed arguments.
+Structured MCP authorization uses its own policy contract; a shell/Python input
+mapping does not grant remote MCP permission.
 
 Host selectors accept `*`, standard names `bash`, `file_read`, `file_write`, or
 `native:<adapter>:<native_name>`. A native selector matches the event's Adapter
@@ -163,9 +181,9 @@ Values must be strings. The bridge trims surrounding whitespace, omits empty val
 From `src/aw`, after editing `aw.sec-core.yaml` and setting `mode: block`:
 
 ```bash
-./target/debug/examples/host aw.sec-core.yaml tool.before shell '{"command":"echo safe"}'
-./target/debug/examples/host aw.sec-core.yaml tool.before shell '{"command":"rm -rf /"}'
-./target/debug/examples/host aw.sec-core.yaml tool.after shell '{"command":"echo safe"}'
+./target/debug/examples/host aw.sec-core.yaml tool.before Bash '{"command":"echo safe"}'
+./target/debug/examples/host aw.sec-core.yaml tool.before Bash '{"command":"rm -rf /"}'
+./target/debug/examples/host aw.sec-core.yaml tool.after Bash '{"command":"echo safe"}'
 ```
 
 These commands submit synthetic tool events; they do not execute the code being

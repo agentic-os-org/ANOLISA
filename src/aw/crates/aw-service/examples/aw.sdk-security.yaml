@@ -40,6 +40,7 @@ spec:
         version: 1
         mode: block
         unmapped_tool: error
+        # SDK Bash normalizes to bash; Qoder CLI keeps Bash instead.
         tools:
           bash: {language: bash, input_pointer: /command}
           execute_shell_command: {language: bash, input_pointer: /command}
@@ -65,6 +66,7 @@ spec:
         - id: scan-shell
           provider: security
           operation: scan_code
+          # Unlisted native tools and MCP calls skip this scanner.
           match:
             tools: ["native:qoder-sdk:Bash", "native:qwenpaw:execute_shell_command"]
           effects: [observe, block]

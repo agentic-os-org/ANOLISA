@@ -42,7 +42,9 @@
     "aw-exec/test/packages",
     "aw-cli/test/qoder_sdk",
     "aw-cli/test/native_configuration",
-    "aw-config/test/native_sources"
+    "aw-config/test/native_sources",
+    "aw-provider-sec-core/test/coverage",
+    "aw-host/test/tool_matching"
   ],
   "cases": {
     "package-doctor-files": {
@@ -864,6 +866,30 @@
     "package-current-source-version-contract": {
       "target": "aw-package/lib/aw_package",
       "test": "store::tests::database::stored_versions_and_source_commits_use_the_current_description_contract"
+    },
+    "coverage-templates": {
+      "target": "aw-provider-sec-core/test/coverage",
+      "test": "templates_scan_declared_tools_and_leave_other_native_tools_unchecked"
+    },
+    "coverage-failures": {
+      "target": "aw-provider-sec-core/test/coverage",
+      "test": "selected_faults_block_before_handler_dispatch_and_preserve_failure_identity"
+    },
+    "coverage-completion": {
+      "target": "aw-provider-sec-core/test/coverage",
+      "test": "generated_completion_observation_uses_the_same_declared_coverage"
+    },
+    "coverage-extraction": {
+      "target": "aw-provider-sec-core/test/coverage",
+      "test": "invalid_extraction_never_calls_scanner_and_python_uses_its_declared_language"
+    },
+    "coverage-native-identity": {
+      "target": "aw-host/test/tool_matching",
+      "test": "selected_native_hooks_reject_invalid_identity_before_execution"
+    },
+    "coverage-provider-example": {
+      "target": "aw-provider-sec-core/test/coverage",
+      "test": "provider_example_covers_real_qoder_bash_with_fail_closed_defaults"
     }
   },
   "agents": {
@@ -893,7 +919,8 @@
       ],
       "security": [
         "security-retry",
-        "scope-native-skips"
+        "scope-native-skips",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "final-replacement"
@@ -948,7 +975,8 @@
       ],
       "security": [
         "security-retry",
-        "scope-native-skips"
+        "scope-native-skips",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "final-replacement",
@@ -982,7 +1010,8 @@
       ],
       "security": [
         "security-retry",
-        "scope-native-skips"
+        "scope-native-skips",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "final-replacement"
@@ -1014,7 +1043,8 @@
       ],
       "security": [
         "security-retry",
-        "scope-native-skips"
+        "scope-native-skips",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "final-replacement",
@@ -1071,7 +1101,8 @@
       "security": [
         "security-retry",
         "scope-native-skips",
-        "scope-pi-order"
+        "scope-pi-order",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "final-replacement",
@@ -1121,7 +1152,8 @@
       ],
       "security": [
         "security-retry",
-        "scope-native-skips"
+        "scope-native-skips",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "final-replacement"
@@ -1203,7 +1235,8 @@
         "qwenpaw-resident-report",
         "qwenpaw-resident-denial",
         "qwenpaw-resident-registration",
-        "qwenpaw-withhold-reload-rejection"
+        "qwenpaw-withhold-reload-rejection",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "final-replacement",
@@ -1256,7 +1289,8 @@
         "scope-native-skips",
         "scope-qoder-sdk-order",
         "qoder-sdk-strict-post",
-        "qoder-sdk-private-fence"
+        "qoder-sdk-private-fence",
+        "coverage-native-identity"
       ],
       "tokenless": [
         "security-retry",
@@ -1270,7 +1304,12 @@
       "security-error",
       "security-cancel",
       "security-observe",
-      "security-budget"
+      "security-budget",
+      "coverage-templates",
+      "coverage-failures",
+      "coverage-completion",
+      "coverage-extraction",
+      "coverage-provider-example"
     ],
     "tokenless": [
       "compression-bound",
