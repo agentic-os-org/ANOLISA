@@ -27,9 +27,48 @@ MARKETPLACE_NAME="anolisa-${COMPONENT}"
 PLUGIN_ID="${COMPONENT}@${MARKETPLACE_NAME}"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this installer with exit 1 before it can say why, and unlike the detector this
+# script registers a marketplace and installs a plugin. Resolve HOME once and
+# derive every user-scope path from it, so an explicit CLAUDE_HOME override keeps
+# working and a missing home is reported before the marketplace is registered.
+#
+# CLAUDE_HOME is the adapter's own configuration directory -- $HOME/.claude --
+# which is what every other *_HOME override in this component means (HERMES_HOME
+# is $HOME/.hermes, CODEX_HOME is $HOME/.codex). It is not the home root: a
+# caller who sets it to "$HOME/.claude" would otherwise have the settings file
+# looked up at "$HOME/.claude/.claude/settings.json", and the uninstall would
+# report success without having touched the real registration.
+HOME_DIR="${HOME:-}"
+# A relative HOME would resolve every path below against whatever directory
+# the caller happened to be in. A home has to be an absolute path; anything
+# else is treated as no home at all, which is the case the guard below
+# already reports.
+case "$HOME_DIR" in
+    /*) ;;
+    [A-Za-z]:[\\/]*) ;;
+    *) HOME_DIR="" ;;
+esac
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+CLAUDE_HOME="${CLAUDE_HOME:-${HOME_DIR:+$HOME_DIR/.claude}}"
+export PATH="${USER_LOCAL_BIN}/usr/local/bin:$PATH"
 
 echo "[${COMPONENT}] Installing ${AGENT} plugin..."
+
+if [ -z "$CLAUDE_HOME" ]; then
+    echo "[${COMPONENT}] Cannot resolve the Claude Code configuration directory: HOME is unset and CLAUDE_HOME is not set." >&2
+    echo "[${COMPONENT}] Set HOME or CLAUDE_HOME to the Claude Code configuration directory, then retry." >&2
+    exit 1
+fi
+
+# The CLI reads its own configuration directory from the environment, so an
+# explicit override has to reach it -- otherwise the guard below passes while
+# the CLI still resolves a different directory and writes somewhere this
+# script knows nothing about. CLAUDE_CONFIG_DIR is the name the CLI itself
+# uses; it is derived from CLAUDE_HOME only when the caller did not set it.
+CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME}"
+export CLAUDE_CONFIG_DIR
 
 if ! command -v "$CLAUDE_BIN" &>/dev/null; then
     echo "[${COMPONENT}] claude CLI not found (CLAUDE_BIN=${CLAUDE_BIN}) — skipping plugin installation."
