@@ -204,6 +204,7 @@ export function installSessionBridge(session, scope = null) {
       if (config.scope) await config.scope.finish(identity.invocation_id);
       return denied;
     }
+    if (config.scope) await config.scope.validate();
     active.set(call, { identity, object: context.toolCall });
     return original;
   };

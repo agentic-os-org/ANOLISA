@@ -50,6 +50,13 @@ impl Runtime {
                 sequence,
                 call_id,
             } => self.finish_invocation(&instance_id, sequence, &call_id, deadline),
+            Operation::WatchScope { instance_id, pid } => self.watch_scope(&instance_id, pid),
+            Operation::CheckScope {
+                instance_id,
+                pid,
+                policy_revision,
+                valid,
+            } => self.check_scope(&instance_id, pid, &policy_revision, valid),
             Operation::ScopePolicy { instance_id } => self.scope_policy(&instance_id),
             Operation::AcknowledgeScope { instance_id } => self.acknowledge_scope(&instance_id),
             Operation::OwnInstance { instance_id, pid } => self.own_instance(&instance_id, pid),

@@ -59,9 +59,15 @@ class Ledger:
     def check(self):
         if self.closed or self.environment is None:
             raise RuntimeError("scope unavailable")
+        probe = getattr(self, "probe", None)
+        if probe is not None:
+            probe()
 
     async def open(self, cwd, environment):
         self.environment = dict(environment)
+
+    async def validate(self):
+        self.check()
 
     async def register(self, sequence, call_id, name, arguments):
         self.check()

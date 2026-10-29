@@ -187,6 +187,8 @@ class ResidentMiddleware(MiddlewareBase):
         self.evaluate = evaluate
         self.context = context
         self.scope = Scope(self.config)
+        self.scope.probe = self.check_seams
+        self.scope.on_failure = self.bridge_failed
         self.active: dict[str, Invocation] = {}
         self.sequence = 0
         self.failed = False
@@ -210,6 +212,14 @@ class ResidentMiddleware(MiddlewareBase):
         self.scope.check()
         if self.failed or self.agent is None:
             raise ResidentFailure("AW Agent admission or native execution failed")
+    def bridge_failed(self, error):
+        self.failed = True
+
+    def check_seams(self):
+        if self.failed:
+            raise ResidentFailure("AW Agent native execution failed")
+        if self.agent is None:
+            raise ResidentFailure("AW Agent admission is incomplete")
         # Native HTTP readiness can precede the plugin's assembly acknowledgement.
         if not all(hasattr(self.agent, name) for name in (
                 "_aw_managed_acting_impl", "_aw_managed_parser",

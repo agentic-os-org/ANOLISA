@@ -222,3 +222,17 @@ fn sdk_and_cli_releases_reach_readiness_checks_without_a_version_allowlist() {
         service.released(&fixture);
     }
 }
+
+#[test]
+fn shared_python_scope_monitors_failure_and_joins_concurrent_cleanup() {
+    let fixture = Fixture::new();
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/scope_contract.py"));
+    let output = fixture.run(command);
+    let report = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && report.contains("Ran 5 tests"),
+        "{report}"
+    );
+}

@@ -12,6 +12,20 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 `status` lists instances; `inspect` shows Provider summaries. Exit all Agents sharing this configuration before stopping AW, then use `status` to confirm shutdown. sec-core and AgentSight services have their own owners.
 
+Resident Pi/Claude SDK, Qoder SDK and QwenPaw tasks expose
+`instances[].scope_validity` in status. `native_alive` reports worker liveness;
+`covered_bridge` reports the monitored AW path. A `failed` bridge blocks covered
+calls while independent healthy tasks continue. Drain and close the failed task,
+then create a new managed task. Unconfirmed native cleanup requires restarting
+its owner. Calls are never replayed automatically; capabilities outside AW
+coverage retain native behavior.
+
+`inspect --json` includes `service.resident_scopes` counts for `native_alive`,
+`ready`, `failed`, `pending` and `unmonitored`. Startup readiness alone does not
+prove continuing validity. Idle checks run two seconds after the prior check
+finishes; the service blocks scopes without a successful check for fifteen
+seconds. `null` means the connected service did not supply these counts.
+
 ## Check installation
 
 For local Provider extensions, reuse `AW_EXTENSION_PREFIX` from installation.

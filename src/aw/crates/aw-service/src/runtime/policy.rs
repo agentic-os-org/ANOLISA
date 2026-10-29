@@ -232,6 +232,7 @@ impl Runtime {
             let state = instance.reload.as_ref();
             json!({"instance_id":id,"target":instance.host.target(),"policy_revision":instance.host.revision(),
                 "parent_instance_id":owners.get(id).and_then(|owner| owner.parent.as_ref()),
+                "scope_validity":owners.get(id).map(|owner| owner.validity_status()),
                 "adapter":instance.host.capabilities().adapter,"native_version":instance.host.capabilities().version,
                 "entrypoint":instance.host.capabilities().entrypoint,"cwd":instance.context.cwd,
                 "reloadable":state.is_some(),"resident_reload":state.is_some_and(|s| s.resident),"ready":state.is_some_and(|s| s.ready),

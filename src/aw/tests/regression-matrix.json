@@ -890,6 +890,22 @@
     "coverage-provider-example": {
       "target": "aw-provider-sec-core/test/coverage",
       "test": "provider_example_covers_real_qoder_bash_with_fail_closed_defaults"
+    },
+    "resident-bridge-isolation": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::bridge_failure_fences_dispatch_but_retains_cleanup_and_isolates_siblings"
+    },
+    "resident-bridge-expiry": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::expired_bridge_cannot_renew_or_reclaim_live_owner"
+    },
+    "resident-bridge-generation": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::bridge_watch_rejects_wrong_worker_and_revision_without_reviving_old_scope"
+    },
+    "python-scope-validity": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "shared_python_scope_monitors_failure_and_joins_concurrent_cleanup"
     }
   },
   "agents": {
@@ -971,7 +987,11 @@
         "invocation-legacy-used",
         "invocation-retire-close-race",
         "scope-native-skips",
-        "claude-response-cleanup"
+        "claude-response-cleanup",
+        "resident-bridge-isolation",
+        "resident-bridge-expiry",
+        "resident-bridge-generation",
+        "python-scope-validity"
       ],
       "security": [
         "security-retry",
@@ -1096,7 +1116,10 @@
         "invocation-legacy-used",
         "invocation-retire-close-race",
         "scope-native-skips",
-        "scope-pi-close"
+        "scope-pi-close",
+        "resident-bridge-isolation",
+        "resident-bridge-expiry",
+        "resident-bridge-generation"
       ],
       "security": [
         "security-retry",
@@ -1222,7 +1245,11 @@
         "resident-policy-owner-exit",
         "resident-policy-capacity",
         "resident-policy-audit-fence",
-        "resident-policy-deadline"
+        "resident-policy-deadline",
+        "resident-bridge-isolation",
+        "resident-bridge-expiry",
+        "resident-bridge-generation",
+        "python-scope-validity"
       ],
       "security": [
         "security-retry",
@@ -1282,7 +1309,10 @@
         "qoder-sdk-resident-reload",
         "qoder-sdk-startup-policy-receipt",
         "resident-policy-audit-fence",
-        "resident-policy-deadline"
+        "resident-policy-deadline",
+        "resident-bridge-isolation",
+        "resident-bridge-expiry",
+        "resident-bridge-generation"
       ],
       "security": [
         "security-retry",

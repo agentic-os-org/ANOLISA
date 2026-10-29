@@ -63,6 +63,7 @@ export async function runWorker(app, sdk, core, args) {
       const nativeStream = session.agent.streamFunction;
       if (typeof nativeStream !== "function") throw new Error("Pi requires its public model stream function");
       const bridge = installSessionBridge(session, scope);
+      scope.onFailure = () => session.agent.abort();
       const stream = bridge.model(nativeStream);
       // The SDK may schedule a final turn after abort; gate before any model transport.
       Object.defineProperty(session.agent, "streamFunction", {

@@ -801,6 +801,18 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "resident_scopes": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "native_alive": {"type": "integer", "minimum": 0},
+                "ready": {"type": "integer", "minimum": 0},
+                "failed": {"type": "integer", "minimum": 0},
+                "pending": {"type": "integer", "minimum": 0},
+                "unmonitored": {"type": "integer", "minimum": 0}
+              },
+              "required": ["native_alive", "ready", "failed", "pending", "unmonitored"]
+            },
             "state": {
               "enum": [
                 "online",

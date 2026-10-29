@@ -170,8 +170,11 @@ fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
                     .contains("bridge_process_mismatch"));
                 assert!(fixture.calls("invoke").is_empty());
             } else {
-                for action in ["open", "acknowledge", "invoke", "close"] {
+                for action in ["open", "acknowledge", "watch", "check", "invoke", "close"] {
                     assert_eq!(result[action], 0, "{action}: {result}");
+                }
+                for action in ["invalid", "renew", "blocked"] {
+                    assert_eq!(result[action], 1, "{action}: {result}");
                 }
                 let calls = fixture.calls("invoke");
                 assert_eq!(calls.len(), 1);

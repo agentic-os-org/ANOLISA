@@ -56,6 +56,9 @@ class Scope:
     def check(self):
         pass
 
+    async def validate(self):
+        self.check()
+
     async def register(self, sequence, call_id, name, arguments):
         pass
 

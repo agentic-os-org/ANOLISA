@@ -170,6 +170,36 @@ Upgrade CLI and daemon together to `aw-service/v1alpha7` after draining old
 sessions and stopping the old daemon. The configuration and Provider protocols
 retain their versions. Rollback requires the same drain/stop procedure.
 
+### Continuous bridge validity
+
+Shared JS/Python consumers start `watch_scope` after task acknowledgement and
+invocation admission. `check_scope` binds the original worker PID and immutable
+policy revision to the existing task owner; the outer binding pins service and
+task generations. Covered registrations and Hook dispatch recheck validity.
+Qoder verifies installed producer, control-dispatch and transport functions;
+QwenPaw verifies its existing middleware, parser and Toolkit dispatch seams.
+
+Idle checks run two seconds after the previous check completes, with a six-second
+CLI timeout. The service rejects a scope after fifteen seconds without a
+successful check, even if its worker remains alive. Explicit probe failure or a
+revision mismatch permanently fences that scope. Reconnecting cannot revive it.
+These checks preserve the declared coverage boundary: native capabilities outside
+AW coverage retain their original authorization behavior.
+
+Failure cancels active Provider work while retaining the live task's ownership
+until native callbacks, work and credentials finish cleanup. Invocation retirement
+remains available; independent sibling scopes retain their own validity.
+Concurrent closes join one cleanup. A late open response is closed without
+acknowledgement. Recovery requires a fresh scope after cleanup and never replays
+side-effecting calls.
+
+`status.instances[].scope_validity` separates `native_alive` from `covered_bridge`
+(`pending`, `ready`, `failed`, `unavailable`, `unmonitored`).
+`inspect.service.resident_scopes` summarizes task counts; older-service data is
+`null`. Startup `ready` cannot establish continuing validity. New consumers reject
+services without watch operations at task admission; drain existing tasks and
+upgrade CLI, adapters and service together.
+
 ## Shared event lifetime
 
 An Adapter opens an event once, then sends individual `invoke_step` requests in

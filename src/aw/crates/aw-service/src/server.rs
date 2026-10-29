@@ -195,6 +195,7 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) 
                     | Operation::CloseEvent { .. }
                     | Operation::CloseHookEvent { .. }
                     | Operation::FinishInvocation { .. }
+                    | Operation::CheckScope { .. }
             )
         {
             return Err(runtime.overload("connection_limit"));

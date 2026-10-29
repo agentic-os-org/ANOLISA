@@ -12,15 +12,14 @@ export function query(input) {
   query.options = input.options;
   const close = query.close.bind(query);
   query.close = async () => { await state.closing?.(); await close(); };
+  const process = query.processControlRequest.bind(query);
   query.processControlRequest = async (frame, signal) => {
     const request = frame.request;
+    if (request.subtype !== "mcp_message") return process(frame, signal);
     const server = input.options.mcpServers[request.server_name];
     const tool = server.tools.find(tool => tool.name === request.message.params.name);
     return { mcp_response: await tool.handler(request.message.params.arguments, { signal }) };
   };
-  const dispatch = query.handleControlRequest.bind(query);
-  query.handleControlRequest = frame => frame.request.subtype === "mcp_message" ?
-    query.processControlRequest(frame, new AbortController().signal) : dispatch(frame);
   state.query = query;
   return query;
 }

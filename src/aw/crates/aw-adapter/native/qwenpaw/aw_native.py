@@ -114,6 +114,9 @@ def bind_toolkit(agent):
             call = current_call.get()
             owns = (call is not None and not call.native_input_checked
                     and call.owner.agent.toolkit is agent.toolkit and tool_call.id == call.call.id)
+            if owns:
+                await call.owner.scope.validate()
+                call.check(tool_call)
             stream = toolkit_call(tool_call, state)
             first = True
             try:

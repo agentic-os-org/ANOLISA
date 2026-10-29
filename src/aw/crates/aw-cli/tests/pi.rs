@@ -335,7 +335,7 @@ fn execution_drain_fences_registration_and_transport_failures() {
     let output = fixture.run(command);
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success() && report.contains("# pass 5") && report.contains("# fail 0"),
+        output.status.success() && report.contains("# pass 9") && report.contains("# fail 0"),
         "{report}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );

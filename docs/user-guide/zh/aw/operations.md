@@ -12,6 +12,17 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 `status` 查看实例，`inspect` 查看 Provider 摘要。先退出共享这份配置的所有 Agent，再停止 AW，并用 `status` 确认服务已退出。sec-core 和 AgentSight 服务由各自管理者维护。
 
+Pi/Claude SDK、Qoder SDK 与 QwenPaw 常驻任务在 status 的
+`instances[].scope_validity` 中报告状态。`native_alive` 表示 worker 存活，
+`covered_bridge` 表示受监测的 AW 通路。桥接为 `failed` 时，覆盖内调用被拒绝，
+独立健康任务继续运行。先排空并关闭失败任务，再创建新的受管任务；原生清理无法
+确认时需重启其 owner。调用不会自动重放，AW 范围外能力保留原生行为。
+
+`inspect --json` 的 `service.resident_scopes` 汇总 `native_alive`、`ready`、
+`failed`、`pending` 和 `unmonitored` 数量。启动 ready 只能说明启动时已就绪。
+空闲检查在上次检查结束两秒后运行；十五秒未成功检查时，服务拒绝该 scope 的执行。
+汇总为 `null` 表示所连服务未提供这些数据。
+
 ## 检查安装
 
 检查本地 Provider 扩展时，沿用安装时的 `AW_EXTENSION_PREFIX`。

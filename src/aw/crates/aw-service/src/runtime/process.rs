@@ -60,6 +60,15 @@ impl Process {
         Ok(())
     }
 
+    /// Require the exact worker identity recorded at task admission.
+    pub(super) fn matches(&self, pid: u32) -> Result<()> {
+        self.check()?;
+        if self.pid != pid {
+            return Err(rejected("scope_worker_mismatch"));
+        }
+        Ok(())
+    }
+
     /// Require the callback process to descend from the selected native process.
     pub fn corroborate(&self, mut pid: u32) -> Result<()> {
         self.check()?;

@@ -50,7 +50,7 @@ pub fn snapshot(
             match value.call_cancellable(Operation::Status, expires(), cancelled) {
                 Ok(status) if status["audit_healthy"].is_boolean() => {
                     service = json!({"state":"online","generation":value.identity().generation,
-                        "audit_healthy":status["audit_healthy"],"adoption":"unverified","code":null});
+                        "audit_healthy":status["audit_healthy"],"resident_scopes":scope_summary(&status),"adoption":"unverified","code":null});
                     recent = match value.call_cancellable(
                         Operation::RecentExecutions,
                         expires(),
@@ -159,6 +159,7 @@ pub fn snapshot(
                     .as_bool()
                     .ok_or_else(|| rejected("inspect_status_invalid"))?;
                 service["audit_healthy"] = json!(healthy);
+                service["resident_scopes"] = scope_summary(&status);
                 Ok(())
             });
         if let Err(error) = refreshed {
@@ -181,6 +182,34 @@ pub fn snapshot(
     protocol
         .check_panel(&bytes)
         .map_err(|_| rejected("inspect_snapshot_invalid"))
+}
+
+fn scope_summary(status: &Value) -> Value {
+    let Some(instances) = status["instances"].as_array() else {
+        return Value::Null;
+    };
+    let mut summary = json!({"native_alive":0,"ready":0,"failed":0,"pending":0,"unmonitored":0});
+    for instance in instances
+        .iter()
+        .filter(|instance| instance["parent_instance_id"].is_string())
+    {
+        let validity = &instance["scope_validity"];
+        let Some(native_alive) = validity["native_alive"].as_bool() else {
+            return Value::Null;
+        };
+        if native_alive {
+            summary["native_alive"] = json!(summary["native_alive"].as_u64().unwrap_or(0) + 1);
+        }
+        let state = match validity["covered_bridge"].as_str() {
+            Some("ready") => "ready",
+            Some("pending") => "pending",
+            Some("failed" | "unavailable") => "failed",
+            Some("unmonitored") => "unmonitored",
+            _ => return Value::Null,
+        };
+        summary[state] = json!(summary[state].as_u64().unwrap_or(0) + 1);
+    }
+    summary
 }
 
 fn timestamp() -> Result<u64> {
@@ -293,6 +322,31 @@ mod tests {
     use super::*;
     use crate::{ipc, Identity, Request, Response, VERSION};
     use std::{fs, os::unix::net::UnixListener, thread};
+
+    #[test]
+    fn resident_summary_separates_liveness_from_bridge_validity() {
+        assert_eq!(scope_summary(&json!({})), Value::Null);
+        let instances = ["ready", "failed", "pending", "unmonitored", "unavailable"]
+            .into_iter()
+            .map(|state| {
+                json!({"parent_instance_id":"root",
+                "scope_validity":{"native_alive":state != "unavailable","covered_bridge":state}})
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scope_summary(&json!({"instances":instances})),
+            json!({"native_alive":4,"ready":1,"failed":2,"pending":1,"unmonitored":1})
+        );
+    }
+
+    #[test]
+    fn legacy_child_scope_validity_remains_unknown() {
+        let legacy = json!({"instances":[
+            {"instance_id":"root","parent_instance_id":null},
+            {"instance_id":"child","parent_instance_id":"root"}
+        ]});
+        assert_eq!(scope_summary(&legacy), Value::Null);
+    }
 
     #[test]
     fn final_status_refreshes_audit_health_and_rejects_invalid_health() {

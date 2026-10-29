@@ -227,3 +227,31 @@ test("MCP tracking suspension preserves approved parsed arguments without a priv
   assert.equal(changed, true);
   assert.equal(seen, "approved");
 });
+
+for (const cancel of [false, true]) {
+  test(`MCP validity wait preserves native cancellation ownership (${cancel})`, { timeout: 5000 }, async t => {
+    const entered = deferred(), release = deferred();
+    let handlers = 0, credentials = 0;
+    const f = await fixture(t, undefined, { mcpServers: { fixture: server(async () => {
+      handlers++;
+      return { content: [] };
+    }) }, awExecutionFactory: async () => { credentials++; return lease(); } }, []);
+    f.scope.validate = async () => { entered.resolve(); await release.promise; };
+    const id = "validity-wait";
+    try {
+      call(f, id);
+      await entered.promise;
+      if (cancel) {
+        f.transport.emit({ type: "control_cancel_request", request_id: id });
+        await pause();
+      }
+    } finally { release.resolve(); }
+    if (!cancel) assert.equal((await f.response(id)).subtype, "success");
+    await until(() => f.resident.callbacks.size === 0, "native dispatch must drain");
+    assert.equal(handlers, cancel ? 0 : 1);
+    assert.equal(credentials, cancel ? 0 : 1);
+    assert.equal(f.transport.responses.has(id), !cancel);
+    assert.equal(f.resident.query.pendingInboundRequests.has(id), false);
+    assert.equal(f.scope.invocations.size, 0);
+  });
+}

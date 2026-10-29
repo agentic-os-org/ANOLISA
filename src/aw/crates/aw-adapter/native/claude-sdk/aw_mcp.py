@@ -159,6 +159,7 @@ class ManagedServer(dict):
         if denial is not None:
             await bridge.invocations.finish(entry)
             return denial
+        await bridge.scope.validate()
         entry.phase = "allowed"
         try:
             result = await tool.handler(_copy_json(arguments))

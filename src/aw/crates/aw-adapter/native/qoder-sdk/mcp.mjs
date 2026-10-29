@@ -37,7 +37,8 @@ export function managedMcpServer(sdk, options) {
       // A schema may retain parsed references. Capture the consumer input before
       // tracking or credential acquisition yields to application code.
       const input = structuredClone(args[0]);
-      return ticket.resident.track(() => {
+      return ticket.resident.track(async () => {
+        await ticket.resident.scope.validate();
         ticket.resident.scope.checkExecution(ticket.generation);
         if (ticket.signal?.aborted) throw new Error("AW MCP dispatch was cancelled before handler entry");
         if (ticket.resident.executionOwner)

@@ -14,7 +14,7 @@ const missingSeams = [
   ["recordInboundSessionMessage", query => { delete query.recordInboundSessionMessage; },
     /recordInboundSessionMessage/],
   ["transport.write", query => { delete query.transport.write; }, /native control response transport/],
-  ["processControlRequest", query => { delete query.processControlRequest; }, /native MCP dispatch seam/],
+  ["processControlRequest", query => { delete query.processControlRequest; }, /native control dispatch seam/],
 ];
 
 for (const [name, remove, message] of missingSeams) {
@@ -503,3 +503,22 @@ test("native close can drain past the old twelve-second deadline", { timeout: 50
     t.mock.timers.reset();
   }
 });
+
+for (const name of ["recordInboundSessionMessage", "handleControlRequest", "transport.write"]) {
+  test(`removed ${name} after first readiness fences only its Query`, { timeout: 5000 }, async t => {
+    const first = fixture(t), second = fixture(t);
+    first.state.importGate.resolve();
+    second.state.importGate.resolve();
+    assert((await first.create()).value);
+    assert((await second.create()).value);
+    if (name === "transport.write") first.state.query.transport.write = () => {};
+    else first.state.query[name] = () => {};
+    assert.throws(() => first.scope.checkExecution(), /seam was removed/);
+    assert(first.scope.failed);
+    second.scope.checkExecution();
+    first.state.closeGate.resolve();
+    second.state.closeGate.resolve();
+    await first.resident.close();
+    await second.resident.close();
+  });
+}

@@ -203,6 +203,25 @@ pub enum Operation {
         instance_id: String,
     },
 
+    /// Start continuous validity checking on an acknowledged task scope.
+    WatchScope {
+        /// Task identity, already bound to the outer service generation.
+        instance_id: String,
+        /// Native worker PID; must match the original scope owner.
+        pid: u32,
+    },
+    /// Validate the installed bridge against its immutable task policy.
+    CheckScope {
+        /// Previously watched task scope.
+        instance_id: String,
+        /// Original native worker PID.
+        pid: u32,
+        /// Revision returned by WatchScope; a mismatch permanently fences the scope.
+        policy_revision: String,
+        /// Whether the native owner still observes every required installed seam.
+        valid: bool,
+    },
+
     /// Enable producer-sequenced reclamation on a fresh owned binding.
     EnableInvocations {
         /// Owned binding whose adapter supplies stable producer identities.

@@ -267,6 +267,8 @@ class ScopePolicyTests(unittest.IsolatedAsyncioTestCase):
                 return 0, json.dumps(snapshot).encode()
             if action == "enable":
                 return 0, b'{"invocations_per_binding":8}'
+            if action == "watch":
+                return 0, json.dumps({"policy_revision": "a" * 64, "interval_ms": 2000}).encode()
             return 0, b'{}'
         scope = SCOPE.Scope({"adapter": "qwenpaw"})
         with patch.object(SCOPE, "command", command):
@@ -279,7 +281,7 @@ class ScopePolicyTests(unittest.IsolatedAsyncioTestCase):
             await scope.close()
             self.assertIsNotNone(scope.reservation)
             await scope.release()
-        self.assertEqual(calls, ["reserve", "open", "policy", "acknowledge", "enable", "close", "release"])
+        self.assertEqual(calls, ["reserve", "open", "policy", "acknowledge", "enable", "watch", "close", "release"])
         self.assertIsNone(scope.reservation)
 
     async def test_unconfirmed_child_close_prevents_root_release(self):

@@ -19,6 +19,9 @@ export function query({ options }) {
     },
     recordInboundSessionMessage() {},
     async handleControlRequest(frame) {
+      return this.processControlRequest(frame, signal);
+    },
+    async processControlRequest(frame, signal) {
       const { input, callback_id } = frame.request;
       return await callbacks.get(callback_id)(input, input.tool_use_id, { signal });
     },

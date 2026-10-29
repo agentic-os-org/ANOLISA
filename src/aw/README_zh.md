@@ -78,6 +78,10 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需�
 [能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)按 Adapter 和启动模式说明
 结果处理、MCP 与策略更新的差异，并链接已验证基线与接线步骤。
 
+
+常驻任务在空闲期间和覆盖内派发前重新核验服务与 owner 有效性。状态分别报告 worker
+存活和 AW 桥接故障；恢复操作见[运维指南](../../docs/user-guide/zh/aw/operations.md)。
+
 ## 文档导航
 
 | 任务 | 文档 |

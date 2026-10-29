@@ -45,6 +45,7 @@ class ResidentBridge(Bridge):
     def __init__(self) -> None:
         super().__init__()
         self.scope = Scope(self.config)
+        self.scope.on_failure = self.scope_failed
         self.failure: str | None = None
         self.mcp_names: set[str] = set()
         self.mcp_servers: set[str] = set()
@@ -52,6 +53,11 @@ class ResidentBridge(Bridge):
         self.stop = None
         self.stopped = False
         self.stop_future: asyncio.Task[None] | None = None
+
+    def scope_failed(self, error: BaseException) -> None:
+        self.failure = "AW managed task stopped after bridge validity failure"
+        if self.stop is not None:
+            self.request_stop()
 
     async def _transport(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
         return await self.scope.invoke(hook, payload)

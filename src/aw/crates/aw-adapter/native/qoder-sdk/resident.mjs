@@ -50,6 +50,7 @@ export class Resident {
     this.config = config;
     this.id = randomUUID();
     this.scope = new Scope(config, "qoder-sdk");
+    this.scope.onFailure = error => this.fail(error);
     this.identities = new Identities(this.scope, error => this.fail(error));
     this.identities.beforeRetire = entry => this.nativeCommands?.complete(entry);
     this.callbacks = new Set();
@@ -169,6 +170,7 @@ export class Resident {
             const result = await callback(payload, id, context);
             checkExecutionCleanup();
             if (entry && event === "PreToolUse") {
+              await this.scope.validate();
               this.identities.check(entry, true);
               if (result?.hookSpecificOutput?.permissionDecision === "deny") {
                 entry.phase = "denied";
@@ -203,6 +205,7 @@ export class Resident {
       // a wrapper in PreTool would hide command-specific native deny rules.
       const result = await options.canUseTool(args[0], structuredClone(ticket.entry.input), args[2]);
       checkExecutionCleanup();
+      await this.scope.validate();
       this.identities.check(ticket.entry, true);
       if (result.behavior === "deny") {
         ticket.entry.phase = "denied";
@@ -326,16 +329,21 @@ export class Resident {
         query.transport.write(JSON.stringify({ type: "control_response", response: result }) + "\n");
         return Promise.resolve();
       }
-      return this.identities.dispatch.run(ticket, () => this.track(() => dispatch(frame), ticket.entry))
+      return this.identities.dispatch.run(ticket, () => {
+        // The SDK must register cancellation ownership before any validity RPC.
+        const pending = dispatch(frame);
+        return this.track(() => pending, ticket.entry);
+      })
         .finally(() => this.identities.pending.delete(ticket.id));
     };
-    if (this.mcp.size) {
-      if (typeof query.processControlRequest !== "function")
-        throw new Error("Qoder Query lacks native MCP dispatch seam");
-      const process = query.processControlRequest.bind(query);
-      query.processControlRequest = (frame, signal) =>
-        this.track(() => dispatchMcp(this, frame, signal, process));
-    }
+    if (typeof query.processControlRequest !== "function")
+      throw new Error("Qoder Query lacks native control dispatch seam");
+    const process = query.processControlRequest.bind(query);
+    query.processControlRequest = (frame, signal) => this.track(async () => {
+      await this.scope.validate();
+      if (signal?.aborted) throw new Error("AW native control request was cancelled before dispatch");
+      return this.mcp.size ? dispatchMcp(this, frame, signal, process) : process(frame, signal);
+    });
     query.close = () => this.close();
     query.return = async () => { await this.close(); return { done: true }; };
     const next = query.next.bind(query);
@@ -379,6 +387,14 @@ export class Resident {
     }
     for (const name of ["setMcpServers"])
       query[name] = () => { throw new Error(`${name} bypasses AW resident admission`); };
+    const seams = ["recordInboundSessionMessage", "handleControlRequest", "processControlRequest", "next", "streamInput"];
+    const installed = seams.map(name => [name, query[name]]);
+    const transport = query.transport, write = transport.write;
+    this.scope.probe = () => {
+      if (query.transport !== transport || transport.write !== write ||
+          installed.some(([name, callback]) => query[name] !== callback))
+        throw new Error("AW required Query dispatch seam was removed");
+    };
     if (query.readLoopPromise) {
       // Transport loss must reclaim the scope even when the application stops reading.
       query.readLoopPromise.then(() => this.close(), error => {

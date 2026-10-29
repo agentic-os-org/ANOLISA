@@ -508,3 +508,22 @@ test("managed MCP generation changes during Pre prevent native execution", { tim
   assert.equal(calls, 0);
   assert.equal(f.scope.invocations.size, 0);
 });
+
+test("Hook cancellation during validity check suppresses callback and response", { timeout: 5000 }, async t => {
+  const entered = deferred(), release = deferred();
+  let callbacks = 0;
+  const f = await fixture(t, async () => { callbacks++; return {}; });
+  f.scope.validate = async () => { entered.resolve(); await release.promise; };
+  try {
+    f.model("cancelled-hook");
+    f.hook("cancelled-hook", "validity-hook");
+    await entered.promise;
+    f.transport.emit({ type: "control_cancel_request", request_id: "validity-hook" });
+    await pause();
+  } finally { release.resolve(); }
+  for (let attempt = 0; f.resident.callbacks.size && attempt < 1000; attempt++) await pause();
+  assert.equal(f.resident.callbacks.size, 0);
+  assert.equal(callbacks, 0);
+  assert.equal(f.transport.responses.has("validity-hook"), false);
+  assert.equal(f.resident.query.pendingInboundRequests.has("validity-hook"), false);
+});

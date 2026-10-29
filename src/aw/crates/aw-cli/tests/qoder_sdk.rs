@@ -171,7 +171,7 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk/bridge.test.mjs"),
         );
-    // The bridge runs 120 Node tests, including deliberate deadline waits.
+    // The bridge suite includes deliberate deadline waits.
     let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(45));
     assert!(
         output.status.success(),
@@ -179,7 +179,7 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 120"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 123"));
 }
 
 #[test]

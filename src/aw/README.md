@@ -80,6 +80,11 @@ record the tested framework versions.
 The [capability matrix](../../docs/user-guide/en/aw/capabilities.md) compares result handling,
 MCP and policy updates by Adapter and launch mode, with links to verified baselines and setup.
 
+
+Resident tasks recheck service and owner validity during idle periods and before
+covered dispatch. Status separates live workers from failed AW bridges; see
+[operations](../../docs/user-guide/en/aw/operations.md) for recovery.
+
 ## Documentation
 
 | Task | Guide |
