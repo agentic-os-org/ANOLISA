@@ -42,7 +42,9 @@ pub struct MemoryService {
     /// the same session log into duplicate facts. Claimed through
     /// [`ConsolidationGuard`], which also releases it on unwind.
     consolidating: AtomicBool,
-    /// Cached consent configuration for memory sovereignty checks.
+    /// Last consent settings saved by this service. Authorization reads the file
+    /// again so changes by other clients take effect.
+    #[deprecated(note = "authorization always re-reads .anolisa/consent.toml")]
     pub consent_cache:
         std::sync::Arc<std::sync::Mutex<Option<crate::tools::memory_sovereignty::ConsentConfig>>>,
 }
@@ -142,6 +144,8 @@ impl MemoryService {
             mount_strategy_name: strategy_name,
             audit_counter: AtomicUsize::new(0),
             consolidating: AtomicBool::new(false),
+            // Preserve construction of the deprecated public field for compatibility.
+            #[allow(deprecated)]
             consent_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
@@ -355,7 +359,7 @@ impl MemoryService {
 
         // Check consent before running consolidation.
         if !crate::tools::memory_sovereignty::is_source_allowed(self, "auto-consolidation") {
-            tracing::info!("consolidation skipped: auto-consolidation denied by consent config");
+            tracing::info!("consolidation skipped: consent did not authorize this pass");
             return 0;
         }
 
