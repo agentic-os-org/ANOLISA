@@ -628,6 +628,13 @@ Options in `openclaw.plugin.json`:
 The previous response, TOON, skip-tool, and shell-tool configuration keys are removed; Core now
 owns those decisions.
 
+The separate optional `selective-claw` context engine persists the recall IDs of its latest
+successfully assembled context window. Its `expand_turn` tool can recover complete turns after cache
+eviction or restart; partial or rewritten turns without a complete archive anchor become
+unavailable after cache loss. Old window labels can silently resolve to different turns in
+the latest window, including across concurrent runs in one session. See the
+[context engine configuration and recall boundaries](../../docs/user-guide/en/tokenless/framework-integration.md#openclaw).
+
 ## Hermes Agent Plugin
 
 The plugin registers hooks at three Hermes events while Core owns the lifecycle policy:

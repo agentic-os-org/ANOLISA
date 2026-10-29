@@ -121,6 +121,11 @@ PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Cont
 默认值依次为 `true`、`true`、`true` 和 `false`。旧的 Response、TOON 与工具分类开关已经
 删除，所有压缩策略由 Core 统一决定。
 
+独立可选的 `selective-claw` 上下文引擎会持久保存最近一次成功组装的上下文窗口的召回编号。
+其 `expand_turn` 工具在缓存淘汰或重启后仍能恢复完整轮次；缺少完整归档锚点的局部或改写轮次
+在缓存丢失后将不可用。旧窗口标签可能静默解析为最新窗口中不同的轮次，同一会话的并发
+运行也受此限制。配置与召回边界见[上下文引擎说明](../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
+
 ### Agent 开发框架集成
 
 - **通用 Python SDK** — 面向任意 Agent 框架的生命周期 API、单项 Runtime 操作与统计查询。
