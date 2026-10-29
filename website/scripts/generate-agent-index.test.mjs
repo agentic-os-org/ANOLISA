@@ -86,12 +86,12 @@ enum Commands {
   return {root, paths, files};
 }
 
-function generate(root) {
+function generate(root, env = {}) {
   const result = spawnSync(process.execPath, [path.join(root, 'website/scripts/generate-agent-index.mjs')], {
     cwd: root,
     encoding: 'utf8',
     timeout: 30_000,
-    env: {...process.env, GITHUB_SHA: 'fixture-commit', SITE_URL: 'https://example.com', BASE_URL: '/'},
+    env: {...process.env, GITHUB_SHA: 'fixture-commit', SITE_URL: 'https://example.com', BASE_URL: '/', ...env},
   });
   assert.ifError(result.error);
   return result;
@@ -171,6 +171,55 @@ for (const migrated of [false, true]) {
     assert.equal(changelog, changelogSources.flatMap((source) => [
       `===== ${source} =====`, '', files[source], '',
     ]).join('\n'));
+  });
+
+  test(`includes current English contributor guides with ${migrated ? 'migrated' : 'legacy'} component paths`, async (t) => {
+    const {root, paths} = await createFixture(t, migrated);
+    const contributorFiles = {
+      'contribute/en/aw/building.md': '# Build AW\n\nAW build instructions.\n',
+      'contribute/en/cosh-ng/testing.md': '# Test cosh-ng\n\nShell test instructions.\n',
+      'CONTRIBUTING.md': '# Contribute\n\nRepository contribution requirements.\n',
+      [`${paths.anolisa}/CONTRIBUTING.md`]: '# Distribution contributor instructions\n',
+      [`${paths.tokenless}/CONTRIBUTING.md`]: '# Contribute to Tokenless\n',
+      [`${paths['copilot-shell']}/CONTRIBUTING.md`]: '# Shell contributor instructions\n',
+    };
+    const excludedFiles = {
+      'CONTRIBUTING_zh.md': '# Chinese repository contribution requirements\n',
+      'contribute/zh/aw/building.md': '# Chinese AW build instructions\n',
+      [`${paths.tokenless}/CONTRIBUTING_zh.md`]: '# Chinese Tokenless contribution requirements\n',
+      'src/unlisted/CONTRIBUTING.md': '# Unlisted component contribution requirements\n',
+      'deprecated/unlisted/CONTRIBUTING.md': '# Archived contribution requirements\n',
+    };
+    for (const [source, content] of Object.entries({...contributorFiles, ...excludedFiles})) {
+      const target = path.join(root, source);
+      await mkdir(path.dirname(target), {recursive: true});
+      await writeFile(target, content);
+    }
+
+    const baseUrl = migrated ? '/ANOLISA/' : '/';
+    const result = generate(root, {BASE_URL: baseUrl});
+    assert.equal(result.status, 0, result.stderr);
+    const output = path.join(root, 'website/.generated/static');
+    const index = JSON.parse(await readFile(path.join(output, 'agents/repo-index.json'), 'utf8'));
+    const fullDocumentation = await readFile(path.join(output, 'llms-full.txt'), 'utf8');
+    const currentContributors = Object.entries(contributorFiles)
+      .filter(([source]) => !source.startsWith('deprecated/'));
+    const bySource = (left, right) => left.source.localeCompare(right.source);
+    assert.deepEqual(index.documentation.slice(4).sort(bySource), currentContributors.map(([source]) => ({
+      source,
+      url: `https://github.com/agentic-os-org/ANOLISA/blob/main/${source}`,
+    })).sort(bySource));
+    assert.equal(new Set(index.documentation.map(({source}) => source)).size, index.documentation.length);
+    for (const [source, content] of currentContributors) {
+      assert.ok(fullDocumentation.includes(`===== ${source} =====\n\n${content}`), source);
+    }
+    for (const source of [...Object.keys(excludedFiles),
+      ...(migrated ? [`${paths['copilot-shell']}/CONTRIBUTING.md`] : [])]) {
+      assert.ok(!index.documentation.some((document) => document.source === source), source);
+      assert.ok(!fullDocumentation.includes(`===== ${source} =====`), source);
+    }
+    const llmsIndex = await readFile(path.join(output, 'llms.txt'), 'utf8');
+    assert.ok(llmsIndex.includes(`- Contribute: https://example.com${baseUrl}docs/contribute/\n`));
   });
 }
 

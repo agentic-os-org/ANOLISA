@@ -12,6 +12,8 @@ AgentSight 为保留的捕获 payload 设置限额，并在配对提前结束时
 任务持有打开的文件描述符，并在每个 4 MiB 窗口之间共享配置的进程 CPU 预算。事件所属线程只为
 未变更且仍有进程引用的文件安装全局 uprobe；符号和已知 offset 快路径继续同步执行。
 关停时取消并等待 worker 退出。首次遇到的静态 binary 在扫描期间仍是 best-effort 探测。
+SSL executable 扫描使用 SIMD 子串搜索，按 4 MiB 有界窗口保留特征重叠区。重叠匹配与跨窗口的
+起始位置均保持原有语义；inode 缓存与符号选择规则不变。
 
 ```mermaid
 flowchart LR
@@ -62,6 +64,11 @@ SQLite 为唯一活跃 sink 时也跳过 payload 延迟等待：完成的 captur
 恢复不需要重新注册。立即投递仍会调用不活跃 sink 的原有写入门控：落库过程中启用时不会丢弃当前
 调用，该调用可能带有 fallback session metadata；后续调用面对活跃的外部 sink 时继续使用原有解析
 等待窗口。
+
+GenAI session 与 conversation 解析每个调用只准备一次 lookup key，供 turn 驱逐与 crash drain 复用。
+相同的第一条及最后一条用户文本共享未完成的 SHA-256 状态。重复长文本通过完整字节比较复用前缀，
+缓存最多保留 2 MiB、64 个 entry；缓存驱逐不改变 anchor。Anchor 保存 domain-separated ID 与
+二进制 lookup digest，保持外部 ID 字节、进程及消息数量隔离和滑动 TTL 行为不变。
 
 SQLite completion 在获取连接锁前序列化 JSON。容量选择使用存储列的 `octet_length`，读取字节长度，
 避免持锁加载并逐字扫描整份 payload。投递仍为同步执行；这些修改缩短其临界区，不增加持久化队列。

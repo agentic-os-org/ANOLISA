@@ -24,10 +24,28 @@ use aya::programs::{Lsm, ProgramFd, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
 
 pub mod capability;
+#[cfg(test)]
+mod file_protection_delete_tests;
+mod file_protection_generation;
+mod file_protection_map_writer;
+mod file_protection_pinned_maps;
+#[cfg(test)]
+mod file_protection_rename_tests;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
 };
+pub use file_protection_generation::{
+    ActiveFileProtectionGeneration, FileProtectionDetachError, FileProtectionStaging,
+    InactiveFileProtectionGeneration,
+};
+pub use file_protection_map_writer::{
+    FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
+    FileProtectionMapWriter, FileProtectionSlot, FileProtectionSlotValue,
+    FileProtectionTargetValue, TreeGuard, TreePathIdentity, FILE_PROTECTION_MAP_CAPACITY,
+    FILE_PROTECTION_MAX_TARGETS, FILE_PROTECTION_NAME_MAX,
+};
+pub use file_protection_pinned_maps::PinnedFileProtectionMaps;
 
 const BPF_ANY: u64 = 0;
 const BPF_NOEXIST: u64 = 1;
@@ -217,6 +235,8 @@ pub const INODE_GUARD_UNLINK: u32 = 1;
 pub const INODE_GUARD_RENAME: u32 = 2;
 /// Inode guard flag: block write.
 pub const INODE_GUARD_WRITE: u32 = 4;
+/// Reserved ABI flag for directory-tree guards, separate from per-target operation flags.
+pub const INODE_GUARD_TREE: u32 = 8;
 
 /// Must match BPF `struct inode_guard_val` layout.
 #[repr(C)]
@@ -227,6 +247,91 @@ pub struct InodeGuardVal {
     pub rule_id: u32,
     pub _pad: u32,
 }
+
+// Mirrors BPF te_path_key; statx mount IDs must fit kernel mount.mnt_id (u32).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TreePathKey {
+    ino: u64,
+    dev: u32,
+    mnt_id: u32,
+    domain_id: u32,
+    generation: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyRootVal {
+    root_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyStableVal {
+    target_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicySlotKey {
+    parent: TreePathKey,
+    name_len: u32,
+    name: [u8; FILE_PROTECTION_NAME_MAX + 1],
+    // Explicit tail storage avoids indeterminate repr(C) padding in map keys.
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicySlotVal {
+    direct_mask: u64,
+    exact_exclude_mask: u64,
+    subtree_exclude_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyTargetKey {
+    domain_id: u32,
+    generation: u32,
+    target_id: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyTargetVal {
+    guard: InodeGuardVal,
+    flags: u32,
+    target_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyDomainVal {
+    generation: u32,
+    target_count: u32,
+    tree_mask: u64,
+    delete_mask: u64,
+    ordinary_write_mask: u64,
+    protection_set_id: u64,
+    guard: InodeGuardVal,
+}
+
+// The structured file-protection map ABI is shared with process.bpf.c by layout
+// alone; pin every key and value size/alignment so a C-side edit cannot silently
+// reinterpret staged generations. Sizes are the BTF sizes of the C structs.
+const _: () = assert!(std::mem::size_of::<InodeGuardVal>() == 16);
+const _: () = assert!(std::mem::size_of::<TreePathKey>() == 24);
+const _: () = assert!(std::mem::align_of::<TreePathKey>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicyRootVal>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicyStableVal>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicySlotKey>() == 288);
+const _: () = assert!(std::mem::align_of::<PolicySlotKey>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicySlotVal>() == 24);
+const _: () = assert!(std::mem::size_of::<PolicyTargetKey>() == 16);
+const _: () = assert!(std::mem::size_of::<PolicyTargetVal>() == 24);
+const _: () = assert!(std::mem::size_of::<PolicyDomainVal>() == 56);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -246,6 +351,14 @@ unsafe impl aya::Pod for FileDomainId {}
 unsafe impl aya::Pod for InodePathVal {}
 unsafe impl aya::Pod for FileId {}
 unsafe impl aya::Pod for InodeGuardVal {}
+unsafe impl aya::Pod for TreePathKey {}
+unsafe impl aya::Pod for PolicyRootVal {}
+unsafe impl aya::Pod for PolicyStableVal {}
+unsafe impl aya::Pod for PolicySlotKey {}
+unsafe impl aya::Pod for PolicySlotVal {}
+unsafe impl aya::Pod for PolicyTargetKey {}
+unsafe impl aya::Pod for PolicyTargetVal {}
+unsafe impl aya::Pod for PolicyDomainVal {}
 unsafe impl aya::Pod for CUpdate {}
 unsafe impl aya::Pod for CRule {}
 unsafe impl aya::Pod for ProcState {}
@@ -889,6 +1002,13 @@ fn pinned_engine_present_inner(
         "ts_root",
         "te_protected_pids",
         "te_inode_guard",
+        "te_policy_roots",
+        "te_policy_dirs",
+        "te_policy_stable",
+        "te_policy_slots",
+        "te_policy_targets",
+        "te_policy_domains",
+        "te_policy_slot_scratch",
         "te_inode_path",
     ] {
         if !paths.map(name).try_exists()? {
@@ -1328,6 +1448,7 @@ enum TracepointNeed {
     RecvAddr,
     FileIpcAdvanced,
     MmapAdvanced,
+    RenameCompat,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1341,6 +1462,24 @@ struct TracepointSpec {
 /// Tracepoint programs. The loader attaches only the subset required by the
 /// loaded hook set instead of attaching the entire object by default.
 const TRACEPOINTS: &[TracepointSpec] = &[
+    TracepointSpec {
+        name: "guard_rename_enter",
+        category: "raw_syscalls",
+        event: "sys_enter",
+        need: TracepointNeed::RenameCompat,
+    },
+    TracepointSpec {
+        name: "guard_rename_exit",
+        category: "raw_syscalls",
+        event: "sys_exit",
+        need: TracepointNeed::RenameCompat,
+    },
+    TracepointSpec {
+        name: "guard_rename_task_exit",
+        category: "sched",
+        event: "sched_process_exit",
+        need: TracepointNeed::RenameCompat,
+    },
     TracepointSpec {
         name: "handle_fork",
         category: "sched",
@@ -1792,7 +1931,9 @@ const LSM_PROGS: &[(&str, &str)] = &[
     ("enforce_file_mprotect", "file_mprotect"),
     ("enforce_path_truncate", "path_truncate"),
     ("enforce_path_unlink", "path_unlink"),
+    ("enforce_path_rmdir", "path_rmdir"),
     ("enforce_path_rename", "path_rename"),
+    ("enforce_path_rename_legacy", "path_rename"),
     ("enforce_socket_connect", "socket_connect"),
     ("enforce_socket_recvmsg", "socket_recvmsg"),
     ("enforce_task_kill", "task_kill"),
@@ -1943,7 +2084,18 @@ impl HookBudget {
     }
 }
 
+fn rename_compat_needed_for_arity(budget: HookBudget, arity: u32) -> bool {
+    budget.features & FEAT_BLOCK_FILE != 0 && !budget.file_open_only && arity == 4
+}
+
+fn rename_compat_needed(budget: HookBudget) -> bool {
+    path_rename_arity().is_ok_and(|arity| rename_compat_needed_for_arity(budget, arity))
+}
+
 fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
+    if spec.need == TracepointNeed::RenameCompat {
+        return rename_compat_needed(budget);
+    }
     if budget.suppress_dataflow_tracepoints {
         return (budget.file_open_only && budget.has_connect() && spec.name == "trace_connect")
             || matches!(
@@ -1953,6 +2105,7 @@ fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
     }
     match spec.need {
         TracepointNeed::Core => true,
+        TracepointNeed::RenameCompat => rename_compat_needed(budget),
         TracepointNeed::CoreExec => false,
         TracepointNeed::ExecArgs => true,
         TracepointNeed::FileOpen => budget.has_file_flow() || budget.has_open_rules(),
@@ -1996,7 +2149,9 @@ fn lsm_needed(
         | "enforce_file_truncate"
         | "enforce_path_truncate"
         | "enforce_path_unlink"
-        | "enforce_path_rename" => block_file,
+        | "enforce_path_rmdir"
+        | "enforce_path_rename"
+        | "enforce_path_rename_legacy" => block_file,
         _ => false,
     }
 }
@@ -2029,8 +2184,17 @@ fn lsm_needed_for_budget(
     )
 }
 
+fn rename_program_selected(name: &str) -> bool {
+    match name {
+        "enforce_path_rename" => path_rename_arity().is_ok_and(|arity| arity == 5),
+        "enforce_path_rename_legacy" => path_rename_arity().is_ok_and(|arity| arity == 4),
+        _ => true,
+    }
+}
+
 fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
     lsm_active
+        && rename_program_selected(name)
         && (name != "enforce_file_truncate" || lsm_prog_hook(name).is_none_or(lsm_hook_available))
         && lsm_needed_for_budget(
             name,
@@ -2082,6 +2246,48 @@ fn lsm_hook_available(hook: &str) -> bool {
         missing
     });
     !missing.contains(&hook)
+}
+
+// Vendor kernels backport hook signatures independently of their release number.
+// Refuse unknown BTF shapes instead of reading a guessed context slot.
+fn path_rename_arity() -> io::Result<u32> {
+    static ARITY: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
+    ARITY
+        .get_or_init(|| unsafe {
+            let btf = libbpf_sys::btf__load_vmlinux_btf();
+            if btf.is_null() || libbpf_sys::libbpf_get_error(btf.cast()) != 0 {
+                return Err("cannot read kernel BTF for path_rename".into());
+            }
+            let result = (|| {
+                let id = libbpf_sys::btf__find_by_name_kind(
+                    btf,
+                    c"bpf_lsm_path_rename".as_ptr(),
+                    libbpf_sys::BTF_KIND_FUNC,
+                );
+                if id < 0 {
+                    return Err("kernel BTF has no bpf_lsm_path_rename".into());
+                }
+                let func = libbpf_sys::btf__type_by_id(btf, id as u32);
+                if func.is_null() {
+                    return Err("invalid path_rename BTF function".into());
+                }
+                let proto = libbpf_sys::btf__type_by_id(btf, (*func).__bindgen_anon_1.type_);
+                if proto.is_null()
+                    || ((*proto).info >> 24) & 0x1f != libbpf_sys::BTF_KIND_FUNC_PROTO
+                {
+                    return Err("invalid path_rename BTF prototype".into());
+                }
+                match (*proto).info & 0xffff {
+                    arity @ (4 | 5) => Ok(arity),
+                    arity => Err(format!("unsupported path_rename BTF arity {arity}")),
+                }
+            })();
+            libbpf_sys::btf__free(btf);
+            result
+        })
+        .as_ref()
+        .copied()
+        .map_err(|message| err(message.clone()))
 }
 
 fn load_exec_tail_programs(bpf: &mut Ebpf) -> io::Result<()> {
@@ -2688,6 +2894,40 @@ impl PinnedEngine {
         Ok(())
     }
 
+    pub fn clear_file_protection_generations(&self) -> io::Result<()> {
+        let domains = self.clear_policy_map::<u32, PolicyDomainVal>("te_policy_domains");
+        if let Err(error) = domains {
+            return Err(err(format!(
+                "deactivate stale structured file-protection domains: {error}"
+            )));
+        }
+        let errors: Vec<_> = [
+            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_roots"),
+            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_dirs"),
+            self.clear_policy_map::<TreePathKey, PolicyStableVal>("te_policy_stable"),
+            self.clear_policy_map::<PolicySlotKey, PolicySlotVal>("te_policy_slots"),
+            self.clear_policy_map::<PolicyTargetKey, PolicyTargetVal>("te_policy_targets"),
+        ]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.to_string())
+        .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(err(errors.join("; ")))
+        }
+    }
+
+    fn clear_policy_map<K: aya::Pod + Copy, V: aya::Pod + Copy>(
+        &self,
+        name: &str,
+    ) -> io::Result<()> {
+        let data = pinned_map_data(&self.paths, name)?;
+        let fd = dup_cloexec_fd(data.fd().as_fd().as_raw_fd())?;
+        clear_hash_map::<K, V>(&fd, name)
+    }
+
     /// Registers a policy path only within its owning domain.
     pub fn register_inode_path(
         &self,
@@ -3126,6 +3366,9 @@ impl Loader {
         let has_block_file = hook_budget.features & FEAT_BLOCK_FILE != 0;
         let has_block_connect = hook_budget.features & FEAT_BLOCK_CONNECT != 0;
 
+        if enforce && has_block_file && !hook_budget.file_open_only {
+            path_rename_arity()?;
+        }
         load_exec_tail_programs(&mut bpf)?;
         let mut pending_links: Vec<(String, FdLink)> = Vec::new();
         let mut tracepoints_held = false;
@@ -3166,6 +3409,9 @@ impl Loader {
         if enforce {
             let btf = Btf::from_sys_fs().map_err(|e| err(format!("btf: {e}")))?;
             for (name, hook) in LSM_PROGS {
+                if !rename_program_selected(name) {
+                    continue;
+                }
                 if !lsm_needed_for_budget(
                     name,
                     has_block_exec,
@@ -4251,6 +4497,16 @@ mod tests {
         assert_eq!(std::mem::size_of::<FileId>(), 16);
         assert_eq!(std::mem::size_of::<FileDomainId>(), 24);
         assert_eq!(std::mem::size_of::<InodeGuardVal>(), 16);
+        assert_eq!(std::mem::size_of::<TreePathKey>(), 24);
+        assert_eq!(std::mem::align_of::<TreePathKey>(), 8);
+        assert_eq!(std::mem::size_of::<PolicyRootVal>(), 8);
+        assert_eq!(std::mem::size_of::<PolicyStableVal>(), 8);
+        assert_eq!(std::mem::size_of::<PolicySlotKey>(), 288);
+        assert_eq!(std::mem::align_of::<PolicySlotKey>(), 8);
+        assert_eq!(std::mem::size_of::<PolicySlotVal>(), 24);
+        assert_eq!(std::mem::size_of::<PolicyTargetKey>(), 16);
+        assert_eq!(std::mem::size_of::<PolicyTargetVal>(), 24);
+        assert_eq!(std::mem::size_of::<PolicyDomainVal>(), 56);
         assert_eq!(std::mem::size_of::<InodePathVal>(), 127);
         assert_eq!(std::mem::size_of::<ProcState>(), 16);
         assert_eq!(std::mem::size_of::<CapState>(), 56);
@@ -4263,6 +4519,128 @@ mod tests {
         assert_eq!(std::mem::size_of::<CConfig>(), 74_760);
         assert_eq!(std::mem::align_of::<Event>(), 8);
         assert_eq!(std::mem::size_of::<Event>(), 384);
+    }
+
+    // Structured-policy map keys are hashed by their byte image, so the Rust
+    // mirrors must contain no implicit repr(C) padding the kernel would compare
+    // as uninitialized bytes, and every declared tail byte must be zeroed.
+    #[test]
+    fn policy_map_keys_have_deterministic_byte_images() {
+        assert_eq!(
+            std::mem::size_of::<TreePathKey>(),
+            std::mem::size_of::<u64>() + 4 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            std::mem::size_of::<PolicyTargetKey>(),
+            4 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            std::mem::size_of::<PolicySlotKey>(),
+            std::mem::size_of::<TreePathKey>()
+                + std::mem::size_of::<u32>()
+                + FILE_PROTECTION_NAME_MAX
+                + 1
+                + std::mem::size_of::<u32>()
+        );
+
+        let slot = FileProtectionSlot::new(
+            TreePathIdentity {
+                ino: 9,
+                dev: 0x0801,
+                mnt_id: 0,
+            },
+            "etc",
+        )
+        .expect("valid basename");
+        let key = PolicySlotKey {
+            parent: TreePathKey {
+                ino: slot.parent.ino,
+                dev: slot.parent.dev,
+                mnt_id: slot.parent.mnt_id,
+                domain_id: 3,
+                generation: 4,
+            },
+            name_len: slot.name_len,
+            name: slot.name,
+            _pad: 0,
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&key as *const PolicySlotKey).cast::<u8>(),
+                std::mem::size_of::<PolicySlotKey>(),
+            )
+        };
+        let name_offset = std::mem::size_of::<TreePathKey>() + std::mem::size_of::<u32>();
+        assert_eq!(&bytes[name_offset..name_offset + 3], b"etc");
+        assert!(
+            bytes[name_offset + 3..].iter().all(|byte| *byte == 0),
+            "slot-key name tail and explicit padding must be zero"
+        );
+    }
+
+    // Normalized target ids are 1-based so each one maps to exactly one bit of
+    // the 64-bit masks carried by te_policy_domain_val.
+    #[test]
+    fn target_ids_are_bounded_and_cover_the_domain_masks() {
+        for flag in [
+            INODE_GUARD_UNLINK,
+            INODE_GUARD_RENAME,
+            INODE_GUARD_WRITE,
+            INODE_GUARD_TREE,
+        ] {
+            assert_eq!(flag.count_ones(), 1, "guard flags must be single bits");
+        }
+
+        let mut covered = 0u64;
+        for target_id in 1..=FILE_PROTECTION_MAX_TARGETS as u32 {
+            let value = PolicyTargetVal {
+                guard: InodeGuardVal {
+                    flags: INODE_GUARD_UNLINK | INODE_GUARD_TREE,
+                    domain_id: 5,
+                    rule_id: target_id,
+                    _pad: 0,
+                },
+                flags: 0b11,
+                target_id,
+            };
+            assert_eq!(
+                value.guard.rule_id, value.target_id,
+                "events must report the stable target id"
+            );
+            covered |= 1u64 << (value.target_id - 1);
+        }
+        assert_eq!(covered, u64::MAX, "64 target ids must fill the mask width");
+
+        let domain = PolicyDomainVal {
+            generation: 1,
+            target_count: FILE_PROTECTION_MAX_TARGETS as u32,
+            tree_mask: covered,
+            delete_mask: covered,
+            ordinary_write_mask: 0,
+            protection_set_id: 7,
+            guard: InodeGuardVal {
+                flags: INODE_GUARD_UNLINK,
+                domain_id: 5,
+                rule_id: 0,
+                _pad: 0,
+            },
+        };
+        assert_eq!(domain.generation, 1);
+        assert_eq!(domain.target_count, domain.tree_mask.count_ones());
+        assert_eq!(domain.delete_mask & domain.ordinary_write_mask, 0);
+        assert_eq!(domain.protection_set_id, 7);
+        assert_eq!(domain.guard.flags, INODE_GUARD_UNLINK);
+
+        let root = PolicyRootVal { root_mask: 0b1 };
+        let stable = PolicyStableVal { target_mask: 0b1 };
+        let slot = PolicySlotVal {
+            direct_mask: 0b1,
+            exact_exclude_mask: 0b10,
+            subtree_exclude_mask: 0b100,
+        };
+        assert_eq!(root.root_mask, stable.target_mask);
+        assert_eq!(slot.direct_mask & slot.exact_exclude_mask, 0);
+        assert_eq!(slot.subtree_exclude_mask, 0b100);
     }
 
     #[test]
@@ -4434,6 +4812,51 @@ mod tests {
             false,
             false,
             budget,
+        ));
+    }
+
+    #[test]
+    fn legacy_rename_context_is_independent_of_dataflow_profile() {
+        let budget = HookBudget::for_pinned_reserve(HookReserve::agent_file_guard());
+        assert!(budget.suppress_dataflow_tracepoints);
+        assert!(!budget.has_file_flow());
+        assert!(rename_compat_needed_for_arity(budget, 4));
+        assert!(!rename_compat_needed_for_arity(budget, 5));
+        assert!(!rename_compat_needed_for_arity(HookBudget::default(), 4));
+        assert!(!rename_compat_needed_for_arity(
+            HookBudget::for_pinned_reserve(HookReserve::file_enforcement()),
+            4,
+        ));
+        for name in [
+            "guard_rename_enter",
+            "guard_rename_exit",
+            "guard_rename_task_exit",
+        ] {
+            let spec = TRACEPOINTS
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("compatibility tracepoint");
+            assert_eq!(spec.need, TracepointNeed::RenameCompat);
+            assert_eq!(
+                tracepoint_needed(spec, budget),
+                rename_compat_needed(budget)
+            );
+        }
+        assert!(lsm_needed(
+            "enforce_path_rename_legacy",
+            false,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(lsm_needed(
+            "enforce_path_unlink",
+            false,
+            true,
+            false,
+            false,
+            false
         ));
     }
 
@@ -5594,6 +6017,13 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -5706,6 +6136,13 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -5749,6 +6186,13 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");

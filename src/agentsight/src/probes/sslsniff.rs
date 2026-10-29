@@ -514,6 +514,13 @@ impl SslSniff {
         Ok(())
     }
 
+    /// Reports whether a process has at least one live SSL uprobe attachment.
+    pub(super) fn has_process_attachments(&self, pid: u32) -> bool {
+        self.pid_inodes
+            .get(&pid)
+            .is_some_and(|files| files.iter().any(|file| self.attachments.contains_key(file)))
+    }
+
     /// Charge executable scans to the same process budget as capture delivery.
     pub(crate) fn set_cpu_budget(&self, budget: Option<Arc<crate::utils::cpu_budget::CpuBudget>>) {
         self.scans.set_budget(budget);

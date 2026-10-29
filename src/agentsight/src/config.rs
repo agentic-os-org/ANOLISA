@@ -854,9 +854,10 @@ pub fn parse_json_rules(
 ///
 /// - If the file does not exist, creates it with the embedded default.
 /// - If the file exists but `schema_version` is missing or older than
-///   `CURRENT_SCHEMA_VERSION`, backs up the old file and replaces it with the
-///   embedded default.
-/// - If the file exists and `schema_version` matches, leaves it untouched.
+///   `CURRENT_SCHEMA_VERSION`, backs up the old file and shallow-merges its
+///   top-level settings into the embedded default.
+/// - If the file exists and `schema_version` matches or exceeds the current
+///   version, leaves it untouched.
 pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         if let Some(parent) = path.parent() {
@@ -885,15 +886,37 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // *valid* JSON whose schema_version is outdated; silently overwriting an
     // invalid file masks the parse error and breaks the documented fallback
     // contract (see issue #1502).
-    if serde_json::from_str::<serde_json::Value>(content).is_err() {
-        return Ok(());
-    }
+    let user: serde_json::Value = match serde_json::from_str(content) {
+        Ok(user) => user,
+        Err(_) => return Ok(()),
+    };
 
     let on_disk_version = extract_schema_version(content);
 
     if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
         return Ok(());
     }
+
+    // Overlay user top-level keys on the defaults so existing customizations
+    // survive while newly introduced sections are added.
+    let mut base: serde_json::Value = serde_json::from_str(DEFAULT_AGENTS_JSON)
+        .context("Embedded DEFAULT_AGENTS_JSON is invalid")?;
+
+    if let (Some(base_obj), Some(user_obj)) = (base.as_object_mut(), user.as_object()) {
+        for (key, value) in user_obj {
+            if key == "schema_version" {
+                continue;
+            }
+            base_obj.insert(key.clone(), value.clone());
+        }
+        base_obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()),
+        );
+    }
+
+    let merged =
+        serde_json::to_string_pretty(&base).context("Failed to serialize merged agents config")?;
 
     let backup = {
         let ts = std::time::SystemTime::now()
@@ -904,10 +927,10 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     };
     std::fs::copy(path, &backup)
         .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
-    std::fs::write(path, DEFAULT_AGENTS_JSON)
-        .with_context(|| format!("Failed to replace outdated config at {path:?}"))?;
+    std::fs::write(path, &merged)
+        .with_context(|| format!("Failed to write merged config to {path:?}"))?;
     log::info!(
-        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, replaced it with defaults at {path:?} (backup at {backup:?})"
+        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, merged user config with defaults at {path:?} (backup at {backup:?})"
     );
     Ok(())
 }
@@ -3001,26 +3024,65 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_agents_config_replaces_outdated_config() {
+    fn ensure_default_agents_config_preserves_user_cmdline_rules_on_merge() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         let user_config = r#"{
-            "schema_version": 2,
+            "schema_version": 1,
             "cmdline": {
                 "allow": [
                     {"rule": ["*mycustomagent*"], "agent_name": "MyCustomAgent"}
-                ]
-            }
+                ],
+                "deny": [{"rule": ["*noisy*"]}]
+            },
+            "https": [{"rule": ["custom.api.example.com"]}]
         }"#;
         std::fs::write(&path, user_config).unwrap();
         ensure_default_agents_config(&path).unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(result, DEFAULT_AGENTS_JSON);
-        assert!(!result.contains("MyCustomAgent"));
+        assert!(
+            result.contains("MyCustomAgent"),
+            "user cmdline rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("custom.api.example.com"),
+            "user https rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("*noisy*"),
+            "user deny rule lost during migration: {result}"
+        );
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            migrated["schema_version"].as_u64().unwrap() as u32,
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]
-    fn ensure_default_agents_config_replacement_contains_storage_section() {
+    fn ensure_default_agents_config_adds_missing_sections_on_merge() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let minimal_v1 = r#"{
+            "cmdline": {"allow": [{"rule": ["*test*"], "agent_name": "Test"}]}
+        }"#;
+        std::fs::write(&path, minimal_v1).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            migrated.get("features").is_some(),
+            "features section not added from default"
+        );
+        assert!(
+            migrated.get("runtime_limits").is_some(),
+            "runtime_limits section not added from default"
+        );
+        assert!(result.contains("Test"), "user rule lost");
+    }
+
+    #[test]
+    fn ensure_default_agents_config_merged_config_contains_storage_section() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         std::fs::write(&path, r#"{"schema_version": 2}"#).unwrap();

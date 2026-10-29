@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # -- Binary fallback paths ----------------------------------------------------
 #
@@ -381,6 +382,8 @@ _CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
 _CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
 _OPTIMIZATION_STATE_DIR = os.path.join(_CONTEXT_DIR, "hook-state")
 _OPTIMIZATION_STATE_TTL_SECONDS = 24 * 60 * 60
+# This bound is shared by all sessions using the same state directory. Under
+# pressure an in-flight marker can be evicted, losing PostTool deduplication.
 _OPTIMIZATION_STATE_MAX_FILES = 1024
 
 # -- Binary resolution (cached) -----------------------------------------------
@@ -394,6 +397,96 @@ _QWENWORK_WORKSPACE_SHELLS = frozenset(
     }
 )
 _QWENWORK_PRIVATE_RUNTIME = False
+
+
+def _windows_profile_directory() -> str:
+    """Resolve the process token's profile, as tokenless-stats/home.rs does."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    profiles = ctypes.WinDLL("userenv", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    security.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    profiles.GetUserProfileDirectoryW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    profiles.GetUserProfileDirectoryW.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise OSError("cannot query the current process token")
+    try:
+        size = wintypes.DWORD()
+        profiles.GetUserProfileDirectoryW(token, None, ctypes.byref(size))
+        if not size.value:
+            raise OSError("no profile directory for the current process token")
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not profiles.GetUserProfileDirectoryW(token, buffer, ctypes.byref(size)):
+            raise OSError("cannot resolve the current process profile directory")
+        return buffer.value
+    finally:
+        kernel.CloseHandle(token)
+
+
+def resolve_data_directory() -> str:
+    """Resolve QwenWork state without writes or environment-based home fallbacks.
+
+    Keep the default and validation aligned with tokenless-stats/home.rs and
+    path_policy.rs, which the CLI and patched RTK also share.
+    """
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    if configured:
+        path = Path(configured)
+    else:
+        try:
+            if os.name == "nt":
+                home = _windows_profile_directory()
+            else:
+                import pwd
+
+                home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError) as error:
+            raise ValueError("no trusted home directory; set TOKENLESS_DATA_DIR") from error
+        anchor = Path(home)
+        if not home or not anchor.is_absolute() or anchor == anchor.parent:
+            raise ValueError("no trusted home directory; set TOKENLESS_DATA_DIR")
+        path = anchor / ".tokenless"
+
+    if not path.is_absolute():
+        raise ValueError("TOKENLESS_DATA_DIR must be an absolute path")
+    if ".." in path.parts:
+        raise ValueError("TOKENLESS_DATA_DIR must not contain parent traversal")
+    # Resolve existing prefixes strictly: dangling links, loops and inaccessible
+    # ancestors must not silently select a different directory from the CLI.
+    ancestor = path
+    missing = []
+    while True:
+        try:
+            ancestor.lstat()
+            break
+        except FileNotFoundError:
+            # Missing drives and UNC shares have no existing ancestor to find.
+            if ancestor == ancestor.parent:
+                raise
+            missing.append(ancestor.name)
+            ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        raise ValueError("TOKENLESS_DATA_DIR must resolve to a directory")
+    normalized = ancestor.resolve(strict=True).joinpath(*reversed(missing))
+    if normalized == normalized.parent:
+        raise ValueError("TOKENLESS_DATA_DIR must not be the filesystem root")
+    return str(normalized)
 
 
 def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
@@ -418,14 +511,17 @@ def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
         warn("workspace shell hook has no valid cwd. Passing through unchanged.")
         skip()
-    # RTK receives this path in its rewritten command; future conversations
-    # must not depend on grants to a previous conversation's state directory.
-    data_dir = os.path.join(cwd, ".tokenless")
-    os.environ["TOKENLESS_DATA_DIR"] = data_dir
+    # Let Tokenless resolve its default database directory and carry it into
+    # RTK commands. Hook state must not default to the workspace either.
+    try:
+        data_dir = resolve_data_directory()
+    except (OSError, ValueError, RuntimeError) as error:
+        warn(f"{error}. Passing through unchanged.")
+        skip()
     _CONTEXT_DIR = data_dir
     _CONTEXT_FILE = os.path.join(data_dir, ".rewrite-context")
     _OPTIMIZATION_STATE_DIR = os.path.join(data_dir, "hook-state")
-    # Bare retrieval commands do not carry the hook's workspace data setting.
+    # Bare retrieval commands do not inherit the hook's runtime environment.
     _QWENWORK_PRIVATE_RUNTIME = True
 
     normalized = {**input_data, "tool_name": "Bash"}

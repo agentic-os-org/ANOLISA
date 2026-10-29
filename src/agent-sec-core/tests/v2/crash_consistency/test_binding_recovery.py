@@ -70,7 +70,7 @@ def test_late_apply_cannot_outlive_confirmed_scope_cleanup(recovery):
     assert ("DELETE_404", target_id) in recovery.remote.requests
     gate.release.set()
     until(
-        lambda: list(recovery.remote.requests),
+        lambda _remaining: list(recovery.remote.requests),
         lambda trace: ("POST_FINISHED", target_id) in trace,
     )
     # Keep the safety assertion even if current code clears responsibility too early.
@@ -99,7 +99,7 @@ def test_partial_scope_cleanup_survives_two_crashes_without_reapplying(recovery)
     recovery.crash()
     recovery.restart()
     first.release.set()
-    until(lambda: recovery.saved()[1], lambda bindings: len(bindings) == 1)
+    until(lambda _remaining: recovery.saved()[1], lambda bindings: len(bindings) == 1)
     assert (
         recovery.saved()[0][0][1] == "DELETING"
     ), "Scope vanished before its last Binding"

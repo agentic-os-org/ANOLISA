@@ -131,13 +131,16 @@ export class Identities {
     // Reserve before awaiting the producer or admission to reject concurrent replay.
     entry.callbacks.add(callback);
     await this.ready(entry, signal, input.hook_event_name === "PreToolUse");
-    if (!isDeepStrictEqual(input.tool_input, entry.input))
+    const expected = input.hook_event_name === "PreToolUse" ? entry.input :
+      (entry.nativeInput ?? entry.input);
+    if (!isDeepStrictEqual(input.tool_input, expected))
       throw new Error("AW rejected changed native Hook input");
     return entry;
   }
 
   payload(entry, input) {
     return { ...structuredClone(input), tool_use_id: entry.id,
+      tool_input: structuredClone(entry.input),
       aw_native_tool_use_id: entry.native, aw_parent_tool_use_id: entry.parent ?? null };
   }
 
@@ -163,6 +166,7 @@ export class Identities {
     entry.phase = "retiring";
     await entry.admitted;
     await Promise.allSettled([...entry.pending]);
+    await this.beforeRetire?.(entry);
     await this.scope.finish(entry.id);
     this.active.delete(native);
   }

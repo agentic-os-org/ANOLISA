@@ -10,8 +10,7 @@ callbacks and collect bounded evidence automatically. No action Provider or eBPF
 is required. AW keeps its local audit when the optional source is unavailable.
 Semantic evaluation is not enabled.
 
-Automatic observation and source identity in this slice cover Qoder, OpenClaw,
-QwenPaw and Hermes. Pi keeps its native policy support; observation-only callbacks
+Automatic observation covers Qoder, OpenClaw and Hermes. QwenPaw requires restricted `--reloadable` mode; ordinary Qoder SDK, QwenPaw and Pi/Claude resident entrypoints require `evidence.mode: off`. Pi keeps its native policy support; observation-only callbacks
 and trusted source association for Pi require a separate Adapter contract.
 
 ## Prerequisites and configuration

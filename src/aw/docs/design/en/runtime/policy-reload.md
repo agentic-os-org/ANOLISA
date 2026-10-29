@@ -56,7 +56,7 @@ provisions Hook files at their final paths, and serializes updates with task
 dispatch. Dispatch resumes only after update succeeds. Active tasks and cleanup
 return `busy`; no automatic retry, task drain or mid-task switch is provided.
 
-The [idle-update support matrix](../../../../../../docs/user-guide/en/aw/configuration.md#update-a-prewarmed-instance)
+The [idle-update support matrix](../../../../../../docs/developer-guide/en/aw/deployment/policy-updates.md)
 records each launch mode, startup readiness seam, safe boundary and selection
 entrypoint. Ordinary Qoder SDK/QwenPaw extend the common service transaction;
 restricted bridges and external attachment keep their existing contracts. Ordinary

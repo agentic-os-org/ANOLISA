@@ -71,7 +71,17 @@ pub fn write(svc: &MemoryService, path: &str, content: &str, overwrite: bool) ->
     }
 
     let result = if overwrite {
-        safe_fs::write(svc.mount.root_fd.as_fd(), rel_path, content.as_bytes())
+        // New files retain the destination parent's default ACL/group policy.
+        // Only an existing file needs the staged replacement guarantee.
+        match safe_fs::write_create_new(svc.mount.root_fd.as_fd(), rel_path, content.as_bytes()) {
+            Err(MemoryError::AlreadyExists(_)) => safe_fs::write_atomic(
+                svc.mount.root_fd.as_fd(),
+                Path::new(svc.mount.meta_dir_name()),
+                rel_path,
+                content.as_bytes(),
+            ),
+            result => result,
+        }
     } else {
         safe_fs::write_create_new(svc.mount.root_fd.as_fd(), rel_path, content.as_bytes())
     };

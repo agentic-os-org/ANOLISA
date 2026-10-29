@@ -71,8 +71,8 @@ are identified separately even if both use Qoder. Reusing the same name across
 configurations can still aggregate their records.
 
 Statistics estimate candidate compression savings over recent records and may include other
-integrations. They are not the current session's billing savings. Check the Agent's actual results
-to confirm adoption into model context.
+integrations. Confirm adoption into model context from the Agent's actual results; use the model
+provider's billed usage to determine session billing savings.
 
 ## Data and privacy
 

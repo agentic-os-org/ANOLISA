@@ -318,6 +318,44 @@ fn test_openai_sse_pipeline() {
 }
 
 #[test]
+fn openai_usage_split_across_tls_records_is_reassembled() {
+    let analysis = run_analysis(vec![
+        (
+            5002,
+            0xC000,
+            1,
+            common::make_openai_request_bytes("gpt-4o", "Say hello", true),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            common::make_openai_sse_response_headers(),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            br#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_to"#.to_vec(),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            b"kens\":3,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n".to_vec(),
+            "python3",
+        ),
+    ]);
+
+    let record = expect_token_record(&analysis);
+    assert_eq!(record.input_tokens, 3);
+    assert_eq!(record.output_tokens, 2);
+}
+
+#[test]
 fn test_openai_non_streaming_pipeline() {
     let pid = 5001u32;
     let ssl_ptr = 0xB000u64;

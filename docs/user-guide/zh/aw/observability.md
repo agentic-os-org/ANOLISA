@@ -3,7 +3,7 @@
 [English](../../en/aw/observability.md)
 
 AW 将 Agent 运行与 AgentSight 记录关联，便于查看活动和观测缺口。
-当前自动观测支持 Qoder、OpenClaw、QwenPaw 和 Hermes。
+自动观测可用于 Qoder、OpenClaw、Hermes；QwenPaw 需使用受限 `--reloadable` 模式，普通 resident 设置 `evidence.mode: off`。
 AgentSight 独立安装和运行，接入 AW 不会自动启动采集器。
 
 ## 配置来源

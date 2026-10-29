@@ -29,7 +29,7 @@ use crate::{
 const MIN_RESPONSE_CHARS: usize = 200;
 const RTK_TIMEOUT: Duration = Duration::from_secs(5);
 
-mod native_find;
+mod native_output;
 mod rtk;
 
 /// Per-call behavior resolved by a transport frontend.
@@ -348,8 +348,8 @@ fn pre_tool_with_optional_rtk(
     if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
         return Ok(pre_tool_passthrough(request));
     }
-    // Preserve native execution for build logs and path lists owned by PostTool.
-    if is_post_tool_owned_command(command) {
+    // Preserve native execution for previews, build logs and path lists.
+    if keeps_command_native(command) {
         return Ok(pre_tool_passthrough(request));
     }
     let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
@@ -445,7 +445,7 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
     }
 }
 
-fn is_post_tool_owned_command(command: &str) -> bool {
+fn keeps_command_native(command: &str) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
     // Empty quoted words still consume wrapper arguments.
@@ -482,7 +482,7 @@ fn is_post_tool_owned_command(command: &str) -> bool {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if character == '\n' && segment_is_post_tool_owned(&words) {
+            if character == '\n' && segment_keeps_native(&words) {
                 return true;
             }
             if character == '\n' {
@@ -493,7 +493,7 @@ fn is_post_tool_owned_command(command: &str) -> bool {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if segment_is_post_tool_owned(&words) {
+            if segment_keeps_native(&words) {
                 return true;
             }
             words.clear();
@@ -505,13 +505,13 @@ fn is_post_tool_owned_command(command: &str) -> bool {
     if word_started {
         words.push(word);
     }
-    segment_is_post_tool_owned(&words)
+    segment_keeps_native(&words)
 }
 
-fn segment_is_post_tool_owned(words: &[String]) -> bool {
-    // Broader transparent-prefix support is specific to find; build/test routing
-    // retains its existing wrapper contract below.
-    if native_find::invokes_find(words) {
+fn segment_keeps_native(words: &[String]) -> bool {
+    // RTK smart-truncates --max-lines rather than preserving a head window.
+    // Keep head/tail and find native through the supported wrappers.
+    if native_output::owns_command(words) {
         return true;
     }
     let mut index = words
@@ -1624,6 +1624,58 @@ mod tests {
     }
 
     #[test]
+    fn pre_tool_preserves_native_source_previews() {
+        for command in [
+            "head -40 source.py",
+            "head -n 40 'source file.py'",
+            "head --lines=40 source.py",
+            "tail -n 40 source.py",
+            "tail --lines=40 source.py",
+            "wc -l source.py; head -40 source.py",
+            "cd /testbed && head -40 source.py",
+            "cat source.py | head -40",
+            "git diff | tail -40",
+            "env LANG=C timeout 10 command /usr/bin/head -40 source.py",
+            "nohup nice -n 5 tail -40 source.py",
+            "uv run head -40 source.py",
+            "he\\\nad -40 source.py",
+        ] {
+            let request = PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": command, "timeout": 30}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            };
+            let response = pre_tool_with_optional_rtk(
+                &request,
+                &Attribution::new("test"),
+                None,
+                None,
+                RTK_TIMEOUT,
+            )
+            .unwrap_or_else(|error| panic!("{command:?}: {error}"));
+            assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert_eq!(response.arguments, request.arguments);
+        }
+        for command in [
+            "echo 'head -40 source.py'",
+            "rg tail source.py",
+            "time echo head",
+            "timeout 10 rtk read source.py --max-lines 40",
+            "rtk head -40 source.py",
+            "rtk tail -40 source.py",
+            "env LANG=C timeout 10 rtk head -40 source.py",
+            "command rtk tail -40 source.py",
+        ] {
+            assert!(!keeps_command_native(command), "{command}");
+        }
+    }
+
+    #[test]
     fn pre_tool_keeps_native_find_commands_without_calling_rtk() {
         for command in [
             "find /workspace -name '*.json' 2>/dev/null",
@@ -1678,7 +1730,7 @@ mod tests {
             "command exec cargo test",
             "command env -i cargo test",
         ] {
-            assert!(!is_post_tool_owned_command(command), "{command}");
+            assert!(!keeps_command_native(command), "{command}");
         }
     }
 
@@ -1769,7 +1821,7 @@ mod tests {
             "command '' find . -type f",
             "timeout 30 '' find . -type f",
         ] {
-            assert!(!is_post_tool_owned_command(command), "{command}");
+            assert!(!keeps_command_native(command), "{command}");
         }
     }
 
@@ -1784,13 +1836,13 @@ mod tests {
             "fi\\\nnd . -type f",
             "env \\\n  RUSTFLAGS=-C \\\n  cargo test",
         ] {
-            assert!(is_post_tool_owned_command(command), "{command:?}");
+            assert!(keeps_command_native(command), "{command:?}");
         }
         for command in [
             "echo 'command \\\n find . -type f'",
             "printf '%s' \"noglob \\\n find . -type f\"",
         ] {
-            assert!(!is_post_tool_owned_command(command), "{command:?}");
+            assert!(!keeps_command_native(command), "{command:?}");
         }
     }
 
@@ -1811,7 +1863,7 @@ mod tests {
         ];
         for command in commands {
             assert!(
-                is_post_tool_owned_command(command),
+                keeps_command_native(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1826,7 +1878,7 @@ mod tests {
             "rg pytest README.md",
         ] {
             assert!(
-                !is_post_tool_owned_command(command),
+                !keeps_command_native(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
@@ -1854,7 +1906,7 @@ mod tests {
             "make -j8",
         ] {
             assert!(
-                is_post_tool_owned_command(command),
+                keeps_command_native(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1865,7 +1917,7 @@ mod tests {
             "env -u RUSTC grep error log",
         ] {
             assert!(
-                !is_post_tool_owned_command(command),
+                !keeps_command_native(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }

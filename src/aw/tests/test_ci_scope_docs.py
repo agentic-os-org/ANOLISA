@@ -11,7 +11,7 @@ GUIDES = (
     "user-guide/{language}/aw/installation.md",
     "user-guide/{language}/aw/security.md",
     "user-guide/{language}/aw/tokenless.md",
-    "user-guide/{language}/aw/packages.md",
+    "developer-guide/{language}/aw/reference/packages.md",
     "user-guide/{language}/aw/operations.md",
 )
 
@@ -82,16 +82,16 @@ class ScopeDocumentationTests(unittest.TestCase):
                 self.assertIn("$AW_TOKENLESS_BUNDLE/aw", commands[2][1])
                 self.assertEqual(commands[3][2], "uninstall")
 
-    def test_developer_core_extension_and_uninstall_keep_the_same_scope(self) -> None:
+    def test_developer_package_example_uses_one_scope_and_prefix(self) -> None:
         for language in ("en", "zh"):
             commands = validate_system_commands(self.guide(GUIDES[3], language))
             with self.subTest(language=language):
-                self.assertEqual([command[2] for command in commands],
+                self.assertEqual([command[1] for command in commands],
                                  ["install", "install", "uninstall"])
                 self.assertEqual([option(command, "--scope") for command in commands],
-                                 ["system"] * 3)
+                                 ["user"] * 3)
                 self.assertEqual([option(command, "--prefix") for command in commands],
-                                 ["$AW_PREVIEW_PREFIX"] * 3)
+                                 ["$AW_PREFIX"] * 3)
 
     def test_missing_wrong_and_duplicate_scope_in_root_examples_are_rejected(self) -> None:
         template = '```bash\nsudo "./bundle/aw" install {scope} --bundle /bundle --prefix /prefix\n```'

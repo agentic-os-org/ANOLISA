@@ -39,6 +39,17 @@ impl<'a> SseFrame<'a> {
         if at_start {
             bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
         }
+        // Some OpenAI-compatible streams omit the SSE data field entirely.
+        let payload = bytes.trim_ascii();
+        if payload.first() == Some(&b'{')
+            && serde_json::from_slice::<serde_json::Value>(payload)
+                .is_ok_and(|value| value.is_object())
+        {
+            return Some(Self {
+                data: Cow::Borrowed(payload),
+                ..Self::default()
+            });
+        }
         let mut frame = Self::default();
         let mut has_data = false;
         for (_, line) in complete_lines(bytes) {
@@ -440,6 +451,23 @@ mod tests {
         let frame = SseFrame::parse(b"data: first\ndata: second\n\n", false).unwrap();
         assert!(matches!(frame.data, Cow::Owned(_)));
         assert_eq!(frame.data.as_ref(), b"first\nsecond");
+    }
+
+    #[test]
+    fn bare_json_object_is_data_but_other_fieldless_frames_stay_ignored() {
+        let payload = br#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":3}}"#;
+        let bytes = [b" \t".as_slice(), payload, b"\r\n\r\n"].concat();
+        let frame = SseFrame::parse(&bytes, false).unwrap();
+        assert!(matches!(frame.data, Cow::Borrowed(_)));
+        assert_eq!(frame.data.as_ref(), payload);
+
+        for bytes in [
+            b"unknown: value\n\n".as_slice(),
+            b"{\"unterminated\":\n\n",
+            b"[DONE]\n\n",
+        ] {
+            assert!(SseFrame::parse(bytes, false).is_none());
+        }
     }
 
     #[test]

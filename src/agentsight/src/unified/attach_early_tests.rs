@@ -97,6 +97,46 @@ fn known_agent_name_does_not_re_attach() {
 }
 
 #[test]
+fn known_agent_registration_failure_keeps_tracking_and_attempts_ssl_attach() {
+    crate::config::set_verbose(false);
+    let mut fixture = RuntimeFixture::new(0);
+    let pid = self_pid();
+    fixture.probes.fail_registration_for(pid);
+    assert!(fixture.probes.add_traced_pid(pid).is_err());
+    fixture.scanner = AgentScanner::from_rules(
+        &[crate::config::CmdlineRule {
+            patterns: vec!["*".to_string()],
+            agent_name: Some("test-agent".to_string()),
+            allow: true,
+        }],
+        &[],
+    );
+    // 覆盖真实编排器的错误诊断分支，不为测试加载内核探针。
+    fixture.handle_procmon_event(&crate::probes::procmon::Event::Exec {
+        pid,
+        tid: pid,
+        ppid: 0,
+        uid: 0,
+        timestamp_ns: 0,
+        comm: "test-agent".to_string(),
+    });
+    assert_eq!(fixture.probes.attached_pids(), vec![pid as i32]);
+    assert_eq!(
+        fixture.pid_agent_name_cache.peek(&pid).map(String::as_str),
+        Some("test-agent")
+    );
+    assert_eq!(
+        fixture
+            .resource_targets
+            .read()
+            .unwrap()
+            .get(&pid)
+            .map(String::as_str),
+        Some("test-agent")
+    );
+}
+
+#[test]
 fn procmon_exec_for_a_known_agent_does_not_double_attach() {
     let mut fixture = RuntimeFixture::new(0);
     let pid = self_pid();

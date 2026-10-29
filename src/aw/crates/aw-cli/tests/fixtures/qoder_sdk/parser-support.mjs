@@ -20,18 +20,24 @@ class Transport {
   changed = deferred();
   closed = false;
   hooks = [];
+  requests = [];
   async initialize() {}
   isReady() { return !this.closed; }
   emit(message) { this.messages.push(message); this.changed.resolve(); }
   write(line) {
     const message = JSON.parse(line);
     if (message.type === "control_request") {
+      this.requests.push(message);
       if (message.request.type === "initialize") {
         this.initialization = message.request;
         this.hooks = message.request.hooks;
       }
       if (message.request.type === "get_context_usage" && this.holdBarrier) {
         this.barrier = message;
+        return;
+      }
+      if (message.request.type === "set_permission_mode" && this.holdPermission) {
+        this.permissionRequest = message;
         return;
       }
       this.emit({ type: "control_response", response: { subtype: "success",
@@ -47,13 +53,13 @@ class Transport {
       while (this.messages.length) yield this.messages.shift();
     }
   }
-  endInput() {}
+  endInput() { this.inputEnds = (this.inputEnds ?? 0) + 1; }
   close() { this.closed = true; this.changed.resolve(); }
 }
 
-export async function fixture(t, callback = async () => ({}), extra = {}, policyHooks) {
+export async function fixture(t, callback = async () => ({}), extra = {}, policyHooks, configuration = {}, source) {
   const transport = new Transport();
-  const resident = new Resident({ hooks: policyHooks ?? [], sdk: process.argv[2] });
+  const resident = new Resident({ hooks: policyHooks ?? [], sdk: process.argv[2], ...configuration });
   const scope = resident.scope;
   scope.open = async () => { scope.handle = {}; };
   scope.invocationLimit = 4;
@@ -67,7 +73,7 @@ export async function fixture(t, callback = async () => ({}), extra = {}, policy
     hooks: { PreToolUse: [{ hooks: [callback] }], PostToolUse: [{ hooks: [callback] }] } };
   let composedOptions;
   if (policyHooks) {
-    await resident.create(prompt(), options, (config, native) => {
+    await resident.create(source ?? prompt(), options, (config, native) => {
       composedOptions = native;
       const hooks = Object.fromEntries(Object.entries(native.hooks).map(([event, groups]) => [event, [...groups]]));
       for (const hook of config.hooks) {
@@ -84,7 +90,7 @@ export async function fixture(t, callback = async () => ({}), extra = {}, policy
     resident.cwd = process.cwd();
     await scope.open();
     scope.begin();
-    const query = sdk.query({ prompt: prompt(), options: resident.decorate(options) });
+    const query = sdk.query({ prompt: source ?? prompt(), options: resident.decorate(options) });
     resident.install(query);
     await query.initializationResult();
   }
@@ -93,11 +99,12 @@ export async function fixture(t, callback = async () => ({}), extra = {}, policy
     session_id: "session", uuid: `message-${id}`, parent_tool_use_id: parent,
     message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
   const hook = (id, request, event = "PreToolUse", input = { command: "fixture" },
-    { name = "Bash", mcpContext, group = 0, session = "session" } = {}) => {
+    { name = "Bash", mcpContext, group = 0, session = "session", permissionMode = extra.permissionMode ?? "default" } = {}) => {
     const callbackId = transport.hooks[event][group].hookCallbackIds[0];
     transport.emit({ type: "control_request", request_id: request,
       request: { subtype: "hook_callback", callback_id: callbackId, tool_use_id: id,
         input: { hook_event_name: event, tool_use_id: id, tool_name: name, tool_input: input,
+          permission_mode: permissionMode,
           ...(mcpContext ? { mcp_context: mcpContext } : {}),
           cwd: process.cwd(), session_id: session, tool_response: "result" } } });
   };
@@ -108,5 +115,11 @@ export async function fixture(t, callback = async () => ({}), extra = {}, policy
     }
     throw new Error(`Native response timeout: ${request}`);
   };
-  return { resident, scope, composedOptions, query: resident.facade(), transport, model, hook, response };
+  const parallelHooks = async (id, label, event, input, native = {}) => {
+    const groups = transport.hooks[event];
+    const requests = groups.map((_group, index) => `${label}-${index}`);
+    groups.forEach((_group, group) => hook(id, requests[group], event, input, { ...native, group }));
+    return await Promise.all(requests.map(response));
+  };
+  return { resident, scope, composedOptions, query: resident.facade(), transport, model, hook, response, parallelHooks };
 }

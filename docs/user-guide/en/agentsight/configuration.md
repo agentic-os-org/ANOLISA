@@ -120,10 +120,12 @@ checkpoint gates the capacity phase. Physical allocation above `max_db_size_mb` 
 the pass deletes the oldest eligible records until logical usage is at most 90% of the limit. It
 does not run `VACUUM`, so freed pages remain on the SQLite freelist for later writes.
 
-`check_interval_inserts` is no longer supported. The configuration format is replaced as a unit when
-`schema_version` changes: a missing or pre-v5 version is backed up and replaced with schema v5
-instead of merging old settings. Start custom files from the shipped `agentsight.json` and do not
-copy the old key into the replacement.
+`check_interval_inserts` is no longer supported. When `schema_version` is missing or older than the
+current version, AgentSight backs up the file, overlays its top-level keys on the current defaults,
+and sets `schema_version` to `5`. This is a shallow merge: an existing section such as `storage`
+replaces the corresponding default section in full, so removed nested keys are not migrated
+automatically. Start custom files from the shipped `agentsight.json` and do not copy obsolete keys
+into the merged file.
 
 ## Feature switches
 
@@ -333,16 +335,19 @@ this table. If a new Codex release is not captured, regenerate the entry with
 built-in version:
 
 - equal or newer → your file is left untouched;
-- missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>` and replaces it
-  with the current default file.
+- missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>`, shallow-merges
+  its top-level keys into the current defaults, and sets the current schema version.
+
+Existing top-level sections are preserved and missing sections are added from the defaults. Nested
+values within an existing section are kept as written rather than recursively merged. After an
+upgrade, review obsolete nested keys against the shipped `agentsight.json`, then reload the service.
 
 Schema v5 introduces the bounded HTTP and FFI retention defaults described above and lowers the
-probe and deferred GenAI byte budgets. Files with an older version are backed up and replaced as
-a whole; reapply custom discovery rules and settings from the backup.
+probe and deferred GenAI byte budgets.
 
 Schema v4 replaces insert-count storage checks with `check_interval_secs` for every policy and adds
-`reuse`, `causal`, and `enforcement`. Custom settings from an older schema are not merged. Reapply
-required custom rules to the new file, then reload the service.
+`reuse`, `causal`, and `enforcement`. These sections are added by the shallow merge when absent;
+existing custom sections remain unchanged.
 
 ## Environment variables
 

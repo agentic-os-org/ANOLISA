@@ -14,6 +14,10 @@
 - **安全** — 注入内容的 prompt 注入检测与密钥/PII 脱敏
 - **跨会话任务** — 跨会话保存/恢复/关闭任务及完整上下文
 
+关键词搜索支持 `config.toml`、`example.com` 和 `v1.2.3` 等搜索词。
+`AND`、`NOT`、`OR` 等词按普通文本搜索。多个搜索词用空格分隔；
+没有全部匹配的结果时，回退返回部分词匹配的结果。
+
 ## 快速开始
 
 ### 安装
@@ -59,6 +63,27 @@ openclaw gateway restart
 }
 ```
 
+### 核心操作
+
+```bash
+# 初始化命名空间
+agent-memory init
+
+# 打印解析后的配置
+agent-memory info
+```
+
+作为 MCP server 运行后，agent 通过以下工具交互：
+
+| 操作 | MCP 工具 |
+|------|----------|
+| 写入记忆 | `mem_write(path, content)` |
+| 读取记忆 | `mem_read(path)` |
+| 搜索 | `memory_search(query, mode="hybrid")` |
+| 观察 | `memory_observe(content, type)` |
+| 获取上下文 | `memory_get_context(max_tokens)` |
+| 快照 | `mem_snapshot(name)` |
+
 OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 ANOLISA
 记忆，另提供 `memory_observe` 和 `memory_get_context`。升级时请更新提示词和白名单
 中的旧工具名，重启 gateway 并开始新会话；内部 MCP 方法名和数据保持不变。
@@ -70,6 +95,13 @@ OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 AN
 OpenClaw 自动记录通过 `memory_capture` 在写入前检查当前采集授权，并将来源标记为
 `auto-capture`。关闭自动采集后，显式调用 `memory_observe` 仍可记录记忆。
 请同时升级服务端和适配器；旧服务端会拒绝自动采集请求，不会回退为手动写入。
+
+对于单行列表条目，`memory_summary` 的概念和文件排名在 `mem_export` / `mem_import`
+往返后仍然可用，包括名称中含逗号的条目。导入时会将 frontmatter 中的换行等 ASCII 控制字符替换为空格。
+
+在 TOML 中选择 embedding provider 后，无需重复设置后端环境变量，也可使用对应的
+`MEMORY_OPENAI_*` 或 `MEMORY_OLLAMA_*` 字段覆盖。密钥优先级和模型变更时的索引限制
+见[配置指南](../../docs/user-guide/zh/agent-memory/index.md)。
 
 ## 架构
 

@@ -151,6 +151,10 @@ Name and path selectors discover existing and future matching processes. PID
 selection pins the first observed instance and never follows PID reuse. Cgroup
 assignments are currently rejected.
 
+**Breaking change:** `scope create --cgroup-id` has been removed. Cgroup assignments
+were not supported. Scripts that pass this option now fail locally with exit code 2;
+select the intended processes with `--pid`, `--process-name`, or `--executable` instead.
+
 ```bash
 agent-sec-cli --socket "$SOCKET" scope create --process-name openclaw --policy-id "$POLICY_ID" --policy-revision 1
 agent-sec-cli --socket "$SOCKET" scope get --scope-id "$SCOPE_ID"

@@ -4,17 +4,9 @@
 
 ## Scope and dependencies
 
-This implements [#7622](https://github.com/agentic-os-org/ANOLISA/issues/7622)
-on the read-only connector in [#7626](https://github.com/agentic-os-org/ANOLISA/pull/7626),
-which implements #7621 and is now merged. This stage builds on main, preserving [#7411](https://github.com/agentic-os-org/ANOLISA/pull/7411) merged at
-`d217dd6bbab927a9820202de5944adf3d9e4a5d7`.
-
-The service offers an explicit `freeze_context` RPC for an active event. It binds
-the original candidate, current AW constraints and selected history to one
-immutable revision. `aw run` does not automatically issue this request. No model,
-semantic evaluation, action routing or new Provider operation is introduced.
-Coverage admission belongs to #7623, incremental public audit export to #7624,
-and AgentSight consumption to #7625. Semantic evaluation remains phase two.
+The service's `freeze_context` RPC binds an active event's original candidate, AW constraints and selected history to an immutable snapshot.
+Ordinary `aw run` uses automatic observation; explicit freezing is available to embedders. The [read-only connector](../integrations/agentsight/agentsight-readonly.md) supplies source data.
+See the [integration roadmap](../integrations/agentsight/agentsight-integration.md) for future coverage admission, public audit export and semantic evaluation.
 
 ## Automatic run observation
 
@@ -75,7 +67,7 @@ reads the stored snapshot and does not trigger collection, so another immediate
 GET cannot guarantee freshness. Source time remains unverified in this projection.
 Hooks do not wait for the next scan; late records cannot rewrite a frozen context
 or completed decision. AW's native callbacks remain the baseline for timely
-input and local audit. See the [phase-two contract](../integrations/agentsight/agentsight-integration.md#semantic-evaluation-contract-reserved-for-phase-2).
+input and local audit.
 
 ## Owners and trust boundary
 

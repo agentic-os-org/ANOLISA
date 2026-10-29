@@ -8,7 +8,7 @@
 //! 3. **Absolute date normalization**: convert relative dates
 //!    ("yesterday", "next week") to absolute ISO 8601 dates.
 
-use chrono::{Datelike, Duration, Local, NaiveDate};
+use chrono::{Datelike, Days, Duration, Local, NaiveDate};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -137,16 +137,12 @@ pub fn normalize_relative_dates(content: &str) -> String {
     // "N days ago" / "N 天前"
     result = DAYS_AGO_EN
         .replace_all(&result, |caps: &regex::Captures| {
-            let n: i64 = caps[1].parse().unwrap_or(0);
-            let date = today - Duration::days(n);
-            date.format("%Y-%m-%d").to_string()
+            days_before(today, &caps[1], &caps[0])
         })
         .to_string();
     result = DAYS_AGO_CN
         .replace_all(&result, |caps: &regex::Captures| {
-            let n: i64 = caps[1].parse().unwrap_or(0);
-            let date = today - Duration::days(n);
-            date.format("%Y-%m-%d").to_string()
+            days_before(today, &caps[1], &caps[0])
         })
         .to_string();
 
@@ -188,6 +184,25 @@ static KEYWORD_REGEXES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| 
 static DAYS_AGO_EN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)\s*days?\s*ago").unwrap());
 
 static DAYS_AGO_CN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)\s*天前").unwrap());
+
+/// Render `days` before `today` as an ISO date, or return `matched` unchanged
+/// when the phrase cannot be rewritten.
+///
+/// The regexes accept an unbounded digit run, so `N` is whatever the memory
+/// content says. `chrono::Duration::days` panics once the count overflows its
+/// internal nanosecond range, and `NaiveDate - Duration` panics outside the
+/// representable date range. A heuristic rewrite must not abort the
+/// consolidation pass over user content, so both cases leave the phrase as it
+/// was written.
+fn days_before(today: NaiveDate, days: &str, matched: &str) -> String {
+    let Ok(n) = days.parse::<u64>() else {
+        return matched.to_string();
+    };
+    match today.checked_sub_days(Days::new(n)) {
+        Some(date) => date.format("%Y-%m-%d").to_string(),
+        None => matched.to_string(),
+    }
+}
 
 fn replace_date(text: &str, relative: &str, absolute: NaiveDate) -> String {
     let date_str = absolute.format("%Y-%m-%d").to_string();
@@ -301,5 +316,38 @@ mod tests {
             .format("%Y-%m-%d")
             .to_string();
         assert!(result.contains(&expected));
+    }
+
+    #[test]
+    fn day_count_past_duration_range_leaves_phrase_intact() {
+        // 1e14 days overflows `TimeDelta::days`; this used to panic the
+        // consolidation pass with "TimeDelta::days out of bounds".
+        let phrase = "99999999999999 days ago";
+        assert_eq!(normalize_relative_dates(phrase), phrase);
+    }
+
+    #[test]
+    fn day_count_past_date_range_leaves_phrase_intact() {
+        // 9.9e9 days fits `TimeDelta` but leaves `NaiveDate`'s ±262143-year
+        // range, so the subtraction used to panic.
+        let phrase = "9999999999天前";
+        assert_eq!(normalize_relative_dates(phrase), phrase);
+    }
+
+    #[test]
+    fn day_count_past_date_range_after_parse_leaves_phrase_intact() {
+        // Fits u64 and i32, so `checked_sub_days` takes its `add_days` branch
+        // and still returns None: 200_000_000 days is ~547k years.
+        let phrase = "200000000 days ago";
+        assert_eq!(normalize_relative_dates(phrase), phrase);
+    }
+
+    #[test]
+    fn unparseable_day_count_leaves_phrase_intact() {
+        // Does not fit i64. This one did not panic before the fix — the
+        // `unwrap_or(0)` fallback rewrote it to today's date, silently
+        // corrupting the stored fact.
+        let phrase = "99999999999999999999999 days ago";
+        assert_eq!(normalize_relative_dates(phrase), phrase);
     }
 }

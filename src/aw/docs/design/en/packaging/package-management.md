@@ -2,7 +2,7 @@
 
 [中文版](../../zh/packaging/package-management.md)
 
-On the `codex/aw-design-d2` branch, `aw-cli` calls the `aw-package` library to
+`aw-cli` calls the `aw-package` library to
 plan and commit local package changes. The implementation is in `database.rs`,
 `open_bundle.rs`, `plan.rs` and `transaction.rs` and their matching directories.
 The CLI remains the only software-management executable; `aw-build` produces

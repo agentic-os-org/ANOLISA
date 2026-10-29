@@ -9,6 +9,19 @@
 
 ## [未发布]
 
+## [0.5.4] - 2026-10-28
+
+### 修复
+
+- Skill 移入另一个 Skill 目录后，及时移除 `/skills` 和 `skill-discover` 中残留的
+  顶层条目，使实时发现结果与重新扫描一致
+  ([#9124](https://github.com/agentic-os-org/ANOLISA/pull/9124))。
+- 选择 Yarn 时，带包名、选项或不明确 shell 语法的 npm install 命令保留原样，
+  避免转换为无效命令 ([#9003](https://github.com/agentic-os-org/ANOLISA/pull/9003))。
+- chat 使用统计将 `--logs-dir` 按字面路径处理，支持方括号等字符，
+  避免误统计相似名称的同级目录
+  ([#9180](https://github.com/agentic-os-org/ANOLISA/pull/9180))。
+
 ## [0.5.3] - 2026-10-23
 
 ### 新增

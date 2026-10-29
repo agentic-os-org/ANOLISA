@@ -6,6 +6,8 @@ import { managedMcpServer, admitMcp } from "../../../../aw-adapter/native/qoder-
 import { sdk, z, pause, deferred, fixture } from "./parser-support.mjs";
 import "./parser-mcp.test.mjs";
 import "./parser-child.test.mjs";
+import "./parser-command-wrapper.test.mjs";
+import "./parser-command-permission.test.mjs";
 
 test("actual SDK parser binds model identity before native callback dispatch", { timeout: 5000 }, async t => {
   let calls = 0;

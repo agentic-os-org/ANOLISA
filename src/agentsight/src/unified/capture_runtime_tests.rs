@@ -12,6 +12,7 @@ pub(super) struct TestProbes {
     /// Pids handed to `attach_process` by the production handlers.
     attached_pids: RefCell<Vec<i32>>,
     cpu_budget: RefCell<Option<Arc<crate::utils::cpu_budget::CpuBudget>>>,
+    failed_registration_pid: Option<u32>,
 }
 
 impl Deref for TestProbes {
@@ -66,6 +67,7 @@ impl TestProbes {
             events: RefCell::new(VecDeque::new()),
             attached_pids: RefCell::new(Vec::new()),
             cpu_budget: RefCell::new(None),
+            failed_registration_pid: None,
         })
     }
 
@@ -79,9 +81,26 @@ impl TestProbes {
         Ok(())
     }
 
-    /// Record pid registration without touching kernel maps.
-    pub(super) fn add_traced_pid(&mut self, _pid: u32) -> Result<()> {
+    /// Record a best-effort attach for an unclassified process.
+    ///
+    /// Shadows the live method for the same reason as `attach_process`; the
+    /// live one differs only in whether a filter-map slot is claimed, which
+    /// replay has no map to observe.
+    pub(super) fn attach_unclassified_process(&mut self, pid: i32) -> Result<()> {
+        self.attached_pids.borrow_mut().push(pid);
         Ok(())
+    }
+
+    /// Record pid registration without touching kernel maps.
+    pub(super) fn add_traced_pid(&mut self, pid: u32) -> Result<()> {
+        if self.failed_registration_pid == Some(pid) {
+            anyhow::bail!("injected registration failure for pid {pid}");
+        }
+        Ok(())
+    }
+
+    pub(super) fn fail_registration_for(&mut self, pid: u32) {
+        self.failed_registration_pid = Some(pid);
     }
 
     pub(super) fn attached_pids(&self) -> Vec<i32> {
@@ -163,6 +182,7 @@ impl RuntimeFixture {
             events: RefCell::new(VecDeque::new()),
             attached_pids: RefCell::new(Vec::new()),
             cpu_budget: RefCell::new(None),
+            failed_registration_pid: None,
         };
         let budget = maintenance::configure_cpu_budget(&probes, percent).unwrap();
         let storage = AgentSight::create_storage(&config.storage.primary_path(), &config).unwrap();

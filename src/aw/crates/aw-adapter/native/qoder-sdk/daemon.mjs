@@ -25,7 +25,7 @@ function trackedCredentials(value, record) {
 
 export async function managedDaemon(sdk, options, config, bounded,
   environment = { ...process.env, ...(options.env ?? {}) }) {
-  const record = { binding: config.binding, environment, queries: new Set(), callbacks: new Set(), closing: false };
+  const record = { binding: config.binding, sdk: config.sdk, site: config.sdk_site ?? "global", environment, queries: new Set(), callbacks: new Set(), closing: false };
   const auth = trackedCredentials(options.auth, record);
   const daemon = await sdk.startDaemon({ ...options, env: { ...environment }, ...(auth ? { auth } : {}) });
   if (typeof daemon.auth === "function") {

@@ -399,39 +399,6 @@ The native dispatcher retains error/result reporting; no callback replay or
 replacement scheduler is added. Reload between tools and empty routes retain
 native behavior. The discovery method is restored on main exit.
 
-## Review findings and KISS decisions
-
-The review history in [#4533](https://github.com/agentic-os-org/ANOLISA/pull/4533)
-repeatedly exposed a few shared contract gaps rather than independent features.
-The implementation keeps these decisions at their existing boundaries:
-
-| Recurring problem | Minimal shared correction |
-| --- | --- |
-| Safe mode, late load receipts and forced reload lose active callbacks | Check native plugin/ledger state before chat and tool execution; re-register the full callback set on reload and reuse only the same session's matching receipt. |
-| AW launch binding changes during dotenv/plugin reload | Hold the binding in the launcher's session module, outside native plugin teardown. |
-| Native rewrites bypass checks on original arguments | Delegate once to the native reducer and veto effective rewrites when AW before callbacks are configured; keep the guard outside plugin teardown. |
-| YAML scalars, merge aliases, templates and managed keys differ from Rust assumptions | Use pinned Hermes YAML editing, expansion and timeout resolution; edit only plugin selections and preserve unrelated raw values. |
-| Concurrent config/plugin publication, cancellation, unreported backups and durability | Stage privately, use the existing lock and atomic exchange, retain the displaced inode, and propagate cancellation through existing bounded commands. |
-| Checked code/helper differs from actual Python/Git execution | One shared preflight runs before and after native dotenv; reuse protected-path checks, private Python caches and native Git queries. Validate skipped names and repository locators too. |
-| PATH/argv/help and non-UTF-8 paths fail after side effects | Validate the supported entrypoint and serialization inputs before probes, writes or service setup. |
-
-The main cause of repeated findings was validating a snapshot while a later
-native operation consumed a different environment, lookup name or lifecycle
-state. Tests cover effective dotenv changes, successful startup followed by
-reload, and original-file/resource preservation across install/run paths.
-A readiness file alone never proves active enforcement.
-The follow-up [#7101](https://github.com/agentic-os-org/ANOLISA/pull/7101) also
-checks effective native arguments and YAML 1.1 string names at those boundaries.
-
-KISS means fixing each invariant at the shared boundary, using native semantics,
-and visibly rejecting unsupported selectors or shell helpers. Reproduced
-correctness checks remain required. No general Git configuration parser, Python
-import-closure scanner, callback scheduler, automatic permission repair, or retry
-layer is introduced. Caller-managed external Python imports remain trusted
-configuration. Duplicate per-launch expansion and sticky-checkout guards were
-unnecessary because native startup and dotenv checks already enforce those
-paths. The named-profile concern was checked against the pinned implementation
-before changing anything.
 
 ## Verification
 

@@ -60,6 +60,11 @@ impl CoshCoreAdapter {
         action: &str,
         params: Value,
     ) -> Result<Value, RegistryQueryError> {
+        if domain == "auth" && action == "activate" {
+            return self.runtime.registry_activation_query(params.clone(), || {
+                self.registry_query_short(domain, action, params)
+            });
+        }
         if let Some(result) = self
             .runtime
             .live_registry_query(domain, action, params.clone())

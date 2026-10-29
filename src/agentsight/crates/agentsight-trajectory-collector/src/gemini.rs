@@ -389,13 +389,20 @@ fn gemini_step(
                 extra: None,
             });
             if let Some(result) = call.get("result").filter(|v| !v.is_null()) {
-                let failed = call.get("status").and_then(|v| v.as_str()) == Some("error");
+                let failed = match call.get("status").and_then(|v| v.as_str()) {
+                    Some("success") => Some(false),
+                    Some("error") => Some(true),
+                    _ => None,
+                };
                 observations.push(ObservationResult {
                     source_call_id: Some(call_id.to_string()),
                     content: Some(serde_json::Value::String(tool_result_text(result))),
                     subagent_trajectory_ref: None,
-                    extra: failed.then(|| {
-                        HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(true))])
+                    extra: failed.map(|failed| {
+                        HashMap::from([(
+                            EXTRA_IS_ERROR.to_string(),
+                            serde_json::Value::Bool(failed),
+                        )])
                     }),
                 });
             }

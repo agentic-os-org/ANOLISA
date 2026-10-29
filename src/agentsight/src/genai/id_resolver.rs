@@ -47,6 +47,9 @@ use std::time::{Duration, Instant};
 use lru::LruCache;
 use sha2::{Digest, Sha256};
 
+mod text_cache;
+use text_cache::TextPrefixCache;
+
 /// Maximum number of (session_key | conv_key) → first_response_id entries
 /// kept in memory. Sized to align with `ResponseSessionMapper`.
 const MAX_ENTRIES: usize = 10_000;
@@ -72,19 +75,33 @@ fn conversation_max_age() -> Duration {
         .unwrap_or(Duration::from_secs(30 * 60))
 }
 
-/// LRU 中缓存的一条锚定记录：首次见到该 key 时的 `response_id`，
-/// 以及最近一次被访问（创建或命中续期）的时间点。
+/// A domain ID fixed by the first response and its latest access time.
 struct Anchor {
-    response_id: String,
+    id: String,
     anchored_at: Instant,
 }
 
 impl Anchor {
-    fn new(response_id: &str, now: Instant) -> Self {
+    fn new(domain: &str, response_id: &str, now: Instant) -> Self {
         Anchor {
-            response_id: response_id.to_string(),
+            id: domain_hash(domain, response_id),
             anchored_at: now,
         }
+    }
+}
+
+/// Reusable conversation lookup key that retains no user text.
+pub(super) struct ConversationKey([u8; 32]);
+
+impl ConversationKey {
+    /// Skip empty text, which cannot identify a conversation anchor.
+    pub(super) fn new(
+        agent_name: &str,
+        pid: i32,
+        text: &str,
+        user_message_count: usize,
+    ) -> Option<Self> {
+        (!text.is_empty()).then(|| Self(compose_key(agent_name, pid, text, user_message_count)))
     }
 }
 
@@ -94,11 +111,12 @@ impl Anchor {
 /// 内部使用 `Mutex<LruCache<...>>`，所以可以以 `&self` 形式安全地在
 /// `GenAIBuilder` 多线程上下文里调用。
 pub struct IdResolver {
+    text_prefixes: Mutex<TextPrefixCache>,
     /// session_key (SHA256 of first user message) → 锚定记录。不设 TTL。
-    session_first_resp: Mutex<LruCache<String, Anchor>>,
+    session_first_resp: Mutex<LruCache<[u8; 32], Anchor>>,
     /// conversation_key (SHA256 of last user message) → 锚定记录。
     /// 受滑动窗口 TTL 约束，见模块文档。
-    conv_first_resp: Mutex<LruCache<String, Anchor>>,
+    conv_first_resp: Mutex<LruCache<[u8; 32], Anchor>>,
 }
 
 impl Default for IdResolver {
@@ -108,10 +126,94 @@ impl Default for IdResolver {
 }
 
 impl IdResolver {
+    /// Share the text prefix when session and conversation identify one message.
+    pub(super) fn message_keys(
+        &self,
+        agent_name: &str,
+        pid: i32,
+        first_text: &str,
+        last_text: &str,
+        user_message_count: usize,
+        need_session: bool,
+    ) -> (Option<[u8; 32]>, Option<ConversationKey>) {
+        if need_session && !first_text.is_empty() {
+            let prefix = self.cached_key_prefix(agent_name, pid, first_text, true);
+            let session = finish_key(prefix.clone(), 0);
+            let conversation = if first_text == last_text {
+                Some(ConversationKey(finish_key(prefix, user_message_count)))
+            } else {
+                self.cached_conversation_key(agent_name, pid, last_text, user_message_count)
+            };
+            (Some(session), conversation)
+        } else {
+            (
+                None,
+                self.cached_conversation_key(agent_name, pid, last_text, user_message_count),
+            )
+        }
+    }
+
+    fn cached_conversation_key(
+        &self,
+        agent: &str,
+        pid: i32,
+        text: &str,
+        count: usize,
+    ) -> Option<ConversationKey> {
+        (!text.is_empty()).then(|| {
+            ConversationKey(finish_key(
+                self.cached_key_prefix(agent, pid, text, false),
+                count,
+            ))
+        })
+    }
+
+    fn cached_key_prefix(&self, agent: &str, pid: i32, text: &str, session: bool) -> Sha256 {
+        if !TextPrefixCache::eligible(agent, text) {
+            return key_prefix(agent, pid, text);
+        }
+        if let Some(prefix) = self
+            .text_prefixes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(agent, pid, session, text)
+        {
+            return prefix;
+        }
+        // Software SHA may be expensive; do that work outside the cache mutex.
+        let prefix = key_prefix(agent, pid, text);
+        self.text_prefixes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(agent, pid, session, text, prefix.clone());
+        prefix
+    }
+
+    /// Resolve a session from a prepared key without reading the user text again.
+    pub(super) fn resolve_session_id_with_key(
+        &self,
+        key: &[u8; 32],
+        response_id: &str,
+    ) -> Option<String> {
+        Self::resolve_with_key(
+            &self.session_first_resp,
+            SESSION_DOMAIN,
+            key,
+            response_id,
+            None,
+        )
+    }
+
+    /// Peek at a session from a prepared key without changing anchor state.
+    pub(super) fn peek_session_id_with_key(&self, key: &[u8; 32]) -> Option<String> {
+        Self::peek_with_key(&self.session_first_resp, key, None)
+    }
+
     /// 构造一个空的 resolver，两份 LRU 容量均为 [`MAX_ENTRIES`]。
     pub fn new() -> Self {
         let cap = NonZeroUsize::new(MAX_ENTRIES).expect("MAX_ENTRIES must be non-zero");
         IdResolver {
+            text_prefixes: Mutex::new(TextPrefixCache::new()),
             session_first_resp: Mutex::new(LruCache::new(cap)),
             conv_first_resp: Mutex::new(LruCache::new(cap)),
         }
@@ -182,6 +284,21 @@ impl IdResolver {
         )
     }
 
+    /// Resolve with the same key that the caller will use to finish the turn.
+    pub(super) fn resolve_conversation_id_with_key(
+        &self,
+        key: &ConversationKey,
+        response_id: &str,
+    ) -> Option<String> {
+        Self::resolve_with_key(
+            &self.conv_first_resp,
+            CONVERSATION_DOMAIN,
+            &key.0,
+            response_id,
+            Some(conversation_max_age()),
+        )
+    }
+
     /// 通用实现：定位/记录"首个 response_id"，再用域前缀 + first_response_id
     /// 计算最终 ID（取 SHA256 前 32 位 hex）。
     ///
@@ -189,7 +306,7 @@ impl IdResolver {
     /// 访问已超过 `ttl`，视为过期并用本次 `response_id` 重新锚定；未过期
     /// 则命中并刷新 `anchored_at` 续期。为 `None` 时不过期，行为与原来一致。
     fn resolve(
-        cache: &Mutex<LruCache<String, Anchor>>,
+        cache: &Mutex<LruCache<[u8; 32], Anchor>>,
         domain: &str,
         agent_name: &str,
         pid: i32,
@@ -203,27 +320,41 @@ impl IdResolver {
         }
 
         let key = compose_key(agent_name, pid, text, user_message_count);
+        Self::resolve_with_key(cache, domain, &key, response_id, max_age)
+    }
+
+    fn resolve_with_key(
+        cache: &Mutex<LruCache<[u8; 32], Anchor>>,
+        domain: &str,
+        key: &[u8; 32],
+        response_id: &str,
+        max_age: Option<Duration>,
+    ) -> Option<String> {
+        if response_id.is_empty() {
+            return None;
+        }
         let now = Instant::now();
-        let anchored_response_id = {
+        let id = {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-            let expired = match (max_age, guard.peek(&key)) {
+            let expired = match (max_age, guard.peek(key)) {
                 (Some(ttl), Some(anchor)) => now.duration_since(anchor.anchored_at) > ttl,
                 _ => false,
             };
             if !expired {
-                if let Some(existing) = guard.get_mut(&key) {
-                    // 命中且未过期：继续复用旧 response_id，刷新访问时间实现
-                    // 滑动窗口续期，避免真正进行中的轮次因长时间运行而过期。
+                if let Some(existing) = guard.get_mut(key) {
+                    // Renew active turns without changing the first response's domain ID.
                     existing.anchored_at = now;
-                    return Some(domain_hash(domain, &existing.response_id));
+                    return Some(existing.id.clone());
                 }
             }
-            // 未命中或已过期：把当前 response_id 写入作为新锚点。
-            guard.put(key, Anchor::new(response_id, now));
-            response_id.to_string()
+            // An expired or unseen key starts a new anchor with the current response.
+            let anchor = Anchor::new(domain, response_id, now);
+            let id = anchor.id.clone();
+            guard.put(*key, anchor);
+            id
         };
 
-        Some(domain_hash(domain, &anchored_response_id))
+        Some(id)
     }
 
     /// 只读查询 session_id：查 LRU 中是否已锁定 `(agent, pid, first_user_text)` 的
@@ -241,7 +372,6 @@ impl IdResolver {
     ) -> Option<String> {
         Self::peek(
             &self.session_first_resp,
-            SESSION_DOMAIN,
             agent_name,
             pid,
             first_user_text,
@@ -262,13 +392,17 @@ impl IdResolver {
     ) -> Option<String> {
         Self::peek(
             &self.conv_first_resp,
-            CONVERSATION_DOMAIN,
             agent_name,
             pid,
             last_user_text,
             Some(conversation_max_age()),
             user_message_count,
         )
+    }
+
+    /// Read an anchor without rehashing the text or refreshing its TTL or LRU order.
+    pub(super) fn peek_conversation_id_with_key(&self, key: &ConversationKey) -> Option<String> {
+        Self::peek_with_key(&self.conv_first_resp, &key.0, Some(conversation_max_age()))
     }
 
     /// 标记一轮对话（turn）已经结束，驱逐 `(agent_name, pid, last_user_text)` 对应的
@@ -297,15 +431,20 @@ impl IdResolver {
         last_user_text: &str,
         user_message_count: usize,
     ) {
-        if last_user_text.is_empty() {
+        let Some(key) = ConversationKey::new(agent_name, pid, last_user_text, user_message_count)
+        else {
             return;
-        }
-        let key = compose_key(agent_name, pid, last_user_text, user_message_count);
+        };
+        self.finish_conversation_with_key(&key);
+    }
+
+    /// Evict precisely the anchor addressed by the earlier resolve or peek.
+    pub(super) fn finish_conversation_with_key(&self, key: &ConversationKey) {
         let mut guard = self
             .conv_first_resp
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        guard.pop(&key);
+        guard.pop(&key.0);
     }
 
     /// `peek_*` 的通用实现：仅查询 LRU，不写入、不提升顺序。
@@ -313,8 +452,7 @@ impl IdResolver {
     /// `max_age`、过期判断逻辑与 `resolve` 一致，但命中时不会刷新
     /// `anchored_at`（保持本函数"只读不写"的语义）。
     fn peek(
-        cache: &Mutex<LruCache<String, Anchor>>,
-        domain: &str,
+        cache: &Mutex<LruCache<[u8; 32], Anchor>>,
         agent_name: &str,
         pid: i32,
         text: &str,
@@ -325,15 +463,23 @@ impl IdResolver {
             return None;
         }
         let key = compose_key(agent_name, pid, text, user_message_count);
+        Self::peek_with_key(cache, &key, max_age)
+    }
+
+    fn peek_with_key(
+        cache: &Mutex<LruCache<[u8; 32], Anchor>>,
+        key: &[u8; 32],
+        max_age: Option<Duration>,
+    ) -> Option<String> {
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         // `LruCache::peek` 不会提升条目顺序，适合 crash 路径“只读不写”。
-        let anchor = guard.peek(&key)?;
+        let anchor = guard.peek(key)?;
         if let Some(ttl) = max_age {
             if Instant::now().duration_since(anchor.anchored_at) > ttl {
                 return None;
             }
         }
-        Some(domain_hash(domain, &anchor.response_id))
+        Some(anchor.id.clone())
     }
 }
 
@@ -371,16 +517,15 @@ pub fn crash_fallback_id(
     full[..32].to_string()
 }
 
-/// 组装 LRU key：SHA256(agent_name + "|" + pid + "|" + text + "|" + user_message_count)
-/// 的 hex。
+/// SHA-256 lookup bytes for `agent_name|pid|text|user_message_count`.
 ///
-/// `user_message_count` 是请求中"真正的用户消息"条数（role=user 且含非空文本，
-/// 排除仅含 tool_result 的消息）。同一轮工具循环内该值不变，用户发新消息时
-/// 必然 +1，从而在不依赖 finish_reason 的前提下结构性避免不同轮次撞 key。
-///
-/// 使用哈希后的定长字符串作为 key，避免原始 user message 过长占用内存；
-/// `|` 作为字段分隔符避免 "a"+"|b" 与 "a|"+"b" 这类拼接哈希冲突。
-fn compose_key(agent_name: &str, pid: i32, text: &str, user_message_count: usize) -> String {
+/// The message count separates repeated prompts in different user turns.
+/// Keep all digest bytes internally to avoid hex formatting and allocation.
+fn compose_key(agent_name: &str, pid: i32, text: &str, user_message_count: usize) -> [u8; 32] {
+    finish_key(key_prefix(agent_name, pid, text), user_message_count)
+}
+
+fn key_prefix(agent_name: &str, pid: i32, text: &str) -> Sha256 {
     let mut hasher = Sha256::new();
     hasher.update(agent_name.as_bytes());
     hasher.update(b"|");
@@ -388,8 +533,12 @@ fn compose_key(agent_name: &str, pid: i32, text: &str, user_message_count: usize
     hasher.update(b"|");
     hasher.update(text.as_bytes());
     hasher.update(b"|");
+    hasher
+}
+
+fn finish_key(mut hasher: Sha256, user_message_count: usize) -> [u8; 32] {
     hasher.update(user_message_count.to_string().as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher.finalize().into()
 }
 
 /// 计算 `SHA256(domain + first_response_id)` 的前 32 位 hex 表示。
@@ -409,6 +558,121 @@ mod tests {
     /// 测试辅助：默认 agent / pid。
     const A: &str = "openclaw";
     const P: i32 = 1001;
+
+    #[test]
+    fn text_cache_eviction_preserves_anchors_and_message_counts() {
+        let resolver = IdResolver::new();
+        let text = "x".repeat(600 * 1024);
+        let (_, first_key) = resolver.message_keys(A, P, &text, &text, 1, true);
+        let first_key = first_key.unwrap();
+        let first_id = resolver.resolve_conversation_id_with_key(&first_key, "resp-first");
+        for pid in 0..8 {
+            resolver.message_keys(A, pid, &text, &text, 1, true);
+        }
+        let (_, key) = resolver.message_keys(A, P, &text, &text, 1, true);
+        assert_eq!(
+            resolver.resolve_conversation_id_with_key(&key.unwrap(), "resp-later"),
+            first_id
+        );
+        let (_, key) = resolver.message_keys(A, P, &text, &text, 2, true);
+        assert_ne!(key.unwrap().0, first_key.0);
+    }
+
+    #[test]
+    fn shared_message_keys_preserve_both_identifiers() {
+        let text = "雪|\"\n\0".repeat(128 * 1024);
+        for (first, last) in [
+            (text.as_str(), text.as_str()),
+            ("first", text.as_str()),
+            ("", ""),
+            ("first", ""),
+        ] {
+            for need_session in [false, true] {
+                let (session, conversation) =
+                    IdResolver::new().message_keys(A, P, first, last, 12, need_session);
+                let expected_session =
+                    (need_session && !first.is_empty()).then(|| compose_key(A, P, first, 0));
+                let expected_conversation = (!last.is_empty()).then(|| compose_key(A, P, last, 12));
+                assert_eq!(session, expected_session);
+                assert_eq!(conversation.map(|key| key.0), expected_conversation);
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_conversation_key_preserves_hash_bytes() {
+        let long_text = "雪|\"\n\0".repeat(128 * 1024);
+        for text in ["hello", long_text.as_str()] {
+            for count in [0, 1, 12] {
+                let key = ConversationKey::new(A, P, text, count).unwrap();
+                let expected = Sha256::digest(format!("{A}|{P}|{text}|{count}").as_bytes());
+                assert_eq!(key.0.as_slice(), expected.as_slice());
+            }
+        }
+        assert!(ConversationKey::new(A, P, "", 1).is_none());
+    }
+
+    #[test]
+    fn prepared_conversation_key_reuses_and_evicts_only_its_anchor() {
+        let resolver = IdResolver::new();
+        let key = ConversationKey::new(A, P, "same text", 1).unwrap();
+        assert!(
+            resolver
+                .resolve_conversation_id_with_key(&key, "")
+                .is_none()
+        );
+        assert!(resolver.peek_conversation_id_with_key(&key).is_none());
+
+        let first = resolver
+            .resolve_conversation_id(A, P, "same text", "resp-1", 1)
+            .unwrap();
+        let other = resolver
+            .resolve_conversation_id(A, P, "same text", "resp-other", 2)
+            .unwrap();
+        assert_eq!(
+            resolver.peek_conversation_id_with_key(&key),
+            Some(first.clone())
+        );
+        assert_eq!(
+            resolver.resolve_conversation_id_with_key(&key, "resp-ignored"),
+            Some(first)
+        );
+        resolver.finish_conversation_with_key(&key);
+        assert!(
+            resolver
+                .peek_conversation_id(A, P, "same text", 1)
+                .is_none()
+        );
+        assert_eq!(
+            resolver.peek_conversation_id(A, P, "same text", 2),
+            Some(other)
+        );
+        assert_eq!(
+            resolver.resolve_conversation_id_with_key(&key, "resp-new"),
+            Some(domain_hash(CONVERSATION_DOMAIN, "resp-new"))
+        );
+    }
+
+    #[test]
+    fn prepared_conversation_key_peek_preserves_anchor_state() {
+        let resolver = IdResolver::new();
+        let key = ConversationKey::new(A, P, "hello", 1).unwrap();
+        let id = resolver
+            .resolve_conversation_id_with_key(&key, "resp-1")
+            .unwrap();
+        resolver.resolve_conversation_id(A, P, "other", "resp-2", 1);
+        let anchored_at = resolver
+            .conv_first_resp
+            .lock()
+            .unwrap()
+            .peek(&key.0)
+            .unwrap()
+            .anchored_at;
+        assert_eq!(resolver.peek_conversation_id_with_key(&key), Some(id));
+        let guard = resolver.conv_first_resp.lock().unwrap();
+        assert_eq!(guard.peek(&key.0).unwrap().anchored_at, anchored_at);
+        assert_eq!(guard.peek_lru().unwrap().0, &key.0);
+    }
 
     #[test]
     fn resolve_session_id_is_stable_across_calls() {
@@ -801,16 +1065,7 @@ mod tests {
         .unwrap();
         std::thread::sleep(Duration::from_millis(2));
         assert!(
-            IdResolver::peek(
-                &resolver.conv_first_resp,
-                CONVERSATION_DOMAIN,
-                A,
-                P,
-                "hello",
-                Some(ttl),
-                1,
-            )
-            .is_none(),
+            IdResolver::peek(&resolver.conv_first_resp, A, P, "hello", Some(ttl), 1,).is_none(),
             "过期锚点应被 peek 视为未命中"
         );
     }

@@ -15,7 +15,7 @@ AW 通过 `aw inspect --config ABS_FILE --json` 提供单个桌面快照，不�
 为两种入口登记相同 CLI/数据目录。
 
 `aw-provider-view/v1alpha1` 独立于 `aw-provider/v1alpha1` 和
-`aw-service/v1alpha2`，事件请求/响应 schema 保持不变。使用匹配的 Preview 二进制
+`aw-service/v1alpha7`，事件请求/响应 schema 保持不变。使用匹配的 Preview 二进制
 和配置；旧二进制可能拒绝新登记。缺失或不支持的展示能力不改变 sec-core 检查、
 after 完成观察或用户 Hook 调度。
 
@@ -69,7 +69,7 @@ Tokenless view 使用显式目录调用公共 `stats summary --json --limit 200`
 复用公共 summary；不把全表 retrieve 归因与有限压缩窗口混算。存储历史可能来自非 AW
 接入；这些数字不证明会话、今日、计费、净收益或原生采用。
 
-服务新增只读 `recent_executions`，返回本次 generation 最近最多 20 条完成步骤投影，
+服务的只读 `recent_executions`，返回本次 generation 最近最多 20 条完成步骤投影，
 新记录在前。有界内存队列仅在持久 append 成功后更新；展示缓存失败不能让事件失败或
 改变审计健康度。发布缓存时保留 journal 锁，维持并发写入顺序。读取至多复制 20 条，
 不跨 Provider I/O 持锁。不新增持久历史；重启
@@ -81,7 +81,7 @@ Tokenless view 使用显式目录调用公共 `stats summary --json --limit 200`
 inspect 绑定配置修订及服务 generation，完成 view 查询后复查同一客户端；无法确认时
 清空近期执行数据，并从最终响应刷新审计健康度。近期执行的成功结果必须包含数据且
 code 为 null，其他状态的 data 为 null。组件存储历史与活跃 AW 会话独立。原有 Tokenless SQLite/SLS 留存
-是另一边界；Panel JSON 排除正文不等于删除或关闭这些 sink。
+是另一边界；组件的数据留存由其配置和清理操作管理。
 
 ## 回归与客户端 fixture
 
@@ -89,6 +89,3 @@ code 为 null，其他状态的 data 为 null。组件存储历史与活跃 AW �
 不证明原生采用。测试覆盖严格校验、子进程限制/取消、不启动/不建库、身份/配置不匹配、
 generation 重置、有界历史及保留阻断。包 CI 额外通过真实公共 CLI 写入统计，
 验证排除 dry-run，并与同一 summary 对照。
-
-既有 sec-core 和 Qoder/OpenClaw/QwenPaw/Hermes 事件测试继续作为回归门槛。
-本次不改变 Adapter、原生 Hook 调度、before/after 权限规则、压缩策略、恢复或 GUI 实现。

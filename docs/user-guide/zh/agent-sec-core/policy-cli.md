@@ -127,6 +127,10 @@ Policy ID 保留 revision 计数器；update 可按下一 revision 重建内容�
 一个进程实例。名称/路径持续发现已有和后续进程；PID 固定第一次观察到的实例，不跟随
 PID 复用。目前拒绝 cgroup assignment。
 
+**兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
+assignment。继续传入该参数的脚本会在本地报错，退出码为 2；请改用 `--pid`、
+`--process-name` 或 `--executable` 选择目标进程。
+
 ```bash
 agent-sec-cli --socket "$SOCKET" scope create --process-name openclaw --policy-id "$POLICY_ID" --policy-revision 1
 agent-sec-cli --socket "$SOCKET" scope get --scope-id "$SCOPE_ID"

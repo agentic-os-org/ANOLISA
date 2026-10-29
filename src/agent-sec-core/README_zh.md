@@ -80,6 +80,9 @@ PolicyTemplate 是包含通用规则的可复用策略；AgentSight Adapter 当�
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
 
+**兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
+assignment。请更新脚本，使用 `--pid`、`--process-name` 或 `--executable` 选择目标进程。
+
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
@@ -364,13 +367,16 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 在 daemon 启动时加载 `/etc/agent-sec/pii-checker/rules.yaml`，也可通过
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` 指定其他文件；重启后更新。
-V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.0.0"`；
+V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.1.1"`；
 覆盖不完整时的 `pass` 不代表检测完整。本阶段保持 Hook 契约，不切换真实宿主，也不新增 PDP 执行控制。
 公共 CLI `--trace-context` 适配通过顶层 OTel 信封传播关联信息，不支持 `params.traceContext`。
 
 正式版 OpenClaw `>=2026.5.12` 在模型运行入口扫描，记录为 `source=model_input`；
 此输入 hook 只扫描本轮 `prompt`，不扫描 system prompt 或历史消息。
 较旧的受支持版本保留入站扫描。输入是否阻断取决于策略，工具输出 hook 仍只用于观测。
+
+`test` 等测试标记只有匹配完整词时才会降低置信度；`latest 13812345678` 保留手机号 finding，
+`test-only` 仍沿用原有的测试上下文处理。
 
 详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-sec-core/pii-checker.md)。
 

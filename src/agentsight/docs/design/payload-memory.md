@@ -14,6 +14,9 @@ including completed results. Jobs pin file descriptors and share the configured 
 between 4 MiB windows. The event owner installs global uprobes only for unchanged files with live
 process references; symbol and known-offset fast paths stay synchronous. Shutdown cancels and joins
 the worker. Discovery of a previously unseen static binary remains best-effort while its scan runs.
+Executable SSL scans use vectorized substring searches in bounded 4 MiB windows with signature
+overlap. Every overlapping match and cross-window start is preserved; inode caching and symbol
+selection keep their existing behavior.
 
 ```mermaid
 flowchart LR
@@ -77,6 +80,12 @@ Dynamic sinks also re-read their current path so a paused exporter can resume wi
 changes. Inactive sinks are still called during immediate fan-out: activation during persistence
 does not discard the current call, which may carry its fallback session metadata. Subsequent calls
 to an active external sink use the existing resolution window.
+
+GenAI session and conversation resolution prepares lookup keys once per call and reuses them for
+turn eviction and crash draining. Identical first/last user text shares its unfinished SHA-256
+state. Repeated long text can reuse exact-byte-checked prefixes in a cache bounded by 2 MiB and
+64 entries; eviction never changes anchors. Anchors retain domain-separated IDs and binary lookup
+digests, preserving external ID bytes, process/message-count isolation and sliding TTL behavior.
 
 SQLite completion serializes JSON before taking the connection lock. Capacity selection uses
 `octet_length` on stored JSON columns to read their byte lengths without fetching and scanning whole

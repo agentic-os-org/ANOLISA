@@ -539,7 +539,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Sun Oct 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Oct 29 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Preserve Qoder result envelopes and native head/tail line windows
+- Honor QwenWork data directories and report sandbox persistence limits
+- Compress unittest logs and preserve HTML zero-rowspan column alignment
+- Resolve redirected Cargo output directories for Windows builds
+
+* Sun Oct 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.0-1
 - Add Windows x64 and Intel Mac packages and TOON spec v4.4 support
 - Preserve JSON fields, empty values, and exact numbers; remove obsolete Rust config fields
 - Resume lossless compression after unchanged RTK output and preserve exact CLI output

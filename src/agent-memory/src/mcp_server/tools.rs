@@ -82,7 +82,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Replace exactly one occurrence of old_str with new_str in a file. Errors if old_str matches zero or multiple times."
+        description = "Replace exactly one occurrence of old_str with new_str in a file. Errors if old_str matches zero or multiple times, including overlapping matches."
     )]
     async fn mem_edit(
         &self,
@@ -233,7 +233,20 @@ impl MemoryMcpServer {
                 category.as_deref().filter(|s| !s.is_empty()),
                 agent_scope.as_deref().filter(|s| !s.is_empty()),
             )
-            .map_err(|e| fmt_err("search failed", e))?;
+            .map_err(|e| {
+                let mut message = fmt_err(
+                    &format!(
+                        "search failed (requested_mode={})",
+                        mode.as_deref().unwrap_or("bm25")
+                    ),
+                    &e,
+                );
+                if crate::index::store::is_row_decode_error(&e) {
+                    message.push_str("; ");
+                    message.push_str(crate::index::store::ROW_DECODE_RECOVERY);
+                }
+                message
+            })?;
         serde_json::to_string_pretty(&hits).map_err(|e| fmt_err("search serialize failed", e))
     }
 
@@ -390,12 +403,12 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Revert a single file to its content at HEAD, then commit the revert. Useful for undoing the most recent uncommitted edit. Errors when git versioning isn't enabled."
+        description = "Restore a single file's working-tree content from HEAD without changing the Git index or committing other files. Returns the source commit hash. Useful for undoing an uncommitted edit. Errors when git versioning isn't enabled."
     )]
     async fn mem_revert(&self, #[tool(param)] path: String) -> ToolResult {
         self.svc
             .mem_revert(&path)
-            .map(|hash| format!("reverted {path} (commit {hash})"))
+            .map(|hash| format!("reverted {path} (from commit {hash})"))
             .map_err(|e| fmt_err("mem_revert failed", e))
     }
 
@@ -684,5 +697,53 @@ impl ServerHandler for MemoryMcpServer {
             }
             memory_tool_box().call(tcc).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// The packaged catalog is what external MCP clients read for discovery,
+    /// so a tool present only in the runtime registry is effectively
+    /// invisible to them. Both directions have to hold: every registered
+    /// tool is listed, and nothing is listed that the server does not
+    /// register. The catalog is profile-agnostic, so this compares against
+    /// the unfiltered registry — the `expert` profile hides a Tier B subset
+    /// at both `tools/list` and `tools/call`, before and after this test.
+    #[test]
+    fn packaged_catalog_matches_registered_tools() {
+        let raw = include_str!("../../config/mcp-server.json");
+        let catalog: serde_json::Value =
+            serde_json::from_str(raw).expect("config/mcp-server.json must be valid JSON");
+        let listed: BTreeSet<String> = catalog["tools"]
+            .as_array()
+            .expect("catalog tools must be an array")
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .expect("catalog tool names must be strings")
+                    .to_string()
+            })
+            .collect();
+
+        let registered: BTreeSet<String> = memory_tool_box()
+            .list()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+
+        let missing: Vec<&String> = registered.difference(&listed).collect();
+        let unknown: Vec<&String> = listed.difference(&registered).collect();
+
+        assert!(
+            missing.is_empty(),
+            "config/mcp-server.json does not list registered tools: {missing:?}"
+        );
+        assert!(
+            unknown.is_empty(),
+            "config/mcp-server.json lists tools the server does not register: {unknown:?}"
+        );
     }
 }

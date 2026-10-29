@@ -113,7 +113,7 @@ SDK，启动进入常驻宿主；所有客户端创建路径都需经过该公�
 Schema/BeforeModel 还需要 resume/compaction 后实际送给模型的 tools/context、新准入事件
 和效果及原生采纳接点；受管模型转发层已提供请求位置，事件/效果准入、安全变换和 Schema 实际采纳仍需实现。Retrieve 需要在生成可恢复输出
 前注册工具、校验模型可见 marker、隔离租户/任务存储、设置过期与配额、逐字节返回原文，并
-避免再次压缩。依赖保留在[完整 Tokenless 交付表](resident-sdk.md#交付拆分和完整-tokenless-依赖)
+避免再次压缩。依赖保留在[完整 Tokenless 交付表](resident-sdk.md#验收和完整-tokenless-依赖)
 及跟踪 [#8952](https://github.com/agentic-os-org/ANOLISA/issues/8952)。
 
 原生验收使用真实 SDK/CLI 和 Tokenless 后端，核对模型实际文本、策略拒绝、前后故障、业务错误、

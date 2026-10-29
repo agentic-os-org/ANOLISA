@@ -30,6 +30,22 @@ use uuid::Uuid;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+// Normalization and resolution primitives land before the topology stage that
+// consumes them, so they stay test-scoped until a production caller exists.
+#[cfg(test)]
+mod file_protection_discovery;
+#[cfg(test)]
+mod file_protection_manifest;
+#[cfg(test)]
+mod file_protection_mountinfo;
+#[cfg(test)]
+mod file_protection_policy;
+#[cfg(test)]
+mod file_protection_resolver;
+#[cfg(test)]
+mod file_protection_runtime;
+#[cfg(test)]
+mod file_protection_topology;
 mod inode_policy;
 use inode_policy::InodePolicy;
 
@@ -1275,6 +1291,7 @@ fn operation_name(operation: u32) -> &'static str {
         4 => "recv",
         5 => "unlink",
         6 => "rename",
+        7 => "rmdir",
         _ => "unknown",
     }
 }
@@ -1575,7 +1592,7 @@ mod tests {
         let mut active = active_binding();
         active.reasons = compiled.reasons;
         active.rule_names = compiled.meta.into_iter().map(|meta| meta.name).collect();
-        for (op, name) in [(5, "unlink"), (6, "rename")] {
+        for (op, name) in [(5, "unlink"), (6, "rename"), (7, "rmdir")] {
             let mut raw = raw_violation(100);
             raw.op = op;
             raw.rule_id = 2;
@@ -1595,7 +1612,7 @@ mod tests {
             (2, "write"),
             (3, "connect"),
             (4, "recv"),
-            (7, "unknown"),
+            (8, "unknown"),
         ] {
             assert_eq!(operation_name(op), name);
         }

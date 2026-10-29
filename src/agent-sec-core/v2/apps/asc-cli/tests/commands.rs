@@ -580,6 +580,39 @@ fn skill_sec_uses_global_trace_context_without_business_fields() {
 }
 
 #[test]
+fn scope_create_excludes_unsupported_cgroup_selector() {
+    for flag in ["-h", "--help"] {
+        let output = common::run(&["scope".into(), "create".into(), flag.into()]);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let help = String::from_utf8(output.stdout).unwrap();
+        for selector in ["--pid", "--process-name", "--executable"] {
+            assert!(help.contains(selector), "{help}");
+        }
+        assert!(!help.contains("--cgroup-id"), "{help}");
+    }
+
+    for selector in [vec!["--cgroup-id", "1"], vec!["--cgroup-id=1"]] {
+        let mut args = vec![
+            "agent-sec-cli",
+            "scope",
+            "create",
+            "--policy-id",
+            "policy-one",
+            "--policy-revision",
+            "2",
+        ];
+        args.extend(selector);
+        let error = Cli::parse_from(args.clone()).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        let output = common::run(&args[1..].iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--cgroup-id"));
+    }
+}
+
+#[test]
 fn scope_create_encodes_name_and_path_assignments() {
     for (flag, matcher) in [
         ("--process-name", json!({"processName":"scope-agent"})),

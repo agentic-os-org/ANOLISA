@@ -9,6 +9,17 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.1] - 2026-10-29
+
+### 修复
+
+- Qoder 压缩 stdout 时保留原生 Bash 结果封装，保留退出状态和遥测字段，不再将它们序列化到模型文本中。其他结果形态保持原有替换行为（[#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)）。
+- 可识别的 `head` 和 `tail` 命令现在保持原生执行，包括受支持的包装命令和包含它们的复合命令，从而保留请求的行范围。显式 RTK 调用和自定义 RTK 包装前缀保持原有行为（[#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)）。
+- QwenWork 工作区 Hook 默认使用系统用户的 `~/.tokenless` 目录，并遵循绝对路径的 `TOKENLESS_DATA_DIR`，在工作目录变化时仍将状态保存在同一位置。已有工作区历史不会自动迁移。安装和检测命令会报告解析后的目录，并说明 Shell 沙箱权限可能导致 RTK 统计和执行凭据无法保存（[#9215](https://github.com/agentic-os-org/ANOLISA/pull/9215)）。
+- unittest 和 Django 的详细测试日志现在可以压缩重复的成功测试记录，同时保留汇总、非通过结果、异常堆栈和数据库初始化输出。原文仍可恢复，多行描述和未知输出保持原样（[#9083](https://github.com/agentic-os-org/ANOLISA/pull/9083)）。
+- HTML 表格中的 `rowspan="0"` 现在延伸到当前行组末尾，并使单元格保持在正确的列标题下。原始页面仍可逐字节恢复（[#9012](https://github.com/agentic-os-org/ANOLISA/pull/9012)）。
+- Windows 构建现在从 Cargo 解析出的目标目录收集本次构建的 Tokenless 和 RTK 可执行文件，避免环境变量或配置重定向构建输出后出现产物缺失或误用旧文件（[#9018](https://github.com/agentic-os-org/ANOLISA/pull/9018)）。
+
 ## [0.9.0] - 2026-10-25
 
 ### 新增

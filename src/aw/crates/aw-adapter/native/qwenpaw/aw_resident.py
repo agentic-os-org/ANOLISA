@@ -210,6 +210,12 @@ class ResidentMiddleware(MiddlewareBase):
         self.scope.check()
         if self.failed or self.agent is None:
             raise ResidentFailure("AW Agent admission or native execution failed")
+        # Native HTTP readiness can precede the plugin's assembly acknowledgement.
+        if not all(hasattr(self.agent, name) for name in (
+                "_aw_managed_acting_impl", "_aw_managed_parser",
+                "_aw_managed_toolkit", "_aw_managed_toolkit_call")):
+            self.failed = True
+            raise ResidentFailure("AW Agent native assembly is incomplete")
         if (self not in self.agent._reply_middlewares
                 or self not in self.agent._acting_middlewares
                 or self.agent._acting_impl is not self.agent._aw_managed_acting_impl

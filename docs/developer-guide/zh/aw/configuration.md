@@ -26,7 +26,9 @@ CLI 版本，要求 >=1.1.64 而不固定一个版本；OpenClaw、QwenPaw、Her
 | `execution.guarantee` | 仅 `native_hook`，不提供 OS、final 或 protected 保证 |
 | `execution.default_event_budget_ms` | 必填正整数共享事件预算，各步骤不会获得重新开始的预算 |
 | `audit.enabled`、`audit.payload` | 本版本固定为 `true`、`metadata_only`；服务持久保存执行元数据 |
-| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`hermes`、`pi`、`claude-sdk` 或 `agentscope`；识别名称不等于运行效果已认证 |
+| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`hermes`、`pi`、`claude-sdk` 或 `agentscope` |
+| `agents.<id>.shutdown_grace_ms` | 外部信号退出宽限，1..120000 ms，默认 2000；见[生命周期](deployment/lifecycle.md) |
+| `daemon.limits` | 常驻服务的并发上限，字段及默认值见[容量配置](deployment/lifecycle.md#服务并发预算) |
 | `agents.<id>.argv` | 非空程序/参数数组；首项不可为空，不隐式调用 shell 或插值 |
 | `agents.<id>.qoder.sequential` | `adapter: qoder` 专属的可选布尔值；将生成的原生组标为顺序执行，false 不覆盖其他匹配组 |
 | `providers.<id>.protocol` | 缺省为仅执行 invoke 的 `aw-hook/v1alpha1`；显式 `aw-provider/v1alpha1` 保留结构化消息，`native-hook/v1alpha1` 保留原生回调字节 |
@@ -57,6 +59,54 @@ Agent/Provider ID、步骤 ID 和操作名与 `metadata.name` 使用相同语法
 Provider 引用与步骤 ID 重复，避免启用时才暴露引用拼写错误。默认值是合同语义，
 解析器不会将它们填入原始文档。
 
+## Qoder SDK 执行资产
+
+在 `qoder-sdk` 目标的 `agents.<id>.qoder_sdk` 下设置这些字段。
+应用无需执行扩展时，可全部省略。
+
+| 字段 | 接入方式与限制 |
+| --- | --- |
+| `sites` | `global`、`cn` 的非空去重列表，第一个区域为默认值；省略时为 `[global]`。在应用目录安装对应 SDK 包。 |
+| `command_wrappers` | 最多 16 个原生 Bash 消费者授权。每项为 `{path, sha256}`，使用普通文件的绝对路径和 64 位小写十六进制 SHA-256。 |
+| `runtime_preloads` | 最多 16 个受信任 Worker import 授权，文件格式与上项相同。 |
+| `declarative_plugins` | 默认 `false`；为使用受管 Daemon 的普通常驻 Query 接入本地角色、Agent、命令和 Skill 资产快照。 |
+
+每个授权文件最多 16 MiB。将 wrapper 和 preload 固定在镜像中。
+AW 在 SDK 探测前验证文件，并在每个 Query 重新检查；不匹配时拒绝启动。
+这些限制统计安装资产，Query 和工具调用的累计次数没有此上限。修改资产或区域后重启 worker。
+
+Bridge 的 `startDaemon`、`createQuery().options` 和 `createSdkMcpServer` 接受
+`awSite: "global"` 或 `"cn"`。Query 省略区域时继承受管 Daemon 的选择；显式选择不同区域会被拒绝。
+
+### Worker import
+
+`startDaemon` 的 `executableArgs` 接受成对的 `--import` 与已授权 preload 路径。
+若提供 `pathToQoderCLIExecutable`，它必须指向对应 SDK 包的官方 Worker。
+其他 executable 或 transport 替换会被拒绝。固定 Worker-thread transport 忽略
+`executableArgs`，因此直接 Query 拒绝该选项；需要 import 时使用受管 Daemon。
+
+### 声明式插件快照
+
+启用 `declarative_plugins: true` 后，通过原生
+`options.plugins: [{type: "local", path: "/absolute/plugin"}]` 传入本地插件根目录。
+使用元数据 manifest 与声明式 Markdown；Agent 的 `tools` 工具选择受支持。
+AW 拒绝可执行插件 Hook、MCP/settings 重定向、shell 插值、`permissionMode`、
+`allowed-tools`，以及 Skill/命令 frontmatter 中的 `context` 和 `agent`。
+未知或有歧义的 frontmatter、符号链接也会被拒绝。可执行行为改用受管 SDK Hook 或 MCP 工厂。
+
+| 快照资源 | 每个 Query 的上限 |
+| --- | --- |
+| 所有插件根目录下的文件与目录 | 共 10,000 个条目 |
+| 内容总大小 | 128 MiB |
+| 插件根目录以下的目录深度 | 64 层 |
+
+AW 强制设置 `skills.disableShellExecution: true`，并在释放首个提示前确认原生设置。
+直接 Query 无法确认有效设置，因此拒绝此配置。Reloadable 启动在 SDK 探测前拒绝插件快照和命令 wrapper。
+此配置限定于 SDK 1.0.56 / Worker 1.1.78，升级 SDK 后须重新验证。
+
+原生工作与回调确认排空后，AW 删除快照。清理未确认时保留快照和 scope 所有权，排查原因后重启 worker。
+原生命令消费者还需要显式审批与完成确认，见 [Qoder SDK 工厂](agents/qoder-sdk.md#原生-bash-命令消费者)。
+
 ## 缺省布尔 Hook
 
 Provider 省略 `protocol` 时选择 `aw-hook/v1alpha1`，步骤省略 `operation` 或填
@@ -65,7 +115,7 @@ Provider 省略 `protocol` 时选择 `aw-hook/v1alpha1`，步骤省略 `operatio
 和可选 reason code，false 时不请求效果，关联字段由 AW 内部处理。非零退出、超时、
 stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处理。stdout 同时受
 32 字节和配置上限约束。已有显式结构化和原生协议行为不变。
-见[布尔脚本示例](native-agents.md#布尔判断脚本)。
+见[布尔脚本示例](providers/hooks.md)。
 
 ## 原生命令与运行支持
 
@@ -90,8 +140,9 @@ Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 Agen
 ## 事件、效果与工具选择
 
 配置识别以下 16 个名称。当前公共 Provider 只派发 `tool.before` 和 `tool.after`，
-其余 14 个名称为预留词汇。各 Adapter 的效果支持见
-[能力矩阵](../../../user-guide/zh/aw/capabilities.md#hook-与-mcp)。
+其余 14 个名称为预留词汇。实现状态见[16 Hook 概览](../../../user-guide/zh/aw/capabilities.md#16-个通用-hook)。
+各 Adapter 的效果支持见
+[能力矩阵](../../../user-guide/zh/aw/capabilities.md#hook-支持矩阵)。
 
 | 事件 | 含义 |
 | --- | --- |
@@ -117,8 +168,8 @@ Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 Agen
 允许 `observe`/`block`，不修改参数。它不是第二个原生 Hook，也不保证排在全部
 第三方 Hook 之后。检查后参数再次改变时，实际执行边界必须重新检查。
 
-`tool.before` 允许 `observe`、`block`、`replace_input`；`tool.after` 允许
-`observe`、`replace_result`；其余事件本版本仅观察。`ask` 保留在 before 步骤中，
+Schema 词汇允许 `tool.before` 声明 `observe`、`block`、`replace_input`；`tool.after` 允许
+`observe`、`replace_result`；其余事件的 Schema 仅接受观察效果。运行时只准入已实现的两个工具事件，拒绝 `replace_input`。`ask` 保留在 before 步骤中，
 启用步骤请求它时拒绝配置。显式关闭的 before 步骤可以保留 `ask` 供后续编辑，
 不因此获得审批能力。宿主原生审批不受影响。
 
@@ -140,6 +191,10 @@ Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 Agen
 `event.tool.native_name`。Adapter ID 与配置的目标名称分开使用，例如
 `native:qoder:Bash` 精确选择 Qoder 的 `Bash`。不支持正则或 glob 模式，
 唯一通配符为 `*`。Provider 私有工具映射独立配置。
+
+启动前，AW 根据所选 Adapter 投影事件与步骤选择器，排除交集确定无法匹配的步骤。仅剩余步骤参与 Provider 准备和效果准入，配置结构与引用仍全量校验。
+`aw validate` 列出各 target 被投影掉的步骤；`aw config validate --json` 使用 `result.projected_out_steps`，包含 target、event 和 step_id。
+OpenClaw after 将 `bash`、`apply-patch`、`cron` 分别规范化为 `exec`、`apply_patch`、`automations`；native_name 保留原回调名称。
 
 共享 Host 在回调归一化、绑定检查和步骤单次占用之后执行选择。
 未匹配步骤以 `kind: skipped` 完成，没有效果，也不启动调用进程；仍校验规范化
@@ -172,4 +227,4 @@ Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 Agen
 
 本 alpha 配置与已有能力 wire 记录、Schema ID/摘要分开演进，不应将 Provider
 配置送入仅支持整数的 wire canonicalizer。校验器不安装或修改任何原生文件；
-回退时移除新增库依赖，并恢复调用方自行编辑的配置草案。
+版本回退使用与目标二进制匹配的配置备份。

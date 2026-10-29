@@ -577,6 +577,35 @@ impl AppConfig {
                     tracing::warn!("unknown MEMORY_EMBEDDING_BACKEND={backend:?}; keeping config");
                 }
             }
+        } else {
+            // A provider selected in TOML still accepts its field overrides.
+            // Only explicit backend selection above resets unspecified fields.
+            match &mut self.memory.embedding {
+                crate::embedding::EmbeddingConfig::OpenAI {
+                    api_key,
+                    model,
+                    base_url,
+                } => {
+                    if let Ok(value) = std::env::var("MEMORY_OPENAI_API_KEY") {
+                        *api_key = value;
+                    }
+                    if let Ok(value) = std::env::var("MEMORY_OPENAI_MODEL") {
+                        *model = value;
+                    }
+                    if let Ok(value) = std::env::var("MEMORY_OPENAI_BASE_URL") {
+                        *base_url = Some(value);
+                    }
+                }
+                crate::embedding::EmbeddingConfig::Ollama { model, base_url } => {
+                    if let Ok(value) = std::env::var("MEMORY_OLLAMA_MODEL") {
+                        *model = value;
+                    }
+                    if let Ok(value) = std::env::var("MEMORY_OLLAMA_BASE_URL") {
+                        *base_url = value;
+                    }
+                }
+                crate::embedding::EmbeddingConfig::None => {}
+            }
         }
         self.memory.cgroup.enabled = env_bool("MEMORY_CGROUP_ENABLED", self.memory.cgroup.enabled);
         if let Ok(v) = std::env::var("MEMORY_CGROUP_MEMORY_MAX") {

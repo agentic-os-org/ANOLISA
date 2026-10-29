@@ -45,16 +45,20 @@ Agent memory is a persistent filesystem memory for AI agents, served over
 the MCP (Model Context Protocol) standard. Linux only.
 
 Core Features:
-- MCP Server: 25 tools over stdio JSON-RPC 2.0, in three tiers
+- MCP Server: 38 tools over stdio JSON-RPC 2.0, in three tiers
   - Tier A file ops: mem_read / write / append / edit / list / grep /
     diff / mkdir / remove / promote / mem_session_log
-  - Tier B structured: memory_search / memory_observe /
-    memory_get_context (hidden from tools/list AND rejected at
-    tools/call with METHOD_NOT_FOUND on the expert profile) /
-    memory_task_save / memory_task_resume / memory_task_list /
-    memory_task_close
+  - Tier B structured: memory_search / memory_observe / memory_capture /
+    memory_get_context / memory_sessions / memory_timeline /
+    memory_summary / memory_session_context / memory_task_save /
+    memory_task_resume / memory_task_list / memory_task_close /
+    memory_forget / memory_consent / mem_export / mem_import
+    (a Tier B subset is hidden from tools/list AND rejected at
+    tools/call with METHOD_NOT_FOUND on the expert profile)
   - Tier C governance: mem_snapshot / mem_snapshot_list /
-    mem_snapshot_restore / mem_log / mem_revert
+    mem_snapshot_restore / mem_log / mem_revert / mem_consolidate /
+    mem_compact / mem_dream / mem_index_refresh / memory_about /
+    memory_auto_created
 - Per-namespace mount under ~/.anolisa/memory/<ns>/ with optional Linux
   user-namespace + private tmpfs isolation; openat2(RESOLVE_BENEATH)
   sandbox for every file open
@@ -201,6 +205,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Oct 28 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.12-1
+- Enforce automatic capture consent and attribute new observations to agents
+- Preserve files on failed edits and validate snapshots before restoration
+- Keep startup indexes current and report search failures with recovery guidance
+- Preserve imported metadata, summary rankings, Unicode and index links
+- Preview OpenClaw lifecycle changes and advertise all 38 MCP tools
+
 * Sun Oct 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.11-1
 - Correct category filtering and keep keyword and vector indexes current
 - Avoid duplicate consolidation facts and sanitized search-marker interests

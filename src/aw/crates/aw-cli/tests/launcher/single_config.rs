@@ -9,7 +9,12 @@ use std::{fs, os::unix::process::ExitStatusExt, process::Output};
 
 #[test]
 fn configured_shutdown_grace_reaches_the_foreground_launcher() {
-    for configured in [false, true] {
+    for (signal, configured) in [
+        (libc::SIGTERM, false),
+        (libc::SIGTERM, true),
+        (libc::SIGINT, false),
+        (libc::SIGINT, true),
+    ] {
         let fixture = Fixture::new();
         let mut document = fixture.document();
         if configured {
@@ -30,7 +35,7 @@ fn configured_shutdown_grace_reaches_the_foreground_launcher() {
             })
             .unwrap();
         let pid = fs::read_to_string(fixture.root.join("started-one")).unwrap();
-        process.signal(libc::SIGTERM);
+        process.signal(signal);
         let output = process.finish();
         assert_eq!(fixture.root.join("cleanup-one").exists(), configured);
         if configured {

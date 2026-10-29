@@ -71,6 +71,85 @@ fn full_scan_indexes_existing_files() {
     assert!(hits[0].snippet.contains("rust") || hits[0].snippet.contains("Rust"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_search_tool_reports_row_decode_error() {
+    let (_tmp, mut svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    index
+        .reindex_file("notes/known.md", "deploymentmarker", 100, 16, None)
+        .unwrap();
+    assert_eq!(
+        svc.memory_search("deploymentmarker", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let conn = rusqlite::Connection::open(index.db_path()).unwrap();
+    conn.busy_timeout(Duration::from_secs(5)).unwrap();
+    // Fault injection in a private test database, not a normal write path.
+    let changed = conn
+        .execute(
+            "UPDATE files SET mtime_ms = 'invalid' WHERE path = ?1",
+            ["notes/known.md"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    let err = svc
+        .memory_search("deploymentmarker", 5, None, None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // With no embedding provider, vector mode falls back to the same scoped BM25 path.
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("vector"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // Exercise hybrid with a deterministic provider and no vector rows.
+    svc.embedding = Some(Arc::new(KeywordEmbedding { dim: 8 }));
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("hybrid"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    let log = std::fs::read_to_string(svc.mount.audit_log_path()).unwrap();
+    let failed: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|entry: &serde_json::Value| {
+            entry["tool"] == "memory_search" && entry["ok"] == false
+        })
+        .collect();
+    assert_eq!(failed.len(), 3, "one failed audit per search error");
+    for (entry, mode) in failed
+        .iter()
+        .zip(["bm25", "bm25(fallback from vector)", "hybrid"])
+    {
+        assert_eq!(
+            entry["path"],
+            format!("{mode}:len={}", "deploymentmarker".len())
+        );
+        assert!(
+            entry["error"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid column type")
+        );
+        assert!(!entry.to_string().contains("deploymentmarker"));
+    }
+}
+
 #[test]
 fn inotify_picks_up_new_file() {
     let (_tmp, svc) = setup();
@@ -710,4 +789,57 @@ async fn full_scan_backfills_vectors_for_preexisting_files() {
         "vector search found no hits after backfill"
     );
     assert_eq!(hits[0].path, "notes/a.md");
+}
+
+// ---------- agent scope on the synchronous reindex ----------
+
+/// `reindex_file` is the path `memory_observe` uses to make a fresh note
+/// searchable before the notify watcher's debounce fires. It has to tag the
+/// row with the observing agent exactly like the watcher's flush and full-scan
+/// paths do: an untagged row is invisible under `isolated:<agent>` — which
+/// defeats the immediate-recall guarantee the synchronous upsert exists for —
+/// and is shared with every *other* agent under `filter:<agent>`.
+///
+/// The note is deliberately never written to disk, so the watcher cannot
+/// re-tag it behind our back and both assertions are about this call alone.
+#[test]
+fn reindex_file_tags_the_row_with_the_observing_agent() {
+    let (_tmp, svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    let mtime_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    index
+        .reindex_file(
+            "notes/observed/virtual.md",
+            "the deploy codename is zephyr",
+            mtime_ms,
+            27,
+            Some("alpha"),
+        )
+        .unwrap();
+
+    let own: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("isolated:alpha"), None)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        own.iter().any(|p| p == "notes/observed/virtual.md"),
+        "isolated:alpha cannot see the row attributed to it: {own:?}"
+    );
+
+    let others: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("filter:beta"), None)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        !others.iter().any(|p| p == "notes/observed/virtual.md"),
+        "filter:beta must not see a row tagged for alpha: {others:?}"
+    );
 }

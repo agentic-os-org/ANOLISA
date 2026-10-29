@@ -720,6 +720,10 @@ jobs:
         working-directory: src/agentsight/dashboard
         run: npm run test:stale-load
 
+      - name: Run dashboard controls regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:dashboard-controls
+
       - name: Install eBPF build dependencies
         run: |
           sudo apt-get update

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-28
+
+### Fixed
+
+- Moving a skill into another skill directory removes its stale top-level
+  entries from `/skills` and `skill-discover`, keeping live discovery consistent
+  with a fresh scan ([#9124](https://github.com/agentic-os-org/ANOLISA/pull/9124)).
+- When Yarn is selected, npm install commands with packages, options or ambiguous
+  shell syntax retain their original form instead of becoming invalid commands
+  ([#9003](https://github.com/agentic-os-org/ANOLISA/pull/9003)).
+- Chat usage statistics treat `--logs-dir` as a literal path, including brackets,
+  and avoid counting logs from similarly named sibling directories
+  ([#9180](https://github.com/agentic-os-org/ANOLISA/pull/9180)).
+
 ## [0.5.3] - 2026-10-23
 
 ### Added

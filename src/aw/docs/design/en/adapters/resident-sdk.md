@@ -167,7 +167,7 @@ with the canonical cwd and captured environment, then uses the shared scope
 transport to register, invoke and finish sequenced calls. Original application
 Hooks keep native IDs; AW callbacks receive the registered UUID. Native partial
 messages stay private unless `includePartialMessages: true` was requested.
-See the [worker guide](../../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
+See the [worker guide](../../../../../../docs/developer-guide/en/aw/agents/qoder-sdk.md)
 for startup and supported options.
 
 Each Query returns a frozen public facade. The native command-queue barrier and
@@ -241,8 +241,12 @@ Failed audit, release or cancellation cannot revive a closing invocation.
 An alive idle client has no inferred business deadline: the application must
 close it and bound request admission. Remote side effects need tool cancellation.
 
-The launcher forwards termination to its owned group and starts forced cleanup
-after the target's `shutdown_grace_ms` grace period, defaulting to two seconds.
+Both ordinary and restricted `--reloadable` Qoder SDK launch forward external
+termination to the unreaped worker PID, preserving native daemon and callback transports for worker-owned cleanup.
+Other launch modes forward to the owned group. Internal failure still signals the
+whole group; worker exit and deadline expiry always reclaim that group. Kernel
+terminal signals follow the foreground group independently of launcher forwarding.
+The launcher starts forced cleanup after the target's `shutdown_grace_ms` grace period, defaulting to two seconds.
 Timing starts when the foreground loop first forwards an external termination
 signal; repeated signals do not reset it. Pre-forwarding waits and final process
 cleanup are outside this interval. Internal readiness/lifecycle failures retain

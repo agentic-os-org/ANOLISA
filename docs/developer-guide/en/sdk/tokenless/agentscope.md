@@ -22,14 +22,14 @@ AgentScope layer. Product adapters such as Claude Code and OpenCode are document
 
 The AgentScope integration wheel requires the exact same version of the native Runtime wheel.
 Install both assets from the same Tokenless GitHub Release in one command. For example, install
-[v0.9.0](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.9.0) on Linux x86_64:
+[v0.9.1](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.9.1) on Linux x86_64:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless-0.9.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless_agentscope-0.9.0-py3-none-any.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless-0.9.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless_agentscope-0.9.1-py3-none-any.whl"
 ```
 
 For other supported systems, replace the native Runtime URL with the matching asset

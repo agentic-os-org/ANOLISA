@@ -16,6 +16,8 @@ spec:
   agents:
     qoder-sdk:
       adapter: qoder-sdk
+      # Allow Query/callback drain and native daemon shutdown before forced cleanup.
+      shutdown_grace_ms: 90000
       argv: [/absolute/path/to/node, /absolute/application/worker.mjs]
     qwenpaw:
       adapter: qwenpaw

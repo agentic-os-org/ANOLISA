@@ -34,10 +34,10 @@ pub(crate) const SCHEMA_VERSION: i64 = 5;
 
 /// What the index currently records for one path.
 ///
-/// The watcher reads this back before touching a file, so an event that did
-/// not change the content — a directory `chmod`/`touch` expanded into its
-/// whole subtree, or a write that restores identical bytes — costs neither a
-/// body read nor an embedding call.
+/// The incremental watcher checks this before reading a body. A matching
+/// `(mtime_ms, size)` with an existing vector can avoid another body read and
+/// embedding call. Full scans use the same fingerprint to skip an upsert,
+/// but read the body first and backfill missing vectors separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexStat {
     /// Last modification time in milliseconds, as stored at index time.
@@ -403,6 +403,7 @@ impl BM25Store {
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
+        let match_query = literal_fts_query(&tokens, " ");
         // Agent scope filter: when set, only return results from the specified agent.
         // Use parameterised binding (`?3`) rather than `format!()` so an
         // attacker-controlled `MCP_CLIENT_NAME` cannot escape the literal.
@@ -430,7 +431,7 @@ impl BM25Store {
             LIMIT ?2
         "#
         );
-        let bind = match_bind(&fts_q, top_k, &agent_param, &category_param);
+        let bind = match_bind(&match_query, top_k, &agent_param, &category_param);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows: Vec<(String, String, f64, String, i64)> = stmt
             .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
@@ -442,8 +443,7 @@ impl BM25Store {
                     row.get::<_, i64>(4)?,
                 ))
             })?
-            .flatten()
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         // OR fallback: FTS5 implicit-AND semantics return 0 results
         // when any single query term is absent from the corpus.
@@ -454,11 +454,7 @@ impl BM25Store {
         // retry with OR-joined quoted tokens so partial matches still
         // surface.
         let rows: Vec<(String, String, f64, String, i64)> = if rows.is_empty() && tokens.len() > 1 {
-            let or_q = tokens
-                .iter()
-                .map(|t| format!("\"{}\"", t))
-                .collect::<Vec<_>>()
-                .join(" OR ");
+            let or_q = literal_fts_query(&tokens, " OR ");
             let or_sql = format!(
                 r#"
                 SELECT f.path,
@@ -486,8 +482,7 @@ impl BM25Store {
                         row.get::<_, i64>(4)?,
                     ))
                 })?
-                .flatten()
-                .collect()
+                .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             rows
         };
@@ -624,7 +619,7 @@ impl BM25Store {
                         row.get::<_, i64>(2)?,
                     ))
                 })?;
-                Ok(rows.flatten().collect())
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
             };
 
         let rows = run_query(" AND ", top_k * 4, false)?;
@@ -757,6 +752,7 @@ impl BM25Store {
         if tokens.iter().any(|t| t.chars().count() < 3) {
             return self.detect_conflicts_like(&tokens, threshold);
         }
+        let match_query = literal_fts_query(&tokens, " ");
 
         // Search excluding cold and superseded files.
         let sql = r#"
@@ -768,12 +764,13 @@ impl BM25Store {
             LIMIT 5
         "#;
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_q], |row| {
+        let rows = stmt.query_map(params![match_query], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })?;
 
         let results: Vec<(String, f64)> = rows
-            .flatten()
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|(_, score)| *score >= threshold)
             .collect();
 
@@ -786,7 +783,8 @@ impl BM25Store {
     /// typically-negative BM25 `threshold`. This is deliberately
     /// recall-oriented: when we can't rank, flag every substring match as a
     /// potential conflict rather than silently miss a duplicate/contradiction.
-    /// The caller still reviews flagged conflicts before superseding.
+    /// A row decode failure aborts detection; the caller logs it and writes
+    /// without superseding. Successful results are still reviewed first.
     fn detect_conflicts_like(&self, tokens: &[&str], threshold: f64) -> Result<Vec<(String, f64)>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
@@ -824,8 +822,8 @@ impl BM25Store {
         })?;
 
         let mut out: Vec<(String, f64)> = Vec::new();
-        for row in rows.flatten() {
-            let (path, body, mtime_ms) = row;
+        for row in rows {
+            let (path, body, mtime_ms) = row?;
             // Case-insensitive frequency: SQLite LIKE is ASCII
             // case-insensitive, so a Rust `matches()` (case-sensitive) would
             // under-count and zero the score for mixed-case matches.
@@ -922,10 +920,7 @@ impl BM25Store {
 
         let mut scores: Vec<(String, f64)> = Vec::new();
         for row in rows {
-            let (path, blob, mtime_opt) = match row {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+            let (path, blob, mtime_opt) = row?;
             let stored = blob_to_f32(&blob);
             if stored.len() != q_norm.len() {
                 continue;
@@ -980,9 +975,28 @@ impl BM25Store {
         top_k: usize,
         exclude_cold: bool,
     ) -> Result<Vec<SearchHit>> {
-        // Run both search strategies.
-        let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold);
+        // A row decode failure makes a fallback result untrustworthy, even
+        // when the other strategy succeeds with no matches.
+        let bm25_hits = match self.search(query, top_k * 2, exclude_cold) {
+            Err(e) if is_row_decode_error(&e) => {
+                tracing::error!(
+                    "hybrid search: BM25 row decode failed (tables=files/files_fts, db={}): {e}; {ROW_DECODE_RECOVERY}",
+                    self.conn.path().unwrap_or(":memory:")
+                );
+                return Err(e);
+            }
+            result => result,
+        };
+        let vec_hits = match self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold) {
+            Err(e) if is_row_decode_error(&e) => {
+                tracing::error!(
+                    "hybrid search: vector row decode failed (table=files_vec, db={}): {e}; {ROW_DECODE_RECOVERY}",
+                    self.conn.path().unwrap_or(":memory:")
+                );
+                return Err(e);
+            }
+            result => result,
+        };
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
@@ -1114,10 +1128,12 @@ impl BM25Store {
                 params![rel_path],
                 |r| r.get(0),
             )
+            // Treat an unreadable timestamp as unknown so the next startup/overflow
+            // full scan reindexes a readable file; no periodic scan runs.
             .ok()
     }
 
-    /// Everything the watcher needs to decide whether `rel_path` changed:
+    /// Index metadata used by incremental updates and full scans:
     /// the stored `(mtime_ms, size)` plus whether a vector row exists.
     /// `None` means the path is not indexed at all.
     ///
@@ -1141,6 +1157,21 @@ impl BM25Store {
             )
             .ok()
     }
+}
+
+pub(crate) const ROW_DECODE_RECOVERY: &str = "a server restart may reindex readable files with corrupt timestamps, but cannot reliably repair corrupt paths or vectors; rebuild the index from source data if the error persists";
+
+// Row conversion failures cannot safely degrade to partial hybrid results.
+// IntegralValueOutOfRange is defensive for future narrower integer reads.
+pub(crate) fn is_row_decode_error(error: &MemoryError) -> bool {
+    matches!(
+        error,
+        MemoryError::Sqlite(
+            rusqlite::Error::FromSqlConversionFailure(..)
+                | rusqlite::Error::IntegralValueOutOfRange(..)
+                | rusqlite::Error::InvalidColumnType(..)
+        )
+    )
 }
 
 /// Strip FTS5 snippet highlight markers («, », …) so that prompt-injection
@@ -1371,8 +1402,8 @@ fn make_snippet(body: &str, needle: &str, radius: usize) -> String {
     s
 }
 
-/// Convert a raw query into something safe for FTS5: drop quotes /
-/// punctuation that confuse the parser, AND-join surviving tokens.
+/// Normalize raw query terms, retaining dots in filenames and version numbers.
+/// The returned terms must be quoted before use in an FTS5 MATCH expression.
 /// `-` is dropped because FTS5 interprets a leading `-` as the NOT
 /// operator, so naïvely keeping it would silently invert match intent
 /// (`hello-world` → match docs containing "hello" but NOT "world").
@@ -1386,6 +1417,17 @@ fn sanitize_fts_query(q: &str) -> String {
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Encode sanitized terms as FTS5 literals; SQL binding does not quote MATCH syntax.
+/// A space separator requires all terms; ` OR ` allows any term to match.
+/// Quote escaping is defensive: the current sanitizer already removes quotes.
+fn literal_fts_query(tokens: &[&str], separator: &str) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 pub(crate) fn mtime_ms_of(meta: &std::fs::Metadata) -> i64 {
@@ -1507,6 +1549,126 @@ mod tests {
     }
 
     #[test]
+    fn literal_search_recalls_dotted_terms() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert(
+                "notes/deployment.md",
+                100,
+                80,
+                "Configure config.toml for example.com using release v1.2.3",
+                None,
+            )
+            .unwrap();
+        for query in ["config.toml", "example.com", "v1.2.3"] {
+            let hits = store.search(query, 10, true).unwrap();
+            assert_eq!(hits.len(), 1, "existing memory must match {query:?}");
+            assert_eq!(hits[0].path, "notes/deployment.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_keeps_all_terms_before_or_fallback() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, body) in [
+            ("both.md", "deployment config.toml"),
+            ("word-only.md", "deployment unrelated"),
+            ("file-only.md", "config.toml unrelated"),
+        ] {
+            store
+                .upsert(path, 100, body.len() as u64, body, None)
+                .unwrap();
+        }
+        let hits = store.search("deployment config.toml", 10, true).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(),
+            vec!["both.md"],
+            "a dotted term must not turn an AND search into OR fallback"
+        );
+
+        // With no exact conjunction, the existing OR fallback still applies.
+        let hits = store.search("absent config.toml", 10, true).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.path != "word-only.md"));
+    }
+
+    #[test]
+    fn literal_search_treats_boolean_words_as_text() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert("null.md", 100, 30, "constraint NOT NULL", None)
+            .unwrap();
+        store
+            .upsert("other.md", 100, 20, "constraint required", None)
+            .unwrap();
+
+        for query in ["NOT", "constraint NOT NULL"] {
+            let hits = store.search(query, 10, true).unwrap();
+            assert_eq!(
+                hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(),
+                vec!["null.md"],
+                "natural-language query must retain {query:?} literally"
+            );
+        }
+
+        store.upsert("gate.md", 100, 10, "AND gate", None).unwrap();
+        let hits = store.search("AND", 10, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "gate.md");
+    }
+
+    #[test]
+    fn literal_search_preserves_scope_and_short_term_fallback() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, agent) in [("alpha.md", "alpha"), ("beta.md", "beta")] {
+            store
+                .upsert(path, 100, 30, "花名 config.toml", Some(agent))
+                .unwrap();
+        }
+        for query in ["config.toml", "花名 config.toml"] {
+            let hits = store
+                .search_scoped(query, 10, true, Some("isolated:alpha"), None)
+                .unwrap();
+            assert_eq!(hits.len(), 1, "scoped query {query:?}");
+            assert_eq!(hits[0].path, "alpha.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_combines_category_and_agent_filters_before_limit() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, agent) in [
+            ("facts/config/alpha.md", "alpha"),
+            ("facts/config/beta.md", "beta"),
+            ("facts/other/alpha.md", "alpha"),
+        ] {
+            store
+                .upsert(path, 100, 30, "config.toml NOT NULL", Some(agent))
+                .unwrap();
+        }
+        for query in ["config.toml", "NOT", "absent config.toml"] {
+            let hits = store
+                .search_scoped(query, 1, true, Some("isolated:alpha"), Some("config"))
+                .unwrap();
+            assert_eq!(hits.len(), 1, "combined filters for {query:?}");
+            assert_eq!(hits[0].path, "facts/config/alpha.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_conflicts_accept_dots_and_boolean_words() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert("fact.md", 100, 40, "config.toml requires NOT NULL", None)
+            .unwrap();
+        for query in ["config.toml", "NOT", "config.toml requires NOT NULL"] {
+            let conflicts = store.detect_conflicts(query, -2.0).unwrap();
+            assert_eq!(conflicts.len(), 1, "conflict query {query:?}");
+            assert_eq!(conflicts[0].0, "fact.md");
+        }
+    }
+
+    #[test]
     fn upsert_search_remove_roundtrip() {
         let mut s = BM25Store::open_in_memory().unwrap();
         s.upsert("notes/a.md", 100, 10, "rust loves ownership", None)
@@ -1521,6 +1683,158 @@ mod tests {
         s.remove("notes/a.md").unwrap();
         let hits = s.search("rust", 5, true).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_reports_row_decode_errors_in_match_and_or_paths() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("good.md", 100, 10, "deploymentmarker", Some("alpha"))
+            .unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker", Some("alpha"))
+            .unwrap();
+        // Fault injection in a private SQLite index; normal writes use i64 timestamps.
+        s.conn
+            .execute(
+                "UPDATE files SET mtime_ms = 'invalid' WHERE path = 'bad.md'",
+                [],
+            )
+            .unwrap();
+
+        for scope in [None, Some("isolated:alpha")] {
+            for query in ["deploymentmarker", "deploymentmarker absentterm"] {
+                assert!(matches!(
+                    s.search_scoped(query, 5, true, scope, None),
+                    Err(MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(
+                        _,
+                        _,
+                        _
+                    )))
+                ));
+            }
+        }
+        assert!(s.search("nomatchingterm", 5, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_like_reports_row_decode_errors_in_and_or_paths() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "花名登记为小云", None).unwrap();
+        s.conn
+            .execute("UPDATE files SET mtime_ms = 'invalid'", [])
+            .unwrap();
+
+        for query in ["花名", "花名 zz"] {
+            assert!(matches!(
+                s.search(query, 5, true),
+                Err(ref e) if is_row_decode_error(e)
+            ));
+        }
+    }
+
+    #[test]
+    fn conflict_search_reports_row_decode_errors_in_match_and_like_paths() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker 花名登记", None)
+            .unwrap();
+        s.conn
+            .execute("UPDATE files SET path = X'00' WHERE path = 'bad.md'", [])
+            .unwrap();
+
+        for query in ["deploymentmarker", "花名"] {
+            assert!(matches!(
+                s.detect_conflicts(query, -2.0),
+                Err(ref e) if is_row_decode_error(e)
+            ));
+        }
+    }
+
+    #[test]
+    fn hybrid_reports_bm25_row_decode_error() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker", None)
+            .unwrap();
+        s.conn
+            .execute("UPDATE files SET mtime_ms = 'invalid'", [])
+            .unwrap();
+
+        assert!(
+            s.search_hybrid("nomatchingterm", &[1.0, 0.0], 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            s.search_hybrid("deploymentmarker", &[1.0, 0.0], 5),
+            Err(ref e) if is_row_decode_error(e)
+        ));
+    }
+
+    #[test]
+    fn vector_and_hybrid_report_vector_row_decode_error() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("known.md", 100, 10, "deploymentmarker", None)
+            .unwrap();
+        s.upsert_vec("known.md", &[1.0, 0.0]).unwrap();
+        // Keep BM25 intact while making the vector row's path unreadable as text.
+        s.conn
+            .execute(
+                "UPDATE files_vec SET path = X'00' WHERE path = 'known.md'",
+                [],
+            )
+            .unwrap();
+
+        for result in [
+            s.search_vec(&[1.0, 0.0], 5).map(|_| ()),
+            s.search_hybrid("deploymentmarker", &[1.0, 0.0], 5)
+                .map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(ref e) if is_row_decode_error(e)
+            ));
+        }
+    }
+
+    #[test]
+    fn search_reports_invalid_utf8_as_row_decode_error() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker", None)
+            .unwrap();
+        s.conn
+            .execute("UPDATE files SET path = CAST(X'FF' AS TEXT)", [])
+            .unwrap();
+
+        let err = s.search("deploymentmarker", 5, true).unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))
+        ));
+        let err = s
+            .search_hybrid("deploymentmarker", &[1.0, 0.0], 5)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))
+        ));
+    }
+
+    #[test]
+    fn row_decode_error_classification_covers_integer_overflow() {
+        let err = MemoryError::Sqlite(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
+        assert!(is_row_decode_error(&err));
+        assert!(!is_row_decode_error(&MemoryError::Sqlite(
+            rusqlite::Error::QueryReturnedNoRows
+        )));
+    }
+
+    #[test]
+    fn hybrid_keeps_vector_fallback_for_query_errors() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert_vec("vector.md", &[1.0, 0.0]).unwrap();
+        s.conn.execute_batch("DROP TABLE files_fts").unwrap();
+
+        let hits = s.search_hybrid("deploymentmarker", &[1.0, 0.0], 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "vector.md");
     }
 
     #[test]

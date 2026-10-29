@@ -186,10 +186,8 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
     let mut facts = Vec::new();
 
     for e in entries {
-        if e.tool == "memory_search" || e.tool == "mem_grep" {
-            // Extract the query from the path field (format: "mode:query" or "bm25:query").
-            // Sanitized `len=<N>` markers carry no query text, so they yield
-            // nothing and must not become facts.
+        if e.ok && (e.tool == "memory_search" || e.tool == "mem_grep") {
+            // Sanitized length markers contain no query text.
             let Some(query) = extract_search_query(&e.path) else {
                 continue;
             };
@@ -304,13 +302,16 @@ fn rule_change(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
 }
 
 // ── Rule 4: Lesson ──────────────────────────────────────────────
-// Trigger: Any tool call that failed (ok=false).
-// Extracts: "Error <type> in <tool> on <path>"
+// Trigger: Failed tool calls, except sanitized searches with no actionable query or path.
 
 fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<ConsolidatedFact> {
     entries
         .iter()
-        .filter(|e| !e.ok && e.error.is_some())
+        .filter(|e| {
+            !e.ok
+                && e.error.is_some()
+                && !(e.tool == "memory_search" && crate::audit::is_sanitized_query_path(&e.path))
+        })
         .map(|e| {
             let error = e.error.as_deref().unwrap_or("(unknown error)");
             let path = if e.path.is_empty() {
@@ -343,7 +344,10 @@ fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
 /// Classify an error message into a human-readable category.
 fn classify_error(error: &str) -> &str {
     let lower = error.to_lowercase();
-    if lower.contains("not found") || lower.contains("不存在") || lower.contains("no such") {
+    if lower.starts_with("sqlite:") {
+        "数据库故障"
+    } else if lower.contains("not found") || lower.contains("不存在") || lower.contains("no such")
+    {
         "文件不存在"
     } else if lower.contains("permission") || lower.contains("权限") || lower.contains("denied") {
         "权限不足"
@@ -512,6 +516,22 @@ mod tests {
     }
 
     #[test]
+    fn rule2_ignores_failed_search() {
+        let entries = vec![
+            make_entry(
+                "memory_search",
+                "bm25:len=16",
+                false,
+                Some("sqlite: Invalid column type Text at index: 4, name: mtime_ms"),
+            ),
+            make_entry("memory_search", "bm25:rust ownership", true, None),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].title.contains("rust ownership"));
+    }
+
+    #[test]
     fn rule3_detects_repeated_edit() {
         let entries = vec![
             make_entry("mem_edit", "src/main.rs", true, None),
@@ -546,6 +566,21 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].category, FactCategory::Lesson);
         assert!(facts[0].content.contains("文件不存在"));
+    }
+
+    #[test]
+    fn rule4_skips_repeated_failed_search_markers() {
+        let error = "sqlite: Invalid column type Text at index: 4, name: mtime_ms";
+        let mut entries = vec![make_entry("memory_search", "bm25:len=16", false, Some(error)); 5];
+        entries.push(make_entry(
+            "mem_read",
+            "notes/missing.md",
+            false,
+            Some("file not found"),
+        ));
+        let facts = rule_lesson(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].related_paths, ["notes/missing.md"]);
     }
 
     #[test]
@@ -630,6 +665,10 @@ mod tests {
         assert_eq!(classify_error("file not found: /x"), "文件不存在");
         assert_eq!(classify_error("Permission denied"), "权限不足");
         assert_eq!(classify_error("Already exists"), "文件已存在");
+        assert_eq!(
+            classify_error("sqlite: Invalid column type Text"),
+            "数据库故障"
+        );
         assert_eq!(classify_error("Invalid argument"), "无效参数");
         assert_eq!(classify_error("Not implemented"), "功能未启用");
         assert_eq!(classify_error("something weird"), "其他");

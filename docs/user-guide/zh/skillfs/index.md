@@ -347,6 +347,12 @@ directive），或两者都关闭——空流水线原样返回选中的字节�
 source。`getattr` 大小、部分读取与完整读取始终基于同一份转换结果。只有 `SKILL.md`
 会被适配——其他 Markdown、shell、Python 与配置文件原样透传。
 
+directive stage 在挂载启动时记录命令可用性。Linux 上直接检查 `PATH` 中的
+可执行文件，不依赖 `which`，也不会执行被探测的命令。可执行符号链接及相对或
+空 `PATH` 项按常规查找位置处理；目录、断链及有效用户无权执行的文件不算可用命令。
+未设置 `PATH` 时使用平台默认搜索路径。
+固定命令白名单保持不变。更改 `PATH` 或安装命令后需重新挂载；读取技能时不会重新探测环境。
+
 ### 关闭 directive stage
 
 directive/compiler stage 默认开启，除非显式关闭：

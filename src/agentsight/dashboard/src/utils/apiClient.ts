@@ -251,6 +251,8 @@ export interface EnforcementCapabilities {
   policy_handoff: boolean;
   alternate_pid_retarget: boolean;
   test_development: boolean;
+  file_delete_guard?: boolean;
+  file_delete_guard_mode?: string | null;
 }
 
 export interface EnforcementBinding {

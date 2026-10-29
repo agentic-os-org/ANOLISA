@@ -41,7 +41,7 @@ QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled 
 更新和任务派发串行化；更新成功后再恢复派发。活跃任务及清理期间返回 `busy`，
 不提供自动重试、等待任务排空或任务内切换。
 
-[空闲更新支持矩阵](../../../../../../docs/user-guide/zh/aw/configuration.md#更新预热实例)
+[空闲更新支持矩阵](../../../../../../docs/developer-guide/zh/aw/deployment/policy-updates.md)
 记录各启动模式的就绪接点、安全边界及选择入口。普通 Qoder SDK/QwenPaw 扩展公共服务事务，
 受限桥接及外部 attach 沿用已有合同；普通 Claude SDK、Pi、Qoder CLI、OpenClaw、Hermes、
 AgentScope SDK 保持固定策略。Qoder 预热应先调用受管 `startDaemon()` 再等待用户流量。

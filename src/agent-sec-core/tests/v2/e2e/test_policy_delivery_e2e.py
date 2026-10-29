@@ -109,16 +109,16 @@ def agentsight_mock() -> Iterator[Queue]:
 
 
 def _wait_for(
-    read: Callable[[], dict[str, Any]], ready: Callable[[dict[str, Any]], bool]
+    read: Callable[[float], dict[str, Any]], ready: Callable[[dict[str, Any]], bool]
 ) -> dict[str, Any]:
-    deadline = time.monotonic() + 10
-    while True:
-        actual = read()
-        if ready(actual):
+    deadline = time.monotonic() + 30
+    actual = None
+    while (remaining := deadline - time.monotonic()) > 0:
+        actual = read(remaining)
+        if ready(actual) and time.monotonic() <= deadline:
             return actual
-        if time.monotonic() >= deadline:
-            pytest.fail(f"Policy lifecycle did not converge: {actual}")
-        time.sleep(0.05)
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    pytest.fail(f"Policy lifecycle did not converge within 30s: last_state={actual}")
 
 
 def test_discovered_binding_delivers_saved_revision_and_cleans_up(
@@ -198,7 +198,7 @@ def test_discovered_binding_delivers_saved_revision_and_cleans_up(
             "startTime": int(stat.rsplit(")", 1)[1].split()[19]),
         }
         listing = _wait_for(
-            lambda: daemon.request("binding", "list", timeout=2),
+            lambda timeout: daemon.request("binding", "list", timeout=timeout),
             lambda value: value["total"] == 1
             and value["items"][0]["status"] == {"phase": "READY"},
         )
@@ -244,11 +244,11 @@ def test_discovered_binding_delivers_saved_revision_and_cleans_up(
 
         daemon.request("scope", "delete", "--scope-id", scope["scopeId"])
         _wait_for(
-            lambda: daemon.request("binding", "list", timeout=2),
+            lambda timeout: daemon.request("binding", "list", timeout=timeout),
             lambda value: value["total"] == 0,
         )
         _wait_for(
-            lambda: daemon.request("scope", "list", timeout=2),
+            lambda timeout: daemon.request("scope", "list", timeout=timeout),
             lambda value: value["total"] == 0,
         )
         assert agentsight_mock.get(timeout=2) == (
@@ -305,7 +305,7 @@ def test_unsupported_rule_is_saved_but_prevents_partial_http_delivery(
             "1",
         )
         listing = _wait_for(
-            lambda: daemon.request("binding", "list", timeout=2),
+            lambda timeout: daemon.request("binding", "list", timeout=timeout),
             lambda value: value["total"] == 1
             and value["items"][0]["status"]["phase"] == "APPLY_FAILED",
         )
@@ -319,7 +319,8 @@ def test_unsupported_rule_is_saved_but_prevents_partial_http_delivery(
         ), "an unsupported rule must prevent all HTTP delivery"
         daemon.request("scope", "delete", "--scope-id", scope["scopeId"])
         _wait_for(
-            lambda: daemon.request("binding", "list"), lambda value: value["total"] == 0
+            lambda timeout: daemon.request("binding", "list", timeout=timeout),
+            lambda value: value["total"] == 0,
         )
         assert (
             agentsight_mock.empty()

@@ -14,6 +14,10 @@ CMA-style persistent filesystem memory for AI agents, served over MCP. Provides 
 - **Safety** — prompt-injection detection and secret/PII redaction for injected content
 - **Cross-session tasks** — save/resume/close tasks across sessions with full context
 
+Keyword search accepts terms such as `config.toml`, `example.com`, and `v1.2.3`.
+Words such as `AND`, `NOT`, and `OR` are searched as text. Separate search terms
+with spaces; partial matches are returned when no result matches every term.
+
 ## Quick Start
 
 ### Install
@@ -110,6 +114,15 @@ capture consent before writing and marks the source as `auto-capture`. Explicit
 `memory_observe` calls remain available when automatic capture is disabled.
 Upgrade the server and adapter together; an older server rejects automatic
 capture requests without falling back to a manual write.
+
+For single-line list entries, `memory_summary` concept and file rankings remain
+available after a `mem_export` / `mem_import` round trip, including literal commas.
+Import replaces ASCII control characters in frontmatter, including newlines, with spaces.
+
+Embedding providers selected in TOML also accept their `MEMORY_OPENAI_*` or
+`MEMORY_OLLAMA_*` field overrides without repeating the backend selector. See
+the [configuration guide](../../docs/user-guide/en/agent-memory/index.md)
+for credential precedence and model-change indexing limits.
 
 ## Architecture
 

@@ -144,7 +144,7 @@ transformation and model-visible Schema adoption remain to be implemented. Retri
 requires a registered tool before recoverable output is emitted, authenticated
 model-visible markers, tenant/task storage, TTL/quota, exact original-byte return
 and bypass of recompression. These dependencies remain in the
-[full Tokenless delivery table](resident-sdk.md#delivery-slices-and-full-tokenless-dependencies)
+[full Tokenless delivery table](resident-sdk.md#acceptance-and-full-tokenless-dependencies)
 and tracking issue [#8952](https://github.com/agentic-os-org/ANOLISA/issues/8952).
 
 Native acceptance runs the real SDK/CLI and Tokenless backend. It checks adopted

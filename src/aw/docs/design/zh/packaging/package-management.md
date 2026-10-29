@@ -2,7 +2,7 @@
 
 [English](../../en/packaging/package-management.md)
 
-`codex/aw-design-d2` 分支中的 `aw-cli` 调用 `aw-package` 库，生成并提交本地软件包
+`aw-cli` 调用 `aw-package` 库，生成并提交本地软件包
 变更。实现位于 `database.rs`、`open_bundle.rs`、`plan.rs`、`transaction.rs` 及其
 同名目录。CLI 仍是唯一的软件管理命令；`aw-build` 负责生成现有 Preview 包。
 

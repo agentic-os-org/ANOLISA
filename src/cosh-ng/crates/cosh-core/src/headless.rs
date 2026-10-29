@@ -30,6 +30,8 @@ use crate::sls;
 use crate::tool::SessionWorkspace;
 
 mod auth;
+#[cfg(test)]
+mod live_state_tests;
 
 use auth::request_auth;
 
@@ -743,6 +745,8 @@ where
                 engine.shell_context = Some(ctx);
             }
 
+            session.refresh_background_compaction(engine);
+
             // Reset per-turn metrics before each user message
             engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
@@ -834,6 +838,18 @@ where
                 Some(extensions.live),
             )
             .await;
+            if domain == "auth"
+                && action == "activate"
+                && matches!(
+                    &response,
+                    OutputMessage::RegistryResponse { success: true, .. }
+                )
+            {
+                let resolved = engine.config.resolve_provider();
+                engine.provider = crate::create_provider(&engine.config);
+                engine.model = resolved.model;
+                engine.extra_params = resolved.extra_params;
+            }
             engine.emit(writer, &response);
             engine.drain_retired_extension_snapshots().await;
         }
@@ -986,6 +1002,43 @@ impl SessionRuntime {
         if !self.resumed || explicit_override || self.record.model.is_empty() {
             self.record.model = resolved_model.to_string();
         }
+    }
+
+    fn refresh_background_compaction(&mut self, engine: &mut CoshCore) {
+        if !self.auto_persist
+            || !self.record.was_loaded
+            || self.record.session_id.as_str() != engine.session_id
+        {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let saved = match store.load(&self.record.session_id) {
+            Ok(saved) => saved,
+            Err(error) => {
+                tracing::warn!(error = ?error, "background compaction refresh failed");
+                return;
+            }
+        };
+        if saved.generation <= self.record.generation
+            || saved.compaction_revision <= engine.compaction.revision()
+        {
+            return;
+        }
+        // Compare the durable redaction without changing live provider context.
+        let mut persisted_messages = engine.messages.clone();
+        crate::redaction::redact_messages(&mut persisted_messages);
+        if crate::compaction::source_digest(&persisted_messages)
+            != crate::compaction::source_digest(&saved.messages)
+        {
+            tracing::warn!("background compaction transcript differs from live session");
+            return;
+        }
+        engine
+            .compaction
+            .load_state(saved.compaction.clone(), saved.compaction_revision);
+        self.record = saved;
     }
 
     fn persist(&mut self, engine: &CoshCore) -> Result<(), SessionError> {

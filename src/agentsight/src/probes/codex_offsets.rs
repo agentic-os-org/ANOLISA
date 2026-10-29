@@ -136,6 +136,58 @@ mod tests {
     }"#;
 
     #[test]
+    fn shipped_codex_entries_preserve_ex_probe_abi() {
+        let table = OffsetTable::load(include_str!("../../agentsight.json")).unwrap();
+        for (size, write, read, handshake) in [
+            (258_278_208, 204_730_912, 204_730_320, 204_728_640),
+            (294_415_048, 231_360_640, 231_358_720, 231_369_984),
+        ] {
+            let entry = table
+                .entries
+                .iter()
+                .find(|entry| entry.fingerprint.file_size == size)
+                .expect("validated musl release fingerprint");
+            let offsets = entry.offsets.as_ref().expect("traceable release");
+            assert_eq!(
+                (
+                    offsets.ssl_write,
+                    offsets.ssl_read,
+                    offsets.ssl_do_handshake
+                ),
+                (write, read, handshake)
+            );
+            assert!(offsets.write_is_ex && offsets.read_is_ex);
+            assert_eq!(entry.fingerprint.head_64k_sha256.len(), 64);
+        }
+    }
+
+    #[test]
+    fn lookup_requires_matching_size_and_head_hash() {
+        use std::io::Write;
+
+        let mut binary = tempfile::NamedTempFile::new().unwrap();
+        binary
+            .write_all(b"synthetic release without Build ID")
+            .unwrap();
+        let path = binary.path().to_str().unwrap();
+        let size = binary.as_file().metadata().unwrap().len();
+        let hash = compute_head_sha256(path).unwrap();
+        let json = serde_json::json!({"codex_offsets": {"entries": [{
+            "fingerprint": {"file_size": size, "head_64k_sha256": hash},
+            "offsets": {"ssl_write": 1, "ssl_read": 2, "ssl_do_handshake": 3,
+                "write_is_ex": true, "read_is_ex": true}
+        }]}})
+        .to_string();
+        let mut table = OffsetTable::load(&json).unwrap();
+        assert!(table.lookup(path).is_some());
+        table.entries[0].fingerprint.file_size += 1;
+        assert!(table.lookup(path).is_none());
+        table.entries[0].fingerprint.file_size = size;
+        table.entries[0].fingerprint.head_64k_sha256 = "wrong hash".into();
+        assert!(table.lookup(path).is_none());
+    }
+
+    #[test]
     fn load_table() {
         let table = OffsetTable::load(TEST_JSON).unwrap();
         assert_eq!(table.entries.len(), 1);
