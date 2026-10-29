@@ -680,7 +680,8 @@ impl SslSniff {
                         }
                         return match self.scans.submit(path) {
                             Ok(()) => AttachOutcome::Deferred,
-                            Err(error) => {
+                            Err(scan_jobs::SubmitError::QueueFull)
+                            | Err(scan_jobs::SubmitError::Failed(error)) => {
                                 log::warn!(
                                     "Schedule SSL byte-pattern detection for pid={pid}, {path}: {error:#}"
                                 );

@@ -17,6 +17,12 @@ use std::thread::{self, JoinHandle};
 
 const MAX_SCANS: usize = 32;
 
+#[derive(Debug)]
+pub(super) enum SubmitError {
+    QueueFull,
+    Failed(anyhow::Error),
+}
+
 struct Job {
     key: FileKey,
     file: File,
@@ -111,19 +117,21 @@ impl ScanJobs {
     }
 
     /// Repeated discovery of one inode consumes one queue entry.
-    pub(super) fn submit(&mut self, path: &str) -> Result<()> {
-        let file = File::open(path).with_context(|| format!("open SSL scan input {path}"))?;
+    pub(super) fn submit(&mut self, path: &str) -> std::result::Result<(), SubmitError> {
+        let file = File::open(path)
+            .with_context(|| format!("open SSL scan input {path}"))
+            .map_err(SubmitError::Failed)?;
         let metadata = file
             .metadata()
-            .with_context(|| format!("stat SSL scan input {path}"))?;
+            .with_context(|| format!("stat SSL scan input {path}"))
+            .map_err(SubmitError::Failed)?;
         let key = (stat_dev_to_key(metadata.dev()), metadata.ino());
         if self.pending.contains(&key) {
             return Ok(());
         }
-        anyhow::ensure!(
-            self.pending.len() < MAX_SCANS,
-            "SSL scan queue is full ({MAX_SCANS} in-flight files); retry discovery for {path}"
-        );
+        if self.pending.len() >= MAX_SCANS {
+            return Err(SubmitError::QueueFull);
+        }
         let job = Job {
             key,
             file,
@@ -131,9 +139,15 @@ impl ScanJobs {
         };
         self.requests
             .as_ref()
-            .context("SSL scan worker stopped")?
+            .context("SSL scan worker stopped")
+            .map_err(SubmitError::Failed)?
             .try_send(job)
-            .map_err(|error| anyhow::anyhow!("enqueue SSL scan for {path}: {error}"))?;
+            .map_err(|error| match error {
+                crossbeam_channel::TrySendError::Full(_) => SubmitError::QueueFull,
+                crossbeam_channel::TrySendError::Disconnected(_) => SubmitError::Failed(
+                    anyhow::anyhow!("enqueue SSL scan for {path}: worker disconnected"),
+                ),
+            })?;
         self.pending.insert(key);
         metrics::gauge!("agentsight_ssl_scan_jobs").set(self.pending.len() as f64);
         Ok(())
@@ -191,10 +205,10 @@ mod tests {
             jobs.submit(file.path().to_str().unwrap()).unwrap();
         }
         assert_eq!(jobs.pending.len(), MAX_SCANS);
-        assert!(
-            jobs.submit(files[MAX_SCANS].path().to_str().unwrap())
-                .is_err()
-        );
+        assert!(matches!(
+            jobs.submit(files[MAX_SCANS].path().to_str().unwrap()),
+            Err(SubmitError::QueueFull)
+        ));
         // Dropping cancels admission while another thread still owns the permit.
         drop(jobs);
     }
