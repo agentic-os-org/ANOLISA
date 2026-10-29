@@ -71,8 +71,14 @@ fn qoder_waiting_after_steps_cannot_renew_an_exhausted_budget() {
     let fixture = Fixture::new();
     let mut document = fixture.document();
     document["spec"]["execution"]["default_event_budget_ms"] = json!(300);
+    // The observer writes its pid as its very first statement, before
+    // blocking on stdin: a pid written only after `stdin.read()` returns
+    // lands when the engine closes the stream — i.e. at budget-exhaustion
+    // teardown — so a SIGKILL racing the write left no `sleeper.pid` and
+    // the pid assertion below panicked on a missing file. Startup-time
+    // writing makes the pid observable for the whole event window.
     document["spec"]["providers"] = json!({
-        "observer":{"protocol":"native-hook/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,"-c","import os,pathlib,sys,time; sys.stdin.read(); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(2)",fixture.root.join("sleeper.pid")]},"timeout_ms":2000,"max_output_bytes":4096},
+        "observer":{"protocol":"native-hook/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,"-c","import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); sys.stdin.read(); time.sleep(2)",fixture.root.join("sleeper.pid")]},"timeout_ms":2000,"max_output_bytes":4096},
         "compression":{"protocol":"aw-provider/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,fixture.action(),"--root",fixture.root,"--protocol","provider","--behavior","replace"]},"timeout_ms":2000,"max_output_bytes":4096}
     });
     document["spec"]["events"] = json!({"tool.after":{"enabled":true,"steps":[
