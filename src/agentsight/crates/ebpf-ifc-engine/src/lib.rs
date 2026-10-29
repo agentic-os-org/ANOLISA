@@ -229,9 +229,7 @@ pub const INODE_GUARD_UNLINK: u32 = 1;
 pub const INODE_GUARD_RENAME: u32 = 2;
 /// Inode guard flag: block write.
 pub const INODE_GUARD_WRITE: u32 = 4;
-/// Guard flag marking a directory-tree target, whose protection covers entries
-/// discovered below it. Traversal is bounded to 256 dentry/mount steps;
-/// undecidable destructive paths deny.
+/// Reserved ABI flag for directory-tree guards, separate from per-target operation flags.
 pub const INODE_GUARD_TREE: u32 = 8;
 
 /// Must match BPF `struct inode_guard_val` layout.

@@ -7,6 +7,8 @@ failures=0
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+bash "$repo_root/src/agentsight/scripts/test-policy-classifier.sh"
+
 # EM_BPF does not identify the host ABI. Assert the dispatcher inside the ELF
 # function symbol, including its map relocations, without scanning BTF/debug data.
 python3 - "$repo_root/src/agentsight/crates/ebpf-ifc-engine" <<'PY'
