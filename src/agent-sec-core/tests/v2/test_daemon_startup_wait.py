@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+
 from tests.v2.e2e import conftest as daemon_fixtures
 
 

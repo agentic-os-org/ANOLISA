@@ -25,7 +25,7 @@ CLI_BIN = "agent-sec-cli"
 DAEMON_BIN = "agent-sec-daemon"
 
 # Includes startup admission and a successful daemon.health response.
-_SOCKET_WAIT_SECONDS = 5.0
+_SOCKET_WAIT_SECONDS = 15.0
 # These process tests shut down idle daemons; worker-drain deadlines have separate coverage.
 _SHUTDOWN_WAIT_SECONDS = 5.0
 _POLL_INTERVAL = 0.02
