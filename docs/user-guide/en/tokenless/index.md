@@ -96,11 +96,11 @@ Release package targets:
 |----------|-------------|-------------|
 | Linux (glibc) | x86_64 | `@anolisa/tokenless-linux-x64` |
 | Linux (glibc) | aarch64 | `@anolisa/tokenless-linux-arm64` |
-| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` — declared build target, **not published yet** |
+| macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` |
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
-| Windows | x86_64 | `@anolisa/tokenless-win32-x64` — declared build target, **not published yet** |
+| Windows | x86_64 | `@anolisa/tokenless-win32-x64` |
 
-Tokenless 0.9.0 builds packages for all five targets. At release preparation, the npm registry's latest root package is still 0.8.8, and the Intel Mac and Windows platform packages are not published. Generating release assets does not publish them to npm: npm installation requires the root package and the matching platform package at the same version. Check availability with `npm view anolisa-tokenless version` and `npm view @anolisa/tokenless-darwin-x64 version` or `npm view @anolisa/tokenless-win32-x64 version` before installing on these new targets. See [Platform support](#platform-support) for the currently available installation routes.
+Tokenless 0.9.1 builds packages for all five targets. At 0.9.1 release preparation, the npm registry's latest root package and Intel Mac and Windows platform packages are 0.9.0. Generating release assets does not publish them to npm: npm installation requires the root package and the matching platform package at the same version. Check availability with `npm view anolisa-tokenless version` and `npm view @anolisa/tokenless-darwin-x64 version` or `npm view @anolisa/tokenless-win32-x64 version`. See [Platform support](#platform-support) for the available installation routes.
 
 #### Method C: curl standalone install
 
@@ -308,14 +308,14 @@ that does not shrink is returned unchanged and is not recorded.
 | Linux x86_64/aarch64 (glibc) | Supported | Supported | Supported (npm path) | Supported (follows curl) |
 | Linux with musl, such as Alpine | Not currently supported | Not currently supported | Source build only, needs a Rust toolchain | Source build only, needs a Rust toolchain |
 | macOS Apple Silicon | Supported | Supported | Supported (npm path) | Supported (follows curl) |
-| macOS x86_64 | Not currently supported | Pending registry publication | Pending registry publication | Pending registry publication |
-| Windows | Not currently supported | x64: pending registry publication | Not supported, use WSL2 | Not supported, use WSL2 |
+| macOS x86_64 | Not currently supported | Supported | Supported (npm path) | Supported (npm path) |
+| Windows | Not currently supported | x64: supported | Not supported, use WSL2 | Not supported, use WSL2 |
 
 Notes on the boundaries above:
 
-- macOS x86_64 is a supported 0.9.0 build target. Its npm and curl npm routes require `@anolisa/tokenless-darwin-x64` to be published alongside the matching root package. Until then, those routes cannot deliver a binary there. The curl source-build fallback is refused on macOS — `scripts/install.sh` exits with an error instead of running `cargo`.
+- macOS x86_64 uses the published `@anolisa/tokenless-darwin-x64` package through npm or the curl installer's npm path. The curl source-build fallback is refused on macOS — `scripts/install.sh` exits with an error instead of running `cargo`.
 - curl on macOS relies on its npm path. Its source-build fallback is validated on Linux only, and the installer refuses to run it on macOS, so a macOS machine without npm has no supported curl path.
-- The 0.9.0 npm manifest declares `os: win32, linux, darwin` and includes a Windows x64 package; Windows ARM64 is unsupported. Native Windows npm installation awaits registry publication. The curl installer rejects Windows in `scripts/install.sh`; run that installer inside WSL2, where the Linux rows apply. The bundled installation Skill also documents a Linux/macOS Bash workflow.
+- The npm manifest declares `os: win32, linux, darwin` and includes the published Windows x64 package; Windows ARM64 is unsupported. The curl installer rejects Windows in `scripts/install.sh`; run that installer inside WSL2, where the Linux rows apply. The bundled installation Skill also documents a Linux/macOS Bash workflow.
 - The Skill method delegates to the anolisa CLI, npm, or curl, so its support follows the method it selects.
 
 To build the standalone CLI from source, see [User manual · Build the standalone CLI from source](index.md#build-the-standalone-cli-from-source).

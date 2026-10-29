@@ -186,12 +186,10 @@ adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样�
 全局包都会被保留。中途失败的替换（tag 缺失、构建报错）会把原安装放回，而不是让
 机器上没有可用 CLI。
 
-当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
-仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
-optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，
-因此 npm 路径无法在 Intel Mac 上提供二进制。独立安装脚本在 macOS 上也不会
-回退到源码构建——它会直接报错退出而不执行 `cargo`——所以 Intel Mac 目前没有
-受支持的安装路径。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
+已发布的 npm 软件包支持 Linux x86_64/aarch64、macOS Apple Silicon 和
+Intel Mac，以及 Windows x64。`@anolisa/tokenless-darwin-x64` 和
+`@anolisa/tokenless-win32-x64` 从 0.9.0 开始提供。独立安装脚本在 macOS 上使用
+npm，并拒绝回退到源码构建：它会报错退出而不执行 `cargo`。Windows 请直接使用 npm。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
 直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
@@ -359,8 +357,8 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 ### 千问办公插件（Windows x64 本地模式）
 
 Windows x64 支持原生 `tokenless.exe`、`rtk.exe`、npm 启动器和千问办公 PowerShell
-Hook，不支持 Windows ARM64。Windows 软件包尚未发布，请按
-[Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并打包，
+Hook，不支持 Windows ARM64。使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。
+源码构建请参阅 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，
 不需要 Git Bash 或 WSL。
 
 Python Adapter 注册 PowerShell Hook 命令，PreTool 同时处理 Bash 和 PowerShell 输入。

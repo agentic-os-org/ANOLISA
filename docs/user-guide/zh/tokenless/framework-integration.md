@@ -93,7 +93,7 @@ Windows 支持范围为 x64 上的千问办公 1.3.2 本地会话，需要安装
 Python 3.10+。不支持 Windows ARM64 和安全工作区／VM 会话，其他 Windows Agent
 尚未验证。
 
-Windows 安装包尚未发布，目前需按
+使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。源码构建请按
 [Windows 构建说明](../../../developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并安装本地 npm 包。
 
 安装 npm 包后，退出千问办公，在 PowerShell 中执行：

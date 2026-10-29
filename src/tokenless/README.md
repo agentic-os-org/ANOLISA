@@ -221,14 +221,11 @@ resources, framework registrations and npm package are left alone. A replacement
 that fails halfway (a missing tag, a build error) puts the previous install back
 instead of leaving the machine without a CLI.
 
-Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
-macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
-optional-dependency entry describes a release build target, not a registry
-artifact, so the npm route cannot deliver a binary there. The standalone
-installer does not fall back to a source build on macOS either — it exits with
-an error instead of running `cargo` — so Intel macOS currently has no supported
-install route. Use Linux or Apple Silicon macOS until that package is
-published.
+Published npm packages cover Linux x86_64/aarch64, macOS Apple Silicon and
+Intel Mac, and Windows x64. The `@anolisa/tokenless-darwin-x64` and
+`@anolisa/tokenless-win32-x64` packages are available from 0.9.0. The standalone
+installer uses npm on macOS and refuses a source-build fallback there: it
+exits with an error instead of running `cargo`. On Windows, use npm directly.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
 without changing an Agent product's user configuration. Run these commands
@@ -701,8 +698,8 @@ make qoder-install
 ## QwenWork Plugin (Windows x64 Local Mode)
 
 Windows x64 supports native `tokenless.exe` and `rtk.exe`, npm launchers, and
-QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. The Windows package
-is not yet published; build and package it using the
+QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. Install the published
+package with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Git Bash and WSL are not required.
 

@@ -101,7 +101,7 @@ sessions on x64, with Node.js/npm and Python 3.10+ installed. Windows ARM64 and
 security-workspace/VM sessions are unsupported; other Windows agents have not
 been validated.
 
-The Windows package is not yet published. For now, follow the
+Install the published package with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../../developer-guide/en/tokenless/windows.md#build-and-test-on-windows)
 to build and install the local npm packages.
 
