@@ -52,6 +52,7 @@ mod inner {
         println!("\n=== SSL Traffic Monitor ===\n");
 
         loop {
+            sniffer.poll_pending_scans();
             if let Some(event) = sniffer.try_recv() {
                 let result = parser.parse_ssl_event(Rc::new(event));
                 for msg in result.messages {
