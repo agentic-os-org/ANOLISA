@@ -135,13 +135,33 @@ fn probe_commands() -> HashSet<String> {
 fn command_exists(cmd: &str) -> bool {
     #[cfg(unix)]
     {
-        std::process::Command::new("which")
-            .arg(cmd)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let Some(path) = std::env::var_os("PATH").or_else(default_search_path) else {
+            return false;
+        };
+        // Probe the executable itself: a restricted PATH need not contain
+        // `which`. Do not run any of the commands while detecting them.
+        std::env::split_paths(&path).any(|directory| {
+            let candidate = directory.join(cmd);
+            if !candidate.is_file() {
+                return false;
+            }
+            let Ok(candidate) = CString::new(candidate.as_os_str().as_bytes()) else {
+                return false;
+            };
+            // SAFETY: candidate owns a NUL-terminated path for the call.
+            // AT_EACCESS checks the effective identity used to execute it.
+            unsafe {
+                libc::faccessat(
+                    libc::AT_FDCWD,
+                    candidate.as_ptr(),
+                    libc::X_OK,
+                    libc::AT_EACCESS,
+                ) == 0
+            }
+        })
     }
     #[cfg(windows)]
     {
@@ -157,6 +177,26 @@ fn command_exists(cmd: &str) -> bool {
     {
         false
     }
+}
+
+// Match the platform's default executable search path when PATH is absent.
+#[cfg(unix)]
+fn default_search_path() -> Option<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    // SAFETY: a null buffer with zero length queries the required capacity.
+    let size = unsafe { libc::confstr(libc::_CS_PATH, std::ptr::null_mut(), 0) };
+    if size == 0 {
+        return None;
+    }
+    let mut path = vec![0u8; size];
+    // SAFETY: path has size writable bytes; confstr writes a terminating NUL.
+    let written = unsafe { libc::confstr(libc::_CS_PATH, path.as_mut_ptr().cast(), size) };
+    if written == 0 || written > size {
+        return None;
+    }
+    path.truncate(written - 1);
+    Some(std::ffi::OsString::from_vec(path))
 }
 
 fn capture_env_vars() -> HashMap<String, String> {

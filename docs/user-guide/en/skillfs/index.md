@@ -387,6 +387,15 @@ error (`ENOENT` at the virtual read boundary) and never retries the live source.
 bytes. Only `SKILL.md` is adapted — other Markdown, shell, Python, and config
 files pass through untouched.
 
+Command availability for the directive stage is captured at mount startup. On
+Linux it checks executable files on `PATH` directly, without requiring `which`
+or executing the detected commands. Executable symlinks and relative/empty
+`PATH` entries follow normal lookup locations; directories, broken links and
+files that the effective user cannot execute do not count. If `PATH` is unset,
+the platform default search path is used. The existing fixed
+command allowlist is unchanged. Remount after changing `PATH` or installing a
+command; this does not add per-read environment probing.
+
 ### Disabling the Directive Stage
 
 The directive/compiler stage stays enabled unless explicitly turned off:

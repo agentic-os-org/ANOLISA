@@ -273,6 +273,11 @@ When FUSE reads `SKILL.md`, SkillFS runs `compiler::compile` and supports:
 - `<!-- @else -->`
 - `<!-- @endif -->`
 
+On Linux, command availability is checked directly against executable files on
+`PATH`; the optional `which` utility is not required. The fixed command allowlist
+and mount-startup environment snapshot are unchanged. Remount after changing
+`PATH` or installing a command to refresh that snapshot.
+
 When there are no conditional blocks, SkillFS also applies a small set of
 heuristic command normalizations, for example:
 
