@@ -94,6 +94,16 @@ the repository root. They connect as separate processes and are not part of the
 ten framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
 can develop and distribute Providers independently; see the [collaboration guide](../../../../../docs/developer-guide/en/aw/providers/index.md).
 
+## Native configuration ownership
+
+`aw-config` validates ordered source references without parsing native content.
+The offline editor changes only those AW-owned references. Embedding Adapters
+use `aw-adapter::configuration` to call their original loader, retain its output
+or live handle, and obtain immutable scope through existing Provider admission.
+The native loader owns precedence, relative paths, credentials and updates;
+the service retains runtime activation and policy revisions. See the
+[editing contract](configuration/configuration-editing.md#native-source-ownership).
+
 ## One Hook request
 
 1. `aw run` calls `aw-adapter` to check the native entrypoint and prepare registration,

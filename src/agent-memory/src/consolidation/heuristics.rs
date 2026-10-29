@@ -19,6 +19,14 @@ use super::fact::{ConsolidatedFact, FactCategory};
 pub struct OwnedAuditEntry {
     pub ts: String,
     pub tool: String,
+    /// `AuditEntry` skips the `path` key entirely whenever it is empty, and
+    /// several tools log exactly that on every successful call
+    /// (`memory_get_context`, `session_context`, `mem_log`,
+    /// `mem_snapshot_list`, `session_log`) plus every error branch that
+    /// fails before a path is known. The field must default to the empty
+    /// string or those lines fail to deserialize with "missing field
+    /// `path`" and the consolidation parser silently drops them.
+    #[serde(default)]
     pub path: String,
     pub ok: bool,
     pub bytes: Option<u64>,
@@ -817,5 +825,87 @@ mod tests {
         let facts = rule_interest(&entries, "sid");
         let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
         assert_eq!(titles, ["搜索: packet:len=14"]);
+    }
+
+    // ── JSONL round-trip: audit lines without a path ──────────────
+
+    #[test]
+    fn owned_entry_parses_a_pathless_audit_line() {
+        // AuditEntry omits the `path` key when it is empty, so every tool
+        // that logs without a path (memory_get_context, session_context,
+        // mem_log, mem_snapshot_list, session_log — plus error branches
+        // that fail before a path is known) serializes to a line
+        // OwnedAuditEntry used to reject with "missing field `path`".
+        let line =
+            serde_json::to_string(&crate::audit::AuditEntry::new("memory_get_context").bytes(120))
+                .unwrap();
+        assert!(
+            !line.contains("\"path\""),
+            "expected the serialized line to omit the path key: {line}"
+        );
+
+        let entry: OwnedAuditEntry =
+            serde_json::from_str(&line).expect("pathless audit lines must stay parseable");
+        assert_eq!(entry.tool, "memory_get_context");
+        assert_eq!(entry.path, "");
+        assert_eq!(entry.bytes, Some(120));
+        assert!(entry.ok);
+    }
+
+    #[test]
+    fn consolidation_parse_loop_keeps_pathless_lines() {
+        // Mirror of the filter_map MemoryService::consolidate runs over the
+        // session log: a mixed log must survive it line for line.
+        let with_path =
+            serde_json::to_string(&crate::audit::AuditEntry::new("mem_read").path("notes/a.md"))
+                .unwrap();
+        let pathless_ok =
+            serde_json::to_string(&crate::audit::AuditEntry::new("memory_get_context").bytes(900))
+                .unwrap();
+        let pathless_err = serde_json::to_string(
+            &crate::audit::AuditEntry::new("memory_search").error("empty search query"),
+        )
+        .unwrap();
+        let log = format!("{with_path}\n{pathless_ok}\n{pathless_err}\n");
+
+        let entries: Vec<OwnedAuditEntry> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<OwnedAuditEntry>(line).ok())
+            .collect();
+
+        assert_eq!(
+            entries.len(),
+            3,
+            "every audit line must parse; got {} of 3",
+            entries.len()
+        );
+        assert_eq!(entries[2].tool, "memory_search");
+        assert_eq!(entries[2].error.as_deref(), Some("empty search query"));
+    }
+
+    #[test]
+    fn min_tool_calls_gate_counts_pathless_calls() {
+        // A session whose calls are mostly pathless (context retrieval, log
+        // reads) must not fall under the min_tool_calls threshold just
+        // because the parser dropped those lines.
+        let lines = [
+            serde_json::to_string(&crate::audit::AuditEntry::new("mem_write").path("notes/a.md"))
+                .unwrap(),
+            serde_json::to_string(&crate::audit::AuditEntry::new("memory_get_context").bytes(10))
+                .unwrap(),
+            serde_json::to_string(&crate::audit::AuditEntry::new("session_log").bytes(4)).unwrap(),
+        ];
+        let entries: Vec<OwnedAuditEntry> = lines
+            .iter()
+            .filter_map(|l| serde_json::from_str::<OwnedAuditEntry>(l).ok())
+            .collect();
+        assert_eq!(entries.len(), 3);
+
+        let facts = run_consolidation_owned(&entries, "sid-pathless", &default_config());
+        assert!(
+            facts.iter().any(|f| f.content.contains("3 次工具调用")),
+            "the session summary must see all three calls; got {} facts",
+            facts.len()
+        );
     }
 }

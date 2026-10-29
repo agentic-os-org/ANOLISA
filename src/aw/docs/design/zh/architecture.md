@@ -77,6 +77,13 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
 接入，不计入 10 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
 其他团队可独立开发、分发 Provider，见[协作指南](../../../../../docs/developer-guide/zh/aw/providers/index.md)。
 
+## 原生配置归属
+
+`aw-config` 校验有序来源引用，不解析原生内容。离线编辑器只修改 AW 自有引用。
+嵌入式 Adapter 使用 `aw-adapter::configuration` 调用原生 loader，保留其结果或存活句柄，
+再通过现有 Provider 准入取得不可变范围。原生 loader 负责优先级、相对路径、凭据和更新；
+service 继续负责运行期激活与策略代次。见[编辑合同](configuration/configuration-editing.md#原生来源归属)。
+
 ## 一次 Hook 请求
 
 1. `aw run` 调用 `aw-adapter` 检查原生入口并准备注册，再由启动器启动 Agent。

@@ -13,7 +13,6 @@ import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import tempfile
 import time
@@ -25,8 +24,7 @@ import pytest
 CLI_BIN = "agent-sec-cli"
 DAEMON_BIN = "agent-sec-daemon"
 
-# The socket appears shortly after the daemon binds; five seconds is generous
-# for a cold binary start under container I/O without masking a real hang.
+# Includes startup admission and a successful daemon.health response.
 _SOCKET_WAIT_SECONDS = 5.0
 # These process tests shut down idle daemons; worker-drain deadlines have separate coverage.
 _SHUTDOWN_WAIT_SECONDS = 5.0
@@ -125,6 +123,8 @@ def _daemon_settings(socket_path: Path) -> tuple[Path, dict[str, str]]:
     environment["AGENT_SEC_DAEMON_SOCKET"] = str(socket_path)
     environment["AGENT_SEC_OLLAMA_MODEL"] = "agent-sec-core-e2e-unavailable"
     environment["AGENT_SEC_MODEL_SERVICE_BASE_URL"] = "http://127.0.0.1:0"
+    # Enable daemon diagnostics without changing the CLI's stderr contract.
+    environment.setdefault("RUST_LOG", "info")
     return config, environment
 
 
@@ -140,8 +140,9 @@ def _start_daemon(
     pii_rules: Path | None = None,
     skillsec_roots: list[Path] | None = None,
 ) -> subprocess.Popen:
-    """Starts a foreground daemon and waits for a complete protocol response."""
+    """Starts a foreground daemon and waits for authenticated daemon.health success."""
     config, environment = _daemon_settings(socket_path)
+    health = _require("agent-sec-daemon-health")
     if skillsec_roots is not None:
         settings = json.loads(config.read_text())
         settings["managedSkillDirs"] = [str(root) for root in skillsec_roots]
@@ -164,28 +165,49 @@ def _start_daemon(
         text=True,
         env=environment,
     )
-    deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
+    started = time.monotonic()
+    deadline = started + _SOCKET_WAIT_SECONDS
+    last_probe = "socket not created"
+    print(f"DAEMON starting pid={process.pid} socket={socket_path}", flush=True)
     while time.monotonic() < deadline:
-        if socket_path.exists():
-            try:
-                with socket.socket(socket.AF_UNIX) as probe:
-                    probe.settimeout(0.2)
-                    probe.connect(str(socket_path))
-                    probe.sendall(
-                        b'{"method":"policy.templates.list","params":{"limit":1,"offset":0}}\n'
-                    )
-                    if probe.recv(4096).endswith(b"\n"):
-                        return process
-            except (OSError, TimeoutError):
-                pass
         if process.poll() is not None:
-            _, stderr = process.communicate()
+            stderr = _terminate(process)
             raise AssertionError(
                 f"agent-sec-daemon exited early (rc={process.returncode}): {stderr}"
             )
+        if socket_path.exists():
+            try:
+                probe = subprocess.run(
+                    [health],
+                    env=environment | {"AGENT_SEC_HEALTH_TIMEOUT_SECONDS": "0.2"},
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    print(
+                        f"DAEMON healthy pid={process.pid} "
+                        f"elapsed_ms={(time.monotonic() - started) * 1000:.3f}",
+                        flush=True,
+                    )
+                    return process
+                last_probe = probe.stderr.strip()
+            except subprocess.TimeoutExpired:
+                last_probe = "daemon.health probe timed out"
+            except OSError as error:
+                last_probe = str(error)
         time.sleep(_POLL_INTERVAL)
-    stderr = _terminate(process)
-    raise AssertionError(f"agent-sec-daemon did not create {socket_path}: {stderr}")
+    elapsed = time.monotonic() - started
+    message = (
+        f"agent-sec-daemon did not become healthy after {elapsed:.3f}s "
+        f"(pid={process.pid}, socket={socket_path}, last_probe={last_probe})"
+    )
+    try:
+        stderr = _terminate(process)
+    except AssertionError as error:
+        raise AssertionError(f"{message}; {error}") from error
+    raise AssertionError(f"{message}: {stderr}")
 
 
 def _terminate(process: subprocess.Popen) -> str:
@@ -193,11 +215,18 @@ def _terminate(process: subprocess.Popen) -> str:
     if process.poll() is None:
         process.send_signal(signal.SIGTERM)
     try:
-        _, stderr = process.communicate(timeout=_SHUTDOWN_WAIT_SECONDS)
+        stdout, stderr = process.communicate(timeout=_SHUTDOWN_WAIT_SECONDS)
     except subprocess.TimeoutExpired:
         process.kill()
-        _, stderr = process.communicate()
-        raise AssertionError("agent-sec-daemon did not exit within the shutdown window")
+        stdout, stderr = process.communicate()
+        raise AssertionError(
+            f"agent-sec-daemon did not exit within the shutdown window: {stderr}"
+        )
+    print(
+        f"DAEMON stopped pid={process.pid} rc={process.returncode}\n"
+        f"stdout:\n{stdout or ''}\nstderr:\n{stderr or ''}",
+        flush=True,
+    )
     return stderr or ""
 
 

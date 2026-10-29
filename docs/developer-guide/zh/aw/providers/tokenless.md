@@ -76,7 +76,7 @@ Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装，�
 
 | 框架 | 模型可见结果替换入口 |
 | --- | --- |
-| Qoder | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` 字符串 |
+| Qoder | AW 适配器中的 `PostToolUse` → `hookSpecificOutput.updatedToolOutput` 字符串 |
 | OpenClaw | 下一次模型请求前的 `registerAgentToolResultMiddleware` |
 | QwenPaw | Acting middleware 返回的最终 AgentScope `ToolResponse` |
 | Hermes | `transform_tool_result` 最终字符串回调 |
@@ -88,8 +88,10 @@ OpenClaw 要求 middleware API 和显式插件启用；AW 生成的原生 profil
 合同。观察型 `after_tool_call` 的返回值无法替换模型可见内容。
 
 仅投影受支持的单个文本槽。Media、多个 Content Block、流式中间块以及未成功的工具
-结果保持原样。替换保留原生 metadata 和 envelope 字段。Qoder 要求字符串替换，因此结构化
-envelope 会序列化到该字符串中。
+结果保持原样。替换保留原生 metadata 和 envelope 字段。AW 的 Qoder 适配器目前将结构化
+envelope 序列化为字符串替换。独立 Tokenless Qoder 插件仅在回填原生 Bash `stdout`
+时保留对象；其他结果形态沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，
+由 Qoder 决定如何将这些字段渲染到模型上下文。
 AW 通过启发式规则推断 `content_origin`。提取到命令时标为 `command_output`；
 没有命令时，按工具名将已知 Shell 工具标为 `command_output`，
 已知文件读取工具标为 `file_content`，其余标为 `api_response`。

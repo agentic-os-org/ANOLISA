@@ -9,6 +9,17 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-29
+
+### Fixed
+
+- Qoder retains the native Bash result envelope when compressing stdout, preserving exit status and telemetry fields without serializing them into the model's text. Other result shapes keep their existing replacement behavior ([#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)).
+- Recognized `head` and `tail` commands, including supported wrappers and compound commands containing them, now execute natively so the requested line window is preserved. Explicit RTK calls and custom RTK wrapper prefixes retain their existing behavior ([#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)).
+- QwenWork workspace hooks now use the system user's `~/.tokenless` directory by default and honor an absolute `TOKENLESS_DATA_DIR`, keeping state in one location across working-directory changes. Existing workspace history is not migrated automatically. Install and detect commands report the resolved directory and explain that Shell sandbox permissions can prevent RTK statistics and execution receipts from being saved ([#9215](https://github.com/agentic-os-org/ANOLISA/pull/9215)).
+- Verbose unittest and Django test logs now compress repeated successful test records while preserving summaries, nonpassing outcomes, tracebacks, and database setup output. The original remains retrievable; multiline descriptions and unknown output are retained ([#9083](https://github.com/agentic-os-org/ANOLISA/pull/9083)).
+- HTML tables with `rowspan="0"` now keep cells under the correct column headers through the end of each row group. Original-page retrieval remains byte-exact ([#9012](https://github.com/agentic-os-org/ANOLISA/pull/9012)).
+- Windows builds now stage the current Tokenless and RTK executables from Cargo's resolved target directories, avoiding missing or stale artifacts when environment or configuration settings redirect build output ([#9018](https://github.com/agentic-os-org/ANOLISA/pull/9018)).
+
 ## [0.9.0] - 2026-10-25
 
 ### Added

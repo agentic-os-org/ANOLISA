@@ -57,6 +57,55 @@ sudo systemctl reload agentsight.service     # after editing config.json
 Because the unit binds the Dashboard to `0.0.0.0`, restrict TCP 7396 in your firewall or cloud
 security group before exposing the host.
 
+### Enable system-level file deletion protection
+
+The packaged enforcer unit defaults to `ACTPLANE_PINNED_PROFILE=credential-exfiltration`.
+It retains credential-to-network blocking but does not reserve the write-rule hooks needed
+for file deletion protection. Even with BPF-LSM active, `ready=true` does not imply
+`capabilities.file_delete_guard=true`. When protection is unavailable, the startup log
+reports the requested profile and activation requirements. SecCore continues to reject
+Apply with `AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE`; it does not silently allow it.
+
+Before activation, verify that `/sys/kernel/security/lsm` lists `bpf` and the enforcer
+runs in the host's initial PID namespace. The `agent-file-guard` profile supplies file
+protection hooks, but switching to it removes `credential-exfiltration` credential-to-network
+blocking. These profiles are not independent switches that can be enabled together.
+Schedule a maintenance window and retain the original binding configuration: switching
+rebuilds an incompatible pinned engine, and restarting clears runtime bindings, leaving a
+protection gap during the transition.
+
+```bash
+sudo systemctl edit agentsight-enforcer.service
+```
+
+Save this drop-in:
+
+```ini
+[Service]
+Environment=ACTPLANE_PINNED_PROFILE=agent-file-guard
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart agentsight-enforcer.service
+sudo journalctl -u agentsight-enforcer.service -n 50 --no-pager
+
+# This loopback GET health check needs no token and does not apply policies
+curl --fail --silent --show-error \
+  http://127.0.0.1:7396/api/enforcement/health
+```
+
+This token-free example only applies to a loopback GET. Remote requests and policy
+mutations require the existing [Dashboard authentication](data-and-storage.md) credential.
+
+After verifying `ready=true` and `capabilities.file_delete_guard=true`, re-apply file
+deletion protection bindings through SecCore. If the capability remains false, check
+BPF-LSM, PID namespaces, and engine load logs; do not bypass the capability gate.
+`/run/agentsight/enforcer.sock` uses an internal versioned protocol, not HTTP for
+`curl --unix-socket`. To roll back, set the same drop-in back to `credential-exfiltration`,
+restart the enforcer, and re-apply the original bindings. Restarting only the enforcer
+does not require stopping AgentSight capture or the Dashboard.
+
 ## Foreground run for troubleshooting
 
 Only one tracer should run at a time, so stop the service first:

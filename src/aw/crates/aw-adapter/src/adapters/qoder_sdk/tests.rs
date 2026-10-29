@@ -19,7 +19,7 @@ impl Fixture {
             root.path().join("node"),
             r#"#!/bin/sh
 : > probed
-printf '{"global":"%s/sdk.mjs"}\n' "$PWD"
+printf '{"global":{"entry":"%s/sdk.mjs","version":"1.0.57","worker_version":"1.1.79"}}\n' "$PWD"
 "#,
         )
         .unwrap();
@@ -57,6 +57,7 @@ printf '{"global":"%s/sdk.mjs"}\n' "$PWD"
         let mut prepared = QoderSdk
             .prepare(self.input(evidence, reloadable), &AtomicBool::new(false))
             .unwrap();
+        assert_eq!(prepared.capabilities().version, "1.0.57");
         let launch = self.root.path().join("launch");
         fs::create_dir(&launch).unwrap();
         let files = crate::test_support::Artifacts(launch);
@@ -70,7 +71,11 @@ printf '{"global":"%s/sdk.mjs"}\n' "$PWD"
             .unwrap();
         assert!(self.root.path().join("probed").is_file());
         assert!(!plan.readiness.unwrap().path.exists());
-        serde_json::from_slice(&fs::read(files.0.join("qoder-sdk.json")).unwrap()).unwrap()
+        let config: Value =
+            serde_json::from_slice(&fs::read(files.0.join("qoder-sdk.json")).unwrap()).unwrap();
+        assert_eq!(config["sdk_metadata"]["global"]["version"], "1.0.57");
+        assert_eq!(config["sdk_metadata"]["global"]["worker_version"], "1.1.79");
+        config
     }
 }
 

@@ -6,7 +6,9 @@ Run source examples from `src/aw`; build AW with the [integration tutorial](../i
 
 ## Start OpenClaw
 
-Install OpenClaw 2026.9.6 separately. The example uses `argv: [openclaw, gateway, run]`;
+Install OpenClaw separately; 2026.9.6 is the verified baseline. AW records the
+installed version and requires native plugin registration and Gateway readiness
+for other releases. The example uses `argv: [openclaw, gateway, run]`;
 set an absolute executable path if needed. Supply the existing native JSON
 configuration and an existing absolute state directory. AW writes a private
 configuration overlay and retains that directory's authentication and sessions.

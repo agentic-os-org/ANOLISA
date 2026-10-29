@@ -4,7 +4,7 @@
 
 ## Dependencies and factories
 
-Use `@qoder-ai/qoder-agent-sdk@1.0.56`, bundled international Worker 1.1.78 and Node.js 22+. Install the SDK in the application directory and retain SDK authentication.
+Verified baseline: `@qoder-ai/qoder-agent-sdk@1.0.56` with bundled international Worker 1.1.78. Use Node.js 22+, install the SDK in the application directory and retain SDK authentication. AW accepts other SDK/Worker releases with the required native interfaces and records their actual versions. Package identity, the declared site, Hook dispatch, invocation identity and Query cleanup remain checked at launch and use.
 Set a target under `spec` in a complete AW configuration.
 
 ```yaml
@@ -91,7 +91,7 @@ Cleanup waits for native Query, Hook, permission, credential and MCP callbacks t
 
 ## Managed MCP and private execution
 
-Use `await bridge.createSdkMcpServer(options)`, creating a new server for each Query. The pinned version provides Query identity; `parentIdentity: "required"` requests a model tool ID and is rejected.
+Use `await bridge.createSdkMcpServer(options)`, creating a new server for each Query. The native integration provides Query identity; `parentIdentity: "required"` requests a model tool ID and is rejected.
 AW rejects schema default/transform changes to approved arguments before entering the handler. Post failures use `withhold_result`; native structured results are retained.
 
 Opt into private execution with `options.awExecutionFactory`. Handlers consume `executionEnvironment()`; results are redacted before Post and delivery. Built-in Bash has no environment injection seam.

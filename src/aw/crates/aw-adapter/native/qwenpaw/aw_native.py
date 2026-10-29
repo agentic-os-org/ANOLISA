@@ -107,7 +107,7 @@ def bind_toolkit(agent):
         _toolkit._json_loads_with_repair = checked_input
     toolkit_call = getattr(agent.toolkit, "call_tool", None)
     if not callable(toolkit_call):
-        raise ResidentFailure("AW requires the pinned Toolkit dispatch seam")
+        raise ResidentFailure("AW requires the native Toolkit dispatch seam")
     if not getattr(toolkit_call, "_aw_parser_bound", False):
         @wraps(toolkit_call)
         async def guarded_toolkit(tool_call, state):
@@ -229,10 +229,10 @@ def bind_coordinator(coordinator):
     names = ("execute", "_run_tool_with_hooks", "_supervise", "_begin_offload", "_finalize_completed", "shutdown")
     original = {name: getattr(coordinator, name, None) for name in names}
     if not all(callable(method) for method in original.values()):
-        raise ResidentFailure("AW requires the pinned Coordinator lifecycle seams")
+        raise ResidentFailure("AW requires the native Coordinator lifecycle seams")
     if any(not callable(getattr(original[name], "__func__", None))
            for name in ("_supervise", "_finalize_completed")):
-        raise ResidentFailure("AW requires the pinned native publication methods")
+        raise ResidentFailure("AW requires the native publication methods")
     supervisors = set()
     pending_results = {}
     offload_drains = {}

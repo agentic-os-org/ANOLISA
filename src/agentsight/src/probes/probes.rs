@@ -277,6 +277,26 @@ impl Probes {
         self.add_traced_pid(pid as u32)
     }
 
+    /// 未识别进程仅在确实关联到 uprobe 时注册，避免每个 exec 耗尽有界过滤表。
+    ///
+    /// 已识别 Agent 仍使用 [`Self::attach_process`]，保留全局 uprobe 的兜底覆盖。
+    ///
+    /// # Errors
+    ///
+    /// uprobe 已关联但 PID 无法注册时返回错误；无可用探针属于正常跳过。
+    pub fn attach_unclassified_process(&mut self, pid: i32) -> Result<()> {
+        if let Err(e) = self.attach_ssl_to_process(pid) {
+            log::debug!(
+                "[attach_unclassified_process] pid={pid}: no SSL attach ({e:#}); leaving the traced_processes slot free"
+            );
+            return Ok(());
+        }
+        if !self.sslsniff.has_process_attachments(pid as u32) {
+            return Ok(());
+        }
+        self.add_traced_pid(pid as u32)
+    }
+
     /// Attach SSL probes to a specific process
     pub fn attach_ssl_to_process(&mut self, pid: i32) -> Result<()> {
         self.sslsniff

@@ -200,9 +200,9 @@ test('dry run performs no GitHub mutations', async () => {
   assert.equal(harness.outputs.mutated, 'false');
 });
 
-test('calls SecCore analysis only for a newly applied SecCore route', async (t) => {
+test('calls component-gated analysis only for a newly applied route', async (t) => {
   const workflow = fs.readFileSync(path.join(__dirname, '../workflows/issue-automation.yml'), 'utf8');
-  const condition = workflow.match(/^  sec-core-analysis:\n[\s\S]*?^    if: >-\n((?:      .+\n)+)/m)?.[1];
+  const condition = workflow.match(/^  issue-analysis:\n[\s\S]*?^    if: >-\n((?:      .+\n)+)/m)?.[1];
   assert.ok(condition, 'The Router must gate the SecCore workflow call');
   const outputExpressions = [...workflow.matchAll(/^      (\w+): \$\{\{ (steps\.triage\.outputs\.\w+) \}\}$/gm)];
   const selected = (stepOutputs, { repositoryId = '1195873793', cancelled = false, result = 'success' } = {}) => {
@@ -216,7 +216,7 @@ test('calls SecCore analysis only for a newly applied SecCore route', async (t) 
   };
   for (const scenario of [
     { name: 'new SecCore decision', expected: true },
-    { name: 'other component', env: { INPUT_COMPONENT: 'sight' } },
+    { name: 'other component', env: { INPUT_COMPONENT: 'sight' }, expected: true },
     { name: 'dry run', env: { INPUT_APPLY: 'false' } },
     { name: 'shadow mode', env: { AUTOMATION_MODE: 'shadow' } },
     { name: 'low confidence', env: { INPUT_CONFIDENCE: '0.60' } },

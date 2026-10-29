@@ -85,8 +85,8 @@ for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
   hasnt "$doc" "Windows or Linux with musl" "$lang QUICKSTART no longer merges Windows with musl"
   hasnt "$doc" "Windows 或使用 musl" "$lang QUICKSTART no longer merges Windows with musl (zh)"
 done
-has_re "$DOC_EN_QUICKSTART" '^\| Windows \| Not currently supported \| x64: pending registry publication \| Not supported, use WSL2 \|' "en QUICKSTART separates Windows npm publication from curl support"
-has_re "$DOC_ZH_QUICKSTART" '^\| Windows \| 暂不支持 \| x64：等待 registry 发布 \| 暂不支持，请使用 WSL2 \|' "zh QUICKSTART separates Windows npm publication from curl support"
+has_re "$DOC_EN_QUICKSTART" '^\| Windows \| Not currently supported \| x64: supported \| Not supported, use WSL2 \|' "en QUICKSTART separates native Windows npm from curl support"
+has_re "$DOC_ZH_QUICKSTART" '^\| Windows \| 暂不支持 \| x64：支持 \| 暂不支持，请使用 WSL2 \|' "zh QUICKSTART separates native Windows npm from curl support"
 for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
   has "$doc" '@anolisa/tokenless-win32-x64' "manual lists the Windows npm build target"
   has "$doc" 'os: win32, linux, darwin' "manual quotes the current npm platform manifest"
@@ -124,7 +124,7 @@ has "$DOC_SKILL" "--purge" "SKILL documents the opt-in runtime-data purge"
 hasnt "$DOC_SKILL" "rm -f ~/.local/bin/tokenless ~/.local/bin/rtk ~/.local/bin/toon" "SKILL drops the blanket curl uninstall block"
 hasnt "$DOC_SKILL" "rm -rf ~/.tokenless" "SKILL no longer deletes runtime data unconditionally"
 has "$DOC_SKILL" "anolisa uninstall tokenless" "SKILL keeps the anolisa CLI uninstall path"
-has "$DOC_SKILL" "Windows is not supported" "SKILL states the Windows boundary"
+has "$DOC_SKILL" "Bash workflow requires WSL2 on Windows" "SKILL states the Windows workflow boundary"
 
 # --- troubleshooting: the curl method has an upgrade/uninstall story too -------
 # "Upgrade and uninstall" is the reference page the Quick Start links to, and it
@@ -160,14 +160,14 @@ for doc in "$DOC_README_EN" "$DOC_README_ZH"; do
 done
 hasnt "$DOC_README_EN" "are not a public" "en README no longer denies the npm route"
 hasnt "$DOC_README_ZH" "目前不能通过公开的" "zh README no longer denies the npm route"
-has "$DOC_README_EN" "still has no published package" "en README keeps the accurate Intel macOS caveat"
-has "$DOC_README_ZH" "Intel Mac" "zh README keeps the accurate Intel macOS caveat"
-has_re "$DOC_EN_QUICKSTART" 'tokenless-darwin-x64`.*not published yet' \
-  "en QUICKSTART marks the darwin-x64 platform package as unpublished"
-has_re "$DOC_ZH_QUICKSTART" 'tokenless-darwin-x64`.*尚未发布' \
-  "zh QUICKSTART marks the darwin-x64 platform package as unpublished"
-has "$DOC_SKILL" "Intel macOS (x86_64) has no published platform package" \
-  "SKILL states the Intel macOS boundary for the npm method"
+has "$DOC_README_EN" "packages are available from 0.9.0" "en README records published platform packages"
+has "$DOC_README_ZH" "从 0.9.0 开始提供" "zh README records published platform packages"
+hasnt "$DOC_EN_QUICKSTART" 'not published yet' \
+  "en QUICKSTART no longer marks platform packages as unpublished"
+hasnt "$DOC_ZH_QUICKSTART" '尚未发布' \
+  "zh QUICKSTART no longer marks platform packages as unpublished"
+has "$DOC_SKILL" 'Intel macOS (x86_64) uses the published' \
+  "SKILL states the published Intel macOS npm route"
 
 # --- Skill bundle: the new Skill must be deployable through the managed path --
 # declared_skills <manifest> <framework> prints one declared skill name per line.
@@ -276,19 +276,17 @@ has "$UNINSTALL_SH" "another installation has taken over that path" \
   "uninstall.sh refuses a recorded path another installer replaced"
 has "$UNINSTALL_SH" "file_digest" "uninstall.sh verifies the recorded file identity"
 
-# --- Intel macOS: distinguish build support from registry availability --------
-# The release builds Intel Mac artifacts, but npm and the curl npm path need
-# the matching platform package on the registry. Source builds remain Linux-only.
+# --- Intel macOS: npm is published; source builds remain Linux-only ----------
 has_re "$DOC_EN_QUICKSTART" \
-  '^\| macOS x86_64 \| Not currently supported \| Pending registry publication \| Pending registry publication \| Pending registry publication \|$' \
-  "en QUICKSTART marks Intel macOS npm routes pending publication"
+  '^\| macOS x86_64 \| Not currently supported \| Supported \| Supported \(npm path\) \| Supported \(npm path\) \|$' \
+  "en QUICKSTART marks Intel macOS npm routes supported"
 has_re "$DOC_ZH_QUICKSTART" \
-  '^\| macOS x86_64 \| 暂不支持 \| 等待 registry 发布 \| 等待 registry 发布 \| 等待 registry 发布 \|$' \
-  "zh QUICKSTART marks Intel macOS npm routes pending publication"
-hasnt "$DOC_EN_QUICKSTART" "npm and curl ship prebuilt binaries on macOS x86_64" \
-  "en QUICKSTART no longer claims prebuilt Intel macOS binaries"
-hasnt "$DOC_ZH_QUICKSTART" "npm 和 curl 方式在 macOS x86_64 上提供预编译二进制" \
-  "zh QUICKSTART no longer claims prebuilt Intel macOS binaries"
+  '^\| macOS x86_64 \| 暂不支持 \| 支持 \| 支持（npm 路径） \| 支持（npm 路径） \|$' \
+  "zh QUICKSTART marks Intel macOS npm routes supported"
+has "$DOC_EN_QUICKSTART" 'uses the published `@anolisa/tokenless-darwin-x64` package' \
+  "en QUICKSTART identifies the published Intel macOS package"
+has "$DOC_ZH_QUICKSTART" '使用已发布的 `@anolisa/tokenless-darwin-x64` 软件包' \
+  "zh QUICKSTART identifies the published Intel macOS package"
 hasnt "$DOC_EN_QUICKSTART" 'Use Method C with `TOKENLESS_FORCE_BUILD=1` there' \
   "en QUICKSTART does not send Intel macOS to a forced source build"
 hasnt "$DOC_ZH_QUICKSTART" '该平台请使用方式 C 并设置 `TOKENLESS_FORCE_BUILD=1`' \

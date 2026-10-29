@@ -121,6 +121,26 @@ fn zero_provider_gateway_is_ready_and_keeps_native_tools() {
 }
 
 #[test]
+fn gateway_versions_preserve_native_readiness_and_policy() {
+    for version in ["2026.9.5", "2026.10.1", "2027.1.1-preview.1"] {
+        let fixture = Fixture::new();
+        let mut config = document(&fixture);
+        command_policy::configure(&fixture, &mut config);
+        let service = Service::start(&fixture, &config);
+        let mut launch = command(&fixture);
+        launch.env(
+            "FAKE_OPENCLAW_VERSION",
+            format!("OpenClaw {version} (fixture)"),
+        );
+        launch.env("FAKE_SCENARIO", "12345");
+        let report = fixture.successful(launch);
+        assert_eq!(report["blocked"], true);
+        assert!(!fixture.root.join("tool-ran").exists());
+        service.released(&fixture);
+    }
+}
+
+#[test]
 fn same_boolean_policy_blocks_matching_inputs_and_failures_in_openclaw() {
     check_boolean_policy(command_policy::configure);
 }

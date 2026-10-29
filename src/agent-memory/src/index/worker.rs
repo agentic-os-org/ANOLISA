@@ -15,6 +15,29 @@ use super::extractor::{extract_text, is_indexable};
 use super::store::{BM25Store, IndexStat};
 
 const DEBOUNCE_MS: u64 = 200;
+const RESCAN_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Debounced paths and recovery state.
+/// `rescan_retry = Some(t)` means a full scan is owed at `t`; ordinary flushes
+/// stay suppressed so stale removals cannot erase partially rebuilt rows.
+#[derive(Default)]
+struct PendingEvents {
+    modify: HashSet<PathBuf>,
+    remove: HashSet<PathBuf>,
+    rescan_retry: Option<Instant>,
+    // Consecutive failed scans; reset only after successful recovery.
+    rescan_attempts: u32,
+}
+
+impl PendingEvents {
+    // Schedule and return the chosen delay, doubling up to a 64-second cap.
+    fn schedule_rescan_retry(&mut self, now: Instant) -> Duration {
+        let delay = RESCAN_RETRY_DELAY * (1 << self.rescan_attempts.min(6));
+        self.rescan_attempts = self.rescan_attempts.saturating_add(1);
+        self.rescan_retry = Some(now + delay);
+        delay
+    }
+}
 
 /// Background indexer: full-scan on start, then incremental updates driven
 /// by `notify` filesystem events. Runs on a dedicated `std::thread` (the
@@ -150,8 +173,7 @@ fn run_watcher(
     event_rx: stdmpsc::Receiver<notify::Result<notify::Event>>,
 ) -> Result<()> {
     // Debounce buffer: track unique paths touched since last flush
-    let mut pending_modify: HashSet<PathBuf> = HashSet::new();
-    let mut pending_remove: HashSet<PathBuf> = HashSet::new();
+    let mut pending = PendingEvents::default();
 
     loop {
         // Cancellation check (non-blocking)
@@ -168,19 +190,14 @@ fn run_watcher(
             }
             let timeout = deadline - now;
             match event_rx.recv_timeout(timeout) {
-                Ok(Ok(ev)) => {
-                    classify(&mount, ev, &mut pending_modify, &mut pending_remove);
-                }
-                Ok(Err(e)) => {
-                    if is_overflow(&e) {
-                        tracing::warn!("inotify overflow detected; triggering full rescan");
-                        full_scan(&mount, &store, embedding.as_deref(), rt_handle.as_ref())?;
-                        pending_modify.clear();
-                        pending_remove.clear();
-                    } else {
-                        tracing::warn!("watcher error: {e}");
-                    }
-                }
+                Ok(event) => handle_event(
+                    &mount,
+                    &store,
+                    embedding.as_deref(),
+                    rt_handle.as_ref(),
+                    event,
+                    &mut pending,
+                ),
                 Err(stdmpsc::RecvTimeoutError::Timeout) => break,
                 Err(stdmpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             }
@@ -191,18 +208,108 @@ fn run_watcher(
         // children — but that walked the entire tree on every event,
         // which is O(N) per change. Per-directory rescan in `flush` for
         // events touching a directory is O(depth) and much cheaper.
-        if !pending_modify.is_empty() || !pending_remove.is_empty() {
-            flush(
-                &mount,
-                &store,
-                embedding.as_deref(),
-                rt_handle.as_ref(),
-                &mut pending_modify,
-                &mut pending_remove,
-            )?;
-        }
+        flush_pending(
+            &mount,
+            &store,
+            embedding.as_deref(),
+            rt_handle.as_ref(),
+            &mut pending,
+            Instant::now(),
+        )?;
     }
 
+    Ok(())
+}
+
+fn handle_event(
+    mount: &MountPointLite,
+    store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+    event: notify::Result<notify::Event>,
+    pending: &mut PendingEvents,
+) {
+    match event {
+        // notify reports a kernel queue overflow as a successful, pathless
+        // Rescan event, so error handling and path classification cannot catch it.
+        Ok(ev) if ev.need_rescan() => {
+            tracing::warn!(root = %mount.root.display(), info = ?ev.info(), "watcher events lost; full rescan required");
+        }
+        Err(e) if is_overflow(&e) => {
+            tracing::warn!(root = %mount.root.display(), error = %e, "watcher overflow detected; full rescan required");
+        }
+        Ok(ev) => {
+            classify(mount, ev, &mut pending.modify, &mut pending.remove);
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("watcher error: {e}");
+            return;
+        }
+    }
+    // Repeated overflow notifications must not bypass a failed scan's delay.
+    if pending.rescan_retry.is_none() {
+        recover(mount, store, embedding, rt_handle, pending);
+    }
+}
+
+fn recover(
+    mount: &MountPointLite,
+    store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+    pending: &mut PendingEvents,
+) {
+    match full_scan(mount, store, embedding, rt_handle) {
+        Ok(()) => {
+            tracing::info!(
+                root = %mount.root.display(),
+                pending_modify = pending.modify.len(),
+                pending_remove = pending.remove.len(),
+                "index recovery completed; discarding superseded events"
+            );
+            pending.modify.clear();
+            pending.remove.clear();
+            pending.rescan_retry = None;
+            pending.rescan_attempts = 0;
+        }
+        Err(e) => {
+            let retry_delay = pending.schedule_rescan_retry(Instant::now());
+            tracing::warn!(
+                root = %mount.root.display(),
+                error = %e,
+                pending_modify = pending.modify.len(),
+                pending_remove = pending.remove.len(),
+                retry_delay_secs = retry_delay.as_secs(),
+                "index recovery failed; retaining pending events until retry"
+            );
+        }
+    }
+}
+
+fn flush_pending(
+    mount: &MountPointLite,
+    store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+    pending: &mut PendingEvents,
+    now: Instant,
+) -> Result<()> {
+    // Indexing errors must stay non-fatal here so the watcher keeps processing events.
+    if let Some(retry_at) = pending.rescan_retry {
+        if now >= retry_at {
+            recover(mount, store, embedding, rt_handle, pending);
+        }
+    } else if !pending.modify.is_empty() || !pending.remove.is_empty() {
+        flush(
+            mount,
+            store,
+            embedding,
+            rt_handle,
+            &mut pending.modify,
+            &mut pending.remove,
+        )?;
+    }
     Ok(())
 }
 
@@ -646,6 +753,7 @@ mod tests {
     use crate::index::store::mtime_ms_of;
     use crate::ns::Namespace;
     use async_trait::async_trait;
+    use notify::event::{Flag, ModifyKind};
     use std::fs::{self, FileTimes};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1340,5 +1448,345 @@ mod tests {
             .expect("search");
         assert_eq!(hits.len(), 1, "the restored file must still be searchable");
         assert_eq!(hits[0].path, "notes/a.md");
+    }
+
+    #[test]
+    fn pathless_rescan_recovers_missed_changes_and_discards_pending_events() {
+        let (_tmp, mount, store) = setup();
+        {
+            let mut store = store.lock().unwrap();
+            store
+                .upsert("deleted.md", 0, 20, "cobaltzebra deleted", None)
+                .unwrap();
+            store.upsert_vec("deleted.md", &[1.0, 0.0]).unwrap();
+            store
+                .upsert("changed.md", 0, 20, "cobaltzebra obsolete", None)
+                .unwrap();
+        }
+        std::fs::write(mount.root.join("changed.md"), "heliotrope updated").unwrap();
+        std::fs::write(mount.root.join("created.md"), "heliotrope created").unwrap();
+        // A delete/recreate may straddle overflow; replaying the stale remove
+        // after rebuilding would erase the current file from the fresh index.
+        let mut pending = PendingEvents {
+            modify: HashSet::from([mount.root.join("deleted.md")]),
+            remove: HashSet::from([mount.root.join("created.md")]),
+            ..Default::default()
+        };
+        let event = notify::Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        assert!(event.paths.is_empty());
+
+        handle_event(&mount, &store, None, None, Ok(event), &mut pending);
+
+        assert!(pending.modify.is_empty());
+        assert!(pending.remove.is_empty());
+        assert!(pending.rescan_retry.is_none());
+        assert_eq!(pending.rescan_attempts, 0);
+        let store = store.lock().unwrap();
+        assert!(store.search("cobaltzebra", 10, false).unwrap().is_empty());
+        assert!(store.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
+        let mut paths: Vec<_> = store
+            .search("heliotrope", 10, false)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["changed.md", "created.md"]);
+    }
+
+    struct TestEmbedding;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for TestEmbedding {
+        async fn embed(&self, _text: &str) -> Result<crate::embedding::Embedding> {
+            Ok(crate::embedding::Embedding {
+                vector: vec![1.0, 0.0],
+            })
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    #[test]
+    fn rescan_retry_backoff_doubles_caps_and_saturates() {
+        let mut pending = PendingEvents::default();
+        let mut now = Instant::now();
+        for (attempt, seconds) in [1, 2, 4, 8, 16, 32, 64, 64, 64].into_iter().enumerate() {
+            let delay = Duration::from_secs(seconds);
+            assert_eq!(pending.schedule_rescan_retry(now), delay);
+            assert_eq!(pending.rescan_retry, Some(now + delay));
+            assert_eq!(pending.rescan_attempts, attempt as u32 + 1);
+            now += delay;
+        }
+
+        pending.rescan_attempts = u32::MAX;
+        let delay = Duration::from_secs(64);
+        assert_eq!(pending.schedule_rescan_retry(now), delay);
+        assert_eq!(pending.rescan_retry, Some(now + delay));
+        assert_eq!(pending.rescan_attempts, u32::MAX);
+    }
+
+    #[test]
+    fn repeated_overflow_preserves_capped_retry_until_success() {
+        let (_tmp, mount, store) = setup();
+        let missed = mount.root.join("missed.md");
+        std::fs::write(&missed, "heliotrope missed").unwrap();
+        let mut pending = PendingEvents {
+            rescan_attempts: 6,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        pending.schedule_rescan_retry(now);
+        let retry_at = now + Duration::from_secs(64);
+
+        for event in [
+            Ok(notify::Event::new(EventKind::Other).set_flag(Flag::Rescan)),
+            Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch)),
+            Err(notify::Error::io(std::io::Error::from_raw_os_error(
+                nix::libc::EOVERFLOW,
+            ))),
+        ] {
+            handle_event(&mount, &store, None, None, event, &mut pending);
+            assert_eq!(pending.rescan_retry, Some(retry_at));
+            assert_eq!(pending.rescan_attempts, 7);
+            assert_eq!(store.lock().unwrap().count().unwrap(), 0);
+        }
+
+        flush_pending(
+            &mount,
+            &store,
+            None,
+            None,
+            &mut pending,
+            retry_at - Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(pending.rescan_retry, Some(retry_at));
+        assert_eq!(pending.rescan_attempts, 7);
+        assert_eq!(store.lock().unwrap().count().unwrap(), 0);
+
+        // A due retry runs even with no buffered paths or new events.
+        flush_pending(&mount, &store, None, None, &mut pending, retry_at).unwrap();
+        assert!(pending.rescan_retry.is_none());
+        assert_eq!(pending.rescan_attempts, 0);
+        assert!(store.lock().unwrap().mtime_for("missed.md").is_some());
+        assert_eq!(
+            pending.schedule_rescan_retry(retry_at),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            pending.rescan_retry,
+            Some(retry_at + Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn failed_recovery_retains_events_and_retries_without_another_event() {
+        for event in [
+            Ok(notify::Event::new(EventKind::Other).set_flag(Flag::Rescan)),
+            Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch)),
+            Err(notify::Error::io(std::io::Error::from_raw_os_error(
+                nix::libc::EOVERFLOW,
+            ))),
+        ] {
+            let (_tmp, mount, _) = setup();
+            let db_path = mount.meta_dir.join("recovery.db");
+            let store = Arc::new(Mutex::new(
+                BM25Store::open(&db_path, 0.01, 0.3, true).unwrap(),
+            ));
+            let conn = rusqlite::Connection::open(db_path).unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let embedding: Option<&dyn EmbeddingProvider> = Some(&TestEmbedding);
+            let rt_handle = Some(runtime.handle());
+            store
+                .lock()
+                .unwrap()
+                .upsert("deleted.md", 0, 20, "cobaltzebra deleted", None)
+                .unwrap();
+            let recreated = mount.root.join("recreated.md");
+            std::fs::write(&recreated, "heliotrope recreated").unwrap();
+            let mut pending = PendingEvents {
+                modify: HashSet::from([mount.root.join("deleted.md")]),
+                remove: HashSet::from([recreated.clone()]),
+                ..Default::default()
+            };
+            // Fail the vector query only after the scan has written BM25 rows.
+            // A second connection exercises a real SQLite error without mocks.
+            conn.execute_batch("ALTER TABLE files_vec RENAME TO unavailable_vec")
+                .unwrap();
+            // Refresh the store connection's schema cache before the failing query.
+            assert_eq!(store.lock().unwrap().count().unwrap(), 1);
+            assert!(store.lock().unwrap().paths_without_vec().is_err());
+
+            handle_event(&mount, &store, embedding, rt_handle, event, &mut pending);
+
+            let retry_at = pending.rescan_retry.expect("failed scan must retry");
+            assert_eq!(pending.rescan_attempts, 1);
+            assert!(store.lock().unwrap().mtime_for("recreated.md").is_some());
+            assert_eq!(
+                pending.modify,
+                HashSet::from([mount.root.join("deleted.md")])
+            );
+            assert_eq!(pending.remove, HashSet::from([recreated.clone()]));
+
+            // Ordinary events still get buffered while recovery is pending.
+            let during_retry = mount.root.join("during-retry.md");
+            std::fs::write(&during_retry, "heliotrope during retry").unwrap();
+            handle_event(
+                &mount,
+                &store,
+                embedding,
+                rt_handle,
+                Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                    .add_path(during_retry.clone())),
+                &mut pending,
+            );
+            assert!(pending.modify.contains(&during_retry));
+            assert!(store.lock().unwrap().mtime_for("during-retry.md").is_none());
+
+            // Another overflow must not bypass the delay while SQLite is broken.
+            handle_event(
+                &mount,
+                &store,
+                embedding,
+                rt_handle,
+                Ok(notify::Event::new(EventKind::Other).set_flag(Flag::Rescan)),
+                &mut pending,
+            );
+            assert_eq!(pending.rescan_retry, Some(retry_at));
+            assert_eq!(pending.rescan_attempts, 1);
+            conn.execute_batch("ALTER TABLE unavailable_vec RENAME TO files_vec")
+                .unwrap();
+
+            // Replaying the old removal now would erase a partially rebuilt row.
+            flush_pending(
+                &mount,
+                &store,
+                embedding,
+                rt_handle,
+                &mut pending,
+                retry_at - Duration::from_millis(1),
+            )
+            .unwrap();
+            assert_eq!(pending.rescan_retry, Some(retry_at));
+            assert_eq!(pending.remove, HashSet::from([recreated]));
+            assert!(store.lock().unwrap().mtime_for("recreated.md").is_some());
+
+            // Advance only the retry deadline, with no new filesystem event.
+            flush_pending(&mount, &store, embedding, rt_handle, &mut pending, retry_at).unwrap();
+            assert!(pending.rescan_retry.is_none());
+            assert_eq!(pending.rescan_attempts, 0);
+            assert!(pending.modify.is_empty());
+            assert!(pending.remove.is_empty());
+            {
+                let store = store.lock().unwrap();
+                assert!(store.mtime_for("deleted.md").is_none());
+                assert!(store.mtime_for("recreated.md").is_some());
+                assert!(store.mtime_for("during-retry.md").is_some());
+                assert!(store.paths_without_vec().unwrap().is_empty());
+                // MountPoint::ensure also seeds README.md.
+                assert_eq!(store.search_vec(&[1.0, 0.0], 10).unwrap().len(), 3);
+            }
+
+            // Successful recovery restores ordinary debounce-only operation.
+            let later = mount.root.join("later.md");
+            std::fs::write(&later, "heliotrope later").unwrap();
+            std::fs::write(mount.root.join("unannounced.md"), "unrelated").unwrap();
+            handle_event(
+                &mount,
+                &store,
+                embedding,
+                rt_handle,
+                Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(later)),
+                &mut pending,
+            );
+            assert!(store.lock().unwrap().mtime_for("later.md").is_none());
+            flush_pending(
+                &mount,
+                &store,
+                embedding,
+                rt_handle,
+                &mut pending,
+                Instant::now(),
+            )
+            .unwrap();
+            let store = store.lock().unwrap();
+            assert!(store.mtime_for("later.md").is_some());
+            assert!(store.mtime_for("unannounced.md").is_none());
+        }
+    }
+
+    #[test]
+    fn failed_recovery_with_empty_buffers_retries() {
+        let (_tmp, mount, _) = setup();
+        let db_path = mount.meta_dir.join("recovery.db");
+        let store = Arc::new(Mutex::new(
+            BM25Store::open(&db_path, 0.01, 0.3, true).unwrap(),
+        ));
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        std::fs::write(mount.root.join("missed.md"), "heliotrope missed").unwrap();
+        conn.execute_batch("ALTER TABLE files RENAME TO unavailable_files")
+            .unwrap();
+        assert!(store.lock().unwrap().count().is_err());
+        assert!(store.lock().unwrap().known_paths().is_err());
+        let mut pending = PendingEvents::default();
+
+        handle_event(
+            &mount,
+            &store,
+            None,
+            None,
+            Ok(notify::Event::new(EventKind::Other).set_flag(Flag::Rescan)),
+            &mut pending,
+        );
+        let retry_at = pending.rescan_retry.expect("failed scan must retry");
+        assert_eq!(pending.rescan_attempts, 1);
+        assert!(pending.modify.is_empty());
+        assert!(pending.remove.is_empty());
+
+        // A failed retry remains non-fatal and still requires another scan.
+        let before_retry = Instant::now();
+        flush_pending(&mount, &store, None, None, &mut pending, retry_at).unwrap();
+        let after_retry = Instant::now();
+        let retry_at = pending
+            .rescan_retry
+            .expect("failed retry must stay pending");
+        assert_eq!(pending.rescan_attempts, 2);
+        assert!(
+            retry_at >= before_retry + Duration::from_secs(2),
+            "the second consecutive recovery failure must delay its retry by two seconds"
+        );
+        assert!(retry_at <= after_retry + Duration::from_secs(2));
+        conn.execute_batch("ALTER TABLE unavailable_files RENAME TO files")
+            .unwrap();
+        flush_pending(&mount, &store, None, None, &mut pending, retry_at).unwrap();
+        assert!(pending.rescan_retry.is_none());
+        assert_eq!(pending.rescan_attempts, 0);
+        assert_eq!(
+            store.lock().unwrap().known_paths().unwrap(),
+            ["README.md", "missed.md"]
+        );
+    }
+
+    #[test]
+    fn ordinary_modify_remains_debounced_without_a_full_scan() {
+        let (_tmp, mount, store) = setup();
+        std::fs::write(mount.root.join("changed.md"), "heliotrope updated").unwrap();
+        std::fs::write(mount.root.join("unannounced.md"), "heliotrope unrelated").unwrap();
+        let changed = mount.root.join("changed.md");
+        let mut pending = PendingEvents::default();
+        let event =
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(changed.clone());
+
+        handle_event(&mount, &store, None, None, Ok(event), &mut pending);
+
+        assert_eq!(pending.modify, HashSet::from([changed]));
+        assert!(pending.remove.is_empty());
+        assert!(pending.rescan_retry.is_none());
+        assert_eq!(store.lock().unwrap().count().unwrap(), 0);
+        flush_pending(&mount, &store, None, None, &mut pending, Instant::now()).unwrap();
+        assert_eq!(store.lock().unwrap().known_paths().unwrap(), ["changed.md"]);
     }
 }

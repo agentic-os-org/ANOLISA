@@ -12,7 +12,7 @@ Tokenless is the token optimization component of ANOLISA. It compresses tool sch
 
 ## System Requirements
 
-- **OS**: Linux or macOS. Windows is not supported by any method below; use WSL2 there.
+- **OS**: Linux or macOS. This Skill's Bash workflow requires WSL2 on Windows; native Windows x64 npm installation is documented in the Tokenless user guide.
 - **Architecture**: x86_64 or arm64
 - **Network**: Internet access required
 - **Shell**: Bash
@@ -80,12 +80,12 @@ This automatically installs the `tokenless` and `rtk` binaries plus the framewor
 
 The adapter resources land in `~/.local/share/anolisa/adapters/tokenless`, which is shared with the anolisa CLI. Ownership there has to be **proven**, not assumed: the postinstall only refreshes a tree carrying the marker (`.tokenless-owner`) that this package or the standalone curl installer wrote. Anything else is kept unchanged and reported — a managed anolisa component install, a tree left by a release from before the marker existed, or a directory somebody copied by hand — because nothing about its content says who put it there, and every framework registration pointing into it would dangle otherwise. The copy this package ships stays available inside the package under `adapters/tokenless`; pass `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` to take the directory over anyway.
 
-The npm package declares `os: linux, darwin`, so this method is unavailable on Windows and on musl Linux.
-Intel macOS (x86_64) has no published platform package yet either: `@anolisa/tokenless-darwin-x64` is a
-release build target, not a registry artifact, so Intel macOS has **no supported install route in this release**.
-Method A does not cover the platform and Method C only reaches its npm path there. Do not pass
+The npm package declares `os: win32, linux, darwin`; prebuilt Linux packages require glibc.
+Intel macOS (x86_64) uses the published `@anolisa/tokenless-darwin-x64` package.
+Method A does not cover Intel macOS; use Method B or Method C's npm path there. Do not pass
 `TOKENLESS_FORCE_BUILD=1` on macOS — the installer refuses the source build on that platform and exits with an
-error instead of running `cargo`. Use Linux or Apple Silicon macOS until that package is published.
+error instead of running `cargo`. Native Windows x64 can use npm directly, but the remaining Bash
+commands in this Skill require WSL2.
 
 **Method C: Standalone curl Install**
 

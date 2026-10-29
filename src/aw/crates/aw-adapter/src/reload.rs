@@ -36,16 +36,16 @@ pub struct Plan {
     pub observe: bool,
 }
 
-/// Check the initially pinned version and reusable native entrypoint.
+/// Check the reusable native entrypoint; runtime bridges verify its protocol.
 pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
     match (
         capabilities.adapter.as_str(),
-        capabilities.version.as_str(),
         capabilities.entrypoint.as_str(),
     ) {
-        ("qoder", "1.1.73", "tui") | ("qwenpaw", "2.2.2.post1", "app")
-        | ("qoder-sdk", "1.0.56", "sdk-worker") => Ok(()),
-        _ => Err("runtime policy updates require Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 App or Qoder SDK 1.0.56".into()),
+        ("qoder", "tui") | ("qwenpaw", "app") | ("qoder-sdk", "sdk-worker") => Ok(()),
+        _ => {
+            Err("runtime policy updates require Qoder TUI, QwenPaw App or Qoder SDK worker".into())
+        }
     }
 }
 

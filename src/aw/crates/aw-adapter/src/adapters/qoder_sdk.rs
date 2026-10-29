@@ -21,6 +21,14 @@ struct Prepared {
     input: LaunchInput,
     sdks: std::collections::BTreeMap<String, PathBuf>,
     policy: assets::Policy,
+    versions: std::collections::BTreeMap<String, Sdk>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Sdk {
+    entry: PathBuf,
+    version: String,
+    worker_version: String,
 }
 
 impl Adapter for QoderSdk {
@@ -77,7 +85,15 @@ impl Adapter for QoderSdk {
                 serde_json::to_string(&policy.sites)?.into(),
             ],
         )?;
-        let sdks: std::collections::BTreeMap<String, PathBuf> = serde_json::from_str(&sdk)?;
+        let versions: std::collections::BTreeMap<String, Sdk> = serde_json::from_str(&sdk)?;
+        for sdk in versions.values() {
+            crate::version::reported(&sdk.version, "Qoder SDK")?;
+            crate::version::reported(&sdk.worker_version, "Qoder Worker")?;
+        }
+        let sdks: std::collections::BTreeMap<_, _> = versions
+            .iter()
+            .map(|(site, sdk)| (site.clone(), sdk.entry.clone()))
+            .collect();
         if sdks.len() != policy.sites.len()
             || policy.sites.iter().any(|site| !sdks.contains_key(site))
             || sdks
@@ -90,6 +106,7 @@ impl Adapter for QoderSdk {
             input,
             sdks,
             policy,
+            versions,
         }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
@@ -105,7 +122,8 @@ impl Adapter for QoderSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> AdapterCapabilities {
-        let mut capabilities = adapter::catalog::QODER_SDK.capabilities("1.0.56", "sdk-worker");
+        let mut capabilities = adapter::catalog::QODER_SDK
+            .capabilities(&self.versions[&self.policy.sites[0]].version, "sdk-worker");
         if !self.input.options.reloadable {
             capabilities
                 .failure_actions
@@ -205,7 +223,7 @@ impl PreparedLaunch for Prepared {
             "qoder-sdk.json",
             &serde_json::to_vec(&json!({
                 "executable":context.executable, "binding":context.binding_path, "sdk":self.sdks[&self.policy.sites[0]],
-                "sdks":self.sdks, "default_site":self.policy.sites[0],
+                "sdks":self.sdks, "sdk_metadata":self.versions, "default_site":self.policy.sites[0],
                 "native_command_wrappers":self.policy.wrappers(), "native_policy":self.policy,
                 "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable,
                 "resident_policy_reload": !self.input.options.reloadable,

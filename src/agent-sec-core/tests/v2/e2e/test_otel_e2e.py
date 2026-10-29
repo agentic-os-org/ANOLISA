@@ -352,6 +352,9 @@ def test_same_trace_requests_keep_distinct_unsampled_log_anchors(otel):
     requests = {}
     for record in otel.records():
         fields = record["fields"]
+        # Process startup and maintenance records have no request context.
+        if fields["reason"] in {"startup_stage", "retention_stage"}:
+            continue
         correlation = json.loads(fields["correlation"])
         assert correlation["trace_id"] == TRACE
         assert correlation["span_id"] == correlation["request_span_id"]

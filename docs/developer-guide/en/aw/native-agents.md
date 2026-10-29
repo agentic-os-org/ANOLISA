@@ -4,9 +4,17 @@
 
 Choose the framework used by your application. Each page lists dependencies, startup and integration limits. SDK applications must explicitly use AW factories.
 
-| Integration | Version | Entrypoint |
+Runtime admission uses required native interfaces and protocol behavior. The
+versions below identify tested combinations. `aw config validate` checks the AW
+schema and configuration relationships; `aw run` resolves the installed framework,
+records its version and checks native registration. Plugin and SDK bridges require
+readiness receipts; Qoder CLI uses native command Hooks. Missing interfaces
+or incompatible callbacks fail at the affected launch or execution boundary.
+After changing an application dependency, follow [native validation](validation.md).
+
+| Integration | Verified baseline | Entrypoint |
 | --- | --- | --- |
-| [Qoder CLI](agents/qoder.md) | ≥ 1.1.64 | CLI |
+| [Qoder CLI](agents/qoder.md) | 1.1.64 | CLI |
 | [Qoder SDK](agents/qoder-sdk.md) | 1.0.56 / Worker 1.1.78 | Node.js worker |
 | [OpenClaw](agents/openclaw.md) | 2026.9.6 | Gateway |
 | [QwenPaw](agents/qwenpaw.md) | 2.2.2.post1 / AgentScope 2.0.10 | App/API |

@@ -251,6 +251,10 @@ FUSE 读取 `SKILL.md` 时，SkillFS 会执行 `compiler::compile`，支持：
 - `<!-- @else -->`
 - `<!-- @endif -->`
 
+Linux 上直接检查 `PATH` 中的可执行文件，无需额外安装 `which`。
+固定命令白名单和挂载启动时的环境快照保持不变；更改 `PATH` 或安装命令后，
+需重新挂载以刷新快照。
+
 没有条件块时，SkillFS 也会执行少量启发式命令归一化，例如：
 
 - 独立调用的 `pip install` / `pip3 install` -> `uv pip install`；保留指定解释器的

@@ -1,4 +1,4 @@
-//! AgentScope 2.0.6 public factory bridge with explicit application opt-in.
+//! AgentScope public factory bridge with explicit application opt-in.
 
 use crate::{
     adapter::{
@@ -12,10 +12,10 @@ use aw_provider::admission::AdmittedStep;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, time::Duration};
 
-const VERSION: &str = "2.0.6";
 pub(crate) struct AgentScope;
 struct Prepared {
     input: LaunchInput,
+    version: String,
 }
 
 impl Adapter for AgentScope {
@@ -53,10 +53,8 @@ impl Adapter for AgentScope {
                 "from importlib.metadata import version; print(version('agentscope'))".into(),
             ],
         )?;
-        if probe != VERSION {
-            return Err(format!("AgentScope {VERSION} is required by this adapter").into());
-        }
-        Ok(Box::new(Prepared { input }))
+        let version = crate::version::reported(&probe, "AgentScope")?;
+        Ok(Box::new(Prepared { input, version }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         normalize(binding, event, native)
@@ -75,7 +73,7 @@ impl Adapter for AgentScope {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::AGENTSCOPE.capabilities(VERSION, "factory")
+        super::super::adapter::catalog::AGENTSCOPE.capabilities(&self.version, "factory")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         event_routes(&self.input.document, steps).map(|_| ())

@@ -1,4 +1,4 @@
-//! Pi Coding Agent 0.84.2 public factory bridge in an owned foreground Node worker.
+//! Pi Coding Agent public factory bridge in an owned foreground Node worker.
 
 use crate::{
     adapter::{
@@ -12,12 +12,12 @@ use aw_provider::admission::AdmittedStep;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf, time::Duration};
 
-const VERSION: &str = "0.84.2";
 use super::sdk_tools::invocation_uuid;
 
 pub(crate) struct Pi;
 struct Prepared {
     input: LaunchInput,
+    version: String,
     application: PathBuf,
 }
 
@@ -58,14 +58,21 @@ impl Adapter for Pi {
                 application.clone().into_os_string(),
             ],
         )?;
-        if result != format!("AW Pi SDK {VERSION}") {
-            return Err("Pi SDK metadata probe did not validate the required packages".into());
-        }
+        let version = crate::version::reported(
+            result
+                .strip_prefix("AW Pi SDK ")
+                .ok_or("Pi SDK metadata probe did not identify the required packages")?,
+            "Pi SDK",
+        )?;
         input
             .command
             .environment
             .remove(std::ffi::OsStr::new("AW_PI_PROBE"));
-        Ok(Box::new(Prepared { input, application }))
+        Ok(Box::new(Prepared {
+            input,
+            application,
+            version,
+        }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
@@ -117,7 +124,7 @@ impl Adapter for Pi {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::PI.capabilities(VERSION, "sdk")
+        super::super::adapter::catalog::PI.capabilities(&self.version, "sdk")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         routes(&self.input.document, steps).map(|_| ())

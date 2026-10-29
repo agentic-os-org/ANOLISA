@@ -131,3 +131,14 @@ executable and its editor-specific validator have been removed; the Rust
 registry or service contracts and does not reload the running service. See the
 [CLI reference](../../../../../../docs/developer-guide/en/aw/reference/configuration-editor.md)
 for options, rollback and restarting with the edited revision.
+
+## Native source ownership
+
+Native configuration stays outside the AW parser and publication transaction.
+The optional agent `native_config.sources` sequence contains only references;
+its IDs share no namespace with native objects. Editing or removing those
+references never reads, overwrites or uninstalls native files. The complete AW
+candidate still passes the strict schema and cross-reference validator before
+atomic publication. Native loading and AW capability admission have separate
+results; active runtime state remains service-owned. See the [loader reference](../../../../../../docs/developer-guide/en/aw/reference/configuration-editor.md#embedding-a-native-loader)
+for the API, consumer obligations and executable evidence.

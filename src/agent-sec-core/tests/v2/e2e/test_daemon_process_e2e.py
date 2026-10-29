@@ -200,18 +200,64 @@ else:
                 raise
 
 
-def test_sigterm_cooperatively_exits_and_removes_socket(start_daemon):
-    handle = start_daemon()
+def test_sigterm_cooperatively_exits_and_removes_socket(start_daemon, monkeypatch):
+    with monkeypatch.context() as environment:
+        environment.setenv("RUST_LOG", "info")
+        handle = start_daemon()
     socket_path = handle.socket_path
     assert socket_path.exists()
     socket_inode = os.stat(socket_path).st_ino
 
     handle.process.send_signal(signal.SIGTERM)
-    handle.process.communicate(timeout=5.0)
+    _, stderr = handle.process.communicate(timeout=5.0)
 
     assert handle.process.returncode == 0
     # The daemon owns its socket and unlinks exactly the inode it bound.
     assert not socket_path.exists(), f"socket inode {socket_inode} was left behind"
+    records = [json.loads(line) for line in stderr.splitlines() if line.startswith("{")]
+    startup = [
+        record
+        for record in records
+        if record.get("fields", {}).get("reason") == "startup_stage"
+    ]
+    stages = [record["fields"]["stage"] for record in startup]
+    required = [
+        "policy_storage",
+        "skillsec",
+        "event_storage",
+        "skill_worker",
+        "policy_runtime",
+        "retention_catchup",
+        "uds_bind",
+        "rpc_ready",
+    ]
+    assert set(required) <= set(stages), stderr
+    positions = [stages.index(stage) for stage in required]
+    assert positions == sorted(positions), stderr
+    assert all(record["timestamp"] and record["level"] == "INFO" for record in startup)
+    elapsed = [
+        record["fields"]["elapsed_ms"]
+        for record in startup
+        if "elapsed_ms" in record["fields"]
+    ]
+    assert elapsed == sorted(elapsed)
+    assert startup[-1]["fields"]["duration_ms"] >= 0
+    retention = [
+        record["fields"]
+        for record in records
+        if record.get("fields", {}).get("reason") == "retention_stage"
+    ]
+    assert {(entry["store"], entry["phase"]) for entry in retention} == {
+        ("security", "started"),
+        ("security", "completed"),
+        ("observability", "started"),
+        ("observability", "completed"),
+    }, stderr
+    assert all(
+        entry["duration_ms"] >= 0
+        for entry in retention
+        if entry["phase"] == "completed"
+    )
 
 
 def test_relative_socket_fails(daemon_bin):

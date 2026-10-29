@@ -179,3 +179,34 @@ pub(super) struct RemoveHook {
     #[command(flatten)]
     pub output: crate::output::Options,
 }
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct NativeSources {
+    #[command(flatten)]
+    pub configuration: Configuration,
+    /// Existing AW Agent target
+    #[arg(long, value_name = "TARGET")]
+    pub agent: String,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct AddNativeSource {
+    #[command(flatten)]
+    pub target: NativeSources,
+    /// AW source descriptor; never the native configuration contents
+    #[arg(long, value_name = "FILE")]
+    pub definition: String,
+    #[command(flatten)]
+    pub output: crate::output::Options,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct RemoveNativeSource {
+    #[command(flatten)]
+    pub target: NativeSources,
+    /// Exact AW source descriptor ID
+    #[arg(long, value_name = "ID", allow_hyphen_values = true)]
+    pub id: String,
+    #[command(flatten)]
+    pub output: crate::output::Options,
+}

@@ -508,6 +508,13 @@ impl SslSniff {
         Ok(())
     }
 
+    /// 仅将关联到实际 uprobe 的进程视为可采集，排除不可追踪文件的负缓存。
+    pub(super) fn has_process_attachments(&self, pid: u32) -> bool {
+        self.pid_inodes
+            .get(&pid)
+            .is_some_and(|files| files.iter().any(|file| self.attachments.contains_key(file)))
+    }
+
     /// Number of SSL library files with live uprobe attachments (diagnostics).
     pub fn traced_inode_count(&self) -> usize {
         self.attachments.len()

@@ -6,8 +6,10 @@ Run source examples from `src/aw`; build AW with the [integration tutorial](../i
 
 ## Start QwenPaw
 
-Install QwenPaw 2.2.2.post1 with AgentScope 2.0.10 and initialize its model configuration
-through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
+The verified baseline is QwenPaw 2.2.2.post1 with AgentScope 2.0.10. Install QwenPaw
+with its compatible dependencies and initialize its model configuration through
+QwenPaw. AW records the installed version and checks the plugin, middleware and
+native task lifecycle interfaces for other releases. The example uses `argv: [qwenpaw, app]`. Set
 `QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
 its owned temporary plugin, preserves existing plugins and native configuration,
 and removes its plugin after the App exits.

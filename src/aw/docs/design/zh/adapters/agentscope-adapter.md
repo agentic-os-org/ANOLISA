@@ -2,7 +2,7 @@
 
 [English](../../en/adapters/agentscope-adapter.md)
 
-`agentscope` Adapter 面向 AgentScope **2.0.6**，要求 **Python >=3.11**
+`agentscope` Adapter 的已验证基线为 AgentScope **2.0.6**，要求 **Python >=3.11**
 （[SDK 要求](https://pypi.org/project/agentscope/2.0.6/)），通过明确接线的公共 `Agent` 工厂
 工作。复用 AW 本地服务、binding、有界 `aw hook` 客户端、前台 launcher、readiness
 与生成文件清理；不把 SDK 标记为 QwenPaw，也不依赖 QwenPaw 插件加载器。
@@ -11,8 +11,8 @@
 
 `aw run --config FILE --agent TARGET` 选择配置中的 `adapter: agentscope`。
 `argv` 首项为应用 Python 解释器，随后为 `.py` 脚本或 `-m MODULE` 与应用参数。
-不支持 `-I`、`-E`、`-c` 等解释器覆盖选项。有界 preflight 使用同一解释器核对
-`importlib.metadata.version("agentscope") == "2.0.6"`。
+不支持 `-I`、`-E`、`-c` 等解释器覆盖选项。有界 preflight 使用同一解释器记录
+`importlib.metadata.version("agentscope")`。原生导入与工厂注册检查所需 middleware 接口。
 
 AW 向前台 worker 提供自有 `aw_agentscope.py` 导入目录和 `AW_NATIVE_CONFIG`。
 应用显式修改公共工厂：

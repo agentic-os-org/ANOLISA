@@ -183,6 +183,10 @@ PreTool 让包含已识别原生 `find` 调用的整条命令跳过 RTK，包括
 和 `uv run`；支持嵌套及反斜杠换行续行，进程 Wrapper 的未知参数会停止识别。
 不读取自定义 `hooks.transparent_prefixes`，这些前缀中的 `find` 仍可能被 RTK 改写。
 关闭搜索路径共享只停止后置压缩，仍保留原生 `find` 的完整输出；混合或不支持的输出因此可能不压缩。
+同一 PreTool 保护也覆盖原生 `head`、`tail` 的所有参数：只要识别到其中一个调用，
+整条命令（含 Pipeline、复合命令）就跳过改写。RTK 的 `read --max-lines` 使用结构截断，
+可能遗漏 `head` 请求行范围内的函数体；`tail` 按相同原生执行策略保留。显式 `rtk` 调用不受此规则保护。
+该规则只控制 PreTool，适用的 PostTool 压缩和文件读取策略不变。
 其余 ContentType（如 `stack_trace`、`plain_text`）透传。
 Claude Code 2.1.121 及以上版本、Qoder CLI、OpenCode 和 Cosh-NG 能替换实时结果；同时裸
 `tokenless` 可从 Shell `PATH` 解析时，其 PostTool 请求才声明恢复可用。缩减或截断结果中的
@@ -226,7 +230,7 @@ Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON
 
 Qoder 通过原生插件目录 `hooks/hooks.json` 加载 hook，并在运行时展开 `${QODER_PLUGIN_ROOT}`。插件内的 `hooks/run-hook.sh` 再从 ANOLISA adapter 目录定位共享的 `compress_response_hook.py`，无需改写 `~/.qoder/settings.json` 或将机器相关绝对路径写入插件缓存。
 
-Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。结构化响应沿用 Claude Code 的 schema 保留逻辑；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。仅当压缩文本回填到原生 Bash `stdout` 时返回对象，其他结果形态沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
 
 ### 路径 5：Claude Code 插件（`PostToolUse` hook）
 

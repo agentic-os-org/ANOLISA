@@ -6,9 +6,10 @@
 下文任务 worker 模式保留原有生命周期与失败策略。
 
 Pi Adapter 支持公开的 Coding Agent/Core SDK
-`@earendil-works/pi-coding-agent` 和 `@earendil-works/pi-agent-core` 0.84.2，
+`@earendil-works/pi-coding-agent` 和 `@earendil-works/pi-agent-core`，
 使用 Linux 与 Node.js >=22.19.0。入口为 `sdk`：AW 管理的前台 worker 导入应用
-工厂。原生 Pi CLI 不在这个合同内。
+工厂。两个 SDK 的已验证基线均为 0.84.2，其他版本需保留 Agent/AgentSession 与
+工具生命周期接口。原生 Pi CLI 不在这个合同内。
 
 ## 工厂与生命周期
 

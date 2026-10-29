@@ -1,4 +1,4 @@
-//! Native-find ownership through the bundled RTK's built-in transparent prefixes.
+//! Native output ownership through the bundled RTK's built-in transparent prefixes.
 //!
 //! Custom `hooks.transparent_prefixes` are deliberately not read or inferred.
 
@@ -59,7 +59,7 @@ const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
 ];
 
 /// Recognizes the inner executable without changing build/test wrapper policy.
-pub(super) fn invokes_find(words: &[String]) -> bool {
+pub(super) fn owns_command(words: &[String]) -> bool {
     let mut index = 0;
     while let Some(word) = words.get(index) {
         if is_environment_assignment(word)
@@ -96,7 +96,7 @@ pub(super) fn invokes_find(words: &[String]) -> bool {
     }
     words
         .get(index)
-        .is_some_and(|word| command_basename(word) == "find")
+        .is_some_and(|word| matches!(command_basename(word), "find" | "head" | "tail"))
 }
 
 fn wrapper_inner_index(wrapper: &ProcessWrapper, words: &[String]) -> Option<usize> {

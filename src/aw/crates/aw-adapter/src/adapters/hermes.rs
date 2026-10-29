@@ -22,8 +22,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
 
-const REVISION: &str = "952c941e741e922a9be8fc403c8944c6e96318bb";
-
 pub(crate) struct Hermes;
 
 struct Prepared {
@@ -31,6 +29,7 @@ struct Prepared {
     profile: PathBuf,
     python: PathBuf,
     callback_timeout: f64,
+    revision: String,
 }
 
 impl Adapter for Hermes {
@@ -55,7 +54,7 @@ impl Adapter for Hermes {
                 profile.display()
             )
         })?;
-        let (selector, python, cache) =
+        let (selector, python, cache, revision) =
             checked_profile_command(&mut input.command, &profile, cancelled)?;
         let timeout =
             callback_timeout(&input.command, &python, &selector, cache.path(), cancelled)?;
@@ -70,6 +69,7 @@ impl Adapter for Hermes {
             profile,
             python,
             callback_timeout: timeout,
+            revision,
         }))
     }
 
@@ -153,7 +153,8 @@ impl Adapter for Hermes {
             cwd: std::env::current_dir()?.canonicalize()?,
             environment: std::env::vars_os().collect(),
         };
-        let (selector, python, cache) = checked_profile_command(&mut command, &profile, cancelled)?;
+        let (selector, python, cache, _) =
+            checked_profile_command(&mut command, &profile, cancelled)?;
         let backup = install::install(
             &profile,
             cancelled,
@@ -274,7 +275,7 @@ fn installed_output(
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::HERMES.capabilities(REVISION, "chat")
+        super::super::adapter::catalog::HERMES.capabilities(&self.revision, "chat")
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
@@ -327,7 +328,7 @@ impl PreparedLaunch for Prepared {
             "binding":context.binding_path.to_str().ok_or("Hermes binding path must be UTF-8")?,
             "profile":self.profile.to_str().ok_or("Hermes profile path must be UTF-8")?,
             "cwd":self.input.command.cwd.to_str().ok_or("Hermes working directory must be UTF-8")?,
-            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks});
+            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "revision":self.revision});
         let path = context
             .files
             .write("hermes-launch.json", &serde_json::to_vec(&launch)?)?;

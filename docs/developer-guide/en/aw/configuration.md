@@ -9,10 +9,14 @@ workflow, begin with the [user guide](../../../user-guide/en/aw/index.md).
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships
 between fields. The local Host performs Provider discovery and admission; the
-selected Adapter performs its native preparation checks before binding. Qoder
-requires CLI >=1.1.64 and records the probed version instead of an exact-release gate; OpenClaw,
-QwenPaw, Hermes, Pi, Claude SDK and AgentScope SDK retain their adapter-specific
-version or revision restrictions. AgentScope SDK requires exactly 2.0.6.
+selected Adapter performs its native preparation checks before binding. Framework
+versions are recorded as runtime metadata. `aw config validate` checks the schema,
+references and capability combinations without requiring installed frameworks.
+`aw run` checks the installed entrypoint and its native registration contract;
+Plugin and SDK bridges require readiness receipts. SDK factories and callbacks
+check their required interfaces and protocol fields. Qoder CLI uses native command
+Hooks without a startup receipt.
+See [verified combinations](native-agents.md) for the native test baselines.
 For a working four-framework example, start with the [integration walkthrough](integration.md).
 
 ## Document fields
@@ -115,8 +119,9 @@ Use managed SDK Hooks or MCP factories for executable behavior.
 AW forces `skills.disableShellExecution: true` and confirms native settings
 before releasing the first prompt. Direct Queries reject this profile because
 they cannot confirm the effective settings. Reloadable launches reject plugin
-snapshots and command wrappers before SDK probing. This profile is pinned to
-SDK 1.0.56 / Worker 1.1.78; revalidate on SDK upgrades.
+snapshots and command wrappers before SDK probing. This profile was verified with
+SDK 1.0.56 / Worker 1.1.78. Other releases must retain the native settings and
+cleanup interfaces; revalidate on SDK upgrades.
 
 After confirmed native and callback drain, AW removes snapshots. Unconfirmed
 cleanup retains snapshots and scope ownership; inspect the failure and restart
@@ -159,8 +164,8 @@ with `observe` or a single final structured `replace_result`, plus native steps
 at these points. Boolean/native steps cannot request result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, guards and stronger execution guarantees
-are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope 2.0.6 factories have launch Adapters;
-their supported versions, entrypoints and
+are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope factories have launch Adapters;
+their verified baselines, entrypoints and
 after-event coverage are listed in the [native Agent reference](native-agents.md).
 
 ## Events, effects and tool selection

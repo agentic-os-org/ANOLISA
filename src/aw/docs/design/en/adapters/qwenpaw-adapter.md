@@ -2,8 +2,8 @@
 
 [中文版](../../zh/adapters/qwenpaw-adapter.md)
 
-AW manages QwenPaw App tool invocations through the pinned QwenPaw
-`2.2.2.post1` / AgentScope `2.0.10` native middleware and Coordinator. Ordinary
+AW manages QwenPaw App tool invocations through native middleware and
+Coordinator interfaces, verified with QwenPaw `2.2.2.post1` / AgentScope `2.0.10`. Ordinary
 `aw run` admits each Agent request into the shared SDK task scope. Native
 permissions, scheduling and model configuration remain owned by QwenPaw.
 
@@ -22,7 +22,7 @@ a fresh UUID in `aw_invocation_id`; `tool_call.id` retains QwenPaw's original ID
 The service correlates the UUID, and the adapter retains only active native
 ownership records. Arguments are compared exactly at the native execution
 boundary, including integers above `2**53`, before the shared wire normalization.
-Admission uses the pinned Toolkit parser and tool schema, including native empty
+Admission uses the native Toolkit parser and tool schema, including native empty
 input and repair semantics. The Toolkit parser corroborates the effective mapping
 again immediately before the admitted dispatch; a later rewrite fences the owner.
 The dispatch guard is consumed before the tool body, allowing nested Toolkit

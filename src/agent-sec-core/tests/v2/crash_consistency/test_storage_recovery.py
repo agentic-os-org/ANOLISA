@@ -100,7 +100,7 @@ def test_shared_sqlite_write_lock_retains_both_results_and_recovers_without_http
         first.release.set()
         second.release.set()
         until(
-            lambda: list(recovery.remote.requests),
+            lambda _remaining: list(recovery.remote.requests),
             lambda trace: {key for method, key in trace if method == "POST_FINISHED"}
             == targets,
         )
@@ -143,7 +143,9 @@ def test_pending_retry_budget_resets_in_a_new_daemon_process(recovery):
     recovery.restart()
     scope = recovery.scope(recovery.policy(), recovery.spawn())
     before = until(
-        lambda: recovery.daemon.request("binding", "list")["items"],
+        lambda remaining: recovery.daemon.request("binding", "list", timeout=remaining)[
+            "items"
+        ],
         lambda items: len(recovery.remote.posts()) == 2
         and len(items) == 1
         and items[0]["status"]["phase"] == "PENDING_APPLY"
@@ -154,7 +156,7 @@ def test_pending_retry_budget_resets_in_a_new_daemon_process(recovery):
     # Four more failures need a fresh five-attempt budget to reach the success.
     recovery.remote.apply_failures = [503] * 4
     recovery.restart()
-    restored = recovery.ready(1, timeout=25)[0]
+    restored = recovery.ready(1)[0]
     assert restored["spec"] == before["spec"]
     assert len(recovery.remote.posts()) == 7
     recovery.daemon.request("scope", "delete", "--scope-id", scope["scopeId"])
@@ -167,7 +169,9 @@ def test_failed_binding_survives_restart_until_explicit_scope_retry(recovery):
     policy = recovery.policy()
     scope = recovery.scope(policy, recovery.spawn())
     failed = until(
-        lambda: recovery.daemon.request("binding", "list")["items"],
+        lambda remaining: recovery.daemon.request("binding", "list", timeout=remaining)[
+            "items"
+        ],
         lambda items: len(items) == 1 and items[0]["status"]["phase"] == "APPLY_FAILED",
     )[0]
     recovery.crash()
@@ -175,7 +179,9 @@ def test_failed_binding_survives_restart_until_explicit_scope_retry(recovery):
     other = recovery.scope(policy, recovery.spawn())
     # Completing independent work proves that recovery is running while Failed stays terminal.
     items = until(
-        lambda: recovery.daemon.request("binding", "list")["items"],
+        lambda remaining: recovery.daemon.request("binding", "list", timeout=remaining)[
+            "items"
+        ],
         lambda items: len(items) == 2
         and any(item["status"]["phase"] == "READY" for item in items),
     )

@@ -406,6 +406,9 @@
               "default": false
             }
           }
+        },
+        "native_config": {
+          "$ref": "#/$defs/nativeConfiguration"
         }
       }
     },
@@ -731,6 +734,56 @@
           "pattern": "^[a-f0-9]{64}$"
         }
       }
+    },
+    "nativeConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sources"
+      ],
+      "properties": {
+        "sources": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/nativeSource"
+          }
+        }
+      },
+      "description": "References consumed by an embedding Adapter native loader; never a copy of native configuration or proof of activation."
+    },
+    "nativeSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "scope",
+        "reference"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/name"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "environment",
+            "argument",
+            "discovery"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/name"
+        },
+        "reference": {
+          "$ref": "#/$defs/text"
+        },
+        "base_dir": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "description": "Ordered native source reference. The Adapter owns interpretation, precedence, path resolution and update semantics. Never put credentials or literal option values in references."
     }
   }
 }

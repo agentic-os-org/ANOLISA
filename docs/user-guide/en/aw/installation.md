@@ -2,7 +2,7 @@
 
 [中文版](../../zh/aw/installation.md)
 
-Requires Linux and a signed-in Qoder CLI 1.1.64 or later. For other Agents, see
+Requires Linux and a signed-in Qoder CLI with native command Hooks; 1.1.64 is the verified baseline. For other Agents, see
 [Configuration and Agent launch](configuration.md).
 
 ## Get a package

@@ -89,7 +89,7 @@ PreTool does not provide those capabilities or Schema compression.
 
 | Framework | Model-visible replacement entry |
 | --- | --- |
-| Qoder | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` string |
+| Qoder | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` string in AW's adapter |
 | OpenClaw | `registerAgentToolResultMiddleware` before the next model request |
 | QwenPaw | Final AgentScope `ToolResponse` returned by acting middleware |
 | Hermes | `transform_tool_result` final string callback |
@@ -103,8 +103,11 @@ return value cannot replace model-visible content.
 
 Only a supported single text slot is projected. Media, multiple content blocks,
 intermediate streaming chunks and unsuccessful tool results remain unchanged.
-Replacement preserves native metadata and envelope fields. Qoder requires a
-string replacement, so a structured envelope is serialized into that string.
+Replacement preserves native metadata and envelope fields. AW's Qoder adapter
+currently serializes structured envelopes into a string replacement. The standalone
+Tokenless Qoder plugin preserves an object only when rewrapping native Bash `stdout`;
+other result shapes retain their JSON string replacement. The Bash object keeps all
+other fields unchanged, and Qoder controls their rendering in model context.
 AW infers `content_origin` using heuristic rules. An extracted command gives
 `command_output`; without a command, tool names classify known shell tools as
 `command_output`, known file-read tools as `file_content`, and other tools as

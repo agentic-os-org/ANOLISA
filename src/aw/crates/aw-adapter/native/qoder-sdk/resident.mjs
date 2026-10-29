@@ -127,7 +127,7 @@ export class Resident {
         this.cleanupDeadline ??= Date.now() + 60000;
         const failures = [];
         if (this.query && !this.nativeClose)
-          throw new Error("Pinned Qoder Query lacks native close; shutdown cannot be confirmed");
+          throw new Error("Qoder Query lacks native close; shutdown cannot be confirmed");
         if (this.nativeClose) {
           const tasks = [...this.background].filter(id => !this.nativeCommands?.acknowledgedTask(id));
           try { await bounded(Promise.all(tasks.map(id => this.query.stopTask(id))),
@@ -250,12 +250,12 @@ export class Resident {
     if (typeof query.close === "function") this.nativeClose = query.close.bind(query);
     for (const method of ["close", "recordInboundSessionMessage", "handleControlRequest", "interrupt", "getContextUsage"])
       if (typeof query[method] !== "function")
-        throw new Error(`Pinned Qoder Query is missing native seam ${method}`);
+        throw new Error(`Qoder Query is missing native seam ${method}`);
     if (typeof query.transport?.write !== "function")
-      throw new Error("Pinned Qoder Query lacks native control response transport");
+      throw new Error("Qoder Query lacks native control response transport");
     if (this.nativeCommands) {
       if (typeof query.transport.endInput !== "function")
-        throw new Error("Pinned Qoder Query lacks native input EOF seam");
+        throw new Error("Qoder Query lacks native input EOF seam");
       const endInput = query.transport.endInput.bind(query.transport);
       query.transport.endInput = () => {
         if (this.nativeShutdownReady) return endInput();
@@ -331,7 +331,7 @@ export class Resident {
     };
     if (this.mcp.size) {
       if (typeof query.processControlRequest !== "function")
-        throw new Error("Pinned Qoder Query lacks native MCP dispatch seam");
+        throw new Error("Qoder Query lacks native MCP dispatch seam");
       const process = query.processControlRequest.bind(query);
       query.processControlRequest = (frame, signal) =>
         this.track(() => dispatchMcp(this, frame, signal, process));

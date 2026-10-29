@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::SubscriberClass;
 
+#[cfg(feature = "mock-backend")]
 pub(crate) const STRUCTURED_FILE_PROTECTION_UNSUPPORTED: &str =
     "structured file protection policies are not implemented by this backend";
 
@@ -43,6 +44,7 @@ pub(crate) fn validate_apply_policy_payload(request: &ApplyPolicy) -> Result<(),
         .map_err(|error| BackendError::CompileFailure(error.to_string()))
 }
 
+#[cfg(feature = "mock-backend")]
 pub(crate) fn structured_file_protection_unsupported() -> BackendError {
     BackendError::CompileFailure(STRUCTURED_FILE_PROTECTION_UNSUPPORTED.into())
 }

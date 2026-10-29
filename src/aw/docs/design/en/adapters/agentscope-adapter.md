@@ -2,7 +2,7 @@
 
 [中文版](../../zh/adapters/agentscope-adapter.md)
 
-The `agentscope` Adapter targets AgentScope **2.0.6** on **Python >=3.11**
+The `agentscope` Adapter has a verified baseline of AgentScope **2.0.6** on **Python >=3.11**
 ([SDK requirement](https://pypi.org/project/agentscope/2.0.6/)) and explicitly composed
 public `Agent` factories. It shares AW's local service, binding, bounded `aw hook`
 client, foreground launcher, readiness and generated-file cleanup. It does not
@@ -13,8 +13,9 @@ identify the SDK as QwenPaw or depend on QwenPaw's plugin loader.
 `aw run --config FILE --agent TARGET` selects the configured `adapter: agentscope`.
 `argv` starts with the application Python interpreter, followed by a `.py` script
 or `-m MODULE` and application arguments. Interpreter override switches such as
-`-I`, `-E` and `-c` are rejected. The same interpreter must report
-`importlib.metadata.version("agentscope") == "2.0.6"` during the bounded preflight.
+`-I`, `-E` and `-c` are rejected. The bounded preflight records
+`importlib.metadata.version("agentscope")` from the same interpreter. Native
+imports and factory registration verify the required middleware interfaces.
 
 AW supplies an owned `aw_agentscope.py` import path and `AW_NATIVE_CONFIG` to the
 foreground worker. The application explicitly changes its public factory:

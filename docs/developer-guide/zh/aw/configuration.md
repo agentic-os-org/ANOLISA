@@ -7,9 +7,11 @@
 
 [随包 Schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 定义公共字段结构，Rust 校验器另行检查引用及字段之间的关系。本地 Host 负责
-Provider 发现与准入，所选 Adapter 在绑定前执行原生准备检查。Qoder 探测并记录
-CLI 版本，要求 >=1.1.64 而不固定一个版本；OpenClaw、QwenPaw、Hermes、Pi、Claude SDK
-和 AgentScope SDK 仍保留各自的版本或修订限制。AgentScope SDK 必须为 2.0.6。四框架可运行示例见[组件接入教程](integration.md)。
+Provider 发现与准入，所选 Adapter 在绑定前执行原生准备检查。框架版本作为运行元数据记录。
+`aw config validate` 检查结构、引用与能力组合，无需安装框架；`aw run` 检查已安装入口，
+检查原生注册合同。插件与 SDK bridge 需要就绪回执；SDK 工厂和回调继续检查所需接口
+与协议字段。Qoder CLI 使用原生命令 Hook，无启动回执。
+[已验证组合](native-agents.md)列出原生测试基线。四框架可运行示例见[组件接入教程](integration.md)。
 
 ## 配置字段
 
@@ -102,7 +104,7 @@ AW 拒绝可执行插件 Hook、MCP/settings 重定向、shell 插值、`permiss
 
 AW 强制设置 `skills.disableShellExecution: true`，并在释放首个提示前确认原生设置。
 直接 Query 无法确认有效设置，因此拒绝此配置。Reloadable 启动在 SDK 探测前拒绝插件快照和命令 wrapper。
-此配置限定于 SDK 1.0.56 / Worker 1.1.78，升级 SDK 后须重新验证。
+此配置已在 SDK 1.0.56 / Worker 1.1.78 验证。其他版本需保留原生设置与收尾接口，升级 SDK 后须重新验证。
 
 原生工作与回调确认排空后，AW 删除快照。清理未确认时保留快照和 scope 所有权，排查原因后重启 worker。
 原生命令消费者还需要显式审批与完成确认，见 [Qoder SDK 工厂](agents/qoder-sdk.md#原生-bash-命令消费者)。
@@ -134,8 +136,8 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 当前运行时准入工具前 `observe`/`block`、工具后 `observe` 或唯一且最后的结构化
 `replace_result`，以及这两个点位的原生步骤。布尔/原生步骤不能请求结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。运行时仍拒绝其他已识别事件、guard 和更强执行保证。
-Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6 工厂均有启动 Adapter；
-受支持版本、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
+Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 工厂均有启动 Adapter；
+已验证基线、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
 
 ## 事件、效果与工具选择
 

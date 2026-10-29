@@ -2,8 +2,8 @@
 
 [English](../../en/adapters/qwenpaw-adapter.md)
 
-AW 通过固定的 QwenPaw `2.2.2.post1` / AgentScope `2.0.10` 原生 middleware 和
-Coordinator 管理工具调用。普通 `aw run` 为每个 Agent 请求创建共享 SDK 任务作用域。
+AW 通过原生 middleware 和 Coordinator 管理工具调用，已验证基线为
+QwenPaw `2.2.2.post1` / AgentScope `2.0.10`。普通 `aw run` 为每个 Agent 请求创建共享 SDK 任务作用域。
 原生权限、调度与模型配置由 QwenPaw 负责。
 
 ## 准入与身份
@@ -17,7 +17,7 @@ Coordinator 缺失均使 Agent 构造失败。Resident middleware 位于 Coordin
 原生派发取得新的 `aw_invocation_id` UUID，`tool_call.id` 保留 QwenPaw 原始 ID。
 服务按 UUID 关联事件，适配器只保留活跃原生调用的所有权记录。原生执行前精确比较
 参数，包括大于 `2**53` 的整数，再进入共享协议的数值归一化。输入变化、过期回调
-身份和已回收作用域均拒绝执行。准入复用固定版本 Toolkit 的解析器和工具 schema，
+身份和已回收作用域均拒绝执行。准入复用原生 Toolkit 的解析器和工具 schema，
 保留原生空输入及修复语义；Toolkit 在实际派发前再次核对有效参数映射，后续改写会
 封锁所属 Agent。该派发核对在进入工具函数前消费，内部嵌套 Toolkit 调用
 可使用自身参数。

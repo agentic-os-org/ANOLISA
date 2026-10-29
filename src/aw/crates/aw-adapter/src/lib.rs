@@ -9,9 +9,11 @@ pub mod association;
 pub mod attachment;
 pub mod callback;
 pub mod completion;
+pub mod configuration;
 pub mod projection;
 mod qoder;
 pub mod reload;
+mod version;
 
 pub use adapter::{
     block_reason, select, Adapter, HookEvent, HookOutput, InstallOptions, LaunchContext,

@@ -34,6 +34,13 @@ Rust Core，而不是 Python 配置中。Shell 工具的 `PostToolRequest` 在 `
 执行的命令行；由 Core 而非 Adapter 把只打印本地文件的结果报告为 `file_read`，打印出的
 HTML 页面因此保持原样，输出中的数据仍照常压缩。
 
+PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，保留已识别的原生
+`head`、`tail` 调用，支持嵌套和 Shell 换行续行。所有参数形式均保持原生执行，包括字节
+窗口和持续跟踪模式。一旦识别到此类调用，其所在的整条 Pipeline 或复合命令都跳过 RTK
+改写。这避免了 RTK `read --max-lines` 路径的结构截断；显式 RTK 调用保持既有行为。
+不会读取自定义 `hooks.transparent_prefixes`，因此这些前缀下的调用仍可能被改写。
+该规则独立于搜索路径共享开关，保留现有 PostTool 文件读取策略。
+
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
 在模型调用之间保持 Retrieve Tool 静态，把 Marker 集合保存在框架 Session 状态中；`retrieve` 只授权该集合

@@ -27,8 +27,9 @@ find /tmp -maxdepth 3 -name '*cosh*' 2>/dev/null
 自动执行资格。执行结果保留 stdout 和退出状态，命令失败时也不例外。
 
 启用 tokenless RTK 重写后，被包裹的命令
-（`env TOKENLESS_* … /usr/bin/rtk <命令>`，或 RTK 自己输出绝对路径时的
-`/usr/bin/rtk <命令>`）保持相同的豁免资格：
+（Tokenless 链接 RTK 时为 `env TOKENLESS_* … /usr/bin/tokenless rtk <命令>`；
+使用单独的 RTK 时为 `env TOKENLESS_* … /usr/bin/rtk <命令>`，或 RTK 自己输出
+绝对路径时的 `/usr/bin/rtk <命令>`）保持相同的豁免资格：
 cosh 评估被包裹的只读命令，并执行包裹后的形态，
 因此 RTK 的输出压缩在免审批路径上仍然生效。
 `TOKENLESS_DATA_DIR` 与会话的 tokenless 状态目录不一致时，仍需审批。

@@ -115,6 +115,12 @@ enum Service {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Config {
+    /// Show redacted native source declarations; does not load or activate them
+    NativeSources(package::NativeSources),
+    /// Record a native source reference without opening the native source
+    AddNativeSource(package::AddNativeSource),
+    /// Remove a reference while retaining the original native source
+    RemoveNativeSource(package::RemoveNativeSource),
     /// Create a configuration from installed Preview packages
     Init(Configure),
     /// Print configuration JSON, including private Provider values

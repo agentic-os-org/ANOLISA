@@ -6,7 +6,7 @@ Explicit resident mode is described in [Resident SDK lifecycle](resident-sdk.md)
 The task-worker mode below retains its original one-worker lifecycle and failure policy.
 
 The `claude-sdk` Adapter launches one foreground Python worker with Claude Agent
-SDK 0.2.88 and its bundled Claude Code CLI 2.1.161. The Python script or `-m`
+SDK and its bundled Claude Code CLI, verified at SDK 0.2.88 / CLI 2.1.161. The Python script or `-m`
 module explicitly uses `aw_claude.create_client(options)` in its public factory.
 AW injects the module and private binding through the launch directory and
 `PYTHONPATH`; it does not patch global SDK constructors or infer business entrypoints.

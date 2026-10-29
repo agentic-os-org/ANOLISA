@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from importlib.metadata import version
 import json
 import logging
 import os
@@ -44,8 +43,6 @@ class Bridge:
     """Compose one foreground SDK client with its private AW launch binding."""
 
     def __init__(self) -> None:
-        if version("claude-agent-sdk") != "0.2.88":
-            raise RuntimeError("AW requires claude-agent-sdk 0.2.88")
         self.config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:

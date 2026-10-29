@@ -47,7 +47,7 @@ retrieval, and attribution.
 | CSV/TSV table compression | workload-dependent | Preserves every cell and row/column order while compacting quoting and record separators; returns the original when there is no benefit. No row sampling or Stash writes. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.6% on reference response | Encodes JSON to TOON format for LLMs; since TOON spec v4.4 this also covers nested record arrays and objects keyed by ID, which previously encoded larger than compact JSON |
-| Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported); recognized build/test commands and direct or built-in-wrapper `find` invocations keep the entire command native, even when search path sharing is disabled; custom RTK wrapper prefixes are outside this protection |
+| Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported); recognized build/test commands and direct or built-in-wrapper `find`, `head`, and `tail` invocations keep the entire command native, even when search path sharing is disabled; custom RTK wrapper prefixes are outside this protection |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | RTK ✅, lossless live PostTool ✅, Schema/Retrieve unavailable in the host |
 | copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅; Cosh-NG supports response compression and Marker-command recovery, while legacy copilot-shell remains lossless-only; Common BeforeModel passes schemas through without authorized Retrieve |
@@ -221,14 +221,11 @@ resources, framework registrations and npm package are left alone. A replacement
 that fails halfway (a missing tag, a build error) puts the previous install back
 instead of leaving the machine without a CLI.
 
-Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
-macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
-optional-dependency entry describes a release build target, not a registry
-artifact, so the npm route cannot deliver a binary there. The standalone
-installer does not fall back to a source build on macOS either — it exits with
-an error instead of running `cargo` — so Intel macOS currently has no supported
-install route. Use Linux or Apple Silicon macOS until that package is
-published.
+Published npm packages cover Linux x86_64/aarch64, macOS Apple Silicon and
+Intel Mac, and Windows x64. The `@anolisa/tokenless-darwin-x64` and
+`@anolisa/tokenless-win32-x64` packages are available from 0.9.0. The standalone
+installer uses npm on macOS and refuses a source-build fallback there: it
+exits with an error instead of running `cargo`. On Windows, use npm directly.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
 without changing an Agent product's user configuration. Run these commands
@@ -701,8 +698,8 @@ make qoder-install
 ## QwenWork Plugin (Windows x64 Local Mode)
 
 Windows x64 supports native `tokenless.exe` and `rtk.exe`, npm launchers, and
-QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. The Windows package
-is not yet published; build and package it using the
+QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. Install the published
+package with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Git Bash and WSL are not required.
 
@@ -720,7 +717,15 @@ Shell sessions. PreToolUse rewrites both shell tool names; PostToolUse observes
 `mcp_list`, `mcp_get`, or `mcp_call` pass through without replacing their real
 output; full MCP responses remain compressible. File-content protection and RTK
 deduplication remain unchanged. Statistics use `qwenwork`, independently of Qoder CLI, Qwen Code,
-and QwenPaw.
+and QwenPaw. QwenWork workspace Shell hooks use the system user's default
+`~/.tokenless` directory or a valid absolute `TOKENLESS_DATA_DIR` for databases
+and Pre/Post state; `$HOME` does not redirect the default. Invalid paths pass
+through without creating state. Existing workspace databases are not migrated.
+Shell sandbox restrictions can prevent RTK statistics and execution receipts
+from being saved while commands and host Hook compression still work.
+Installation/detection reports this limitation and the current process's data
+directory without testing sandbox access. RTK's native database retains
+its own path configuration.
 
 After `anolisa install tokenless`, quit QwenWorkCN and explicitly sideload the plugin:
 
@@ -733,8 +738,8 @@ anolisa adapter status tokenless
 Restart QwenWorkCN and open a new session; check activation in the application.
 The CLI verifies managed files, while loading and activation remain `unknown`.
 It does not change settings or enable a disabled plugin. Linux VM sessions remain
-unsupported. Workspace Shell state uses the conversation working directory, and
-its single MCP text block is handled as shell output. Uninstall previous
+unsupported. Workspace Shell state follows the Tokenless data directory, and its
+single MCP text block is handled as shell output. Uninstall previous
 script-managed installations with their original script before enabling through
 the CLI; CLI-managed copies use `anolisa adapter disable tokenless qwenwork`.
 Installation, removal, and compatibility baselines are covered in

@@ -15,13 +15,12 @@ pub(super) fn install_command(
     command
 }
 
-/// Keep actual Git semantics while supplying the pinned fixture revision.
+/// Observe native Git usage while retaining its actual checkout identity.
 pub(super) fn git_wrapper(
     fixture: &Fixture,
     profile: &std::path::Path,
     real_git: &std::path::Path,
 ) -> PathBuf {
-    // Only pin reporting is faked; Git itself checks tracked content and the index.
     let wrapper = profile.parent().unwrap().join("git");
     fs::write(
         &wrapper,
@@ -41,10 +40,7 @@ if 'status' in sys.argv and '--porcelain' in sys.argv and 'core.fsmonitor=false'
     (Path(os.environ['FAKE_ROOT']) / 'index-before-native').write_bytes(Path(index).read_bytes())
     if os.environ.get('FAKE_SCRATCH_HOOK') == '1':
         assert Path(index).read_bytes() == (Path(os.environ['FAKE_ROOT']) / 'original-index').read_bytes(), 'AW preflight changed the native index'
-if 'rev-parse' in sys.argv and sys.argv[-1] == 'HEAD':
-    print('952c941e741e922a9be8fc403c8944c6e96318bb')
-else:
-    os.execv({}, [{}] + sys.argv[1:])
+os.execv({}, [{}] + sys.argv[1:])
 "#,
             fixture.python.display(),
             json!(real_git),

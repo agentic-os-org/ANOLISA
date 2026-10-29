@@ -60,7 +60,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder -- -p 'Read the current directo
 
 ### OpenClaw
 
-需要 OpenClaw 2026.9.6 和已初始化的 profile。先停止使用同一 profile 的 Gateway，将以下占位路径换成已有安装与配置的绝对路径。
+需要 OpenClaw 和已初始化的 profile；2026.9.6 为已验证基线，其他版本需提供相同的原生插件接口。先停止使用同一 profile 的 Gateway，将以下占位路径换成已有安装与配置的绝对路径。
 
 ```bash
 export AW_NODE=/absolute/path/to/node
@@ -80,3 +80,31 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 
 自定义规则可读取工具事件并返回 JSON 布尔值，见[Hook 教程](../../../developer-guide/zh/aw/providers/hooks.md)。
 常驻应用的[策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)、[外部进程接入](../../../developer-guide/zh/aw/deployment/process-attach.md)和[退出、并发设置](../../../developer-guide/zh/aw/deployment/lifecycle.md)由应用部署方配置。
+
+## 记录原生配置来源
+
+接入通用 native-loader API 的应用可以在 AW 策略旁记录来源引用。原生配置继续保存在
+原文件中。内置 `aw run` Adapter 仍通过既有选项选择来源，来源声明本身不会改变加载行为
+或激活覆盖范围。
+
+沿用安装步骤中的私有 `AW_HOME` 和 `qoder` 目标，为已经选定的原生项目来源建立记录：
+
+```bash
+cat > "$AW_HOME/native-source.json" <<'JSON'
+{"id":"project","kind":"file","scope":"project","reference":"./native.yaml"}
+JSON
+chmod 600 "$AW_HOME/native-source.json"
+aw config add-native-source --config "$AW_HOME/aw.yaml" --agent qoder \
+  --definition "$AW_HOME/native-source.json"
+aw config native-sources --config "$AW_HOME/aw.yaml" --agent qoder
+```
+
+预期输出 `declared_not_loaded` / `not_admitted` 以及来源序号和类别，不打印原生内容或
+凭据。Adapter 负责相对路径解析和实际来源优先级。移除引用使用：
+
+```bash
+aw config remove-native-source --config "$AW_HOME/aw.yaml" --agent qoder --id project
+```
+
+原生文件继续保留。来源字段、原子编辑、加载与准入状态及当前接入范围见
+[编辑器与 loader 参考](../../../developer-guide/zh/aw/reference/configuration-editor.md#原生配置来源)。

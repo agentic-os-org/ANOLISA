@@ -21,7 +21,7 @@ fn managed_response_iterators_close_before_native_teardown() {
     let output = fixture.run(command);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && stderr.contains("Ran 13 tests") && stderr.contains("\nOK\n"),
+        output.status.success() && stderr.contains("Ran 14 tests") && stderr.contains("\nOK\n"),
         "{stderr}"
     );
 }
@@ -188,4 +188,37 @@ fn model_producer_identity_and_callback_drain_contracts() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn sdk_and_cli_releases_reach_readiness_checks_without_a_version_allowlist() {
+    for version in [
+        "0.2.87:2.1.160 (Claude Code)",
+        "0.2.89:2.1.162 (Claude Code)",
+        "1.0.0rc1:3.0.0 (Claude Code)",
+    ] {
+        let fixture = Fixture::new();
+        let host = fixture.root.join("python-probe");
+        fs::write(
+            &host,
+            format!("#!/usr/bin/python3\nimport sys\nif sys.argv[1] == '-c': print({version:?})\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut document = fixture.document();
+        document["spec"]["agents"] =
+            json!({"sdk":{"adapter":"claude-sdk","argv":[host,"worker.py"]}});
+        let service = Service::start(&fixture, &document);
+        let mut command = fixture.command();
+        command
+            .args(["run", "--config"])
+            .arg(fixture.root.join("aw.json"))
+            .args(["--agent", "sdk"]);
+        let output = fixture.run(command);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("before native hooks became ready")
+        );
+        service.released(&fixture);
+    }
 }
