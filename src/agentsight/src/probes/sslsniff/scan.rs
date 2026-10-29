@@ -86,31 +86,40 @@ pub(super) fn ssl_exe_markers() -> Vec<Vec<u8>> {
 /// from the previous round, so a marker straddling a round boundary is
 /// still seen) and stops at the first hit, so a matching binary costs only
 /// the read up to its first marker.
+#[cfg(test)]
 pub(super) fn file_has_ssl_markers(path: &str) -> bool {
+    file_has_ssl_markers_admitted(path, || Some(())).unwrap_or(false)
+}
+
+/// Paced variant of [`file_has_ssl_markers`] used by the scan worker.
+///
+/// `admit` runs once per window and returns `None` when the caller's CPU
+/// budget or shutdown flag cancels the scan. The first hit stops the scan.
+pub(super) fn file_has_ssl_markers_admitted<G>(
+    path: &str,
+    mut admit: impl FnMut() -> Option<G>,
+) -> Option<bool> {
     let markers = ssl_exe_markers();
     let overlap = markers.iter().map(|m| m.len()).max().unwrap_or(1) - 1;
-    let Ok(mut file) = fs::File::open(path) else {
-        return false;
-    };
+    let mut file = fs::File::open(path).ok()?;
     let mut buf = vec![0u8; overlap + SCAN_CHUNK_BYTES];
     let mut carry = 0usize;
     loop {
-        let Some(read) = fill_buf(&mut file, &mut buf[carry..]) else {
-            return false;
-        };
+        let _permit = admit()?;
+        let read = fill_buf(&mut file, &mut buf[carry..])?;
         let filled = carry + read;
         if filled == 0 {
-            return false;
+            return Some(false);
         }
         let window = &buf[..filled];
         if markers
             .iter()
             .any(|marker| memchr::memmem::find(window, marker).is_some())
         {
-            return true;
+            return Some(true);
         }
         if filled < buf.len() {
-            return false;
+            return Some(false);
         }
         buf.copy_within(filled - overlap..filled, 0);
         carry = overlap;
@@ -130,5 +139,17 @@ mod tests {
         let mut hits = vec![Vec::new(); 2];
         collect_pattern_hits(b"aaaa", patterns, 0, 4, &mut hits);
         assert_eq!(hits, vec![vec![0, 1, 2], vec![0, 1]]);
+    }
+
+    #[test]
+    fn marker_admission_cancels_before_reading() {
+        let path = std::env::temp_dir().join(format!(
+            "agentsight-marker-admission-{}",
+            std::process::id()
+        ));
+        fs::write(&path, b"boringssl").expect("write marker fixture");
+        let result = file_has_ssl_markers_admitted(&path.to_string_lossy(), || None::<()>);
+        let _ = fs::remove_file(&path);
+        assert_eq!(result, None);
     }
 }
