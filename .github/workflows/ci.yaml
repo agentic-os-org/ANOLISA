@@ -1411,7 +1411,7 @@ jobs:
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     environment: ${{ needs.detect-changes.outputs.cache_environment }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
