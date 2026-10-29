@@ -134,9 +134,38 @@ anolisa adapter status agent-memory
 ```
 
 **前置条件**：确保 `openclaw` CLI 在 `$PATH` 上。RPM 安装时选择
-`agent-memory-plugins`。CLI 缺失时脚本会输出日志并以 0 退出，安装 OpenClaw 后重跑即可。卸载
-`agent-memory-plugins` 会运行其 `%preun` uninstall 脚本。若仅卸载兼容包、
-单独保留 plugins 包，其插件注册也会继续保留。
+`agent-memory-plugins`。安装脚本在 CLI 缺失时输出明确日志并以 0 退出，
+安装 OpenClaw 后重跑即可。若仅卸载兼容包、单独保留 plugins 包，
+其插件注册也会继续保留。
+
+通过独立脚本移除插件：
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+```
+
+脚本调用 `openclaw plugins uninstall memory-anolisa --force`，由宿主处理配置目标和受管插件目录移除。
+它不会在宿主执行后重写 `openclaw.json`，因此不会给 `$include` 配置添加覆盖项，
+也不会在设置 `OPENCLAW_CONFIG_PATH` 时修改另一个配置文件。
+CLI 缺失时现在会在修改任何文件之前返回 1；此规则同样适用于旧脚本会手工清理的普通 JSON 配置。
+请恢复 CLI 后重试。CLI 返回 1 且完整诊断只有
+`Plugin not found: memory-anolisa`（忽略首尾空白和大小写）时，表示插件已注销。
+其他 CLI 失败会保留原退出码，不再额外清理。宿主成功或返回上述确切的未找到结果后，
+脚本检查 `${OPENCLAW_STATE_DIR}/extensions/memory-anolisa` 和
+`${OPENCLAW_STATE_DIR}/plugins/memory-anolisa`。任何路径仍存在（包括悬空符号链接）
+都会被报告并返回 1。手动删除前请先检查；脚本自身绝不删除这些路径。
+OpenClaw 可能已修改配置后才报错或留下文件。这不保证回滚。
+
+成功表示宿主接受移除（或插件已经注销），且两个已知路径均不存在。
+这不承诺删除外部源插件包、链接目录或自定义安装位置。使用 OpenClaw 2026.5.7 时，
+随包提供的 `install.sh` 将插件包复制到受管 extensions 目录；卸载移除该副本、保留源插件包。
+该版本宿主会将已选中的 `memory-anolisa` slot 重置为 `memory-core`，并保留原本为 `none`
+的选择。slot 仍由宿主管理；包装脚本不在其他宿主版本中强制这些值。
+
+`ANOLISA_DRY_RUN=1` 会预览宿主命令或缺少 CLI 时的拒绝执行，返回 0 且不修改文件。
+移除 `agent-memory-plugins` 时，其 RPM `%preun` 会尽力调用脚本；
+脚本失败不会中止软件包移除。如果 OpenClaw 中仍注册着插件，
+请在移除 `agent-memory-plugins` 之前成功执行此脚本。
 
 执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。运行 `install.sh` 时设置 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主将拒绝安装，直至自行授予（例如交互式执行 `openclaw plugins install`）。
 
