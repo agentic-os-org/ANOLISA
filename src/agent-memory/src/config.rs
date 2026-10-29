@@ -232,6 +232,14 @@ fn default_reclaim_min_age_secs() -> u64 {
     crate::snapshot::reclaim::DEFAULT_MIN_ARTIFACT_AGE.as_secs()
 }
 
+/// Hard floor for `[memory.snapshot_reclaim].min_artifact_age_secs`. The
+/// age guard is the only protection an in-flight snapshot in another
+/// process has — there is no lock or pid file on the snapshot write — so
+/// a value below one minute must never reach the sweeper. TOML rejects it
+/// at startup (`validate`); the env override ignores it with a warning.
+/// Single source of truth for both paths and for the docs' "60 s floor".
+pub const MIN_ARTIFACT_AGE_FLOOR: u64 = 60;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MountConfig {
@@ -513,12 +521,11 @@ impl AppConfig {
         // The age guard is the only protection an in-flight create_tarball in
         // another process has — there is no lock or pid file on the snapshot
         // write — so a value below one minute must never reach the sweeper.
-        const MIN_RECLAIM_AGE_SECS: u64 = 60;
         let age = self.memory.snapshot_reclaim.min_artifact_age_secs;
-        if age < MIN_RECLAIM_AGE_SECS {
+        if age < MIN_ARTIFACT_AGE_FLOOR {
             return Err(MemoryError::InvalidArgument(format!(
                 "[memory.snapshot_reclaim].min_artifact_age_secs = {age} must be >= \
-                 {MIN_RECLAIM_AGE_SECS}; the age guard is the only protection an in-flight \
+                 {MIN_ARTIFACT_AGE_FLOOR}; the age guard is the only protection an in-flight \
                  snapshot in another process has, and a shorter window lets the sweep delete \
                  live snapshot state"
             )));
@@ -723,10 +730,12 @@ impl AppConfig {
                 // usually a per-invocation tweak, and the age guard is the
                 // only protection an in-flight snapshot in another process
                 // has, so there is no safe interpretation of a tiny value.
-                Ok(n) if n >= 60 => self.memory.snapshot_reclaim.min_artifact_age_secs = n,
+                Ok(n) if n >= MIN_ARTIFACT_AGE_FLOOR => {
+                    self.memory.snapshot_reclaim.min_artifact_age_secs = n
+                }
                 Ok(n) => tracing::warn!(
-                    "MEMORY_SNAPSHOT_RECLAIM_MIN_AGE={n} below the 60 s floor would let the \
-                     sweep delete an in-flight snapshot; ignoring"
+                    "MEMORY_SNAPSHOT_RECLAIM_MIN_AGE={n} below the {MIN_ARTIFACT_AGE_FLOOR} s \
+                     floor would let the sweep delete an in-flight snapshot; ignoring"
                 ),
                 Err(e) => {
                     tracing::warn!("MEMORY_SNAPSHOT_RECLAIM_MIN_AGE={v:?} not a u64: {e}; ignoring")
@@ -988,6 +997,49 @@ mod tests {
                 !lambda_override_is_usable(candidate) || validated,
                 "the override accepts {candidate} but validate() rejects it, \
                  so MEMORY_INDEX_TIME_DECAY_LAMBDA={candidate} would fail startup"
+            );
+        }
+    }
+
+    #[test]
+    fn reclaim_age_floor_and_validate_agree() {
+        // The two guards are one rule seen from two sides: the env override
+        // accepts exactly what `validate` accepts, and both read the same
+        // MIN_ARTIFACT_AGE_FLOOR constant. The override is exercised for
+        // real (apply_env_overrides runs the actual gate), so a guard that
+        // drifts to its own literal fails here.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        for candidate in [
+            0,
+            MIN_ARTIFACT_AGE_FLOOR - 1,
+            MIN_ARTIFACT_AGE_FLOOR,
+            MIN_ARTIFACT_AGE_FLOOR + 1,
+            86_400,
+        ] {
+            // SAFETY: single-threaded access to this env var is guaranteed
+            // by ENV_LOCK; no other thread reads it during the test.
+            unsafe { std::env::set_var("MEMORY_SNAPSHOT_RECLAIM_MIN_AGE", candidate.to_string()) };
+            let mut env_cfg = AppConfig::default();
+            env_cfg.apply_env_overrides();
+            unsafe { std::env::remove_var("MEMORY_SNAPSHOT_RECLAIM_MIN_AGE") };
+            let accepted = env_cfg.memory.snapshot_reclaim.min_artifact_age_secs == candidate;
+
+            let mut toml_cfg = AppConfig::default();
+            toml_cfg.memory.snapshot_reclaim.min_artifact_age_secs = candidate;
+            let validated = toml_cfg.validate().is_ok();
+
+            assert!(
+                accepted == (candidate >= MIN_ARTIFACT_AGE_FLOOR),
+                "the env override's decision for {candidate} disagrees with the floor: \
+                 accepted={accepted}, expected={}",
+                candidate >= MIN_ARTIFACT_AGE_FLOOR
+            );
+            assert!(
+                accepted == validated,
+                "the env override accepts {candidate} but validate() rejects it (or vice versa), \
+                 so MEMORY_SNAPSHOT_RECLAIM_MIN_AGE={candidate} and TOML-configured \
+                 {candidate} disagree"
             );
         }
     }
