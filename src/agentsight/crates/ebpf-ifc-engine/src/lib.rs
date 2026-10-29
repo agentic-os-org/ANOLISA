@@ -31,6 +31,8 @@ mod file_protection_map_writer;
 mod file_protection_pinned_maps;
 #[cfg(test)]
 mod file_protection_rename_tests;
+#[cfg(test)]
+mod file_protection_write_tests;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
@@ -107,9 +109,9 @@ const PINNED_FILE_PROFILE_MARKER: &str =
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
     "agentsight_profile_credential_exfiltration_v5_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v4_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v5_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v5_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -1009,6 +1011,7 @@ fn pinned_engine_present_inner(
         "te_policy_targets",
         "te_policy_domains",
         "te_policy_slot_scratch",
+        "te_policy_permission_scratch",
         "te_inode_path",
     ] {
         if !paths.map(name).try_exists()? {
@@ -4913,7 +4916,7 @@ mod tests {
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v4"));
+        assert!(marker.contains("agent_file_guard_v5"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -6024,6 +6027,7 @@ os.execv({hit:?}, [{hit:?}])
             "te_policy_targets",
             "te_policy_domains",
             "te_policy_slot_scratch",
+            "te_policy_permission_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -6051,6 +6055,101 @@ os.execv({hit:?}, [{hit:?}])
         assert!(!pinned_engine_present(&paths, HookReserve::default()).expect("present"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pinned_engine_present_rejects_pre_ordinary_write_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "actplane-pin-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        for (reserve, old) in [
+            (
+                HookReserve::full_profile(),
+                "agentsight_profile_full_v4_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::agent_file_guard(),
+                "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+        ] {
+            let paths = PinnedEnginePaths::new(root.join(old));
+            std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
+            std::fs::create_dir_all(paths.links_dir()).expect("links dir");
+            for name in [
+                "rb",
+                "cap_req",
+                "cap_pending_submitter",
+                "cap_task",
+                "cap_state",
+                "cap_policy",
+                "ts_counts",
+                "ts_proc",
+                "ts_proc_domains",
+                "ts_root",
+                "te_protected_pids",
+                "te_inode_guard",
+                "te_policy_roots",
+                "te_policy_dirs",
+                "te_policy_stable",
+                "te_policy_slots",
+                "te_policy_targets",
+                "te_policy_domains",
+                "te_policy_slot_scratch",
+                "te_policy_permission_scratch",
+                "te_inode_path",
+            ] {
+                std::fs::write(paths.map(name), b"").expect("map pin");
+            }
+            let budget = HookBudget::for_pinned_reserve(reserve);
+            for spec in TRACEPOINTS {
+                if tracepoint_needed(spec, budget) {
+                    std::fs::write(paths.link(spec.name), b"").expect("tracepoint pin");
+                }
+            }
+            for (name, _) in LSM_PROGS {
+                if lsm_link_expected(name, budget, bpf_lsm_active()) {
+                    std::fs::write(paths.link(name), b"").expect("LSM pin");
+                }
+            }
+            std::fs::write(paths.map(old), b"").expect("old marker pin");
+            let error = pinned_engine_present(&paths, reserve).expect_err("v4 must be stale");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("pinned metadata mismatch"));
+
+            let current = reserve.profile_marker();
+            std::fs::rename(paths.map(old), paths.map(current)).expect("current marker pin");
+            assert!(pinned_engine_present(&paths, reserve).expect("complete current layout"));
+            std::fs::remove_file(paths.map("te_policy_permission_scratch"))
+                .expect("remove permission scratch");
+            assert!(
+                !pinned_engine_present(&paths, reserve).expect("incomplete layout"),
+                "missing permission scratch must prevent reuse even with all links"
+            );
+        }
+        std::fs::remove_dir_all(&root).expect("remove private fixture");
+    }
+
+    #[test]
+    #[ignore = "requires root, BPF LSM, unlimited memlock and --test-threads=1; private pins only"]
+    fn pinned_engine_reinstalls_pre_ordinary_write_marker_on_live_kernel() {
+        let _fixture = file_protection_delete_tests::Fixture::new("fp-write-upgrade");
+        let engine = PinnedEngine::open_or_install_singleton().expect("load private engine");
+        let paths = engine.paths.clone();
+        let current = HookReserve::agent_file_guard().profile_marker();
+        let old = "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a";
+        std::fs::rename(paths.map(current), paths.map(old)).expect("simulate v4 marker");
+        // Release any process-owned tracepoints before replacing this private layout.
+        drop(engine);
+        let reopened = PinnedEngine::open_or_install_singleton().expect("reinstall private engine");
+        assert_eq!(reopened.paths, paths);
+        assert!(paths.map(current).exists());
+        assert!(paths.map("te_policy_permission_scratch").exists());
+        assert!(!paths.map(old).exists());
     }
 
     /// Upgrade residue (an older or aborted install) leaves maps pinned under
@@ -6143,6 +6242,7 @@ os.execv({hit:?}, [{hit:?}])
             "te_policy_targets",
             "te_policy_domains",
             "te_policy_slot_scratch",
+            "te_policy_permission_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -6193,6 +6293,7 @@ os.execv({hit:?}, [{hit:?}])
             "te_policy_targets",
             "te_policy_domains",
             "te_policy_slot_scratch",
+            "te_policy_permission_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");

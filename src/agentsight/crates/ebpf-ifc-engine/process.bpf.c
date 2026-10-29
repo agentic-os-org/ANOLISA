@@ -2861,12 +2861,6 @@ int BPF_PROG(enforce_file_open, struct file *file)
 #endif
 }
 
-SEC("lsm/file_permission")
-int BPF_PROG(enforce_file_permission, struct file *file, int mask)
-{
-	return te_handle_file_permission(file, te_access_from_perm_mask(mask),
-					 TE_MODE_BLOCK);
-}
 
 SEC("lsm/file_truncate")
 int BPF_PROG(enforce_file_truncate, struct file *file)
@@ -2944,6 +2938,54 @@ static __always_inline void te_inode_guard_violation(
 	emit_violation(pid, rule_id, target, /*conn_ip=*/0,
 		      TE_OBJ_FILE, &fid, dom_id, /*matched_labels=*/0,
 		      op, /*blocked=*/1, /*killed=*/0, TEFFECT_BLOCK);
+}
+
+static __always_inline int te_policy_handle_file_permission(struct file *file, int mask)
+{
+	if (!enforce_mode || !(mask & MAY_WRITE) || !file)
+		return 0;
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	if (!te_pid_active(pid))
+		return 0;
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (!domain || !domain->ordinary_write_mask)
+		return 0;
+	__u32 zero = 0;
+	struct te_policy_permission_scratch *scratch =
+		bpf_map_lookup_elem(&te_policy_permission_scratch, &zero);
+	struct dentry *dentry = NULL, *parent = NULL;
+	struct vfsmount *vfsmount = NULL;
+	struct inode *inode = NULL;
+	if (!scratch || BPF_CORE_READ_INTO(&dentry, file, f_path.dentry) || !dentry ||
+	    BPF_CORE_READ_INTO(&vfsmount, file, f_path.mnt) || !vfsmount ||
+	    BPF_CORE_READ_INTO(&parent, dentry, d_parent) || !parent ||
+	    BPF_CORE_READ_INTO(&inode, dentry, d_inode) || !inode ||
+	    (BPF_CORE_READ(inode, i_mode) & 0170000) != 0100000)
+		return 0;
+	__builtin_memset(scratch, 0, sizeof(*scratch));
+	scratch->parent_path.mnt = vfsmount;
+	scratch->parent_path.dentry = parent;
+	te_policy_classify(&scratch->parent_path, dentry, true,
+			   domain->ordinary_write_mask, domain,
+			   &scratch->classification);
+	/* UNKNOWN remains fail-open for phase-one ordinary writes. */
+	if (scratch->classification.kind != TE_POLICY_CLASS_PROTECTED)
+		return 0;
+	te_inode_guard_violation(pid, dentry, &scratch->classification.guard,
+				 TE_EVENT_OP_ORDINARY_WRITE);
+	return -EPERM;
+}
+
+SEC("lsm/file_permission")
+int BPF_PROG(enforce_file_permission, struct file *file, int mask, int ret)
+{
+	if (ret)
+		return ret;
+	int rc = te_policy_handle_file_permission(file, mask);
+	if (rc)
+		return rc;
+	return te_handle_file_permission(file, te_access_from_perm_mask(mask),
+					 TE_MODE_BLOCK);
 }
 
 SEC("lsm/path_unlink")

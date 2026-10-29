@@ -179,6 +179,7 @@ fn structured_rename_and_exchange_on_live_kernel() {
         assert_eq!(event.pid, worker.pid());
         assert_eq!(event.target, "protected-entry");
     }
+    assert_eq!(worker.run("write", &write_entry), "errno=1");
     let moved_write_tree = write_parent.join("moved-tree");
     for (source, destination) in [
         (&write_tree, &moved_write_tree),
@@ -218,6 +219,7 @@ fn structured_rename_and_exchange_on_live_kernel() {
         assert!(!source.exists());
         assert_eq!(identity(destination).ino, before);
     }
+    assert_eq!(worker.run("write", &write_entry), "errno=1");
 
     // Renames that stay inside one protected tree remain allowed.
     assert_eq!(

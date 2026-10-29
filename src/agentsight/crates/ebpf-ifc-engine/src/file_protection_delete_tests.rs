@@ -69,6 +69,12 @@ for line in sys.stdin:
             os.unlink(path)
         elif op == 'rmdir':
             os.rmdir(path)
+        elif op == 'write':
+            fd = os.open(path, os.O_WRONLY)
+            try:
+                os.write(fd, b'overwritten')
+            finally:
+                os.close(fd)
         elif op.startswith('rename:'):
             os.rename(path, op.split(':', 1)[1])
         elif op.startswith('exchange:'):

@@ -1292,6 +1292,7 @@ fn operation_name(operation: u32) -> &'static str {
         5 => "unlink",
         6 => "rename",
         7 => "rmdir",
+        8 => "ordinary_write",
         _ => "unknown",
     }
 }
@@ -1612,7 +1613,8 @@ mod tests {
             (2, "write"),
             (3, "connect"),
             (4, "recv"),
-            (8, "unknown"),
+            (8, "ordinary_write"),
+            (9, "unknown"),
         ] {
             assert_eq!(operation_name(op), name);
         }
