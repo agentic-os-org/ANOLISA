@@ -265,6 +265,11 @@ for name in ("process.bpf.c", "process.h", "taint.h", "taint_engine.bpf.h",
              "capability.bpf.h", "channel.bpf.h"):
     (engine / name).write_text(name)
 (engine / "build.rs").write_bytes(b"staged-build")
+(engine / "src").mkdir()
+(source / "bpf/src").mkdir()
+for name in ("lib.rs", "file_protection_generation.rs", "file_protection_generation_tests.rs",
+             "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
+    (engine / "src" / name).write_bytes(f"staged-{name}".encode())
 for arch in ("x86_64", "aarch64"):
     (engine / "prebuilt" / arch).mkdir()
     (engine / "prebuilt" / arch / "process.bpf.o").write_bytes(f"{arch}-full-object".encode())
@@ -281,10 +286,17 @@ elif command == "checkout":
     # Model the source reset performed by the real cache checkout/reset.
     (pathlib.Path(source) / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
     (pathlib.Path(source) / "bpf/build.rs").write_bytes(b"patched-build")
+    (pathlib.Path(source) / "bpf/src/lib.rs").write_bytes(b"patched-lib")
     print("fixture Git diagnostic")
 elif command == "hash-object":
     path = pathlib.Path(source) / args[0]
-    key = {"lib.rs": "PATCHED_BPF_LIB", "Makefile": "PATCHED_BPF_MAKEFILE"}.get(path.name)
+    key = {"Makefile": "PATCHED_BPF_MAKEFILE"}.get(path.name)
+    if path.suffix == ".rs" and path.name != "build.rs":
+        data = path.read_bytes()
+        if path.name == "lib.rs":
+            key = {b"patched-lib": "PATCHED_BPF_LIB", b"staged-lib.rs": "STAGED_BPF_LIB"}.get(data)
+        elif data == f"staged-{path.name}".encode():
+            key = "STAGED_" + path.stem.upper()
     if path.name == "build.rs":
         key = {b"staged-build": "STAGED_BPF_BUILD",
                b"patched-build": "PATCHED_BPF_BUILD"}.get(path.read_bytes())
@@ -316,6 +328,12 @@ arch = host.split("-")[0]
 patch_config = args[args.index("--config") + 1]
 source = pathlib.Path(patch_config.split('path="')[1].rstrip('"'))
 assert (source / "build.rs").read_bytes() == b"staged-build"
+for name in ("lib.rs", "file_protection_generation.rs", "file_protection_generation_tests.rs",
+             "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
+    path = source / "src" / name
+    assert path.read_bytes() == f"staged-{name}".encode()
+    if os.environ.get("FIXTURE_MUTATE_SOURCE") == name:
+        path.write_bytes(b"mutation during build")
 objects = source / "prebuilt" / arch
 assert (objects / "process.bpf.o").read_bytes() == f"{arch}-full-object".encode()
 assert (objects / "process-inode-only.bpf.o").read_bytes() == f"{arch}-inode-object".encode()
@@ -375,6 +393,17 @@ for failure in CARGO_BUILD_TARGET=other-target ACTPLANE_REBUILD_BPF=1 FIXTURE_BA
     if [[ "$failure" = FIXTURE_WRONG_PAIR=1 ]]; then
         grep -Fq 'BPF object is not embedded' "$tmp_dir/failed-build.err"
     fi
+done
+
+for source_file in lib.rs file_protection_generation.rs file_protection_generation_tests.rs \
+    file_protection_map_writer.rs file_protection_pinned_maps.rs; do
+    if "${fixture_env[@]}" "FIXTURE_MUTATE_SOURCE=$source_file" \
+        "$fixture_root/scripts/build-enforcer.sh" >"$tmp_dir/failed-path" 2>"$tmp_dir/failed-build.err"; then
+        printf 'attested build accepted a mutation of %s\n' "$source_file" >&2
+        exit 1
+    fi
+    [[ ! -s "$tmp_dir/failed-path" ]]
+    grep -Fq 'attested ActPlane sources mutated during the build' "$tmp_dir/failed-build.err"
 done
 
 # Cross builds preserve the same private-output and receipt contract.

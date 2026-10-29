@@ -2823,6 +2823,16 @@ impl PinnedEngine {
             == (FEAT_BLOCK_FILE | FEAT_WRITE_RULES)
     }
 
+    /// Whether the active profile has the LSM hook required for ordinary writes.
+    pub fn supports_file_permission_guard(&self) -> bool {
+        self.supports_file_delete_guard()
+            && self
+                .paths
+                .link("enforce_file_permission")
+                .try_exists()
+                .unwrap_or(false)
+    }
+
     pub fn try_lock_runtime() -> io::Result<std::fs::File> {
         let file = open_runtime_lock()?;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {

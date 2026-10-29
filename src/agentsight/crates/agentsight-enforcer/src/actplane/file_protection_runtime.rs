@@ -1,12 +1,14 @@
-//! Structured policy lowering into generation-scoped map entries.
+//! Structured delete-policy lowering and generation ownership.
 
 use std::collections::BTreeMap;
 use std::io;
 
 use agentsight_enforcement_protocol::{FileProtectionExclusionKind, FileProtectionTargetKind};
 use ebpf_ifc_engine::{
-    FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
-    FileProtectionTargetValue, INODE_GUARD_RENAME, INODE_GUARD_UNLINK, TreeGuard, TreePathIdentity,
+    ActiveFileProtectionGeneration, FileProtectionDomainValue, FileProtectionGeneration,
+    FileProtectionMapCounts, FileProtectionSlot, FileProtectionSlotValue, FileProtectionStaging,
+    FileProtectionTargetValue, INODE_GUARD_RENAME, INODE_GUARD_UNLINK,
+    InactiveFileProtectionGeneration, PinnedEngine, TreeGuard, TreePathIdentity,
 };
 use uuid::Uuid;
 
@@ -27,6 +29,26 @@ const DELETE_GUARD_FLAGS: u32 = INODE_GUARD_UNLINK | INODE_GUARD_RENAME;
 pub(super) struct PreparedFileProtection {
     pub(super) policy: NormalizedFileProtectionPolicy,
     pub(super) topology: PreparedFileProtectionTopology,
+}
+
+/// Inactive map generation ready for last-step activation.
+pub(super) struct StagedFileProtection {
+    prepared: Option<PreparedFileProtection>,
+    staging: Option<FileProtectionStaging>,
+    activation: FileProtectionDomainValue,
+}
+
+/// Active or retryable generation together with every held topology identity.
+pub(super) struct ActiveFileProtection {
+    prepared: Option<PreparedFileProtection>,
+    owner: GenerationOwner,
+    retain_topology_on_drop: bool,
+}
+
+enum GenerationOwner {
+    Active(ActiveFileProtectionGeneration),
+    Retry(InactiveFileProtectionGeneration),
+    Clean,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -59,6 +81,93 @@ struct LoweredPolicy {
     activation: FileProtectionDomainValue,
 }
 
+impl PreparedFileProtection {
+    /// Stages every generation key without publishing the domain activation.
+    pub(super) fn stage(
+        self,
+        engine: &PinnedEngine,
+        domain: u32,
+        binding_id: Uuid,
+        revision: &str,
+    ) -> Result<StagedFileProtection, BackendError> {
+        let generation = generation(binding_id, revision)?;
+        let lowered = lower(&self, binding_id)?;
+        let counts = lowered.counts();
+        ensure_prepared_capacity(&self, counts)?;
+        let mut staging = engine
+            .begin_file_protection_generation(domain, generation, counts)
+            .map_err(|error| kernel("begin structured file-protection generation", error))?;
+        lowered
+            .stage(&mut staging)
+            .map_err(|error| kernel("stage structured file-protection generation", error))?;
+        Ok(StagedFileProtection {
+            prepared: Some(self),
+            staging: Some(staging),
+            activation: lowered.activation,
+        })
+    }
+}
+
+impl StagedFileProtection {
+    /// Publishes the activation record after process-domain setup has completed.
+    pub(super) fn activate(mut self) -> Result<ActiveFileProtection, BackendError> {
+        let staging = self.staging.take().ok_or_else(|| {
+            BackendError::KernelFailure("file-protection staging is absent".into())
+        })?;
+        let topology = &self
+            .prepared
+            .as_ref()
+            .ok_or_else(|| {
+                BackendError::KernelFailure("file-protection topology is absent".into())
+            })?
+            .topology;
+        let active = activate_validated(topology, || staging.activate(self.activation))?;
+        Ok(ActiveFileProtection {
+            prepared: self.prepared.take(),
+            owner: GenerationOwner::Active(active),
+            retain_topology_on_drop: false,
+        })
+    }
+}
+
+impl ActiveFileProtection {
+    /// Deactivates first and retries generation-scoped cleanup when necessary.
+    pub(super) fn deactivate_and_cleanup(&mut self) -> Result<(), BackendError> {
+        let owner = std::mem::replace(&mut self.owner, GenerationOwner::Clean);
+        let result = match owner {
+            GenerationOwner::Active(active) => active.detach(),
+            GenerationOwner::Retry(retry) => retry.retry_cleanup(),
+            GenerationOwner::Clean => return Ok(()),
+        };
+        match result {
+            Ok(()) => {
+                self.retain_topology_on_drop = false;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.owner = GenerationOwner::Retry(error.retry);
+                self.retain_topology_on_drop = true;
+                Err(BackendError::KernelFailure(message))
+            }
+        }
+    }
+}
+
+impl Drop for ActiveFileProtection {
+    fn drop(&mut self) {
+        if let Err(error) = self.deactivate_and_cleanup() {
+            log::error!("file-protection cleanup during drop failed: {error}");
+        }
+        if self.retain_topology_on_drop
+            && let Some(prepared) = self.prepared.take()
+        {
+            // Retain held identities until exit; repeated backend reopen failures can accumulate them.
+            std::mem::forget(prepared);
+        }
+    }
+}
+
 impl LoweredPolicy {
     fn counts(&self) -> FileProtectionMapCounts {
         FileProtectionMapCounts {
@@ -69,6 +178,32 @@ impl LoweredPolicy {
             targets: self.targets.len(),
             domains: 1,
         }
+    }
+
+    fn stage(&self, staging: &mut FileProtectionStaging) -> io::Result<()> {
+        for (key, mask) in &self.roots {
+            staging.stage_root(key.identity(), *mask)?;
+        }
+        for (key, mask) in &self.directories {
+            staging.stage_directory(key.identity(), *mask)?;
+        }
+        for (key, mask) in &self.stable_paths {
+            staging.stage_stable_path(key.identity(), *mask)?;
+        }
+        for (key, (parent, masks)) in &self.slots {
+            staging.stage_slot(
+                FileProtectionSlot::new(*parent, &key.name)?,
+                FileProtectionSlotValue {
+                    direct_mask: masks.direct,
+                    exact_exclude_mask: masks.exact_exclude,
+                    subtree_exclude_mask: masks.subtree_exclude,
+                },
+            )?;
+        }
+        for target in &self.targets {
+            staging.stage_target(*target)?;
+        }
+        Ok(())
     }
 }
 
@@ -85,6 +220,14 @@ impl PathKey {
         Self {
             mnt_id: 0,
             ..Self::from_identity(identity)
+        }
+    }
+
+    fn identity(self) -> TreePathIdentity {
+        TreePathIdentity {
+            ino: self.ino,
+            dev: self.dev,
+            mnt_id: self.mnt_id,
         }
     }
 }
@@ -243,6 +386,28 @@ fn target_bit(target_id: u32) -> Result<u64, BackendError> {
     } else {
         Err(compile("structured target id is outside 1..=64"))
     }
+}
+
+fn ensure_prepared_capacity(
+    prepared: &PreparedFileProtection,
+    counts: FileProtectionMapCounts,
+) -> Result<(), BackendError> {
+    let capacity = prepared.topology.capacities;
+    for (name, actual, prepared) in [
+        ("roots", counts.roots, capacity.roots),
+        ("directories", counts.directories, capacity.directories),
+        ("stable paths", counts.stable_paths, capacity.stable_paths),
+        ("slots", counts.slots, capacity.slots),
+        ("targets", counts.targets, capacity.targets),
+        ("domains", counts.domains, capacity.domains),
+    ] {
+        if actual > prepared {
+            return Err(compile(format!(
+                "lowered file-protection {name} count {actual} exceeds prepared capacity {prepared}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn generation(binding_id: Uuid, revision: &str) -> Result<FileProtectionGeneration, BackendError> {
