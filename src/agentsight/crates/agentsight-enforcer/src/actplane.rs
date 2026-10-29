@@ -206,7 +206,7 @@ impl ActPlaneBackend {
         kernel_pid: Option<i32>,
     ) -> Vec<String> {
         let mut errors = Vec::new();
-        let control_pid = std::process::id() as i32;
+        let control_pid = self_host_pid();
         if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
             errors.push(format!("unbind control pid: {error}"));
         }
@@ -329,7 +329,7 @@ impl ActPlaneBackend {
             );
         }
 
-        let control_pid = std::process::id() as i32;
+        let control_pid = self_host_pid();
         let control_state = CapState {
             scope_id: 1,
             labels: label,
@@ -1410,6 +1410,98 @@ fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
     input_pid // fallback
 }
 
+/// The enforcer's own identity, read back through `/proc/self`.
+///
+/// This is the candidate-selection boundary for [`self_host_pid`]: it keeps
+/// the namespace pid, the host pid candidate (`nspid[0]`) and the start time
+/// that binds them in one value, so the mapping can be exercised with a
+/// namespace pid that deliberately differs from the host pid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelfProcSnapshot {
+    /// `NSpid` chain from `/proc/self/status`, outermost (host) first.
+    ///
+    /// Empty when the kernel does not expose the field, which is what a
+    /// container with the host procfs mounted over `/proc` looks like.
+    nspid: Vec<i32>,
+    /// Field 22 of `/proc/self/stat`; clock ticks since boot, never zero for
+    /// a live process. Zero marks the snapshot as unusable.
+    start_time: u64,
+}
+
+/// Map the enforcer's namespace-local pid to its host pid from `snapshot`.
+///
+/// `start_time` is load-bearing, not decoration: it is the only evidence that
+/// the `NSpid` chain describes the same process across namespaces. Dropping it
+/// (or passing a zero) turns this into the identity function, which is the
+/// no-op regression this function exists to prevent.
+fn host_pid_from_self_snapshot(ns_pid: i32, snapshot: &SelfProcSnapshot) -> i32 {
+    if snapshot.start_time == 0 {
+        return ns_pid;
+    }
+    let (Some(&host_pid), Some(&innermost)) = (snapshot.nspid.first(), snapshot.nspid.last())
+    else {
+        return ns_pid;
+    };
+    if host_pid <= 0 || innermost != ns_pid {
+        return ns_pid;
+    }
+    host_pid
+}
+
+/// Read the enforcer's own `/proc/self` identity.
+///
+/// `/proc/self` (unlike `/proc/<getpid()>`) always resolves to the calling
+/// process, even when a host procfs is mounted over `/proc`.
+fn read_self_snapshot() -> SelfProcSnapshot {
+    SelfProcSnapshot {
+        // A missing `NSpid` line only means "no nested namespace evidence";
+        // it must not throw away the start time, which is the identity check.
+        nspid: read_proc_text_lossy("/proc/self/status")
+            .map(|status| parse_nspid_from_status(&status))
+            .unwrap_or_default(),
+        start_time: proc_self_start_time().unwrap_or(0),
+    }
+}
+
+/// Resolve the host-namespace PID of the enforcer process itself.
+///
+/// The kernel keys `cap_task`, `ts_proc_domains` and friends by init-namespace
+/// pid, so a control pid taken from `std::process::id()` is wrong whenever the
+/// enforcer runs in a nested PID namespace.
+///
+/// When `/proc/self/status` exposes a nested `NSpid` chain the host pid comes
+/// straight from `nspid[0]`, with `start_time` proving the chain is ours; no
+/// `/proc` scan is needed. Otherwise fall back to [`resolve_to_host_pid`],
+/// which scans candidates by the same start time instead of trusting a zero.
+///
+/// The result is cached: the host pid is fixed for the process lifetime and
+/// `cleanup_binding` runs on every apply and rollback path.
+fn self_host_pid() -> i32 {
+    use std::sync::OnceLock;
+    static SELF_HOST_PID: OnceLock<i32> = OnceLock::new();
+    *SELF_HOST_PID.get_or_init(|| {
+        let ns_pid = std::process::id() as i32;
+        let snapshot = read_self_snapshot();
+        let mapped = host_pid_from_self_snapshot(ns_pid, &snapshot);
+        if mapped != ns_pid {
+            return mapped;
+        }
+        // Already in the host namespace, or the snapshot cannot prove the
+        // mapping (no `NSpid` line, unreadable stat): let the /proc scan try,
+        // it matches candidates by the same start time.
+        resolve_to_host_pid(ns_pid, snapshot.start_time)
+    })
+}
+
+/// Read `start_time` (field 22) from `/proc/self/stat`.
+///
+/// Unlike `/proc/<getpid()>/stat`, `/proc/self/stat` always resolves to the
+/// calling process even when the container mounts the host `/proc`.
+fn proc_self_start_time() -> Result<u64, ()> {
+    let stat = read_proc_text_lossy("/proc/self/stat").map_err(|_| ())?;
+    parse_process_start_time(&stat).map_err(|_| ())
+}
+
 /// Read the `NSpid:` chain from `/proc/<pid>/status`.  Returns a Vec where
 /// index 0 is the outermost (host) PID and the last element is the innermost
 /// (namespace-local) PID.
@@ -2173,6 +2265,111 @@ mod tests {
     fn proc_start_time_handles_parenthesized_comm() {
         let stat = "42 (a tricky) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 98765";
         assert_eq!(parse_process_start_time(stat), Ok(98765));
+    }
+
+    #[test]
+    fn proc_self_start_time_is_never_zero() {
+        // /proc/self/stat always resolves to the enforcer process, and a real
+        // process's start_time (field 22) is a positive clock tick count. This
+        // guards against the identity-function regression where a `0`
+        // start_time made `resolve_to_host_pid` a no-op.
+        let start = proc_self_start_time().expect("read /proc/self/stat");
+        assert!(start > 0, "own start_time must be positive, got {start}");
+    }
+
+    #[test]
+    fn self_host_pid_maps_a_nested_namespace_pid_to_the_host_pid() {
+        // The case the PR exists for: the enforcer's namespace pid (7) is not
+        // the pid the kernel maps are keyed by (4242). The start time is what
+        // ties the NSpid chain to this process.
+        let snapshot = SelfProcSnapshot {
+            nspid: vec![4242, 7],
+            start_time: 98_765,
+        };
+        assert_eq!(host_pid_from_self_snapshot(7, &snapshot), 4242);
+    }
+
+    #[test]
+    fn self_host_pid_refuses_a_snapshot_without_a_start_time() {
+        // Discriminating guard: if the start time is discarded (the original
+        // `resolve_to_host_pid(pid, 0)` no-op), the namespace pid would be
+        // promoted to a host pid. It must stay the namespace pid instead.
+        let snapshot = SelfProcSnapshot {
+            nspid: vec![4242, 7],
+            start_time: 0,
+        };
+        assert_eq!(
+            host_pid_from_self_snapshot(7, &snapshot),
+            7,
+            "a zero start time must not promote the namespace pid"
+        );
+    }
+
+    #[test]
+    fn self_host_pid_ignores_a_chain_for_another_process() {
+        // Innermost pid differs -> the chain is not ours, do not use nspid[0].
+        let snapshot = SelfProcSnapshot {
+            nspid: vec![4242, 8],
+            start_time: 98_765,
+        };
+        assert_eq!(host_pid_from_self_snapshot(7, &snapshot), 7);
+        // No chain at all (host procfs over /proc) -> likewise no promotion.
+        let empty = SelfProcSnapshot {
+            nspid: Vec::new(),
+            start_time: 98_765,
+        };
+        assert_eq!(host_pid_from_self_snapshot(7, &empty), 7);
+    }
+
+    #[test]
+    fn self_snapshot_is_usable_for_the_host_pid_mapping() {
+        // The production wrapper consumes this snapshot directly. If the start
+        // time is dropped on the way in (`unwrap_or(0)` or a literal 0), the
+        // mapping silently degenerates to the identity function again, so the
+        // snapshot itself must stay usable.
+        let snapshot = read_self_snapshot();
+        assert!(
+            snapshot.start_time > 0,
+            "snapshot must carry a non-zero start time, got {}",
+            snapshot.start_time
+        );
+        assert!(
+            !snapshot.nspid.is_empty(),
+            "snapshot must carry the NSpid chain"
+        );
+    }
+
+    #[test]
+    fn self_host_pid_follows_the_live_self_snapshot() {
+        // Exercises the production wrapper end to end against the live
+        // /proc/self. The expectation is rebuilt from the raw files (not from
+        // `read_self_snapshot`), so discarding the start time inside the
+        // production path - `unwrap_or(0)` or a flat-out `0` - turns this red.
+        let pid = std::process::id() as i32;
+        let status = read_proc_text_lossy("/proc/self/status").expect("read /proc/self/status");
+        let nspid = parse_nspid_from_status(&status);
+        let start_time = proc_self_start_time().expect("start time");
+
+        let expected = match (nspid.first(), nspid.last()) {
+            (Some(&host_pid), Some(&innermost))
+                if start_time > 0 && host_pid > 0 && innermost == pid =>
+            {
+                host_pid
+            }
+            _ => pid,
+        };
+        assert_eq!(self_host_pid(), expected);
+        if nspid.len() >= 2 {
+            assert_ne!(expected, pid, "nested namespace must map to the host pid");
+        } else {
+            assert_eq!(expected, pid);
+        }
+    }
+
+    #[test]
+    fn self_host_pid_is_stable_across_calls() {
+        // Cached for the process lifetime: the host PID cannot change.
+        assert_eq!(self_host_pid(), self_host_pid());
     }
 
     #[test]
