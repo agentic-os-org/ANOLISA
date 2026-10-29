@@ -9,9 +9,12 @@ AgentSight 为保留的捕获 payload 设置限额，并在配对提前结束时
 ## 所有权边界
 
 耗时的静态 SSL 特征探测由一个 worker 执行，最多保留 32 个在途 executable 文件，包含已完成结果。
-任务持有打开的文件描述符，并在每个 4 MiB 窗口之间共享配置的进程 CPU 预算。事件所属线程只为
-未变更且仍有进程引用的文件安装全局 uprobe；符号和已知 offset 快路径继续同步执行。
-关停时取消并等待 worker 退出。首次遇到的静态 binary 在扫描期间仍是 best-effort 探测。
+整文件 marker 预筛仅用于未识别 exe-probe 候选，同样在 worker 上执行，事件消费线程不再读取可执行
+文件内容；已知静态输入（例如静态 OpenSSL/Codex）跳过 BoringSSL marker 预筛，直接扫描 prologue。
+任务持有打开的文件描述符，并在每个 4 MiB 窗口之间共享配置的进程 CPU 预算。事件所属线程在安装
+全局 uprobe 前重新 fstat 钉住的描述符并检查进程引用，然后为所有仍存活的受影响 PID 注册过滤器
+槽位；符号和已知 offset 快路径继续同步执行。队列满的重试由 runtime tick 调度，不再依赖下一次
+discovery。关停时取消并等待 worker 退出。首次遇到的静态 binary 在扫描期间仍是 best-effort 探测。
 SSL executable 扫描使用 SIMD 子串搜索，按 4 MiB 有界窗口保留特征重叠区。重叠匹配与跨窗口的
 起始位置均保持原有语义；inode 缓存与符号选择规则不变。
 

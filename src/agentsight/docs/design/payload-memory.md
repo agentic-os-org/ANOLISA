@@ -10,13 +10,18 @@ runtime, including the ring buffer, native decoding state and allocator retentio
 ## Ownership boundaries
 
 Slow static SSL signature detection runs on one worker with at most 32 in-flight executable files,
-including completed results. Jobs pin file descriptors and share the configured process CPU budget
-between 4 MiB windows. The event owner installs global uprobes only for unchanged files with live
-process references; symbol and known-offset fast paths stay synchronous. Shutdown cancels and joins
-the worker. Discovery of a previously unseen static binary remains best-effort while its scan runs.
-Executable SSL scans use vectorized substring searches in bounded 4 MiB windows with signature
-overlap. Every overlapping match and cross-window start is preserved; inode caching and symbol
-selection keep their existing behavior.
+including completed results. The worker also runs the whole-file marker prefilter for unknown
+exe-probe candidates, so the event consumer never reads executable contents. Known static inputs
+(for example static OpenSSL/Codex binaries) skip that BoringSSL-only prefilter and scan their
+prologues directly. Jobs pin file descriptors and share the configured process CPU budget between
+4 MiB windows. The event owner re-fstats the pinned descriptor and checks live
+process references immediately before installing global uprobes, then registers every still-live
+affected PID in the filter map. Symbol and known-offset fast paths stay synchronous. Queue-full
+retries are scheduled by the runtime tick instead of requiring another discovery. Shutdown cancels
+and joins the worker. Discovery of a previously unseen static binary remains best-effort while its
+scan runs. Executable SSL scans use vectorized substring searches in bounded 4 MiB windows with
+signature overlap. Every overlapping match and cross-window start is preserved; inode caching and
+symbol selection keep their existing behavior.
 
 ```mermaid
 flowchart LR
