@@ -3,8 +3,9 @@
 [English](../../en/adapters/hermes-adapter.md)
 
 Hermes 适配器通过框架原生 Plugin 和 shell Hook API，将已有本地 profile
-接入 AW 服务。本期支持 Linux 上官方 `NousResearch/hermes-agent` 提交
-`952c941e741e922a9be8fc403c8944c6e96318bb` 的 Python `chat` 入口。
+接入 AW 服务，使用 Linux 上的 Python `chat` 入口。已验证基线为官方
+`NousResearch/hermes-agent` 提交 `952c941e741e922a9be8fc403c8944c6e96318bb`，
+其他修订需保留 profile、插件与 shell Hook 接口。
 Gateway、ACP、Desktop 和独立 TUI 入口尚未支持，使用 `.container-mode` 将 CLI
 转入托管容器的 profile 也会被拒绝。
 AW 加入原生 `--cli`，防止环境或配置中的 TUI 偏好切换入口。只接受完整的受支持
@@ -68,7 +69,7 @@ checkout 检查前，非空 `GIT_CONFIG_SYSTEM`、`GIT_CONFIG_GLOBAL`、
 也不支持外部命令 Hook；启动前需禁用该 Hook，避免把 shell 命令误当作单个可信
 可执行路径。配置中的外部 Git `filter.*.clean`、`.process` 和 `.smudge` 命令也不支持，
 在索引/状态检查前拒绝。这些限制在 dotenv 加载前后都生效。
-先用父进程环境校验 checkout，再以有界 Python `-P` 探测调用固定版本的
+先用父进程环境校验 checkout，再以有界 Python `-P` 探测调用已安装版本的
 `load_hermes_dotenv`，禁用本次探测的外部密钥获取，只返回 Git 相关变量、`LD_*`
 加载器变量以及 `PATH`、`HOME`、`XDG_CONFIG_HOME`。非空 `LD_*` 在原生子进程启动前
 检查，并在 dotenv 加载后、第二次 Git 探测前再次拒绝；允许空值或未设置。在 CLI 版本/超时导入前，使用该有效环境重新
@@ -76,12 +77,12 @@ checkout 检查前，非空 `GIT_CONFIG_SYSTEM`、`GIT_CONFIG_GLOBAL`、
 负责，探测不重写最终 chat/Provider 环境；原生启动仍正常加载 dotenv 和外部密钥。
 在该启用 site 的探测前，项目 dotenv 检查拒绝组或其他用户可写的 checkout 根，
 包括 sticky 目录，且无论 `.env` 是否存在。这同时保护 editable `.pth` 激活的
-固定 checkout 根，阻止他人新增导入名称。
+选定的 checkout 根，阻止他人新增导入名称。
 
 安装和启动均在执行 `--version` 之前，校验发现的 checkout 路径、已跟踪文件、
-固定 Git 提交、索引标记和已跟踪状态。限时 `git ls-files -v -z` 拒绝
+实际完整 Git 对象 ID、索引标记和已跟踪状态。限时 `git ls-files -v -z` 拒绝
 `assume-unchanged` 和 `skip-worktree`，请清除标记后重试。每个 checkout 探测均使用
-`--no-replace-objects`，使工作区/索引始终与固定对象比较，即使存在 replacement refs
+`--no-replace-objects`，使工作区/索引始终与选定的 HEAD 对象比较，即使存在 replacement refs
 也不会转向替换对象。AW checkout 探测使用 `--no-optional-locks` 禁止可选索引刷新，
 也不修改 replacement refs。状态探测覆盖 `core.trustctime=true` 和
 `core.checkStat=default`，并额外对从 HEAD 填充的临时索引进行比较。新索引没有
@@ -98,9 +99,9 @@ checkout 检查前，非空 `GIT_CONFIG_SYSTEM`、`GIT_CONFIG_GLOBAL`、
 即使该目录带 sticky bit 且可写也不会从中加载同名包。调用者管理的 Python 配置
 属于受信任输入，包含显式 `PYTHONPATH` 和受保护的 `.pth`/editable-finder 代码。
 AW 保留这些配置，不递归审计它们选择的外部导入根或依赖；安装所有者应信任所配置
-的路径。上述检查验证固定框架 checkout 和 AW 自建启动资源，不对已安装的 Python
+的路径。上述检查验证选定的框架 checkout 和 AW 自建启动资源，不对已安装的 Python
 环境提供沙箱隔离。
-后续版本探测最长允许 60 秒，因为该 Hermes 版本会执行自身更新检查；AW 不修改
+后续版本探测最长允许 60 秒，因为已验证 Hermes 基线会执行自身更新检查；AW 不修改
 该设置，也不重试失败。输出的安装目录必须与已校验的元数据来源一致，不使用可能
 随 `origin/main` 变化的 banner 作为版本依据。
 
@@ -128,7 +129,7 @@ aw run --config aw.yaml --agent hermes --native-profile /absolute/profile -- cha
 ```
 
 Agent 的 `argv` 指定已安装的 Hermes Python console script，使用绝对 Python
-shebang。不支持 shell wrapper 或 `python -m` 入口；请使用固定版本包安装生成的
+shebang。不支持 shell wrapper 或 `python -m` 入口；请使用所选版本包安装生成的
 console script。`chat` 及其参数可以放在
 `argv` 中，也可以放在启动命令的 `--` 后，出现一次即可。
 [示例配置](../../../../crates/aw-service/examples/aw.hermes.yaml)已在 `argv` 中写入 `chat`。
@@ -139,7 +140,7 @@ console script。`chat` 及其参数可以放在
 
 安装向 `plugins/aw-native-hooks` 写入随 AW 提供的插件，将名称添加到
 `plugins.enabled`，并移除 `plugins.disabled` 中对应项。列表包含 `${...}` 时，
-调用固定版本原生展开函数，在真实 profile 环境中解析插件选择；指向 AW 的项
+调用原生展开函数，在真实 profile 环境中解析插件选择；指向 AW 的项
 规范化为启用列表中的名称或从禁用列表移除，其他模板保持原值。原生探针只返回
 指向 AW 的索引，模板展开增长不再占用 JSON 输出预算，也不传回无关的展开值。展开探针和 YAML
 writer 均通过有界 stdin 接收 JSON 列表，沿用 4 MiB 配置数据限额，避免操作系统
@@ -149,7 +150,7 @@ writer 均通过有界 stdin 接收 JSON 列表，沿用 4 MiB 配置数据限�
 插件选择保持原值。更新配置会将原始字节完整保存到私有的
 `config.yaml.aw-backup-<id>`。仅在 AW 独占的私有暂存目录修改需要调整的插件选择
 字段。读取插件有效列表前先展开 YAML 合并来源，支持嵌套合并、序列优先级及显式
-覆盖；候选验证和已安装配置读取共用该逻辑。固定版本原生 round-trip YAML 编辑器
+覆盖；候选验证和已安装配置读取共用该逻辑。原生 round-trip YAML 编辑器
 先复制目标插件 mapping，再替换列表，保留共享锚点的原值。其 YAML 1.1 resolver
 为 `on`、`no`、`null` 等名称加引号，使运行时读取器继续将其视为字符串。
 写入器保留未知值、注释与引号，并在替换暂存候选之前刷新、同步每次写入的新文件。
@@ -216,7 +217,7 @@ Desktop 进程热加载插件。AW 只更新本地文件，不复制或重写 pr
 每个准入的 AW step 对应独立的原生 shell Hook 回调，通过
 `PluginContext.register_hook` 注册。Hermes 按登记顺序串行执行回调，工具批次
 的串行或并行仍由 Hermes 调度。已有配置中的 Hook 继续执行；AW 不导入或
-重排其配置。该固定版本的原生 Hook 配置没有逐 Hook 的环境变量对象。
+重排其配置。已验证基线的原生 Hook 配置没有逐 Hook 的环境变量对象。
 
 原生命令收到回调进程的实际环境，包括 profile 的 `.env` 变量，以及 Hermes
 设置的 HOME/TMPDIR。结构化 Provider 保持启动绑定时固定的环境。AW 不将环境
@@ -255,12 +256,14 @@ middleware 之前。值相同的新字典仍可使用；嵌套原地修改及值
 AW 事件期限与 Hermes 回调期限共同生效。原生命令期限及清理余量超过
 `plugins.hook_callback_timeout` 时，启动会拒绝该配置。自动补入的纯观测回调与配置中的
 动作回调执行同样的准入校验。有界探测使用 console script
-解释器与固定版本原生 CLI 的 profile/dotenv 加载器，查询原生 timeout resolver，
+解释器与原生 CLI 的 profile/dotenv 加载器，查询原生 timeout resolver，
 因此 YAML 1.1 标量、环境展开、默认值和 600 秒上限均遵循 Hermes。启动探测共用
 启动器的取消标志；SIGINT/SIGTERM 会及时回收探测进程组，并保留信号退出状态。
 安装与启动准备共用中断错误报告，在恢复信号前输出包括进程组清理失败在内的诊断。
 插件完成注册后写入
-私有就绪凭据，启动器据此显示原生 Hook 已就绪。临时启动 guard 使用 console
+私有就绪凭据，启动器据此显示原生 Hook 已就绪。启动记录要求 revision 为 40 或 64 位
+十六进制 Git 对象 ID；插件在注册回调和发布就绪前与实际 checkout 核对，缺失、非法或
+发生变化的修订均使注册失败。临时启动 guard 使用 console
 script 的 Python 解释器，解释器启动时就将字节码导入缓存指向私有的启动目录，再在同一进程
 导入原生 CLI 前恢复原始 argv。旧 profile 字节码缓存不会被读取，也不会被改写；
 私有缓存随启动目录清理。profile 选择和 dotenv 加载仍由原生实现负责。guard 在

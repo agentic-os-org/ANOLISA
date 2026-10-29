@@ -100,6 +100,25 @@ fn empty_policy_starts_native_app_and_releases_owned_files() {
 }
 
 #[test]
+fn app_versions_still_require_native_registration_and_cleanup() {
+    for version in ["2.2.2", "2.2.2.post2", "3.0.0rc1"] {
+        let fixture = Fixture::new();
+        let document = setup(&fixture);
+        let service = Service::start(&fixture, &document);
+        let mut command = launch(&fixture);
+        command.env(
+            "FAKE_QWENPAW_VERSION",
+            format!("QwenPaw, version {version}"),
+        );
+        let result = fixture.successful(command);
+        assert_eq!(result["ready_hook_count"], 0);
+        assert_eq!(result["tool_executed"], true);
+        preserved(&fixture);
+        service.released(&fixture);
+    }
+}
+
+#[test]
 fn native_commands_keep_onion_order_literal_argv_and_profile() {
     let fixture = Fixture::new();
     let mut document = setup(&fixture);

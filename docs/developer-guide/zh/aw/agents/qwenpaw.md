@@ -6,7 +6,9 @@
 
 ## 启动 QwenPaw
 
-安装 QwenPaw 2.2.2.post1 与 AgentScope 2.0.10，通过 QwenPaw 初始化模型配置。示例
+已验证基线为 QwenPaw 2.2.2.post1 与 AgentScope 2.0.10。安装 QwenPaw 及其兼容依赖，
+通过 QwenPaw 初始化模型配置。其他版本沿用插件、middleware 与原生任务生命周期接口检查，
+AW 记录已安装版本。示例
 使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
 AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
 

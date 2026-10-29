@@ -2,12 +2,14 @@
 
 [English](../../en/adapters/resident-sdk.md)
 
-Pi 0.84.2 和 Claude SDK 0.2.88 / bundled CLI 2.1.161 可在同一客户端/session 内连续
+Pi 和 Claude SDK 可在同一客户端/session 内连续
 执行多轮，不同客户端在同一前台 worker 中并发。一份配置通过
 `aw run --config aw.yaml --agent pi` 或 `--agent claude` 选择目标。SYSOM 接入集中在镜像、
 启动和公共客户端/MCP 工厂，应用继续负责调度、凭据、HTTP/SSE、业务工具及会话存储。
+已验证基线为 Pi 0.84.2 和 Claude SDK 0.2.88 / bundled CLI 2.1.161，其他版本沿用
+相同的原生工厂、transport 与生命周期检查。
 
-普通 Qoder SDK 1.0.56 / Worker 1.1.78 Query 复用相同的子 scope 和递增 invocation 服务合同。
+普通 Qoder SDK Query（已验证基线为 SDK 1.0.56 / Worker 1.1.78）复用相同的子 scope 和递增 invocation 服务合同。
 每个 Query 持有一个 execution，直到关闭；Query 保持开启时持续回收已完成工具身份。
 其 `--reloadable` 模式使用独立的请求准入路径，详见下文。
 
@@ -39,9 +41,9 @@ binding 内按严格递增序号登记；回调到达时不能靠名称或参数
 AW 保留原始工具载荷；此比较规则保持 AW 元数据的独立整数编码合同。需要精确大整数的工具
 应在 schema 中将其定义为字符串。
 Pi 使用公开模型 stream 及其产生的工具对象。Claude 使用私有 loopback Anthropic Messages
-转发层和固定 SDK 传输的回调调度上下文。MCP `_meta.claudecode/toolUseId` 在 SDK 移除
+转发层和原生 SDK 传输的回调调度上下文。MCP `_meta.claudecode/toolUseId` 在 SDK 移除
 handler 参数中的元数据前，将原生帧关联到同一个身份。
-Qoder 使用固定 Worker 私有 partial 输出中的完整模型工具块，并按原生 control 调度上下文
+Qoder 使用 Worker 私有 partial 输出中的完整模型工具块，并按原生 control 调度上下文
 核验每个 Hook。子工具的私有 stream-start 帧在活动且已授权的父 Agent 下预留原生 ID。
 PreTool 或权限回调可能早于完整 assistant 帧到达；回调在原生取消边界内等待该帧及其登记
 确认，回调输入不能补充缺失的模型参数。未完成生产者占用活动调用预算，固定十二秒期限
@@ -105,8 +107,9 @@ redacted_thinking 和客户端 tool_use。
 其他边界为 64 KiB header、32 MiB 请求/JSON 响应、一 MiB SSE frame/工具输入、
 上游连接十秒、请求 body 三十秒、上游读取六十秒、请求总期限六百秒。这些限制
 控制活动资源，会话 compaction 仍由应用/SDK 管理。实际生产 endpoint、TLS 和代理配置需要
-部署验收。SDK transport 与 _connect_inner 接点固定为 0.2.88；原生 init 必须报告 CLI
-2.1.161；转发层验收使用 HTTPX 0.28.1，升级时重跑验收。
+部署验收。SDK transport 与 `_connect_inner` 接口已在 SDK 0.2.88 验证；原生 init
+需报告合法的 CLI 版本元数据，已验证 CLI 基线为 2.1.161。转发层验收使用
+HTTPX 0.28.1，升级时重跑验收。
 
 Pi 导出 createSession({sdk,cwd,...options}) 和
 runWorker({createSession,closeSession,withSession,args})，工厂返回 cwd 匹配且已装好原生回调
@@ -196,7 +199,7 @@ launcher 在目标的 `shutdown_grace_ms` 宽限期结束后开始
 常驻入口在发布 ready 前拒绝启用的 AgentSight evidence，`evidence.mode: off` 继续支持。
 Claude 两种消息消费方式均在回调排空后交付 ResultMessage，缺少终态消息的 EOF 会报错。
 Claude 显式持有并关闭响应与 transport 迭代器。调用身份上下文仅由设置它的 reader task
-恢复。固定版本 SDK 的 transport 迭代器在原生进程清理前接收取消，避免其 GeneratorExit
+恢复。SDK 的 transport 迭代器在原生进程清理前接收取消，避免其 GeneratorExit
 处理等待进程退出而延后关闭。意外的 reader 与清理错误在现有清理期限内继续向外传播。
 原生清单保留双消费端、EOF 中断、同一 worker 多次 Hook 故障后的新客户端任务恢复、
 Pi 工具执行中取消与退出超时后拒绝复用 worker 的验收。

@@ -217,7 +217,6 @@ spec = importlib.util.spec_from_file_location("resident_fixture", PLUGIN, submod
 plugin = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
-plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
 plugin.plugin.register(SimpleNamespace(
     config={"enabled": not bool(os.environ.get("FAKE_QWENPAW_DISABLED"))},
     register_middleware=lambda factory, **kw: FACTORIES.append(factory),

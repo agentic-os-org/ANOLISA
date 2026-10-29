@@ -1,4 +1,4 @@
-//! Minimum-version Qoder launch contracts using the native-host fixture.
+//! Version-independent Qoder launch contracts using the native-host fixture.
 
 use super::{hooks, Fixture, Service};
 use std::fs;
@@ -6,6 +6,9 @@ use std::fs;
 #[test]
 fn qoder_versions_share_the_hook_contract_and_keep_actual_version_evidence() {
     for version in [
+        "1.1.63".to_owned(),
+        "1.1.64-preview".to_owned(),
+        "2.0.0".to_owned(),
         "1.1.64".to_owned(),
         "1.1.66".to_owned(),
         "1.1.66-preview".to_owned(),
@@ -48,16 +51,12 @@ fn qoder_versions_share_the_hook_contract_and_keep_actual_version_evidence() {
 }
 
 #[test]
-fn older_and_invalid_qoder_versions_are_rejected_before_binding() {
+fn invalid_qoder_versions_are_rejected_before_binding() {
     let fixture = Fixture::new();
     let mut document = fixture.document();
     fixture.provider(&mut document);
     let service = Service::start(&fixture, &document);
     for (version, diagnostic) in [
-        ("1.1.6", "1.1.64 or newer"),
-        ("1.1.63", "1.1.64 or newer"),
-        ("1.1.64-preview", "1.1.64 or newer"),
-        ("1.1.64-preview+build.7", "1.1.64 or newer"),
         ("unknown", "expected a bare SemVer"),
         ("1.1", "expected a bare SemVer"),
         ("1.1.066", "expected a bare SemVer"),

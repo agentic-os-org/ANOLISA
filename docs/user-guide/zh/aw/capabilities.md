@@ -71,3 +71,5 @@ Qoder SDK 应用还可接入固定摘要的 Bash 凭据消费者、Worker import
 - AW 通过原生 Hook 执行策略，OS 沙箱隔离需另行部署。
 
 矩阵由[回归清单](../../../../src/aw/tests/regression-matrix.json)生成。[原生验收清单](../../../../src/aw/tests/native-matrix.json)记录固定版本及验证范围，操作方法见[贡献指南](../../../../src/aw/CONTRIBUTING_zh.md)。
+
+框架版本沿用[原生接入检查](../../../developer-guide/zh/aw/native-agents.md)。记录的测试基线用于复现验收，其他版本可通过相同原生合同接入。

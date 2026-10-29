@@ -6,10 +6,10 @@
 
 ## 启动 AgentScope SDK
 
-使用安装了 `agentscope==2.0.6` 的 Python 环境；这与 QwenPaw 已验证的
-AgentScope 2.0.10 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
-`-m MODULE`。AW 校验该 SDK 版本，提供 `aw_agentscope` 与受保护的运行配置，
-等待真实公共工厂安装 middleware 后生成的回执。
+独立 SDK 的已验证基线为 AgentScope 2.0.6，QwenPaw 的已验证运行时使用
+AgentScope 2.0.10。其他版本可通过相同的公共工厂与 middleware 合同接入。
+`argv` 指定 SDK 环境的 Python 和 `.py` 应用或 `-m MODULE`。AW 记录已安装版本，
+提供 `aw_agentscope` 与受保护的运行配置，等待真实公共工厂安装 middleware 后生成的回执。
 
 在 `src/aw` 中，将该环境的 `python3` 放到 PATH 后执行：
 

@@ -1,4 +1,4 @@
-//! QwenPaw App 2.2.2.post1 middleware; the native runtime owns tool scheduling.
+//! QwenPaw App middleware; the native runtime owns tool scheduling.
 
 use crate::{
     adapter::{
@@ -19,11 +19,11 @@ use std::{
     time::Duration,
 };
 
-const VERSION: &str = "2.2.2.post1";
 pub(crate) struct QwenPaw;
 
 struct Prepared {
     input: LaunchInput,
+    version: String,
     working: PathBuf,
     plugin: Option<OwnedPlugin>,
 }
@@ -172,13 +172,17 @@ impl Adapter for QwenPaw {
                 );
             }
         }
-        if adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?
-            != format!("QwenPaw, version {VERSION}")
-        {
-            return Err(format!("QwenPaw {VERSION} is required by this adapter").into());
-        }
+        let output =
+            adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?;
+        let version = crate::version::reported(
+            output
+                .strip_prefix("QwenPaw, version ")
+                .ok_or("QwenPaw --version must identify QwenPaw and its version")?,
+            "QwenPaw",
+        )?;
         Ok(Box::new(Prepared {
             input,
+            version,
             working,
             plugin: None,
         }))
@@ -203,7 +207,8 @@ impl Adapter for QwenPaw {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        let mut capabilities = super::super::adapter::catalog::QWENPAW.capabilities(VERSION, "app");
+        let mut capabilities =
+            super::super::adapter::catalog::QWENPAW.capabilities(&self.version, "app");
         if !self.input.options.reloadable {
             capabilities
                 .failure_actions
@@ -481,6 +486,7 @@ mod tests {
     fn withholding_is_limited_to_the_ordinary_resident_launch() {
         for reloadable in [false, true] {
             let prepared = Prepared {
+                version: "2.2.3".into(),
                 input: LaunchInput {
                     document: json!({}),
                     target: "target".into(),

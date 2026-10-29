@@ -6,7 +6,9 @@ Run source examples from `src/aw`; build AW with the [integration tutorial](../i
 
 ## Start a Claude SDK worker
 
-Use Claude Agent SDK 0.2.88 with its bundled CLI 2.1.161. The Adapter launches one
+The verified baseline is Claude Agent SDK 0.2.88 with bundled CLI 2.1.161.
+Other releases are admitted through the same native client, Hook, identity and
+transport lifecycle checks. The Adapter records the installed SDK version and launches one
 foreground Python script or `-m` module and requires the worker's public factory
 to use `aw_claude.create_client(options)`. Model credentials remain SDK settings.
 AW supplies this module on `PYTHONPATH` for the launched worker; it does not

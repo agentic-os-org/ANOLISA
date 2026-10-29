@@ -15,6 +15,7 @@ use std::{fs, time::Duration};
 pub(crate) struct ClaudeSdk;
 struct Prepared {
     input: LaunchInput,
+    version: String,
 }
 
 impl Adapter for ClaudeSdk {
@@ -37,13 +38,18 @@ impl Adapter for ClaudeSdk {
             return Err("Claude SDK requires a Python worker script or -m module".into());
         }
         let script = "from importlib.metadata import version; from pathlib import Path; import claude_agent_sdk, subprocess; bundled = Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude'; print(version('claude-agent-sdk') + ':' + subprocess.check_output([str(bundled), '--version'], timeout=4, text=True).strip())";
-        if adapter::Probe(cancelled)
-            .version_output(&input.command, &["-c".into(), script.into()])?
-            != "0.2.88:2.1.161 (Claude Code)"
-        {
-            return Err("Claude SDK 0.2.88 with bundled CLI 2.1.161 is required".into());
-        }
-        Ok(Box::new(Prepared { input }))
+        let output = adapter::Probe(cancelled)
+            .version_output(&input.command, &["-c".into(), script.into()])?;
+        let (sdk, cli) = output
+            .split_once(':')
+            .ok_or("Claude SDK probe must report SDK and bundled CLI versions")?;
+        let version = crate::version::reported(sdk, "Claude SDK")?;
+        crate::version::reported(
+            cli.strip_suffix(" (Claude Code)")
+                .ok_or("Claude SDK probe must identify its bundled Claude Code CLI")?,
+            "Claude Code",
+        )?;
+        Ok(Box::new(Prepared { input, version }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         if native.get("aw_source").is_some() {
@@ -62,7 +68,7 @@ impl Adapter for ClaudeSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::CLAUDE_SDK.capabilities("0.2.88", "sdk-worker")
+        super::super::adapter::catalog::CLAUDE_SDK.capabilities(&self.version, "sdk-worker")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         super::sdk_tools::routes(&self.input.document, steps).map(|_| ())

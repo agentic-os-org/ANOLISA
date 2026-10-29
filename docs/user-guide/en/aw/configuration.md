@@ -60,7 +60,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder -- -p 'Read the current directo
 
 ### OpenClaw
 
-Use OpenClaw 2026.9.6 with an initialized profile. Stop the Gateway using that profile, then replace these placeholders with absolute paths to the existing installation and configuration.
+Use OpenClaw with an initialized profile; 2026.9.6 is the verified baseline. Other releases must provide the same native plugin interfaces. Stop the Gateway using that profile, then replace these placeholders with absolute paths to the existing installation and configuration.
 
 ```bash
 export AW_NODE=/absolute/path/to/node

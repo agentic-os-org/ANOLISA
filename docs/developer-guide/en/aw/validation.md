@@ -15,7 +15,8 @@ absolute paths and verify the Provider. The commands here use its `AW_BIN`,
 files with `AW_BIN` pointing to the installed binary; Python 3 is the sample
 script's dependency.
 
-Prepare each Agent's supported version and native model configuration first.
+Prepare each Agent and its native model configuration first. Versions in the table
+are verified baselines; other releases use the same [integration contracts](native-agents.md).
 Only the selected target must be installed to run it. Use separate native
 profiles, choose their tool working directory explicitly and start from
 `$AW_DEMO/workspace`. The shared YAML changes neither model credentials nor
@@ -23,10 +24,10 @@ native permissions. Test one target at a time initially.
 
 | Target | Native prerequisite | Launch detail |
 | --- | --- | --- |
-| Qoder | CLI >=1.1.64 with native command Hooks, completed login | Interactive or print; optional `--native-settings` |
+| Qoder | CLI with native command Hooks (verified baseline 1.1.64), completed login | Interactive or print; optional `--native-settings` |
 | OpenClaw | 2026.9.6, configured JSON and existing state directory; stop any Gateway using that profile | AW starts a new `gateway run`; pass both native paths |
 | QwenPaw | 2.2.2.post1 / AgentScope 2.0.10, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
-| Hermes | Clean official revision `952c941e`, installed Python console script and initialized local chat profile | Install the AW plugin once into that profile; pass the same profile when running |
+| Hermes | Clean checkout (verified at `952c941e`), installed Python console script and initialized local chat profile | Install the AW plugin once into that profile; pass the same profile when running |
 
 Launch Qoder:
 

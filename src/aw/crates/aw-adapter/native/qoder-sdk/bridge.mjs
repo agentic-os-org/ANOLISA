@@ -28,13 +28,13 @@ function configuration() {
 function runtime(config, options, operation) {
   runtimeOptions(config, options, operation);
   if (process.env.QODERCLI_PATH)
-    throw new Error("QODERCLI_PATH overrides the pinned Qoder SDK runtime");
+    throw new Error("QODERCLI_PATH overrides the bundled Qoder SDK runtime");
   for (const environment of [process.env, options.env ?? {}])
     if (/^(1|true|yes|on)$/i.test((environment.QODER_HEADLESS_FAST_HOOKS ?? "").trim()))
       throw new Error("QODER_HEADLESS_FAST_HOOKS disables native hooks");
 }
 
-/** Start the pinned daemon after admission; the caller still owns stop(). */
+/** Start the SDK daemon after admission; the caller still owns stop(). */
 export async function startDaemon(options) {
   const config = configuration();
   const { awSite = config.default_site ?? "global", ...nativeOptions } = options;

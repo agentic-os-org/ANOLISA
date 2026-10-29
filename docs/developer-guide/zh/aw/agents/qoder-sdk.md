@@ -4,7 +4,7 @@
 
 ## 依赖与工厂
 
-使用 `@qoder-ai/qoder-agent-sdk@1.0.56`、bundled Worker 1.1.78 国际版、Node.js 22+。SDK 安装在应用目录，认证沿用 SDK 设置。
+已验证基线为 `@qoder-ai/qoder-agent-sdk@1.0.56` 与 bundled Worker 1.1.78 国际版。使用 Node.js 22+，SDK 安装在应用目录，认证沿用 SDK 设置。具备所需原生接口的其他 SDK/Worker 版本也可接入，AW 记录实际版本，并在启动和使用时检查包身份、声明站点、Hook 分发、调用身份和 Query 收尾。
 在完整 AW 配置的 `spec` 中设置目标。
 
 ```yaml

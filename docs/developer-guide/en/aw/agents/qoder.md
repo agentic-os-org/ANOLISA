@@ -23,7 +23,7 @@ with the absolute path of its executable. `--agent qoder` selects the named
 entry under `spec.agents`; the name is yours to choose, while `adapter: qoder`
 selects the framework.
 
-The CLI requires SemVer ≥1.1.64 with bare version output. Integration requires `--settings`, literal `args` command Hooks, `PreToolUse`/`PostToolUse`, callback identity and exit-code-2 denial.
+The verified baseline is CLI 1.1.64. AW records the installed bare SemVer output. Integration requires `--settings`, literal `args` command Hooks, `PreToolUse`/`PostToolUse`, callback identity and exit-code-2 denial.
 
 For example, name the target `qodercli` and select your installed executable:
 

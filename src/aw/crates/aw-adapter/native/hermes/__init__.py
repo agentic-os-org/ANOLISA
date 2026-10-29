@@ -1,4 +1,4 @@
-"""Register AW callbacks through the pinned Hermes native shell-hook bridge."""
+"""Register AW callbacks through the Hermes native shell-hook bridge."""
 
 import json
 import os
@@ -11,7 +11,6 @@ import tempfile
 from typing import Any
 
 
-REVISION = "952c941e741e922a9be8fc403c8944c6e96318bb"
 EVENTS = {"tool.before": "pre_tool_call", "tool.after": "post_tool_call"}
 
 
@@ -41,6 +40,10 @@ def _read_launch(path: str) -> dict[str, Any]:
         raise ValueError("AW Hermes launch hooks must be a list")
     if not isinstance(launch.get("token"), str) or not launch["token"]:
         raise ValueError("AW Hermes launch has no readiness token")
+    revision = launch.get("revision")
+    if (not isinstance(revision, str) or len(revision) not in (40, 64)
+            or any(char not in "0123456789abcdefABCDEF" for char in revision)):
+        raise ValueError("AW Hermes launch revision must be a full Git object ID")
     return launch
 
 
@@ -51,12 +54,12 @@ def register(ctx: Any) -> None:
         return
 
     from agent.shell_hooks import ShellHookSpec, _make_callback
-    from hermes_constants import get_hermes_home
     from hermes_cli.version_info import get_version_info
+    from hermes_constants import get_hermes_home
 
     launch = _read_launch(session.launch_path)
-    if get_version_info().commit != REVISION:
-        raise ValueError("AW requires Hermes revision " + REVISION)
+    if get_version_info().commit != launch["revision"]:
+        raise ValueError("AW Hermes checkout changed after launch preparation")
     if get_hermes_home().resolve() != Path(launch["profile"]):
         raise ValueError("AW Hermes launch profile changed")
     if Path.cwd().resolve() != Path(launch["cwd"]):

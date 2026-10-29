@@ -6,7 +6,8 @@
 
 ## 启动 Claude SDK worker
 
-使用 Claude Agent SDK 0.2.88 及其 bundled CLI 2.1.161。Adapter 启动一个前台
+已验证基线为 Claude Agent SDK 0.2.88 及其 bundled CLI 2.1.161。其他版本沿用
+原生 client、Hook、身份与 transport 生命周期检查。Adapter 记录已安装的 SDK 版本，启动一个前台
 Python script 或 `-m` module，要求 worker 公共工厂显式使用
 `aw_claude.create_client(options)`。模型认证继续由 SDK 配置。AW 为启动的 worker
 通过 `PYTHONPATH` 提供此模块，不会自动向任意 SDK 应用注入 Hooks。

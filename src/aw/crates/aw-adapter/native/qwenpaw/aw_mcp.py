@@ -37,7 +37,7 @@ class ManagedMcpTool(MCPTool):
 
     def __init__(self, native: MCPTool) -> None:
         if type(native) is not MCPTool:
-            raise ValueError("AW managed MCP requires the pinned native MCPTool")
+            raise ValueError("AW managed MCP requires the native MCPTool")
         super().__init__(mcp_name=native.mcp_name, tool=native._tool.model_copy(deep=True),
                          session=native._session, client_gen=native._client_gen,
                          middlewares=list(native._middlewares))

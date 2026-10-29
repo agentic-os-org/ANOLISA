@@ -4,7 +4,10 @@
 
 ## Prepare
 
-Use official commit `952c941e741e922a9be8fc403c8944c6e96318bb` with clean tracked files. Install the Python console script with an absolute Python shebang; the entrypoint is local `chat`.
+The verified baseline is commit `952c941e741e922a9be8fc403c8944c6e96318bb`. AW records
+the actual checkout revision and accepts other revisions with the native profile,
+plugin and shell-hook interfaces. Keep tracked files clean and retain the checked
+installation and loader environment. Install the Python console script with an absolute Python shebang; the entrypoint is local `chat`.
 Build AW with the [tutorial](../integration.md), copy the [Hermes configuration](../../../../../src/aw/crates/aw-service/examples/aw.hermes.yaml), and set argv to the installation's absolute path.
 Initialize the profile and model credentials with Hermes first.
 

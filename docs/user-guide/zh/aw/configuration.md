@@ -60,7 +60,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder -- -p 'Read the current directo
 
 ### OpenClaw
 
-需要 OpenClaw 2026.9.6 和已初始化的 profile。先停止使用同一 profile 的 Gateway，将以下占位路径换成已有安装与配置的绝对路径。
+需要 OpenClaw 和已初始化的 profile；2026.9.6 为已验证基线，其他版本需提供相同的原生插件接口。先停止使用同一 profile 的 Gateway，将以下占位路径换成已有安装与配置的绝对路径。
 
 ```bash
 export AW_NODE=/absolute/path/to/node

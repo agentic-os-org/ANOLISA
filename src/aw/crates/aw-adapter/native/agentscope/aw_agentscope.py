@@ -1,4 +1,4 @@
-"""AgentScope 2.0.6 factory bridge; native tool scheduling retains authority."""
+"""AgentScope factory bridge; native tool scheduling retains authority."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import stat
 import sys
 import tempfile
 from contextvars import ContextVar
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
 from uuid import uuid4
@@ -332,8 +331,6 @@ class AwBridge:
     """
 
     def __init__(self) -> None:
-        if version("agentscope") != "2.0.6":
-            raise RuntimeError("AW requires AgentScope 2.0.6")
         self.config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:

@@ -20,11 +20,11 @@ pub struct Settings<'a> {
     pub state: &'a Path,
     /// Explicit policy selection; installed Providers are never enabled implicitly.
     pub policy: Policy<'a>,
-    /// Qoder CLI >=1.1.64 executable with compatible native command Hooks.
+    /// Qoder CLI executable with compatible native command Hooks.
     pub qoder: Option<&'a Path>,
-    /// Node executable used by the pinned OpenClaw installation.
+    /// Node executable used by the selected OpenClaw installation.
     pub node: Option<&'a Path>,
-    /// OpenClaw 2026.9.6 openclaw.mjs entrypoint.
+    /// OpenClaw openclaw.mjs entrypoint.
     pub openclaw: Option<&'a Path>,
 }
 
@@ -57,7 +57,7 @@ pub enum Policy<'a> {
 
 /// Exclusively create a private, schema-validated configuration.
 /// No template executes user commands or starts a Provider during generation.
-/// Agent versions are checked by `aw run`; configuration creation never invokes a model.
+/// Native compatibility is checked by `aw run`; configuration creation never invokes a model.
 pub fn configure(settings: &Settings<'_>) -> Result<()> {
     configure_using(settings, paths::write_private)
 }

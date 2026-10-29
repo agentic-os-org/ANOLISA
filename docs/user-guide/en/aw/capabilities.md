@@ -72,3 +72,5 @@ imports and declarative role assets. Setup and permission requirements are in th
 - AW enforces policy through native Hooks. Deploy OS sandbox isolation separately.
 
 The matrix is generated from the [regression manifest](../../../../src/aw/tests/regression-matrix.json). The [native manifest](../../../../src/aw/tests/native-matrix.json) records pinned versions and coverage; see [contributing](../../../../src/aw/CONTRIBUTING.md) for validation.
+
+Framework releases use the [native integration checks](../../../developer-guide/en/aw/native-agents.md). The recorded test baselines identify reproducible validation inputs; other releases can use the same native contracts.

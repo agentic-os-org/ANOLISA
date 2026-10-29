@@ -2,7 +2,7 @@
 
 [English](../../en/aw/installation.md)
 
-需要 Linux，以及已登录的 Qoder CLI 1.1.64 或更新版本。
+需要 Linux，以及已登录、支持原生命令 Hook 的 Qoder CLI；已验证基线为 1.1.64。
 其他 Agent 见[配置与 Agent 启动](configuration.md)。
 
 ## 获取安装包

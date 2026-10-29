@@ -91,8 +91,12 @@ class ManagedTransport(Transport):
                 ticket = None
                 try:
                     if message.get("type") == "system" and message.get("subtype") == "init":
-                        if message.get("claude_code_version") != "2.1.161":
-                            raise CallbackFailure("AW managed identities require Claude CLI 2.1.161")
+                        version = message.get("claude_code_version")
+                        if (not isinstance(version, str) or not version or len(version) > 128
+                                or not version[0].isascii() or not version[0].isdigit()
+                                or any(not char.isascii() or not (char.isalnum() or char in ".+-_!")
+                                       for char in version)):
+                            raise CallbackFailure("AW requires Claude CLI version metadata in its init frame")
                     if message.get("type") == "control_request":
                         request = message["request"]
                         kind = request.get("subtype")

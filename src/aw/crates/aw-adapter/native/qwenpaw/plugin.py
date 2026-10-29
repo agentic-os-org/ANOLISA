@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from importlib.metadata import version
 import json
 import logging
 import os
@@ -267,8 +266,6 @@ class AwPlugin:
     """Validate once, then register factories which perform no configuration I/O."""
 
     def register(self, api: Any) -> None:
-        if version("qwenpaw") != "2.2.2.post1" or version("agentscope") != "2.0.10":
-            raise RuntimeError("AW requires QwenPaw 2.2.2.post1 and AgentScope 2.0.10")
         if api.config.get("enabled") is False:
             raise RuntimeError("QwenPaw configuration disables the AW plugin")
         descriptor = Path(__file__).with_name("aw-attachment.json")
