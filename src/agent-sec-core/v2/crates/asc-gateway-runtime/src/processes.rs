@@ -6,6 +6,7 @@ use std::path::Path;
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fd::OwnedFd;
+#[cfg(target_os = "linux")]
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
 use crate::{GatewayError, GatewayErrorKind};
@@ -187,6 +188,14 @@ pub(crate) fn scope_snapshot(path: &str) -> Result<Vec<ProcessIdentity>, Gateway
     pids.into_iter().map(capture).collect()
 }
 
+#[cfg(not(target_os = "linux"))]
+fn capture(_pid: u32) -> Result<ProcessIdentity, GatewayError> {
+    Err(GatewayError::unavailable(
+        "process registration requires Linux pidfds",
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn capture(pid: u32) -> Result<ProcessIdentity, GatewayError> {
     let raw = i32::try_from(pid).map_err(|_| GatewayError::invalid("PID is out of range"))?;
     let target = Pid::from_raw(raw).ok_or_else(|| GatewayError::invalid("PID must be positive"))?;

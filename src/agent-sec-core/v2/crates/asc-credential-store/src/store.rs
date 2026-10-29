@@ -18,7 +18,7 @@ pub const MAX_ACTIVE_FAKES_PER_AGENT: usize = 64;
 /// budget permanently; removed fakes must stay rejected rather than becoming unknown.
 pub const MAX_FAKES_TOTAL: usize = 4096;
 
-const STORE_FILE_MODE: u32 = 0o600;
+const STORE_FILE_MODE: rustix::fs::RawMode = 0o600;
 const MAX_STORE_BYTES: u64 = 8 * 1024 * 1024;
 const STORE_VERSION: u32 = 1;
 const FAKE_ATTEMPTS: usize = 8;

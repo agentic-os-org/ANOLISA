@@ -9,7 +9,7 @@ use crate::{AgentName, CredentialId, CredentialStore, CredentialStoreError};
 /// Schema version of the gateway secrets snapshot.
 pub const SECRETS_SNAPSHOT_VERSION: u32 = 1;
 
-const SNAPSHOT_FILE_MODE: u32 = 0o640;
+const SNAPSHOT_FILE_MODE: rustix::fs::RawMode = 0o640;
 
 /// Destination of a gateway secrets snapshot, normally on tmpfs under `/run`.
 #[derive(Debug, Clone, PartialEq, Eq)]

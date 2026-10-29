@@ -153,7 +153,7 @@ impl PinnedDirectory {
     pub(crate) fn read_file(
         &self,
         name: &str,
-        mode: u32,
+        mode: rustix::fs::RawMode,
         limit: u64,
     ) -> Result<Option<Vec<u8>>, CredentialStoreError> {
         let path = self.path.join(name);
@@ -190,7 +190,7 @@ impl PinnedDirectory {
         &self,
         name: &str,
         bytes: &[u8],
-        mode: u32,
+        mode: rustix::fs::RawMode,
         group: Option<u32>,
     ) -> Result<(), WriteFailure> {
         let not_replaced = |error| WriteFailure {

@@ -213,7 +213,9 @@ class Agent:
 
 def in_domain(agent, script, *args, refresh=True, snapshot=False):
     """Executes a generated local script in a descendant of the registered Agent."""
-    return agent.execute(["sh", "-c", script, "sh", *args], refresh=refresh, snapshot=snapshot)
+    return agent.execute(
+        ["sh", "-c", script, "sh", *args], refresh=refresh, snapshot=snapshot
+    )
 
 
 def resolve_flags():
@@ -276,7 +278,8 @@ def wait_status(cli, ready, timeout=30):
 def wait_loaded(cli):
     wait_status(
         cli,
-        lambda status: status["enabled"] and status["loadedGeneration"] == status["generation"],
+        lambda status: status["enabled"]
+        and status["loadedGeneration"] == status["generation"],
     )
 
 
@@ -308,7 +311,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         host = self.headers.get("Host", "").partition(":")[0]
         authorization = self.headers.get("Authorization")
         body = self._body()
-        self.server.seen.append((self.server.scheme, host, self.command, self.path, authorization))
+        self.server.seen.append(
+            (self.server.scheme, host, self.command, self.path, authorization)
+        )
         if host == "github.com":
             self._git(authorization, body)
             return
@@ -393,7 +398,9 @@ def _issue_certificates(directory):
     extensions = Path(directory) / "server.ext"
     names = ",".join(f"DNS:{host}" for host in HOSTS)
     extensions.write_text(
-        f"subjectAltName={names}\n" "extendedKeyUsage=serverAuth\n" "authorityKeyIdentifier=keyid\n"
+        f"subjectAltName={names}\n"
+        "extendedKeyUsage=serverAuth\n"
+        "authorityKeyIdentifier=keyid\n"
     )
     command(
         "openssl", "x509", "-req", "-days", "1", "-in", f"{directory}/server.csr",
@@ -538,7 +545,11 @@ def protected_token(cli, user, agents=(AGENT,), foreign_user=None):
                     probe = domain.request(probe=True, refresh=False, snapshot=snapshot)
                     assert probe["cgroup"].endswith(scope)
                     assert probe["descendantCgroup"] == probe["cgroup"]
-                    expected_pid = domain.ready["child"]["pid"] if snapshot else domain.ready["pid"]
+                    expected_pid = (
+                        domain.ready["child"]["pid"]
+                        if snapshot
+                        else domain.ready["pid"]
+                    )
                     assert probe["pid"] == expected_pid
                 gateway(
                     cli,
@@ -562,14 +573,22 @@ def protected_token(cli, user, agents=(AGENT,), foreign_user=None):
             finally:
                 try:
                     wait_status(cli, lambda status: True)
-                    remaining = {entry["name"] for entry in gateway(cli, "status")["agents"]}
+                    remaining = {
+                        entry["name"] for entry in gateway(cli, "status")["agents"]
+                    }
                     # Domain removal, not key remove, owns preset revocation.
                     with contextlib.ExitStack() as cleanup:
                         for name in registered:
                             if name in remaining:
-                                cleanup.callback(gateway, cli, "unregister", "--agent", name)
+                                cleanup.callback(
+                                    gateway, cli, "unregister", "--agent", name
+                                )
                     assert gateway(cli, "status")["agents"] == []
-                    assert all(entry["state"] == "retired" and all(fake["retired"] for fake in entry["fakes"]) for entry in gateway(cli, "key", "list")["credentials"])
+                    assert all(
+                        entry["state"] == "retired"
+                        and all(fake["retired"] for fake in entry["fakes"])
+                        for entry in gateway(cli, "key", "list")["credentials"]
+                    )
                 finally:
                     gateway(cli, "disable")
     assert not RUNTIME.exists()
@@ -594,8 +613,12 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
             assert probe["descendantCgroup"] == probe["cgroup"]
             environment = probe["environment"]
             token = environment["GITHUB_TOKEN"]
-            assert token == environment["GH_TOKEN"] == grant["environment"]["GITHUB_TOKEN"]
-            assert token != real and token.startswith("ghp_") and len(token) == len(real)
+            assert (
+                token == environment["GH_TOKEN"] == grant["environment"]["GITHUB_TOKEN"]
+            )
+            assert (
+                token != real and token.startswith("ghp_") and len(token) == len(real)
+            )
             assert real not in json.dumps(environment)
             for variable in (
                 "SSL_CERT_FILE",
@@ -606,7 +629,9 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
                 assert environment[variable] == grant["environment"][variable]
                 assert Path(environment[variable]).is_file()
         before = agent.request(probe=True, refresh=False)["cgroup"]
-        own = agent.execute([cli, "gateway", "credentials", "--agent", AGENT], refresh=False)
+        own = agent.execute(
+            [cli, "gateway", "credentials", "--agent", AGENT], refresh=False
+        )
         assert own.returncode == 0, own.stderr
         assert json.loads(own.stdout) == grant
         assert agent.request(probe=True, refresh=False)["cgroup"] == before
@@ -634,7 +659,15 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
             ["disable"],
             ["key", "list"],
             ["key", "remove", "github", "--agent", AGENT],
-            ["key", "add", "github", "--agent", AGENT, "--secret-file", "/does-not-exist"],
+            [
+                "key",
+                "add",
+                "github",
+                "--agent",
+                AGENT,
+                "--secret-file",
+                "/does-not-exist",
+            ],
             [
                 "register",
                 "--agent",
@@ -652,7 +685,9 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
             assert "permission_denied" in (denied.stdout + denied.stderr), args
         status = agent.execute([cli, "gateway", "status"], refresh=False)
         assert status.returncode == 0, status.stderr
-        assert {entry["name"] for entry in json.loads(status.stdout)["agents"]} == {AGENT}
+        assert {entry["name"] for entry in json.loads(status.stdout)["agents"]} == {
+            AGENT
+        }
         foreign = domains[OTHER_AGENT]
         for caller, target in ((agent, OTHER_AGENT), (foreign, AGENT)):
             denied = caller.execute(
@@ -662,9 +697,9 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
             assert "permission_denied" in (denied.stdout + denied.stderr)
         foreign_status = foreign.execute([cli, "gateway", "status"], refresh=False)
         assert foreign_status.returncode == 0, foreign_status.stderr
-        assert {entry["name"] for entry in json.loads(foreign_status.stdout)["agents"]} == {
-            OTHER_AGENT
-        }
+        assert {
+            entry["name"] for entry in json.loads(foreign_status.stdout)["agents"]
+        } == {OTHER_AGENT}
         assert {entry["name"] for entry in gateway(cli, "status")["agents"]} == {
             AGENT,
             OTHER_AGENT,
@@ -679,9 +714,18 @@ def test_rest_requests_carry_the_real_token_upstream(host, upstream):
         fake = fake_of(agent)
         for snapshot in (False, True):
             echoed = curl(agent, "https://api.github.com/user", snapshot=snapshot)
-            assert seen[-1] == ("https", "api.github.com", "GET", "/user", f"Bearer {real}")
+            assert seen[-1] == (
+                "https",
+                "api.github.com",
+                "GET",
+                "/user",
+                f"Bearer {real}",
+            )
             # The upstream echo is rewritten even for the pre-registration child.
-            assert echoed == {"host": "api.github.com", "authorization": f"Bearer {fake}"}
+            assert echoed == {
+                "host": "api.github.com",
+                "authorization": f"Bearer {fake}",
+            }
 
         anonymous = agent.execute(
             [
@@ -763,7 +807,10 @@ def test_misused_credentials_are_rejected_before_the_upstream(host, upstream):
         # supplies either token. unregister then makes the read-only query fail.
         grant = gateway(cli, "credentials", "--agent", AGENT)
         assert not {"GITHUB_TOKEN", "GH_TOKEN"} & grant["environment"].keys()
-        assert {entry["name"] for entry in gateway(cli, "status")["agents"]} == {AGENT, OTHER_AGENT}
+        assert {entry["name"] for entry in gateway(cli, "status")["agents"]} == {
+            AGENT,
+            OTHER_AGENT,
+        }
         gateway(cli, "unregister", "--agent", AGENT)
         revoked = agent.request(argv=["true"])
         assert revoked["returncode"] != 0 and revoked["stage"] == "credentials"
@@ -775,14 +822,21 @@ def test_misused_credentials_are_rejected_before_the_upstream(host, upstream):
         # a separate key remove, while leaving its independent Agent alive.
         gateway(cli, "unregister", "--agent", OTHER_AGENT)
         assert gateway(cli, "status")["agents"] == []
-        assert all(entry["state"] == "retired" and all(fake["retired"] for fake in entry["fakes"]) for entry in gateway(cli, "key", "list")["credentials"])
+        assert all(
+            entry["state"] == "retired"
+            and all(fake["retired"] for fake in entry["fakes"])
+            for entry in gateway(cli, "key", "list")["credentials"]
+        )
         revoked = other.request(argv=["true"])
         assert revoked["returncode"] != 0 and revoked["stage"] == "credentials"
         for snapshot in (False, True):
             probe = other.request(probe=True, refresh=False, snapshot=snapshot)
             expected = other.ready["child"]["pid"] if snapshot else other.ready["pid"]
             assert probe["pid"] == expected
-        assert gateway(cli, "credentials", "--agent", OTHER_AGENT, check=False).returncode != 0
+        assert (
+            gateway(cli, "credentials", "--agent", OTHER_AGENT, check=False).returncode
+            != 0
+        )
         for body, code in cases:
             assert body == {"error": code, "source": "agent-sec-gateway"}
     # None of the rejected requests reached the upstream.

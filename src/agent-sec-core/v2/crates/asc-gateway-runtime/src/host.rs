@@ -125,6 +125,12 @@ impl Host for SystemHost {
         }))
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn user_groups(&self, _uid: u32) -> Option<Vec<u32>> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
     fn user_groups(&self, uid: u32) -> Option<Vec<u32>> {
         let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
         let name = std::ffi::CString::new(user.name).ok()?;
