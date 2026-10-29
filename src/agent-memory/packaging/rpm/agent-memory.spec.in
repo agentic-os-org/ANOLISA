@@ -216,8 +216,8 @@ install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_data
 # run, which is the correct trust boundary.
 
 %preun plugins
-# On uninstall ($1=0): run the adapter uninstall script which removes
-# the openclaw plugin (CLI or manual) and cleans openclaw.json entries.
+# On final erase ($1=0), delegate plugin deregistration and configuration
+# cleanup to the host through the adapter uninstall script.
 if [ $1 -eq 0 ]; then
     UNINSTALL_SCRIPT="%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh"
     if [ -f "$UNINSTALL_SCRIPT" ]; then

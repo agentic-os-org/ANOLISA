@@ -44,6 +44,10 @@ openclaw gateway restart
 
 两个可选安装参数都从 `openclaw plugins install --help` 协商，但两个开关并不对称。只有宿主列出完整的 `--accept-capabilities` 时才传递它——当前宿主会列出，因此 `AGENT_MEMORY_ACCEPT_CAPABILITIES` 在这些宿主上仍然会改变 argv：取 `1` 时在 `openclaw plugins install <插件目录> --force` 之后追加 `--accept-capabilities`，取 `0` 时省略它，带同意门禁的宿主随后会拒绝这次安装。只有宿主仍声明 `--dangerously-force-unsafe-install` 有效时才传递该覆盖参数（OpenClaw 2026.6.1 及更早版本）。当前宿主把它标注为 deprecated no-op，两种取值下都不会收到它，因此 `AGENT_MEMORY_SAFE_INSTALL` 在这些宿主上不产生任何差别，安装期安全由运维自有的 `security.installPolicy` 决定。安装日志会说明命中的是哪一种情况。
 
+配套的 `uninstall.sh` 将插件移除与配置清理交给 OpenClaw。插件已注销时，只有 state 目录下
+两个已知插件路径均不存在才算成功。CLI 缺失、执行失败或路径残留均返回非零；脚本自身不修改
+配置，也不删除插件文件。成功条件和 RPM 卸载行为的完整说明见用户指南。
+
 ### 集成（MCP 客户端）
 
 添加到 MCP 配置（Claude Code、Cursor 等）：

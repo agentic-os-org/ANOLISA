@@ -196,7 +196,7 @@ esac
 
 # One install-failure cause the script can establish without any transcript.
 # OpenClaw materialises the plugin under ${OPENCLAW_STATE_DIR}/extensions/ (the
-# memory-anolisa directory uninstall.sh removes), so an unwritable state
+# memory-anolisa directory managed by the host), so an unwritable state
 # directory fails the install on its own, whatever the host's install policy
 # says. Probing that path leaves the CLI's streams exactly as they were.
 install_target_writable() {

@@ -84,6 +84,20 @@ if [ "$1" = config ] && [ "$2" = set ]; then
     exit 0
 fi
 if [ "$1" = plugins ] && [ "$2" = uninstall ]; then
+    # Model OpenClaw 2026.5.7 cleanup for this fixture, not every host version.
+    # A separate real install/uninstall probe checks this slot behavior.
+    python3 - "$OPENCLAW_STATE_DIR/openclaw.json" <<'CLEAN'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+if path.exists():
+    cfg = json.loads(path.read_text())
+    plugins = cfg.get("plugins", {})
+    plugins["allow"] = [p for p in plugins.get("allow", []) if p != "memory-anolisa"]
+    plugins.get("entries", {}).pop("memory-anolisa", None)
+    if plugins.get("slots", {}).get("memory") == "memory-anolisa":
+        plugins["slots"]["memory"] = "memory-core"
+    path.write_text(json.dumps(cfg))
+CLEAN
     exit 0
 fi
 [ "$1" = plugins ] && [ "$2" = install ]
@@ -577,7 +591,7 @@ assert plugins['entries']['memory-core']['enabled'] == (sys.argv[3] == 'true')
 assert 'memory-anolisa' not in plugins['entries']
 assert 'memory-anolisa' not in plugins['allow']
 assert plugins['entries']['memory-lancedb']['enabled'] is True
-assert plugins['slots'].get('memory') == (None if sys.argv[2] == 'memory-anolisa' else sys.argv[2])
+assert plugins['slots'].get('memory') == ("memory-core" if sys.argv[2] == 'memory-anolisa' else sys.argv[2])
 PYTEST
             if [ "$legacy" = yes ]; then
                 expect_log 'previous installer recorded'
@@ -652,59 +666,18 @@ esac
     || fail 'dry-run uninstall called the CLI'
 echo "PASS: dry-run uninstall previews the CLI deregistration"
 
-# Without the CLI the preview names the two direct removals instead.
+# Without the CLI the preview names the refusal and still changes nothing.
 dry_manual_out="$(ANOLISA_DRY_RUN=1 OPENCLAW_BIN="$SANDBOX/absent-openclaw" \
     bash "$UNINSTALL_SH" 2>&1)" || fail 'no-CLI dry-run uninstall exited non-zero'
 case "$dry_manual_out" in
-    *"DRY-RUN: rm -rf $OPENCLAW_STATE_DIR/plugins/memory-anolisa"*) : ;;
-    *) fail 'no-CLI dry-run uninstall did not name the plugin removal' ;;
+    *"a real uninstall would fail"*) : ;;
+    *) fail 'no-CLI dry-run uninstall did not preview the refusal' ;;
 esac
 case "$dry_manual_out" in
-    *"DRY-RUN: rm -rf $OPENCLAW_STATE_DIR/extensions/memory-anolisa"*) : ;;
-    *) fail 'no-CLI dry-run uninstall did not name the extension removal' ;;
+    *"rm -rf"*) fail 'no-CLI dry-run uninstall promised a direct removal' ;;
 esac
 [ -d "$OPENCLAW_STATE_DIR/plugins/memory-anolisa" ] || fail 'the no-CLI dry run removed the plugin tree'
-echo "PASS: a no-CLI dry-run uninstall names both direct removals"
+echo "PASS: a no-CLI dry-run uninstall previews the refusal"
 
-# The openclaw.json rewrite preview is the only conditional in the uninstall
-# preview, so both of its branches are pinned here: deleting the -f guard, or
-# the block, must fail this suite. The tool named is the one the real path
-# would use on this host — jq, else python3, else neither, where the real path
-# WARNs and leaves the file referencing the plugin, so the preview says that
-# instead of promising an edit this host cannot make.
-mkdir -p -- "$OPENCLAW_STATE_DIR"
-cfg="$OPENCLAW_STATE_DIR/openclaw.json"
-printf '{"plugins":{"allow":["memory-anolisa"],"entries":{"memory-anolisa":{"enabled":true}},"slots":{"memory":"memory-anolisa"}}}\n' > "$cfg"
-cfg_before="$(cat "$cfg")"
-dry_cfg_out="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)" \
-    || fail 'dry-run uninstall with a config file exited non-zero'
-case "$dry_cfg_out" in
-    *"drop memory-anolisa from plugins.allow, plugins.entries and plugins.slots in $cfg"*) : ;;
-    *) fail 'dry-run uninstall did not preview the openclaw.json rewrite' ;;
-esac
-if command -v jq &>/dev/null; then cfg_tool='(jq)'
-elif command -v python3 &>/dev/null; then cfg_tool='(python3)'
-else cfg_tool=''; fi
-if [ -n "$cfg_tool" ]; then
-    case "$dry_cfg_out" in
-        *"$cfg_tool"*) : ;;
-        *) fail "dry-run uninstall did not name the tool the real path would use ($cfg_tool)" ;;
-    esac
-else
-    case "$dry_cfg_out" in
-        *'neither jq nor python3 is on PATH'*) : ;;
-        *) fail 'dry-run uninstall promised a config edit with no tool to make it' ;;
-    esac
-fi
-[ "$(cat "$cfg")" = "$cfg_before" ] || fail 'dry-run uninstall rewrote openclaw.json'
-echo "PASS: dry-run uninstall previews the openclaw.json rewrite and names the tool"
-
-# Without the file there is no rewrite to announce.
-rm -f "$cfg"
-dry_nocfg_out="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)" \
-    || fail 'dry-run uninstall without a config file exited non-zero'
-case "$dry_nocfg_out" in
-    *"plugins.allow, plugins.entries and plugins.slots"*|*'neither jq nor python3'*)
-        fail 'dry-run uninstall previewed a rewrite for a missing openclaw.json' ;;
-esac
-echo 'PASS: a dry run without openclaw.json previews no rewrite'
+# These isolated subprocess cases pin the host-owned configuration boundary.
+python3 "$SCRIPT_DIR/test_openclaw_uninstall.py"
