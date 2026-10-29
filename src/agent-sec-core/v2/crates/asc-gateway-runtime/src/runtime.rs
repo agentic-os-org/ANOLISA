@@ -241,6 +241,44 @@ impl RuntimeDirectory {
         Ok(())
     }
 
+    /// Retains public trust material so existing Agent CA settings remain usable after disable.
+    pub(crate) fn remove_except_ca(&self) -> Result<(), GatewayError> {
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(GatewayError::internal("runtime root is not a directory"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(GatewayError::io("cannot inspect", &self.root, &error)),
+        }
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(GatewayError::io("cannot list", &self.root, &error)),
+        };
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| GatewayError::io("cannot list", &self.root, &error))?;
+            if entry.file_name() == CA_BUNDLE_NAME {
+                continue;
+            }
+            let kind = entry
+                .file_type()
+                .map_err(|error| GatewayError::io("cannot inspect", &entry.path(), &error))?;
+            if kind.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+                    .map_err(|error| GatewayError::io("cannot remove", &entry.path(), &error))?;
+            } else {
+                files::remove_file(&entry.path())?;
+            }
+        }
+        if !self.ca_bundle_path().exists() {
+            std::fs::remove_dir(&self.root)
+                .map_err(|error| GatewayError::io("cannot remove", &self.root, &error))?;
+        }
+        Ok(())
+    }
+
     /// Removes the whole runtime directory, secrets snapshot included.
     pub(crate) fn remove_all(&self) -> Result<(), GatewayError> {
         match std::fs::remove_dir_all(&self.root) {

@@ -27,6 +27,9 @@ struct HostLog {
     cgroups: BTreeSet<String>,
     rulesets: Vec<String>,
     units: Vec<String>,
+    operations: Vec<&'static str>,
+    fail_unroute: bool,
+    fail_stop: bool,
     attached: Vec<(String, u32)>,
     processes: BTreeMap<u32, TestProcess>,
     change_after_snapshot: BTreeSet<u32>,
@@ -103,7 +106,12 @@ impl Host for FakeHost {
     }
 
     fn stop_unit(&self, unit: &str) -> Result<(), GatewayError> {
-        self.log().units.push(format!("stop {unit}"));
+        let mut log = self.log();
+        log.units.push(format!("stop {unit}"));
+        log.operations.push("stop");
+        if log.fail_stop {
+            return Err(GatewayError::unavailable("stop rejected"));
+        }
         Ok(())
     }
 
@@ -112,7 +120,14 @@ impl Host for FakeHost {
     }
 
     fn apply_nft(&self, ruleset: &str) -> Result<(), GatewayError> {
-        self.log().rulesets.push(ruleset.to_owned());
+        let mut log = self.log();
+        log.rulesets.push(ruleset.to_owned());
+        if ruleset == nft::render_delete() {
+            log.operations.push("unroute");
+            if log.fail_unroute {
+                return Err(GatewayError::unavailable("unroute rejected"));
+            }
+        }
         Ok(())
     }
 
@@ -690,15 +705,29 @@ fn a_failed_enable_leaves_nothing_serving() {
 }
 
 #[test]
-fn disable_removes_runtime_files_and_routes() {
+fn disable_preserves_public_ca_and_withdraws_routes_before_stopping() {
     let fixture = Fixture::new();
     let service = fixture.service();
     fixture.register(&service, DEV_UID, "dev");
     service.add_key(&fixture.request("dev", REAL)).unwrap();
     service.enable().unwrap();
+    let bundle = fixture.config.runtime_dir.join("ca-bundle.pem");
+    let ca = fs::read(&bundle).unwrap();
+    fixture.host.log().operations.clear();
     let status = service.disable().unwrap();
     assert!(!status.enabled);
-    assert!(!fixture.config.runtime_dir.exists());
+    assert_eq!(fixture.host.log().operations, ["unroute", "stop"]);
+    assert_eq!(fs::read(&bundle).unwrap(), ca);
+    assert_eq!(fs::metadata(&bundle).unwrap().mode() & 0o7777, 0o644);
+    assert_eq!(
+        fs::read_dir(&fixture.config.runtime_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        [std::ffi::OsString::from("ca-bundle.pem")]
+    );
+    service.disable().unwrap();
+    assert_eq!(fs::read(&bundle).unwrap(), ca);
     assert_eq!(fixture.last_ruleset(), nft::render_delete());
     assert_eq!(
         fixture.host.log().units.last().map(String::as_str),
@@ -706,6 +735,58 @@ fn disable_removes_runtime_files_and_routes() {
     );
     assert_eq!(service.list_keys().unwrap().agents.len(), 1);
     assert!(!fixture.service().status(0).enabled);
+}
+
+#[test]
+fn disable_does_not_follow_runtime_root_symlinks() {
+    let fixture = Fixture::new();
+    let service = fixture.service();
+    let target = fixture.config.state_dir.join("unrelated");
+    fs::create_dir_all(&target).unwrap();
+    let sentinel = target.join("keep");
+    fs::write(&sentinel, b"unrelated data").unwrap();
+    symlink(&target, &fixture.config.runtime_dir).unwrap();
+    assert!(service.disable().is_err());
+    assert_eq!(fs::read(&sentinel).unwrap(), b"unrelated data");
+}
+
+#[test]
+fn disable_host_failures_keep_runtime_for_retry() {
+    for unroute_failure in [true, false] {
+        let fixture = Fixture::new();
+        let service = fixture.service();
+        fixture.register(&service, DEV_UID, "dev");
+        service.add_key(&fixture.request("dev", REAL)).unwrap();
+        service.enable().unwrap();
+        {
+            let mut log = fixture.host.log();
+            log.operations.clear();
+            log.fail_unroute = unroute_failure;
+            log.fail_stop = !unroute_failure;
+        }
+        assert_eq!(
+            service.disable().unwrap_err().kind(),
+            GatewayErrorKind::Unavailable
+        );
+        assert!(fixture.config.runtime_dir.join("active.json").is_file());
+        assert!(service.status(0).enabled);
+        assert!(fixture.service().status(0).enabled);
+        assert_eq!(
+            fixture.host.log().operations,
+            if unroute_failure {
+                vec!["unroute"]
+            } else {
+                vec!["unroute", "stop"]
+            }
+        );
+        {
+            let mut log = fixture.host.log();
+            log.fail_unroute = false;
+            log.fail_stop = false;
+        }
+        assert!(!service.disable().unwrap().enabled);
+        assert!(!fixture.config.runtime_dir.join("active.json").exists());
+    }
 }
 
 #[test]
@@ -1180,13 +1261,8 @@ fn ruleset_redirects_each_scope_and_returns_loopback() {
          \x20   type nat hook output priority -100; policy accept;\n\
          \x20   ip daddr 127.0.0.0/8 return\n\
          \x20   ip6 daddr ::1 return\n\
-         \x20   socket cgroupv2 level 2 \"agentsec.slice/agent-sec-agent-dev.scope\" tcp dport { 80, 443 } counter redirect to :15001 comment \"asc:agent:dev\"\n\
-         \x20   socket cgroupv2 level 2 \"agentsec.slice/agent-sec-agent-ops.scope\" tcp dport { 80, 443 } counter redirect to :15002 comment \"asc:agent:ops\"\n\
-         \x20 }\n\
-         \x20 chain filter_out {\n\
-         \x20   type filter hook output priority 0; policy accept;\n\
-         \x20   socket cgroupv2 level 2 \"agentsec.slice/agent-sec-agent-dev.scope\" udp dport 443 counter drop comment \"asc:agent:dev\"\n\
-         \x20   socket cgroupv2 level 2 \"agentsec.slice/agent-sec-agent-ops.scope\" udp dport 443 counter drop comment \"asc:agent:ops\"\n\
+         \x20   meta nfproto ipv4 socket cgroupv2 level 2 \"agentsec.slice/agent-sec-agent-dev.scope\" tcp dport { 80, 443 } counter redirect to :15001 comment \"asc:agent:dev\"\n\
+         \x20   meta nfproto ipv4 socket cgroupv2 level 2 \"agentsec.slice/agent-sec-agent-ops.scope\" tcp dport { 80, 443 } counter redirect to :15002 comment \"asc:agent:ops\"\n\
          \x20 }\n\
          }\n"
     );

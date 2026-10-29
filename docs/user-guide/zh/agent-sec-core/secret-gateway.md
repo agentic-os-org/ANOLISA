@@ -3,7 +3,7 @@
 [English](../../en/agent-sec-core/secret-gateway.md)
 
 Secret Gateway 让真实 API Key 不进入 Agent 进程。Agent 独立启动，由 root 登记其 UID 和 PID，
-并通过 Agent 自身配置使用形态相同的 fake key。Agent 把 fake key 发往允许的端点时，网关在链路上替换为真实 key；
+并通过 Agent 自身配置使用形态相同的 fake key。Agent 经网关把 fake key 发往允许的端点时，网关在链路上替换为真实 key；
 fake key 在其他任何地方都没有用处。即使 Agent 被提示词注入后打印环境变量、写入文件或发往其他主机，
 泄露的也只是 fake key。
 
@@ -15,9 +15,9 @@ fake key 在其他任何地方都没有用处。即使 Agent 被提示词注入�
 - **Agent 域**：一个 UID 下的进程子集，对应具名 systemd scope
   `agentsec.slice/agent-sec-agent-<name>.scope`。root 登记已有 Agent 的 UID、PID，daemon 核验
   进程身份后将其及已有后代快照移入 scope；之后在域内创建的子进程继承归属。
-- **引流**：daemon 安装 nftables 表 `inet agent_sec_gateway`，把各 Agent 域发出的 TCP 80、443
-  流量重定向到网关，并丢弃 UDP 443，使客户端从 HTTP/3 回退到 TCP。回环流量和 Agent 域之外的进程
-  不受影响。
+- **引流**：daemon 安装 nftables 表 `inet agent_sec_gateway`，仅把已配置 Key 的 Agent 域发出的
+  IPv4 TCP 80、443 流量重定向到网关。IPv6 和 HTTP/3/QUIC 绕过网关，不丢弃 UDP 443，
+  不强制回退到 TCP；回环流量和 Agent 域之外的进程不被重定向。
 - **网关**：`agent-sec-gateway.service` 以无特权用户 `agent-sec-gw` 运行固定版本的 mitmproxy
   standalone 构建，使用 transparent 模式。每个 Agent 域独占 `15001`–`15008` 中的一个端口，
   因此最多配置 8 个域。
@@ -33,8 +33,10 @@ fake key 在其他任何地方都没有用处。即使 Agent 被提示词注入�
 | `github.com` | `…/git-upload-pack` | POST |
 | `github.com` | `…/git-receive-pack` | POST |
 
-Agent 在 `Authorization` 头中以 Token 或 HTTP Basic 密码的形式出示 fake key。该头中没有 fake key
-的请求原样转发。网关拒绝请求时返回 JSON 响应体
+Agent 在 `Authorization` 头中以 Token 或 HTTP Basic 密码的形式出示 fake key。所有被引流的
+IPv4 HTTP(S) 请求都经过代理；HTTPS 即使没有 fake 也执行 TLS MITM，客户端仍须信任网关 CA。
+不含托管凭据的请求仅在通过原安全校验后按默认策略放行，不是 TLS 透传，也不保证流量不受影响。
+网关拒绝请求时返回 JSON 响应体
 `{"error": "<code>", "source": "agent-sec-gateway"}`，下列错误码状态码为 `403`，
 `sni_host_mismatch` 为 `421`，钩子内部异常 `gateway_error` 为 `500`。常见错误码：
 
@@ -111,8 +113,30 @@ agent-sec-cli gateway credentials --agent dev  # read-only: your domain's fakes 
 sudo agent-sec-cli gateway key list       # read-only, root only: abbreviated fakes
 sudo agent-sec-cli gateway key remove github --agent dev
 sudo agent-sec-cli gateway unregister --agent dev
-sudo agent-sec-cli gateway disable        # stops the gateway, removes routing and runtime files
+sudo agent-sec-cli gateway disable        # withdraws routing, stops the gateway, retains public CA
 ```
+
+### 关闭与失败边界
+
+这是可用性优先的有限 fail-open：未覆盖的协议允许未经网关保护的请求发出，不强制回退，
+主动 disable 恢复直连。这些请求中的 fake 不会被替换，鉴权可能失败。已进入 IPv4 代理的请求
+仍执行原安全校验，generation 未就绪仍拒绝。撤销失败仍停止代理并删除整个运行目录，
+首次 enable 失败的清理也删除整个运行目录；这些路径不适用 disable 的 CA 保留规则，
+不能概括为所有故障都 fail-open。
+
+`disable` 先通过 nft delete 事务撤流，再停止网关 unit；两步均成功后才删除
+`/run/agent-sec-gateway` 中除 `ca-bundle.pem` 外的全部内容，包括 manifest、plan、
+secrets 快照和 `status/`，并保存 `enabled=false`。已配置 Key 与域登记保留，供下次 enable。
+
+- 撤流失败立即返回错误，不停止 unit、不删文件、不修改期望 `enabled`，须显式重试 disable。
+- unit 停止失败时引流已撤除，但运行文件与期望 `enabled` 保留；须重试 disable，不能把错误
+  当作关闭成功。
+- 文件清理失败仍尝试保存 `enabled=false`，随后返回清理错误；状态保存失败也返回错误。
+  须核查并重试，不能假定清理已完成。
+
+公开 CA 保留在原路径，避免已有 Agent CA 配置悬空，但不会让 fake 成为有效 GitHub Token：
+直连请求仍原样携带 fake。已有连接不保证无缝恢复，需重连。CA 仍位于 `/run`，主机重启后
+会丢失，因此这种保留不是持久存储。
 
 ## Agent 凭据与 CA 配置
 
@@ -130,7 +154,8 @@ sudo agent-sec-cli gateway disable        # stops the gateway, removes routing a
 也不清理代理变量。HTTPS Git 需自行配置 credential helper，以 fake 作为密码；避免 helper 使用真实 Token。
 检查并去除会绕过透明引流的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及小写形式。
 
-只配置 fake/CA 不会自动归类进程；只有登记到域内的进程及其后代的新连接才会经过网关。
+只配置 fake/CA 不会自动归类进程；仅在网关启用时，已登记且配置 Key 的域内进程及其后代
+发出的、属于覆盖范围的 IPv4 TCP 新连接才会经过网关。
 
 ## 限制
 
@@ -139,9 +164,9 @@ sudo agent-sec-cli gateway disable        # stops the gateway, removes routing a
   部分迁移，错误不代表已完整接管；核查进程后重试登记。
 - Agent 和 gateway 启动顺序独立，但只有注册、Key 配置、enable 及 Agent fake/CA 配置均完成后，
   新连接才具有完整的注入效果。未被引流的 fake 可能离开主机，不能把这种情况称为请求已被阻断。
-- 只引流 TCP 80 和 443。发往其他端口的 fake key 原样离开主机，对接收方无用。
-- 网关只监听 IPv4 回环地址，因此 Agent 域发往 80、443 的 IPv6 连接会失败；随后改用 IPv4 的
-  客户端仍可正常工作。
+- 只引流 IPv4 TCP 80 和 443。IPv6、HTTP/3/QUIC 与其他端口绕过凭据保护，请求可能携带
+  未替换的 fake key 离开主机，鉴权可能失败。网关不拒绝这些协议，也不强制回退；
+  完整 IPv6 和 HTTP/3 支持属于后续扩展。
 - 以同一用户运行的多个 Agent 域彼此不隔离：该用户可读取所有这些域的 fake key。
 - 已撤销的 fake key 会一直保留记录以便继续拒绝；存储总共最多容纳 4096 个 fake key，
   已撤销的也计入在内。

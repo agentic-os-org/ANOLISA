@@ -8,9 +8,15 @@
 
 ## 1. 目标与边界
 
-Secret Gateway 让 Agent 进程只持有与真实 key 同形的 fake。Agent 把 fake 发往允许的
+Secret Gateway 让 Agent 进程只持有与真实 key 同形的 fake。Agent 经网关把 fake 发往允许的
 端点时，网关在请求上把它换成真实值；fake 在其他任何地方都没有用途。被 prompt 注入的
 Agent 即使打印环境变量、写入文件或发往其他主机，泄露的也只是 fake。
+
+本版本采用可用性优先的有限 fail-open：只引流已配置 Key 的 Agent 域的 IPv4 TCP 80/443，
+IPv6 与 HTTP/3/QUIC 不强制回退或拒绝，允许未经网关保护的请求发出；这些请求中的 fake
+不会被替换，鉴权可能失败。主动 disable 撤流后恢复直连，不保证已有连接无缝恢复，需重连。
+已进入 IPv4 代理的请求仍执行原安全校验，generation 未就绪仍拒绝，撤销失败仍停止代理；
+这不是所有故障都 fail-open。完整 IPv6 与 HTTP/3 凭据保护属于后续扩展。
 
 本设计只支持内置 preset，用户不能自定义规则。内容检测（DLP）、审计导出和 OAuth
 流程不在范围内。
@@ -80,9 +86,9 @@ fake 保留真实值最长匹配的已知前缀和总长度；前缀之后的每
 - `retire_fake` 把某个 Agent 域的 fake 变为 tombstone，其他域继续使用该凭据；之后再签发会得到新值。
 - `remove` 丢弃真实值，所有 fake 变为 tombstone。对已退役的凭据再次 `put` 会重新启用它，
   但旧 fake 仍是 tombstone。
-- tombstone 永不清理，被撤销的 fake 因此始终被拒绝，而不会退化成“未知值”被放行。
-  代价是 tombstone 占用全局配额：每个 Agent 域最多 64 个活跃 fake，全部 fake（含
-  tombstone）最多 4096 个。
+- tombstone 永不清理，被撤销的 fake 因此在代理内始终被拒绝，而不会退化成“未知值”被放行。
+  未覆盖协议不经过该判定。代价是 tombstone 占用全局配额：每个 Agent 域最多 64 个活跃 fake，
+  全部 fake（含 tombstone）最多 4096 个。
 
 加载和每次写入时都校验以下不变量，违反即视为存储损坏：
 
@@ -129,7 +135,7 @@ fake 保留真实值最长匹配的已知前缀和总长度；前缀之后的每
 | `github.com` | `/**/git-upload-pack` | POST | none |
 | `github.com` | `/**/git-receive-pack` | POST | buffered |
 
-上传接口、raw 对象、GitHub Enterprise 和通配子域名都不在规则中，发往这些地方的 fake
+上传接口、raw 对象、GitHub Enterprise 和通配子域名都不在规则中，经网关发往这些地方的 fake
 会被拒绝，而不是被替换。`git-upload-pack` 的响应是 packfile，不会回显 token 且可能很大，
 因此不改写。
 
@@ -328,24 +334,30 @@ unit 在启动前和停止后都会删除 `status/health.json`。如果保留上
   旧 generation 中仍有被撤销的映射，因此停止 unit 并删除整个运行目录（旧快照也含被撤销的值）；
   清理本身失败时，错误信息会提示管理员手动停止网关。
 - 首次 `enable` 失败、状态仍为未启用时，停止 unit、删除 nftables 表和运行目录，未启用的
-  网关不会继续服务。
-- `disable` 停止 unit、删除 nftables 表和运行目录，保留已配置的 key 供下次 enable。
+  网关不会继续服务。这与撤销失败的 `remove_all` 收敛保持不变，不适用 disable 的 CA 保留规则。
+- `disable` 先通过 nft delete 事务撤流，成功后停止 unit；两步均成功后才用 `remove_except_ca`
+  删除运行目录中除 `ca-bundle.pem` 外的全部内容，包括 manifest、plan、快照和 `status/`，
+  并保存 `enabled=false`。已配置的 key 保留供下次 enable。
+- 撤流失败立即返回，不停止 unit、不删文件、不修改期望 `enabled`；停止 unit 失败同样返回，
+  保留运行文件与期望 `enabled`，但引流已经撤除。管理员须重试 disable，不能把错误当作关闭成功。
+- 文件清理失败仍尝试保存 `enabled=false`，随后返回清理错误；状态保存失败也返回错误。
+  错误不保证运行目录已清空，须核查并重试。
+- 成功关闭保留公开 CA 的原路径，避免已有 CA 配置悬空；它不是持久存储，主机重启后 `/run`
+  中的 CA 仍会丢失。直连不会替换 fake，fake 仍不能用于 GitHub 鉴权；已有代理连接需重连。
 
 ### 5.5 流量引导
 
 nftables 表 `inet agent_sec_gateway` 由控制面独占，每次整体替换：
 
-```
+```text
+table inet agent_sec_gateway
+delete table inet agent_sec_gateway
 table inet agent_sec_gateway {
   chain redirect_out {
     type nat hook output priority -100; policy accept;
     ip daddr 127.0.0.0/8 return
     ip6 daddr ::1 return
-    socket cgroupv2 level 2 "agentsec.slice/agent-sec-agent-dev-agent.scope" tcp dport { 80, 443 } counter redirect to :15001 comment "asc:agent:dev-agent"
-  }
-  chain filter_out {
-    type filter hook output priority 0; policy accept;
-    socket cgroupv2 level 2 "agentsec.slice/agent-sec-agent-dev-agent.scope" udp dport 443 counter drop comment "asc:agent:dev-agent"
+    meta nfproto ipv4 socket cgroupv2 level 2 "agentsec.slice/agent-sec-agent-dev-agent.scope" tcp dport { 80, 443 } counter redirect to :15001 comment "asc:agent:dev-agent"
   }
 }
 ```
@@ -353,8 +365,11 @@ table inet agent_sec_gateway {
 - 只有已配置 Key 且 cgroup 当前存在的域才会出现在表中。nft 在加载时把 cgroup 路径解析为 inode，
   所以 scope 每次重新创建后都要重写表；启用状态下 `register` 移入进程后刷新引流。表加载时
   如果某个 cgroup 恰好消失，整个事务失败，此时重试一次。
-- 发往回环地址的流量不重定向；IPv6 也会被重定向，但监听端口只在 `127.0.0.1` 上，
-  因此 IPv6 连接直接失败。丢弃 UDP/443，让客户端从 QUIC 回退到 TCP。
+- 发往回环地址的流量不重定向；`meta nfproto ipv4` 将域内重定向限定为 IPv4 TCP 80/443。
+  没有 UDP/443 drop 或 filter chain，IPv6 与 HTTP/3/QUIC 放行，不强制客户端回退到 TCP。
+  未覆盖流量绕过网关，fake 原样发出且不能完成真实凭据鉴权。
+- 所有被引流的 IPv4 HTTP(S) 请求都经过代理；HTTPS 均执行 TLS MITM，即使不含 fake 也不是
+  TLS 透传。不含托管凭据仅表示按 `requestDefault` 判定，仍需客户端信任 CA，并通过原安全校验。
 
 ### 5.6 已有进程注册
 
@@ -405,8 +420,10 @@ HTTPS Git 由 Agent 自行配置 helper，以 fake 作为 Basic 密码。用户�
 
 ## 7. 已知限制
 
-- 只引导 TCP 80 和 443；发往其他端口的 fake 原样离开主机，对接收方没有用途。
-- 网关只监听 IPv4 回环地址，Agent 域发出的 IPv6 HTTP(S) 连接会失败。
+- 只引导 IPv4 TCP 80 和 443；IPv6、HTTP/3/QUIC 及其他端口不受网关保护，fake 原样
+  离开主机，鉴权可能失败。不会因协议未覆盖而强制回退或拒绝；完整 IPv6 和 HTTP/3 支持为后续扩展。
+- 成功 disable 撤流并停止代理，仅保留公开 CA 的原路径；fake 不会因此成为有效 GitHub Token，
+  已有连接不保证无缝恢复，须重连。CA 位于 `/run`，不保证跨主机重启保留。
 - 隔离边界是 UID：同一用户的多个 Agent 域可以互相读取 fake，同一用户在域外运行的进程
   不经过网关。
 - tombstone 永不清理，fake 总数（含 tombstone）上限 4096。

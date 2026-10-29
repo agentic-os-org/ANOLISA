@@ -20,23 +20,17 @@ pub(crate) struct Redirect<'a> {
 /// nft resolves each cgroup path to the cgroup's inode when loading, so the
 /// table must be re-rendered whenever a scope is created again; a path whose
 /// cgroup is missing fails the whole transaction and leaves the old table.
-/// IPv6 is redirected too and, with listeners only on 127.0.0.1, fails
-/// closed. QUIC is dropped so clients fall back to TCP.
+/// Only IPv4 TCP is supported; IPv6 and QUIC bypass credential protection.
 pub(crate) fn render(redirects: &[Redirect<'_>]) -> String {
     let mut redirect_rules = String::new();
-    let mut drop_rules = String::new();
     for redirect in redirects {
         let level = redirect.cgroup.split('/').count();
         let matcher = format!("socket cgroupv2 level {level} \"{}\"", redirect.cgroup);
         let comment = format!("comment \"asc:agent:{}\"", redirect.agent);
         let _ = writeln!(
             redirect_rules,
-            "    {matcher} tcp dport {{ 80, 443 }} counter redirect to :{} {comment}",
+            "    meta nfproto ipv4 {matcher} tcp dport {{ 80, 443 }} counter redirect to :{} {comment}",
             redirect.port
-        );
-        let _ = writeln!(
-            drop_rules,
-            "    {matcher} udp dport 443 counter drop {comment}"
         );
     }
     format!(
@@ -48,10 +42,6 @@ pub(crate) fn render(redirects: &[Redirect<'_>]) -> String {
          \x20   ip daddr 127.0.0.0/8 return\n\
          \x20   ip6 daddr ::1 return\n\
          {redirect_rules}\
-         \x20 }}\n\
-         \x20 chain filter_out {{\n\
-         \x20   type filter hook output priority 0; policy accept;\n\
-         {drop_rules}\
          \x20 }}\n\
          }}\n"
     )

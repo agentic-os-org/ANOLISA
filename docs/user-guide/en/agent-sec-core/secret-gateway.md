@@ -4,8 +4,8 @@
 
 The secret gateway keeps real API keys out of the Agent process. Agents start independently;
 root registers their UID and PID, and each Agent loads a same-shaped fake through its own
-configuration. When the Agent sends that fake to an allowed endpoint, the gateway swaps in the
-real key on the wire. The fake key is useless
+configuration. When the Agent sends that fake through the gateway to an allowed endpoint, the
+gateway swaps in the real key on the wire. The fake key is useless
 anywhere else. A prompt-injected Agent that prints its environment, writes it to a file or sends
 it to another host leaks only the fake.
 
@@ -20,9 +20,9 @@ not available.
   the daemon verifies process identity and moves it and a snapshot of existing descendants into
   the scope. Children created inside the domain inherit its membership.
 - **Routing**: the daemon installs the nftables table `inet agent_sec_gateway`. It redirects
-  outbound TCP ports 80 and 443 from each Agent domain to the gateway, and drops UDP port 443 so
-  clients fall back from HTTP/3 to TCP. Loopback traffic and processes outside the domains are not
-  affected.
+  IPv4 TCP ports 80 and 443 from Agent domains with configured keys to the gateway. IPv6 and
+  HTTP/3/QUIC bypass the gateway; UDP port 443 is not dropped and no TCP fallback is forced.
+  Loopback traffic and processes outside the domains are not redirected.
 - **Gateway**: `agent-sec-gateway.service` runs the pinned mitmproxy standalone build as the
   unprivileged `agent-sec-gw` user, in transparent mode. Each Agent domain uses its own port in
   `15001`–`15008`, so at most 8 domains can be configured.
@@ -40,9 +40,11 @@ The `github` preset injects the real token only for these requests:
 | `github.com` | `…/git-receive-pack` | POST |
 
 The Agent presents the fake in the `Authorization` header, as a token or as the HTTP Basic
-password. Requests without a fake in that header are forwarded unchanged. The gateway rejects a
-request with a JSON body `{"error": "<code>", "source": "agent-sec-gateway"}`, status `403` for
-the codes below, `421` for `sni_host_mismatch` and `500` for an internal `gateway_error`. Common
+password. All redirected IPv4 HTTP(S) requests pass through the proxy; HTTPS uses TLS MITM even
+without a fake, so clients must trust the gateway CA. Requests without managed credentials are
+allowed by the default policy only after the existing security checks; this is not TLS passthrough
+or a promise of unaffected traffic. The gateway rejects a request with a JSON body
+`{"error": "<code>", "source": "agent-sec-gateway"}`, status `403` for the codes below, `421` for `sni_host_mismatch` and `500` for an internal `gateway_error`. Common
 codes:
 
 | Code | Trigger |
@@ -129,8 +131,35 @@ agent-sec-cli gateway credentials --agent dev  # read-only: your domain's fakes 
 sudo agent-sec-cli gateway key list       # read-only, root only: abbreviated fakes
 sudo agent-sec-cli gateway key remove github --agent dev
 sudo agent-sec-cli gateway unregister --agent dev
-sudo agent-sec-cli gateway disable        # stops the gateway, removes routing and runtime files
+sudo agent-sec-cli gateway disable        # withdraws routing, stops the gateway, retains public CA
 ```
+
+### Disabling and failure boundaries
+
+This is an availability-first, limited fail-open policy: unsupported protocols are allowed out
+without gateway protection or forced fallback, and an explicit disable restores direct routing.
+Their fakes are not replaced, so authentication may fail. Requests already entering the IPv4 proxy
+still undergo its security checks; an unready generation is rejected. Failed revocation still stops
+the proxy and removes the entire runtime directory, as does cleanup after a failed first enable.
+These failures do not share disable's CA retention rule; not every fault is fail-open.
+
+`disable` first withdraws routing with an nft delete transaction, then stops the gateway unit.
+Only after both succeed does it remove everything in `/run/agent-sec-gateway` except
+`ca-bundle.pem`, including manifests, plans, secrets snapshots and `status/`, and save
+`enabled=false`. Configured keys and domain registrations remain for a later enable.
+
+- If routing withdrawal fails, the command returns an error without stopping the unit, deleting
+  files or changing the desired `enabled` state. Retry disable explicitly.
+- If stopping the unit fails, routing is already withdrawn, but runtime files and the desired
+  `enabled` state remain. Retry disable; an error is not a successful shutdown.
+- If file cleanup fails, the daemon still attempts to save `enabled=false`, then returns the cleanup
+  error. A state-save failure also returns an error; inspect and retry rather than assuming cleanup
+  completed.
+
+The public CA stays at its original path to avoid dangling Agent CA settings. It does not make a
+fake valid for GitHub authentication: direct requests still carry the fake unchanged. Existing
+connections are not guaranteed to recover seamlessly; reconnect. The CA remains under `/run` and
+is lost on host reboot, so this retention is not durable.
 
 ## Agent credential and CA configuration
 
@@ -152,8 +181,8 @@ install a system CA, replace Git helpers or remove proxy variables. Configure HT
 credential helper to return the fake as its password; avoid helpers supplying real tokens. Check
 and remove `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and lowercase variants that bypass transparent routing.
 
-Loading fake/CA settings does not classify a process. Only new connections from registered domain
-processes and their descendants pass through the gateway.
+Loading fake/CA settings does not classify a process. Only covered new IPv4 TCP connections from
+registered domains with configured keys and their descendants pass through the enabled gateway.
 
 ## Limits
 
@@ -164,10 +193,10 @@ processes and their descendants pass through the gateway.
 - Agent and gateway startup order is independent. Complete injection requires registration, key
   configuration, enable and the Agent's own fake/CA configuration before opening new connections.
   An unrouted fake can leave the host; this is not a blocked request.
-- Only TCP ports 80 and 443 are routed. A fake sent to another port leaves the host unchanged and
-  is useless to the receiver.
-- The gateway listens on IPv4 loopback only, so IPv6 connections to ports 80 and 443 from an
-  Agent domain fail. Clients that try IPv4 next keep working.
+- Only IPv4 TCP ports 80 and 443 are routed. IPv6, HTTP/3/QUIC and other ports bypass credential
+  protection; requests may leave the host with the fake unchanged and authentication may fail.
+  The gateway does not reject these protocols or force fallback. Full IPv6 and HTTP/3 support
+  remains a future extension.
 - Agent domains that run as the same user are not isolated from each other: that user can read
   the fakes of all of them.
 - Every removed fake stays recorded so that it keeps being rejected; the store holds at most 4096

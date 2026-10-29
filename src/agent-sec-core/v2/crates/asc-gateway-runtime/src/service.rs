@@ -237,23 +237,22 @@ impl GatewayService {
         Ok(self.status_of(&inner.state))
     }
 
-    /// Stops the data plane and removes every runtime file, the secrets snapshot included.
+    /// Withdraws routing, stops the data plane and removes runtime secrets, retaining the public CA bundle.
     ///
     /// Configured keys are kept for a later enable.
     ///
     /// # Errors
-    /// Returns the first host failure after attempting every cleanup step.
+    /// Routing or stop failures leave the data plane files intact for an explicit retry.
     pub fn disable(&self) -> Result<GatewayStatus, GatewayError> {
         let mut inner = self.lock();
-        let stopped = self.host.stop_unit(&self.config.unit);
-        let unrouted = self.host.apply_nft(&nft::render_delete());
-        let removed = self.runtime(None).remove_all();
+        // Never stop the listener while new connections are still redirected to it.
+        self.host.apply_nft(&nft::render_delete())?;
+        self.host.stop_unit(&self.config.unit)?;
+        let removed = self.runtime(None).remove_except_ca();
         let mut desired = inner.state.clone();
         desired.enabled = false;
         desired.save(&self.config.state_dir)?;
         inner.state = desired;
-        stopped?;
-        unrouted?;
         removed?;
         Ok(self.status_of(&inner.state))
     }

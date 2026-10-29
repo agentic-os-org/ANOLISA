@@ -591,7 +591,8 @@ def protected_token(cli, user, agents=(AGENT,), foreign_user=None):
                     )
                 finally:
                     gateway(cli, "disable")
-    assert not RUNTIME.exists()
+    assert sorted(path.name for path in RUNTIME.iterdir()) == ["ca-bundle.pem"]
+    assert (RUNTIME / "ca-bundle.pem").is_file()
     assert command("nft", "list", "table", "inet", TABLE, check=False).returncode != 0
     logs = command("journalctl", "--no-pager", "-u", UNIT, "-u", DAEMON_UNIT).stdout
     assert real not in logs
@@ -864,8 +865,8 @@ def test_traffic_outside_the_domain_bypasses_the_gateway(host, upstream):
             receiver.bind((UPSTREAM, 443))
             receiver.settimeout(1)
             in_domain(agent, send)
-            with pytest.raises(TimeoutError):
-                receiver.recv(16)
+            # UDP/443 is deliberately outside the MVP's interception boundary.
+            assert receiver.recv(16) == b"quic\n"
             command("runuser", "-u", user, "--", "sh", "-c", send)
             assert receiver.recv(16) == b"quic\n"
     assert real not in str(seen)
