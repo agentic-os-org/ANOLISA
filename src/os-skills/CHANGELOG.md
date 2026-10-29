@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `docker-admin` skill for single-host Docker/Podman runtime
+  administration: container diagnostics, bounded log reading, disk cleanup
+  with list-before-delete and named-volume protection, and idempotent
+  compose lifecycle operations. (#3529)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

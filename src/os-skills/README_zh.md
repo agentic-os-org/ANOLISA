@@ -35,6 +35,7 @@
 - **upgrade-alinux-kernel** — ALinux 内核升级
 
 ### 开发运维
+- **docker-admin** — 单机 Docker/Podman 容器运行时管理（诊断、日志、安全清理、compose 生命周期）
 - **github** — GitHub 工作流与集成
 - **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）
 - **sysom-agentsight** — 系统诊断工具

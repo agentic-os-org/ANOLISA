@@ -44,7 +44,7 @@ maintainers:
 
 不要为此类任务触发此技能:
 
-- 容器编排细节(Kubernetes 网络、Docker Compose 配置) - 使用 Docker/K8s 相关技能
+- 容器运行时运维(Docker 诊断、日志、清理、Compose 生命周期) - 使用 docker-admin 技能；Kubernetes 编排暂无对应技能
 - 云提供商 IAM、VPC 路由或托管服务配置 - 这些是云平台层面的问题
 - 安全加固、漏洞修复、合规配置 - 使用 security 模块相关技能
 - 性能调优、sysctl 参数、cgroups 配置 - 使用 performance-tuning 技能

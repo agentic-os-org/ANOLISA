@@ -55,6 +55,10 @@ name = "aliyun-ecs"
 source = "{datadir}/skills/aliyun-ecs/"
 
 [[adapters.openclaw.skills]]
+name = "docker-admin"
+source = "{datadir}/skills/docker-admin/"
+
+[[adapters.openclaw.skills]]
 name = "github"
 source = "{datadir}/skills/github/"
 
@@ -173,6 +177,10 @@ source = "{datadir}/skills/setup-mcp/"
 [[adapters.hermes.skills]]
 name = "aliyun-ecs"
 source = "{datadir}/skills/aliyun-ecs/"
+
+[[adapters.hermes.skills]]
+name = "docker-admin"
+source = "{datadir}/skills/docker-admin/"
 
 [[adapters.hermes.skills]]
 name = "github"
