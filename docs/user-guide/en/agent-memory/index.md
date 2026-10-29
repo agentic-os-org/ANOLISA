@@ -810,6 +810,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | config typos silently ignored | — | now hard-fail; check startup stderr |
 | `mem_log` returns `[]` despite writes | git versioning not enabled | `MEMORY_GIT_ENABLED=true MEMORY_GIT_AUTO_COMMIT=true` |
 | search misses just-written content | inside the 200 ms debounce window | retry, or use `mem_grep` (regex on the filesystem, no index) |
+| startup warns `index unavailable` with `duplicate column name`; search stays disabled | older builds can repeat a schema migration when clients start against the same index concurrently | update agent-memory and restart the affected MCP client after the other clients finish starting; preserve the memory files. If the warning persists, inspect the index schema: an index already made inconsistent by the old race may need repair |
 | `mem_promote` reports `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` unset or scratch missing | see Promote workflow |
 | OpenClaw plugin not loaded | `openclaw` CLI not on PATH | rerun `install.sh` after installing OpenClaw |
 | OpenClaw calls the host memory backend or reports `plugin tool name conflict` | Old plugin bundle, stale gateway/session, or old tool names in prompts | Update the plugin, restart the gateway, start a new session, and use `anolisa_memory_search` / `anolisa_memory_get` for ANOLISA memories |

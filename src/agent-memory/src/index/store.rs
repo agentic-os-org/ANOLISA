@@ -119,27 +119,32 @@ impl BM25Store {
     /// - Older DB → step through `migrate_<N>_to_<N+1>` until current.
     /// - Newer DB → fail loudly (refuse to operate on unknown schema).
     fn ensure_schema(conn: &mut Connection) -> Result<()> {
-        let current: i64 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap_or(0);
-
+        let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if current > SCHEMA_VERSION {
             return Err(MemoryError::Other(format!(
                 "index db schema is at v{current}, binary only supports up to v{SCHEMA_VERSION}; \
                  downgrade is not safe"
             )));
         }
-
         if current == SCHEMA_VERSION {
             return Ok(());
         }
 
-        // Each migration runs inside its own transaction so a crash mid-
-        // upgrade either leaves the DB at the previous version or the next.
-        let mut at = current;
-        while at < SCHEMA_VERSION {
-            let tx = conn.transaction()?;
+        // Claim the SQLite writer before choosing each migration. Another
+        // process can finish an upgrade while we wait for this lock; using
+        // the earlier version would repeat ALTER TABLE and disable its index.
+        // Keep each schema step and its version update in one transaction.
+        loop {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let at: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             match at {
+                SCHEMA_VERSION => return Ok(()),
+                n if n > SCHEMA_VERSION => {
+                    return Err(MemoryError::Other(format!(
+                        "index db schema is at v{n}, binary only supports up to v{SCHEMA_VERSION}; \
+                         downgrade is not safe"
+                    )));
+                }
                 0 => Self::migrate_0_to_1(&tx)?,
                 1 => Self::migrate_1_to_2(&tx)?,
                 2 => Self::migrate_2_to_3(&tx)?,
@@ -153,11 +158,9 @@ impl BM25Store {
                     )));
                 }
             }
-            at += 1;
-            tx.pragma_update(None, "user_version", at)?;
+            tx.pragma_update(None, "user_version", at + 1)?;
             tx.commit()?;
         }
-        Ok(())
     }
 
     /// Initial schema (v1): file metadata table + FTS5 BM25 over body.
@@ -2265,6 +2268,101 @@ mod tests {
         // Second open must succeed and preserve data.
         let s = BM25Store::open_for_test(path).unwrap();
         assert_eq!(s.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn ensure_schema_observes_a_concurrent_migration() {
+        use std::cell::RefCell;
+        use std::sync::mpsc::{Sender, channel};
+        use std::time::Duration;
+
+        thread_local! {
+            static BLOCKED: RefCell<Option<Sender<()>>> = const { RefCell::new(None) };
+        }
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut first = Connection::open(tmp.path()).unwrap();
+        first.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let tx = first.transaction().unwrap();
+        BM25Store::migrate_0_to_1(&tx).unwrap();
+        BM25Store::migrate_1_to_2(&tx).unwrap();
+        tx.execute_batch(
+            "INSERT INTO files (rowid, path, mtime_ms, size, indexed_at)
+             VALUES (1, 'notes/kept.md', 1, 6, '2026-10-29');
+             INSERT INTO files_fts (rowid, path, body)
+             VALUES (1, 'notes/kept.md', 'quartz');",
+        )
+        .unwrap();
+        tx.pragma_update(None, "user_version", 2).unwrap();
+        tx.commit().unwrap();
+
+        let tx = first
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        BM25Store::migrate_2_to_3(&tx).unwrap();
+        tx.pragma_update(None, "user_version", 3).unwrap();
+        let (blocked_tx, blocked_rx) = channel();
+        let path = tmp.path().to_path_buf();
+        let second = std::thread::spawn(move || {
+            let mut conn = Connection::open(path).unwrap();
+            BLOCKED.with(|slot| *slot.borrow_mut() = Some(blocked_tx));
+            conn.busy_handler(Some(|attempt| {
+                BLOCKED.with(|slot| {
+                    if let Some(sender) = slot.borrow_mut().take() {
+                        sender.send(()).unwrap();
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(1));
+                attempt < 5_000
+            }))
+            .unwrap();
+            BM25Store::ensure_schema(&mut conn)
+        });
+
+        blocked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        tx.commit().unwrap();
+        second
+            .join()
+            .unwrap()
+            .expect("another client already applied the pending migration");
+        assert_eq!(
+            first
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        let store = BM25Store::open_for_test(tmp.path()).unwrap();
+        assert_eq!(
+            store.search("quartz", 5, true).unwrap()[0].path,
+            "notes/kept.md"
+        );
+    }
+
+    #[test]
+    fn concurrent_open_initializes_a_new_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bm25.db");
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let clients: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let ready = ready.clone();
+                std::thread::spawn(move || {
+                    ready.wait();
+                    BM25Store::open_for_test(&path)
+                })
+            })
+            .collect();
+        let results: Vec<_> = clients.into_iter().map(|c| c.join().unwrap()).collect();
+        for (client, result) in results.into_iter().enumerate() {
+            let mut store = result.expect("every client must retain a usable index");
+            store
+                .upsert(&format!("notes/{client}.md"), 1, 6, "quartz", None)
+                .unwrap();
+            assert!(!store.search("quartz", 8, true).unwrap().is_empty());
+        }
+        let store = BM25Store::open_for_test(&path).unwrap();
+        assert_eq!(store.count().unwrap(), 8);
     }
 
     #[test]

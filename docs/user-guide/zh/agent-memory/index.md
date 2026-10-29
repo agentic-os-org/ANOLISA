@@ -767,6 +767,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 配置项 typo 被悄悄忽略 | — | 现已硬失败，看启动 stderr 报错并修正 |
 | `mem_log` 返回 `[]` 即使有写入 | git 版本控制未启用 | `MEMORY_GIT_ENABLED=true MEMORY_GIT_AUTO_COMMIT=true` |
 | 索引检索对刚写入的内容查不到 | 还在 200 ms debounce 窗口内 | 重试，或用 `mem_grep`（直接走文件系统正则，不依赖索引） |
+| 启动警告 `index unavailable` 并包含 `duplicate column name`，之后检索一直不可用 | 旧版在多个客户端同时打开同一索引时可能重复执行数据库迁移 | 更新 agent-memory，等待其他客户端启动完成后重启受影响的 MCP 客户端，并保留记忆文件。若仍有同样警告，检查索引的 schema；旧竞态已经造成的不一致索引可能需要修复 |
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
 | OpenClaw 调用了宿主记忆后端或报告 `plugin tool name conflict` | 插件包、gateway/会话未更新，或提示词仍使用旧工具名 | 更新插件、重启 gateway、开始新会话，并使用 `anolisa_memory_search` / `anolisa_memory_get` 访问 ANOLISA 记忆 |
