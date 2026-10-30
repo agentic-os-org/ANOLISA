@@ -198,6 +198,11 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+Fixed-port per-trial sandboxes attempt stop and force removal when startup
+readiness fails or is interrupted, before any handle reaches the caller.
+Shutdown also attempts removal after a failed stop. Cleanup warnings expose
+unreleased resources, and the original startup failure remains visible.
+
 ## Troubleshooting
 
 | Issue | Fix |
