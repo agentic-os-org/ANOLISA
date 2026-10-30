@@ -1856,6 +1856,7 @@ mod tests {
     fn call(name: &str, args: serde_json::Value) -> crate::atif::AtifToolCall {
         crate::atif::AtifToolCall {
             tool_call_id: "c".into(),
+            extra: None,
             function_name: name.into(),
             arguments: args,
         }
