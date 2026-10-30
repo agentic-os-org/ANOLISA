@@ -271,3 +271,33 @@ def test_scan_rule_ref_resolve_error(mock_load: object) -> None:
     assert result.ok is False
     assert result.verdict == Verdict.ERROR
     assert "rule reference resolve failed" in result.summary
+
+
+class TestTamperBothSidesSensitive:
+    """A sensitive path on both sides of the command must still flag tamper.
+
+    The target check only considered each target regex's FIRST match: the
+    source path (~/.ssh/id_ed25519.pub) matched before the >> operator, so
+    the destination (~/.ssh/authorized_keys) was never considered — the
+    classic append-own-key persistence attack missed the tamper rule.
+    """
+
+    def _rule_ids(self, code: str) -> set:
+        from agent_sec_cli.code_scanner.models import Language
+
+        result = scan(code, Language.BASH)
+        return {f.rule_id for f in result.findings}
+
+    def test_append_own_key_flags_tamper(self):
+        assert "shell-tamper-sensitive-file" in self._rule_ids(
+            "cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys"
+        )
+
+    def test_non_sensitive_source_control(self):
+        assert "shell-tamper-sensitive-file" in self._rule_ids(
+            "cat /tmp/id_ed25519.pub >> ~/.ssh/authorized_keys"
+        )
+
+    def test_non_sensitive_destination_not_tamper(self):
+        ids = self._rule_ids("cat ~/.ssh/id_ed25519.pub >> /tmp/keys")
+        assert "shell-tamper-sensitive-file" not in ids
