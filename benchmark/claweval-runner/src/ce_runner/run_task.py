@@ -39,6 +39,8 @@ import sys
 import time
 from pathlib import Path
 
+from ce_runner.task_paths import resolve_task_path
+
 from . import batch_runner
 from .sandbox import (execute_task_sandbox, convert_and_grade_sandbox)
 from .infra import check_gateway, cleanup_config, cleanup_mock_services
@@ -99,22 +101,13 @@ def get_user_agent_config(config: dict) -> dict:
     return {"api_key": api_key, "base_url": base_url, "model_id": model_id}
 
 
-
-
 def resolve_task(task_path: str) -> tuple[str, str]:
     """Resolve task directory or file to (task_yaml_abs, task_dir_abs)."""
-    p = Path(task_path)
-    if p.is_dir():
-        task_yaml = p / "task.yaml"
-    elif p.is_file():
-        task_yaml = p
-    else:
-        log(f"Error: task path not found: {task_path}")
+    try:
+        return resolve_task_path(task_path)
+    except ValueError as error:
+        log(f"Error: {error}")
         sys.exit(1)
-    if not task_yaml.exists():
-        log(f"Error: task.yaml not found in {task_yaml.parent}")
-        sys.exit(1)
-    return str(task_yaml.resolve()), str(task_yaml.parent.resolve())
 
 
 def discover_tasks(tasks_dir: str, tag: str = None, range_str: str = None,
