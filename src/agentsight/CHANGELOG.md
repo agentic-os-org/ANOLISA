@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.2
+
+### Features
+- Enforce structured file-protection policies: classify policy paths, lower them into map entries, apply them, and enforce structured kernel deletion, rename/exchange, and ordinary file writes.
+- Advertise structured file protection as a capability.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs: `agentsight-core` owns programs, configuration and services; `agentsight-plugins` holds the DSH integration; `agentsight` remains as a compatibility package that depends on the exact-version core.
+- Programs install to the system binary directory, and `make install` consumes prebuilt files without activating services. (BREAKING)
+
+### Tests
+- Cover structured policies end to end and assert matched file guard audit rules.
+
 ## 0.15.1
 
 ### Breaking changes
