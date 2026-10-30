@@ -97,6 +97,11 @@ pub(super) struct TaskAdmission<'a> {
     pub(super) catalog: &'a TaskLaunchCatalog,
 }
 
+/// Upper bound on Task list/event page size, mirrored by the store's
+/// `load_tasks_for_owner`/`load_task_events_for_owner` bounds and the CLI/web
+/// client-side parsers.
+const MAX_TASK_PAGE_SIZE: u16 = 64;
+
 /// Dispatches one authenticated request through Task command and projection ports.
 pub(super) fn dispatch<P>(
     actor: &ActorRef,
@@ -130,6 +135,7 @@ where
             .get(&actor.actor_id, &task_id)
             .map(GatewayResult::Task),
         GatewayRequest::List { limit, .. } => {
+            validate_pagination(limit, None)?;
             ports.list(&actor.actor_id, limit).map(GatewayResult::Tasks)
         }
         GatewayRequest::Events {
@@ -137,9 +143,12 @@ where
             after_revision,
             limit,
             ..
-        } => ports
-            .events(&actor.actor_id, &task_id, after_revision, limit)
-            .map(GatewayResult::Events),
+        } => {
+            validate_pagination(limit, after_revision)?;
+            ports
+                .events(&actor.actor_id, &task_id, after_revision, limit)
+                .map(GatewayResult::Events)
+        }
         GatewayRequest::Cancel { request, .. } => ports
             .cancel(&actor.actor_id, request)
             .map(GatewayResult::Cancelled),
@@ -179,4 +188,30 @@ pub(super) fn validate_submission_admission(
                 "Task target or Runtime is not admitted by this daemon".to_owned(),
             )
         })
+}
+
+/// Reject out-of-range pagination bounds before dispatch so a malformed
+/// request surfaces as `invalid_request` instead of `store_unavailable`. The
+/// store enforces the same bounds as defense in depth, but without this
+/// admission check a raw-socket client sending `limit=0`/`limit>64` or an
+/// `after_revision` beyond SQLite's `i64` would be mapped by `error_response`
+/// to a durable-storage outage, which monitoring reads as a storage incident
+/// rather than a bad request.
+pub(super) fn validate_pagination(
+    limit: u16,
+    after_revision: Option<u64>,
+) -> Result<(), GatewayDaemonError> {
+    if limit == 0 || limit > MAX_TASK_PAGE_SIZE {
+        return Err(GatewayDaemonError::Protocol(format!(
+            "Task page limit must be between 1 and {MAX_TASK_PAGE_SIZE}"
+        )));
+    }
+    if let Some(after_revision) = after_revision {
+        if after_revision > i64::MAX as u64 {
+            return Err(GatewayDaemonError::Protocol(
+                "after_revision is out of range for Task events".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
