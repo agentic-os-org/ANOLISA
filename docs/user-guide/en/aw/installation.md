@@ -76,7 +76,9 @@ raw extension management.
 
 Prepare the Agent using its own installation guide. This example requires a
 signed-in Qoder CLI 1.1.64 or later. Generate an empty policy as your ordinary
-user, keeping configuration and data outside the installation prefix:
+user, keeping configuration and data outside the installed payloads. With the
+default `~/.local` prefix, XDG state at `~/.local/state/aw` is also accepted;
+state must not target the installed `bin`, `libexec` or `share` directories.
 
 ```bash
 export AW_HOME="$HOME/aw"

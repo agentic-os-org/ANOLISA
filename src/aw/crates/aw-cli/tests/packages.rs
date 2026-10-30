@@ -20,7 +20,7 @@ mod validation;
 use serde_json::{json, Value};
 use std::{
     fs,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     process::{Command, Output},
 };
 use support::{success, Fixture};
@@ -79,6 +79,92 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
         fs::read(f.prefix.join("unowned.txt")).unwrap(),
         b"user data"
     );
+}
+
+/// The documented `~/.local` core prefix combined with XDG state
+/// (`~/.local/state/aw`) is a supported layout: state is a writable
+/// sibling of the installed payloads, not one of them, so `config init`
+/// must accept it — with and without a registered Provider in the same
+/// prefix. State that would overwrite an installed payload root or the
+/// installer's registration metadata is still refused.
+#[test]
+fn config_init_accepts_xdg_state_beside_payloads_under_the_prefix() {
+    for installed in [false, true] {
+        let f = Fixture::new();
+        let local = f.root.join("local");
+        if installed {
+            success(
+                f.command()
+                    .args(["install", "--prefix"])
+                    .arg(&local)
+                    .arg("--bundle")
+                    .arg(&f.bundle)
+                    .output()
+                    .unwrap(),
+            );
+            assert!(
+                local.join(".local-packages/installation.json").exists(),
+                "the registered-prefix case requires the installation"
+            );
+        }
+        // The XDG layout from the issue: core installed at ~/.local, config
+        // at ~/.config/aw (outside the prefix), state at ~/.local/state/aw.
+        let config = f.root.join(".config/aw/aw.yaml");
+        let state = local.join("state/aw");
+        // The gate runs under umask 0002 too; create the fixture parents
+        // with explicit safe modes so they never inherit group write.
+        for parent in [config.parent().unwrap(), state.parent().unwrap()] {
+            make_private_dir(parent);
+        }
+        success(
+            f.command()
+                .args(["config", "init", "--prefix"])
+                .arg(&local)
+                .arg("--config")
+                .arg(&config)
+                .arg("--state-dir")
+                .arg(&state)
+                .args(["--qoder", "/bin/true"])
+                .output()
+                .unwrap(),
+        );
+        assert!(config.is_file());
+        assert!(!state.exists(), "configuration must not start a runtime");
+
+        // State targeting an immutable payload root, the installer's
+        // reserved registration metadata, or the installation lock is
+        // still refused.
+        for root in [
+            "bin",
+            "libexec",
+            "share",
+            ".local-packages",
+            ".aw-packages",
+            ".local-install.lock",
+        ] {
+            let target = f.root.join(format!(".config/aw/aw2-{root}.yaml"));
+            failure(
+                f.command()
+                    .args(["config", "init", "--prefix"])
+                    .arg(&local)
+                    .arg("--config")
+                    .arg(&target)
+                    .arg("--state-dir")
+                    .arg(local.join(root))
+                    .args(["--qoder", "/bin/true"])
+                    .output()
+                    .unwrap(),
+            );
+            assert!(!target.exists(), "{root}: no configuration is written");
+        }
+    }
+}
+
+/// Create a directory with 0700 so fixture parents pass the owned-parent
+/// gates under any caller umask.
+fn make_private_dir(path: &std::path::Path) {
+    fs::create_dir_all(path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[test]

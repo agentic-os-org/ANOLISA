@@ -72,7 +72,9 @@ scope。`aw install` 用于安装本地 Provider bundle。
 ## 创建配置
 
 按 Agent 自身指南准备 Agent。本例要求已登录的 Qoder CLI 1.1.64 或更高版本。
-以普通用户生成空策略配置，将配置和数据保存在安装目录之外：
+以普通用户生成空策略配置，将配置和数据保存在已安装负载之外。默认 `~/.local`
+前缀下也接受 XDG 状态目录 `~/.local/state/aw`；状态目录不得落在已安装的
+`bin`、`libexec` 或 `share` 目录内：
 
 ```bash
 export AW_HOME="$HOME/aw"

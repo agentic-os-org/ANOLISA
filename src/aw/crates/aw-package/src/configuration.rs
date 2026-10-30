@@ -103,8 +103,8 @@ pub(crate) fn configure_using(
         )?;
     }
     require(
-        !config.starts_with(prefix) && !state.starts_with(prefix),
-        "configuration and state must be outside the immutable prefix",
+        !config.starts_with(prefix) && !overlaps_reserved_prefix_path(state, prefix),
+        "configuration must be outside the prefix, and state must not overlap installed payloads or registration metadata",
     )?;
     socket_length("AW state", &state.join("aw.sock"))?;
     require(
@@ -135,6 +135,34 @@ pub(crate) fn configure_using(
         .map_err(|error| crate::Error::Invalid(error.to_string()))?;
     selection.verify(prefix)?;
     publish(config, yaml.as_bytes())
+}
+
+/// Prefix-relative paths `aw` itself owns: the payload roots `aw install`
+/// and the distribution Makefile write (`store::filesystem::relative`
+/// admits exactly `bin`, `libexec` and `share`), and the reserved
+/// metadata names — the registration metadata directory (`RegistrationPointer`
+/// requires it to hold only the locator) and the installation lock, which
+/// the installer requires to be a regular file. Runtime state dropped on
+/// any of these breaks `config init`, `aw list --installed` or the next
+/// installation, so configuration and state must not overlap them, but
+/// may live elsewhere under the prefix — the documented `~/.local` install
+/// with XDG state at `~/.local/state/aw` is a sibling, not one of them.
+fn overlaps_reserved_prefix_path(candidate: &Path, prefix: &Path) -> bool {
+    const RESERVED: [&str; 6] = [
+        "bin",
+        "libexec",
+        "share",
+        ".local-packages",
+        ".aw-packages",
+        ".local-install.lock",
+    ];
+    let Ok(relative) = candidate.strip_prefix(prefix) else {
+        return false;
+    };
+    relative
+        .components()
+        .next()
+        .is_some_and(|first| RESERVED.iter().any(|root| first.as_os_str() == *root))
 }
 
 fn socket_length(name: &str, path: &Path) -> Result<()> {
@@ -172,4 +200,57 @@ fn entrypoint(path: &Path, access: i32, permission: &str) -> Result<()> {
         ),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    #[test]
+    fn state_may_be_an_xdg_sibling_of_the_payloads_but_not_inside_them() {
+        let prefix = Path::new("/home/user/.local");
+        // XDG state under the supported prefix: accepted.
+        assert!(!overlaps_reserved_prefix_path(
+            &prefix.join("state/aw"),
+            prefix
+        ));
+        // The immutable payload roots themselves, and anything inside them.
+        for root in ["bin", "libexec", "share"] {
+            assert!(overlaps_reserved_prefix_path(&prefix.join(root), prefix));
+            assert!(overlaps_reserved_prefix_path(
+                &prefix.join(root).join("aw"),
+                prefix
+            ));
+        }
+        // The installer's reserved registration metadata directory, and
+        // anything inside it: startup would write state beside
+        // `installation.json` and corrupt the locator.
+        assert!(overlaps_reserved_prefix_path(
+            &prefix.join(".local-packages"),
+            prefix
+        ));
+        assert!(overlaps_reserved_prefix_path(
+            &prefix.join(".local-packages/s"),
+            prefix
+        ));
+        // The legacy metadata name and the installation lock: runtime state
+        // created there breaks registration reading and later installs.
+        for reserved in [".aw-packages", ".local-install.lock"] {
+            assert!(overlaps_reserved_prefix_path(
+                &prefix.join(reserved),
+                prefix
+            ));
+            assert!(overlaps_reserved_prefix_path(
+                &prefix.join(reserved).join("s"),
+                prefix
+            ));
+        }
+        // Not under the prefix at all: outside this helper's scope (the
+        // separate starts_with gate on the configuration path covers the
+        // caller's needs), so it reports no overlap.
+        assert!(!overlaps_reserved_prefix_path(
+            Path::new("/elsewhere/state/aw"),
+            prefix
+        ));
+    }
 }
