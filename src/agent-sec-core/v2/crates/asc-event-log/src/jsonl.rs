@@ -12,9 +12,9 @@
 //! * A failure to take the lock does **not** fail the write: v1 falls through
 //!   and writes unlocked, accepting a small race.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -34,14 +34,12 @@ pub const DEFAULT_BACKUP_COUNT: usize = 10;
 /// Default diagnostic prefix used by the security-events stream.
 pub const DEFAULT_ERROR_PREFIX: &str = "[security_events]";
 
-/// Owner-only mode enforced on data files and their lock files.
+/// Owner-only mode enforced on data files and their lock files, in `rustix`
+/// flag form so no numeric cast is needed on platforms where the raw mode
+/// type is not `u32`.
 ///
 /// Local streams can contain request/result evidence, so the mode is applied
 /// independently of the caller's umask.
-const PRIVATE_FILE_MODE: u32 = 0o600;
-
-/// [`PRIVATE_FILE_MODE`] expressed with `rustix` flags, so no numeric cast is
-/// needed on platforms where the raw mode type is not `u32`.
 const PRIVATE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
 
 /// Mask covering the permission and set-id bits, i.e. `0o7777`.
@@ -462,23 +460,55 @@ fn tighten_retained_backup(path: &Path) {
     }
 }
 
-/// Opens a file for append, enforcing mode `0o600`.
+/// Opens a file for append, enforcing mode `0o600` and a regular file.
 ///
 /// The creation mode prevents a new file from starting with broader
 /// permissions; the follow-up `fchmod` tightens files created by older
 /// releases and restores owner access under an unusually strict umask.
+///
+/// The open refuses a swapped or pre-planted symlink (`O_NOFOLLOW`, the same
+/// guard `tighten_retained_backup` applies to backups and the skillfs
+/// summary-log writers apply to their shared file) and every other
+/// non-regular entry. Without it, a symlink at the stream path redirected the
+/// daemon's JSONL lines into the link target and tightened the *target's*
+/// mode through the opened descriptor; a dangling link materialized its
+/// target; and a FIFO blocked the append open forever, wedging every later
+/// write on this writer. `NONBLOCK` makes the FIFO fail at open (`ENXIO`)
+/// instead of blocking, and is a no-op for the regular files that pass the
+/// `fstat` check.
 fn open_private_append(path: &Path) -> Result<File, EventLogError> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(PRIVATE_FILE_MODE)
-        .open(path)
-        .map_err(|err| EventLogError::io("open", path, err))?;
+    let flags = OFlags::WRONLY
+        | OFlags::APPEND
+        | OFlags::CREATE
+        | OFlags::CLOEXEC
+        | OFlags::NOFOLLOW
+        | OFlags::NONBLOCK;
+    let fd = match rustix::fs::open(path, flags, PRIVATE_MODE) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::LOOP) => {
+            return Err(EventLogError::io(
+                "open",
+                path,
+                std::io::Error::other(format!("{} is a symlink — refusing to use", path.display())),
+            ));
+        }
+        Err(err) => return Err(EventLogError::io("open", path, err.into())),
+    };
+    let file = File::from(fd);
 
-    let metadata = file
-        .metadata()
-        .map_err(|err| EventLogError::io("stat", path, err))?;
-    if metadata.mode() & 0o7777 != PRIVATE_FILE_MODE {
+    let stat =
+        rustix::fs::fstat(&file).map_err(|err| EventLogError::io("stat", path, err.into()))?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(EventLogError::io(
+            "open",
+            path,
+            std::io::Error::other(format!(
+                "{} is not a regular file — refusing to append",
+                path.display()
+            )),
+        ));
+    }
+    if Mode::from_raw_mode(stat.st_mode).intersection(PERMISSION_BITS) != PRIVATE_MODE {
         rustix::fs::fchmod(&file, PRIVATE_MODE)
             .map_err(|err| EventLogError::io("chmod", path, err.into()))?;
     }
@@ -489,7 +519,7 @@ fn open_private_append(path: &Path) -> Result<File, EventLogError> {
 mod tests {
     use std::fs;
     use std::io::Read;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
 
     use serde_json::json;
@@ -544,7 +574,7 @@ mod tests {
 
         assert!(writer.path().exists());
         assert_eq!(fs::metadata(writer.path()).expect("metadata").len(), 0);
-        assert_eq!(mode_of(writer.path()), PRIVATE_FILE_MODE);
+        assert_eq!(mode_of(writer.path()), 0o600);
     }
 
     #[test]
@@ -734,6 +764,154 @@ mod tests {
             0o644,
             "files that do not match the rotation pattern must be left alone"
         );
+    }
+
+    #[test]
+    fn a_symlinked_log_path_is_refused_not_written_through() {
+        // The backup tighten already refuses symlinked backup names; the
+        // append open must refuse a symlinked *stream* path the same way.
+        // Following the link appended the daemon lines to an arbitrary
+        // target and tightened the target mode through the descriptor.
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("stream.jsonl");
+        let target = dir.path().join("elsewhere.log");
+        fs::write(&target, "seed\n").expect("seed the target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))
+            .expect("widen the target mode");
+        symlink(&target, &path).expect("plant the symlink");
+
+        let writer = JsonlEventWriter::new(&path);
+        let outcome = writer.write_or_raise(&json!({"k": "v"}));
+
+        let message = outcome
+            .expect_err("a symlinked log path must be refused")
+            .to_string();
+        assert!(
+            message.contains("is a symlink"),
+            "the refusal must name the symlink, got: {message}"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("target"),
+            "seed\n",
+            "the link target must stay untouched"
+        );
+        assert_eq!(
+            fs::metadata(&target).expect("target").mode() & 0o7777,
+            0o644,
+            "the target mode must not be tightened through the link"
+        );
+    }
+
+    #[test]
+    fn a_dangling_symlink_log_path_is_not_created_through() {
+        // `O_CREAT` through a dangling link materializes the link target as
+        // this process user; the no-follow open refuses the link itself.
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("stream.jsonl");
+        let target = dir.path().join("nowhere.log");
+        symlink(&target, &path).expect("dangling symlink");
+
+        let writer = JsonlEventWriter::new(&path);
+        let outcome = writer.write_or_raise(&json!({"k": "v"}));
+
+        let message = outcome
+            .expect_err("a dangling link must be refused")
+            .to_string();
+        assert!(
+            message.contains("is a symlink"),
+            "the refusal must name the symlink, got: {message}"
+        );
+        assert!(!target.exists(), "the link target must not be created");
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("link")
+                .file_type()
+                .is_symlink(),
+            "the link itself stays as the caller left it"
+        );
+    }
+
+    // `rustix::fs::mkfifoat` only exists on Linux, and the macOS CI leg
+    // compiles the test targets without running this suite, so the FIFO
+    // probe is gated to where it can both compile and run.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fifo_log_path_fails_closed_instead_of_blocking_the_writer() {
+        // The append open used to block forever on a FIFO (no reader), so
+        // one planted path wedged every later write on the writer. The
+        // non-blocking open fails at `open(2)` (`ENXIO`) and the write is
+        // refused; the probe thread bound in time proves the open returned.
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("stream.jsonl");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::Mode::from_bits(0o600).expect("mode"),
+        )
+        .expect("fifo");
+
+        let writer = Arc::new(JsonlEventWriter::new(&path));
+        let worker = Arc::clone(&writer);
+        let (done, arrived) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = worker.write_or_raise(&json!({"k": "v"}));
+            let _ = done.send(outcome);
+        });
+        let outcome = arrived
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the append open must fail closed, not block");
+        assert!(
+            matches!(
+                outcome,
+                Err(EventLogError::Io {
+                    operation: "open",
+                    ..
+                })
+            ),
+            "a FIFO must be refused at the open, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_lock_file_is_refused_and_the_write_still_happens() {
+        // The lock open goes through the same guard: a dangling lock link
+        // used to be created through, pointing the advisory lock at an
+        // arbitrary path. With the guard the lock open fails, and v1's
+        // fallthrough contract keeps the write itself working (unlocked).
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("stream.jsonl");
+        let lock_target = dir.path().join("nowhere.lock");
+        symlink(&lock_target, writer_lock_path(&path)).expect("dangling lock link");
+
+        let writer = JsonlEventWriter::new(&path);
+        writer
+            .write_or_raise(&json!({"k": "v"}))
+            .expect("an refused lock must not fail the write");
+
+        assert!(
+            !lock_target.exists(),
+            "the lock link target must not be created"
+        );
+        assert!(
+            fs::symlink_metadata(writer_lock_path(&path))
+                .expect("lock link")
+                .file_type()
+                .is_symlink(),
+            "the lock link itself stays as the caller left it"
+        );
+        assert!(
+            read_lines(&path) == vec![r#"{"k":"v"}"#],
+            "the line must land in the real log despite the refused lock"
+        );
+    }
+
+    fn writer_lock_path(path: &Path) -> PathBuf {
+        let mut name = path
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .unwrap_or_default();
+        name.push(".lock");
+        path.with_file_name(name)
     }
 
     /// A backup-shaped symlink must not carry the tighten through to its target.
