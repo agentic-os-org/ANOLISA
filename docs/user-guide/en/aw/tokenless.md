@@ -8,10 +8,10 @@ remain in effect.
 
 ## Install and enable
 
-Install the Tokenless backend CLI and its compatible RTK using the
-[Tokenless guide](../tokenless/index.md). This Provider requires patched RTK 0.49.0;
-use the backend owner's matching release. The AW Provider bundle contains only
-the bridge, examples and template, not Tokenless CLI or RTK.
+Install the Tokenless backend CLI using the [Tokenless guide](../tokenless/index.md).
+The CLI links the patched RTK 0.49.0 that this Provider requires, so there is no
+separate RTK to install. The AW Provider bundle contains only the bridge, examples
+and template, not the Tokenless CLI.
 
 Prepare the AW CLI, `AW_HOME` and `AW_QODER` using [installation](installation.md),
 then install the bridge into its own extension prefix:
@@ -30,21 +30,17 @@ These examples use user scope. Root-managed extension writes require explicit
 `--scope system` and root privileges.
 Avoid enabling an overlapping native Tokenless plugin in the same session.
 
-Select the actual backend programs and compute the checksum of the selected RTK.
-Resolve any symlink so `RTK_BINARY` identifies the regular executable itself:
+Select the installed Tokenless CLI and check its RTK version:
 
 ```bash
 export AW_TOKENLESS_CLI="$(command -v tokenless)"
 export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
-export AW_RTK_BINARY="$(readlink -f "$(command -v rtk)")"
-export AW_RTK_SHA256="$(sha256sum "$AW_RTK_BINARY" | awk '{print $1}')"
-"$AW_RTK_BINARY" --version
+"$AW_TOKENLESS_CLI" rtk --version
 aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --config "$AW_HOME/tokenless.yaml" --state-dir "$AW_HOME/tokenless-state" \
   --template "$AW_TEMPLATE_DIR/tokenless.json" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI" \
-  --template-var "RTK_BINARY=$AW_RTK_BINARY" --template-var "RTK_SHA256=$AW_RTK_SHA256" \
   --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/tokenless.yaml"
 cd "$AW_HOME/workspace"
@@ -52,7 +48,7 @@ aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 ```
 
 The version command must report `rtk 0.49.0`. Template variables are
-`PROVIDERS_DIR`, `TOKENLESS_CLI`, `RTK_BINARY` and `RTK_SHA256`.
+`PROVIDERS_DIR` and `TOKENLESS_CLI`.
 For native or Makefile installations, use the actual Provider root for `PROVIDERS_DIR`. For security too, install and start
 [sec-core](security.md) and select `sec-core-tokenless.json`, adding
 `SEC_CORE_CLI` and `SOCKET` from that backend. OpenClaw uses its
@@ -68,8 +64,8 @@ through absolute `transport.argv` in YAML.
 - After execution, supported successful text results can be compressed. Failed results, images and unsupported content stay unchanged.
 - Compression errors, timeouts or no savings preserve the original result. Compression cannot override a safety denial.
 
-Generated configuration uses the explicitly selected RTK path and checksum. Missing or invalid files produce an error;
-AW does not substitute a user-installed RTK. The current AW integration has no recovery entrypoint
+Command suggestions run the configured Tokenless CLI by absolute path; AW never
+uses a user-installed RTK. The current AW integration has no recovery entrypoint
 for compressed results.
 
 ## Check results

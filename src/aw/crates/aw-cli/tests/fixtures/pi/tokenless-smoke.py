@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Real Tokenless Provider/CLI adoption through Pi; streams, shell tools and RTK are controlled fixtures."""
+"""Real Tokenless Provider/CLI and linked RTK adoption through Pi; streams and shell tools are controlled fixtures."""
 import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -53,11 +54,6 @@ results = []
 for case in ["json-selected-output", "rtk-retry-rescanned-denied", "rtk-retry-allowed-post-neutral"]:
     state = Path(tempfile.mkdtemp(prefix="t", dir=root))
     assert len(os.fsencode(state / "state/aw.sock")) < 108, "Choose a shorter --root"
-    bin_dir = state / "bin"
-    bin_dir.mkdir()
-    rtk = bin_dir / "rtk"
-    rtk.write_text("#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'rtk 0.49.0'; elif [ \"$1\" = rewrite ]; then printf 'rtk %s\\n' \"$2\"; else exit 99; fi\n")
-    rtk.chmod(0o700)
     scanner = state / "scanner"
     scanner.write_text(f'''#!{python}
 import json,sys,pathlib,os
@@ -103,7 +99,7 @@ raise SystemExit(result.returncode)
     config = state / "aw.json"
     config.write_text(json.dumps(document))
     env = {**os.environ, "PI_TEST_ROOT": str(state), "PI_METADATA": "1", "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0",
-           "PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"])}
+           "PATH": os.pathsep.join(["/usr/bin", "/bin"])}
     if case == "json-selected-output":
         env["PI_PRETTY_JSON"] = "1"
     else:
@@ -139,7 +135,9 @@ raise SystemExit(result.returncode)
             prefix = "[tokenless:rewrite] Retry this tool with arguments: "
             assert guidance.startswith(prefix), (case, guidance, err)
             retry = json.loads(guidance[len(prefix):])["command"]
-            assert str(rtk) in retry and "TOKENLESS_AGENT_ID=pi" in retry
+            words = shlex.split(retry)
+            assert [cli, "rtk"] in [words[i:i + 2] for i in range(len(words))], retry
+            assert "TOKENLESS_AGENT_ID=pi" in retry
             scanned = [json.loads(line) for line in (state / "scanned.jsonl").read_text().splitlines()]
             assert scanned == ["git status", retry], scanned
             if case == "rtk-retry-rescanned-denied":

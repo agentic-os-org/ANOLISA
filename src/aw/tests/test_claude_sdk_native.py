@@ -466,7 +466,7 @@ def main() -> None:
     parser.add_argument(
         "--tokenless",
         type=Path,
-        help="Also verify Bash optimization using a built Protocol v2 CLI and RTK on PATH",
+        help="Also verify Bash optimization using a built Protocol v2 CLI with its linked RTK",
     )
     parser.add_argument("--tokenless-provider", type=Path, help="Tokenless Provider executable")
     args = parser.parse_args()

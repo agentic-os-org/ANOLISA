@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 from build import SOURCE, compile_target, recheck_source, source_commit
-from common import Cancellation, copy_file, digest, run
+from common import Cancellation, digest, run
 
 RTK_SHARED_SOURCES = ("home.rs", "path_policy.rs", "rtk_outcome.rs")
 
@@ -28,41 +28,47 @@ def backends(selection: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     return selected
 
 
-def prepare_rtk(repo: Path, root: Path, cancel: Cancellation) -> Path:
-    """Use owned pinned sources without modifying a local RTK checkout."""
-    shared = root / "crates/tokenless-stats/src"
-    for name in RTK_SHARED_SOURCES:
-        copy_file(
-            repo / "src/tokenless/crates/tokenless-stats/src" / name, shared / name, cancel, 0o644
-        )
-    destination = root / "third_party/rtk"
-    run(["bash", "src/tokenless/packaging/build/setup-rtk.sh", str(destination)], repo, cancel, 180)
-    return destination
+def prepare_tokenless(repo: Path, source: str, root: Path, cancel: Cancellation) -> Path:
+    """Export committed Tokenless sources and fetch a fresh pinned RTK inside them.
+
+    Tokenless links RTK through third_party/rtk, so building the export keeps a
+    cached RTK checkout, its local edits and other ignored files out of the CLI.
+    """
+    archive = root / "tokenless.tar"
+    run(
+        ["git", "archive", "--format=tar", f"--output={archive}", f"{source}:src/tokenless"],
+        repo, cancel, 60,
+    )
+    tree = root / "tokenless"
+    tree.mkdir()
+    run(["tar", "-xf", str(archive), "-C", str(tree)], root, cancel, 60)
+    archive.unlink()
+    run(["bash", "packaging/build/setup-rtk.sh"], tree, cancel, 180)
+    return tree
 
 
 def rtk_provenance(
-    repo: Path, rtk: Path, source: str, binary: Path, cancel: Cancellation
+    tree: Path, source: str, binary: Path, cancel: Cancellation
 ) -> dict[str, object]:
-    """Receipt the actual isolated RTK inputs without adding backend package payloads."""
-    shared = rtk.parent.parent / "crates/tokenless-stats/src"
+    """Receipt the exported RTK build inputs against the CLI that links them."""
+    rtk = tree / "third_party/rtk"
     inputs = [
         ("LICENSE", rtk / "LICENSE", "upstream:LICENSE"),
         ("source-commit", rtk / ".anolisa-rtk-commit", "setup-rtk.sh:.anolisa-rtk-commit"),
         *(
             (
-                f"tokenless-stats/{name}", shared / name,
+                f"tokenless-stats/{name}", tree / "crates/tokenless-stats/src" / name,
                 f"src/tokenless/crates/tokenless-stats/src/{name}",
             )
             for name in RTK_SHARED_SOURCES
         ),
         (
-            "setup-rtk.sh", repo / "src/tokenless/packaging/build/setup-rtk.sh",
+            "setup-rtk.sh", tree / "packaging/build/setup-rtk.sh",
             "src/tokenless/packaging/build/setup-rtk.sh",
         ),
         *(
-            (name, repo / f"src/tokenless/third_party/patches/{name}",
-             f"src/tokenless/third_party/patches/{name}")
-            for name in ("rtk-tokenless-stats.patch", "rtk-pytest-error-report.patch")
+            (patch.name, patch, f"src/tokenless/third_party/patches/{patch.name}")
+            for patch in sorted((tree / "third_party/patches").glob("*.patch"))
         ),
     ]
     return {
@@ -79,7 +85,7 @@ def rtk_provenance(
             {"source": origin, "input": name, "sha256": digest(path, cancel)}
             for name, path, origin in inputs
         ],
-        "binary": {"name": "rtk", "sha256": digest(binary, cancel)},
+        "binary": {"name": "tokenless", "sha256": digest(binary, cancel)},
     }
 
 
@@ -93,13 +99,12 @@ def build(repo: Path, selection: list[str] | tuple[str, ...], cancel: Cancellati
     if "sec-core" in selected:
         compile_target(repo / "src/agent-sec-core/v2", ("asc-cli", "asc-daemon"), cancel)
     if "tokenless" in selected:
-        compile_target(repo / "src/tokenless", ("tokenless-cli",), cancel)
-        with tempfile.TemporaryDirectory(prefix="aw-integration-rtk-") as temporary:
-            rtk = prepare_rtk(repo, Path(temporary), cancel)
-            compile_target(rtk, ("rtk",), cancel, repo / "src/aw/target")
-            provenance = rtk_provenance(
-                repo, rtk, source, repo / "src/aw/target/release/rtk", cancel
-            )
+        cli = repo / "src/tokenless/target/release/tokenless"
+        with tempfile.TemporaryDirectory(prefix="aw-integration-tokenless-") as temporary:
+            tree = prepare_tokenless(repo, source, Path(temporary), cancel)
+            # The export is temporary; keep the CLI where consumers expect it.
+            compile_target(tree, ("tokenless-cli",), cancel, repo / "src/tokenless/target")
+            provenance = rtk_provenance(tree, source, cli, cancel)
     recheck_source(repo, source, cancel)
     if provenance is not None:
         cancel.check()

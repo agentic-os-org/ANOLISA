@@ -87,7 +87,7 @@ select its `claude` target, and replace the absolute executable, worker and stat
 paths. The source `claude-worker.py` example explicitly exposes and allows native
 Bash in addition to its echo tool. Keep your application's own permission policy
 when composing its factory. See the [Tokenless guide](../../../../user-guide/en/aw/tokenless.md) for Provider
-installation, RTK requirements and statistics settings.
+installation and statistics settings.
 
 PreTool blocks the original Bash attempt and returns retry arguments to the model;
 the new call passes all policies and native permissions again. PostTool replaces

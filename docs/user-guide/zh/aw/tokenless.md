@@ -7,9 +7,9 @@ Tokenless 压缩工具文本，减少后续模型上下文，也可以建议输�
 
 ## 安装并启用
 
-按 [Tokenless 指南](../tokenless/index.md)安装后端 CLI 和兼容的 RTK。
-此 Provider 要求带补丁的 RTK 0.49.0，应使用后端 owner 的对应发行件。
-AW Provider bundle 只包含桥接程序、示例与模板，不包含 Tokenless CLI 或 RTK。
+按 [Tokenless 指南](../tokenless/index.md)安装后端 CLI。CLI 已内置此 Provider
+要求的带补丁 RTK 0.49.0，无需另外安装 RTK。AW Provider bundle 只包含桥接程序、
+示例与模板，不包含 Tokenless CLI。
 
 按[安装页](installation.md)准备 AW CLI、`AW_HOME` 和 `AW_QODER`，再将桥接程序
 安装到独立的扩展 prefix：
@@ -27,30 +27,26 @@ export AW_TEMPLATE_DIR="$PWD/$AW_TOKENLESS_BUNDLE/templates"
 这些示例使用 user scope。root 管理的扩展写入需要显式 `--scope system` 与 root
 权限。不要在同一会话叠加功能相同的 Tokenless 原生插件。
 
-选择实际后端程序，计算所选 RTK 的校验和。若有符号链接，应先解析，使
-`RTK_BINARY` 指向普通可执行文件本身：
+选择已安装的 Tokenless CLI，并检查其 RTK 版本：
 
 ```bash
 export AW_TOKENLESS_CLI="$(command -v tokenless)"
 export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
-export AW_RTK_BINARY="$(readlink -f "$(command -v rtk)")"
-export AW_RTK_SHA256="$(sha256sum "$AW_RTK_BINARY" | awk '{print $1}')"
-"$AW_RTK_BINARY" --version
+"$AW_TOKENLESS_CLI" rtk --version
 aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --config "$AW_HOME/tokenless.yaml" --state-dir "$AW_HOME/tokenless-state" \
   --template "$AW_TEMPLATE_DIR/tokenless.json" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI" \
-  --template-var "RTK_BINARY=$AW_RTK_BINARY" --template-var "RTK_SHA256=$AW_RTK_SHA256" \
   --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/tokenless.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 ```
 
-版本命令须输出 `rtk 0.49.0`。模板变量是 `PROVIDERS_DIR`、`TOKENLESS_CLI`、
-`RTK_BINARY` 和 `RTK_SHA256`。原生包或 Makefile 安装时，`PROVIDERS_DIR` 取实际
-Provider 根目录。同时需要安全检查时，安装并启动 [sec-core](security.md)，选择
+版本命令须输出 `rtk 0.49.0`。模板变量是 `PROVIDERS_DIR` 和 `TOKENLESS_CLI`。
+原生包或 Makefile 安装时，`PROVIDERS_DIR` 取实际 Provider 根目录。同时需要安全
+检查时，安装并启动 [sec-core](security.md)，选择
 `sec-core-tokenless.json`，再提供该后端的 `SEC_CORE_CLI` 和 `SOCKET`。
 OpenClaw 使用[对应 Agent 参数](configuration.md#openclaw)，其他运行时见
 [集成参考](../../../developer-guide/zh/aw/providers/tokenless.md)。
@@ -64,8 +60,7 @@ OpenClaw 使用[对应 Agent 参数](configuration.md#openclaw)，其他运行�
 - 执行后会处理受支持的成功文本结果。失败结果、图片和不支持的内容保持原样。
 - 压缩失败、超时或没有收益时保留原结果。安全检查的拒绝不会被压缩步骤覆盖。
 
-生成的配置使用显式选择的 RTK 路径和校验和。文件缺失或校验失败时会报告错误，
-不会改用其他用户安装的版本。
+命令建议以绝对路径调用所配置的 Tokenless CLI，不会改用用户自行安装的 RTK。
 当前 AW 接入不提供压缩结果的恢复入口。
 
 ## 查看效果

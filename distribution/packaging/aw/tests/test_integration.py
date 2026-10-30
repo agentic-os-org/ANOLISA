@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import integration
@@ -25,7 +28,7 @@ class IntegrationTests(Fixture):
             ) as recheck, patch.object(
                 integration, "compile_target"
             ) as compile_target, patch.object(
-                integration, "prepare_rtk", return_value=self.repo / "fresh-rtk"
+                integration, "prepare_tokenless", return_value=self.repo / "export"
             ) as prepare, patch.object(
                 integration, "rtk_provenance", return_value={"source": self.commit}
             ) as provenance:
@@ -35,9 +38,18 @@ class IntegrationTests(Fixture):
                 if "sec-core" in integration.backends(selected):
                     expected.update(("asc-cli", "asc-daemon"))
                 if "tokenless" in integration.backends(selected):
-                    expected.update(("tokenless-cli", "rtk"))
+                    expected.add("tokenless-cli")
                     prepare.assert_called_once()
-                    provenance.assert_called_once()
+                    self.assertEqual(prepare.call_args.args[:2], (self.repo, self.commit))
+                    self.assertIn(
+                        call(self.repo / "export", ("tokenless-cli",), self.cancel,
+                             self.repo / "src/tokenless/target"),
+                        compile_target.call_args_list,
+                    )
+                    provenance.assert_called_once_with(
+                        self.repo / "export", self.commit,
+                        self.repo / "src/tokenless/target/release/tokenless", self.cancel,
+                    )
                     receipt = self.repo / "src/aw/target/rtk-provenance.json"
                     self.assertEqual(json.loads(receipt.read_text()), {"source": self.commit})
                 else:
@@ -46,54 +58,82 @@ class IntegrationTests(Fixture):
                 self.assertEqual(packages, expected)
                 recheck.assert_called_once_with(self.repo, self.commit, self.cancel)
 
-    def test_rtk_preparation_preserves_cached_source_and_copies_patched_dependencies(self) -> None:
-        cached = self.file("src/tokenless/third_party/rtk/local-edit", b"preserve")
-        for name in integration.RTK_SHARED_SOURCES:
-            self.file(f"src/tokenless/crates/tokenless-stats/src/{name}")
-        owned = self.repo / "owned"
-
-        def setup(argv: list[str], *args: object) -> bytes:
-            rtk = Path(argv[-1])
-            (rtk / "src/core").mkdir(parents=True)
-            for name in integration.RTK_SHARED_SOURCES:
-                relative = rtk / "src/core/../../../../crates/tokenless-stats/src" / name
-                self.assertEqual(relative.read_bytes(), b"fixture")
-            return b""
-
-        with patch.object(integration, "run", side_effect=setup) as command:
-            prepared = integration.prepare_rtk(self.repo, owned, self.cancel)
-        self.assertEqual(prepared, owned / "third_party/rtk")
+    @unittest.skipUnless(
+        all(shutil.which(tool) for tool in ("git", "tar", "bash")),
+        "export preparation needs git, tar and bash",
+    )
+    def test_tokenless_preparation_exports_the_commit_and_fetches_rtk_inside_it(self) -> None:
+        self.file(
+            "src/tokenless/packaging/build/setup-rtk.sh",
+            b'root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"\n'
+            b'mkdir -p "$root/third_party/rtk"\n'
+            b'printf "%s\\n" "$#" > "$root/third_party/rtk/arguments"\n',
+        )
+        self.file("src/tokenless/Cargo.toml", b"committed")
+        self.file(".gitignore", b"/src/tokenless/target/\n/src/tokenless/third_party/rtk/\n")
+        environment = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        with patch.dict(os.environ, environment):
+            for argv in (
+                ["init", "-q"], ["add", "."],
+                ["-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                 "commit", "-q", "-m", "fixture"],
+            ):
+                subprocess.run(["git", *argv], cwd=self.repo, check=True)
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=self.repo, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+            cached = self.file("src/tokenless/third_party/rtk/local-edit", b"preserve")
+            self.file("src/tokenless/target/release/stale", b"ignored")
+            self.file("src/tokenless/Cargo.toml", b"uncommitted")
+            owned = self.repo / "owned"
+            owned.mkdir()
+            tree = integration.prepare_tokenless(self.repo, commit, owned, self.cancel)
+        self.assertEqual(tree, owned / "tokenless")
+        self.assertEqual((tree / "Cargo.toml").read_bytes(), b"committed")
+        self.assertEqual((tree / "third_party/rtk/arguments").read_text(), "0\n")
+        self.assertFalse((tree / "third_party/rtk/local-edit").exists())
+        self.assertFalse((tree / "target").exists())
+        self.assertFalse((owned / "tokenless.tar").exists())
         self.assertEqual(cached.read_bytes(), b"preserve")
-        self.assertEqual((owned / "crates/tokenless-stats/src/home.rs").read_bytes(), b"fixture")
-        self.assertEqual(command.call_args.args[0][-1], str(prepared))
 
-    def test_rtk_provenance_receipts_every_patched_input_and_the_built_binary(self) -> None:
-        rtk = self.repo / "owned/third_party/rtk"
-        self.file("owned/third_party/rtk/LICENSE", b"upstream license")
-        self.file("owned/third_party/rtk/.anolisa-rtk-commit", b"b" * 40 + b"\n")
+    def test_rtk_provenance_receipts_every_patched_input_and_the_built_cli(self) -> None:
+        tree = self.repo / "export"
+        self.file("export/third_party/rtk/LICENSE", b"upstream license")
+        self.file("export/third_party/rtk/.anolisa-rtk-commit", b"b" * 40 + b"\n")
         for name in integration.RTK_SHARED_SOURCES:
-            self.file(f"owned/crates/tokenless-stats/src/{name}", name.encode())
-        self.file("src/tokenless/packaging/build/setup-rtk.sh")
-        for name in ("rtk-tokenless-stats.patch", "rtk-pytest-error-report.patch"):
-            self.file(f"src/tokenless/third_party/patches/{name}")
-        binary = self.binary("src/aw", "rtk")
-        receipt = integration.rtk_provenance(self.repo, rtk, self.commit, binary, self.cancel)
+            self.file(f"export/crates/tokenless-stats/src/{name}", name.encode())
+        self.file("export/packaging/build/setup-rtk.sh")
+        patches = ("rtk-tokenless-stats.patch", "rtk-pytest-error-report.patch", "rtk-library.patch")
+        for name in patches:
+            self.file(f"export/third_party/patches/{name}", name.encode())
+        binary = self.binary("src/tokenless", "tokenless")
+        receipt = integration.rtk_provenance(tree, self.commit, binary, self.cancel)
         self.assertEqual(receipt["upstream"]["commit"], "b" * 40)
         self.assertEqual(receipt["anolisa_source_commit"], self.commit)
         self.assertIn("call-scoped receipt", receipt["shared_sources_reason"])
         inputs = {item["input"]: item for item in receipt["inputs"]}
-        self.assertEqual(len(inputs), 8)
+        self.assertEqual(len(inputs), 9)
         for name in integration.RTK_SHARED_SOURCES:
             item = inputs[f"tokenless-stats/{name}"]
             self.assertEqual(item["source"], f"src/tokenless/crates/tokenless-stats/src/{name}")
             self.assertEqual(
                 item["sha256"],
-                integration.digest(self.repo / f"owned/crates/tokenless-stats/src/{name}", self.cancel),
+                integration.digest(tree / f"crates/tokenless-stats/src/{name}", self.cancel),
             )
-        self.assertEqual(receipt["binary"]["sha256"], integration.digest(binary, self.cancel))
-        (rtk.parent.parent / "crates/tokenless-stats/src/rtk_outcome.rs").unlink()
+        for name in patches:
+            self.assertEqual(inputs[name]["source"], f"src/tokenless/third_party/patches/{name}")
+            self.assertEqual(
+                inputs[name]["sha256"],
+                integration.digest(tree / f"third_party/patches/{name}", self.cancel),
+            )
+        self.assertEqual(
+            receipt["binary"],
+            {"name": "tokenless", "sha256": integration.digest(binary, self.cancel)},
+        )
+        (tree / "crates/tokenless-stats/src/rtk_outcome.rs").unlink()
         with self.assertRaises(FileNotFoundError):
-            integration.rtk_provenance(self.repo, rtk, self.commit, binary, self.cancel)
+            integration.rtk_provenance(tree, self.commit, binary, self.cancel)
 
     def test_backend_selection_rejects_package_roles_duplicates_and_empty_input(self) -> None:
         for selected in ([], ["core"], ["all"], ["tokenless tokenless"]):

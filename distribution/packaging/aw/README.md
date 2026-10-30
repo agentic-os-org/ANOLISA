@@ -28,7 +28,7 @@ aw/
 ├── common.py                     # Bounded commands, cancellation and copying
 ├── core.Makefile                 # Archive install entry; reuses AW install.mk
 ├── build-integration.sh          # Explicit backend build entry for acceptance
-├── integration.py                # Build sec-core, Tokenless and pinned RTK
+├── integration.py                # Build sec-core and Tokenless
 ├── templates/                    # Policy data with explicit program paths
 └── tests/                        # Build selection and archive/install fixtures
 ```
@@ -41,8 +41,8 @@ already installed AW CLI. Provider archives contain no backend executables.
 
 Templates take `PROVIDERS_DIR`, the actual root containing the `sec-core` and
 `tokenless` Provider directories. Supply backend paths through `SEC_CORE_CLI`,
-`TOKENLESS_CLI`, `RTK_BINARY`, `RTK_SHA256` and `SOCKET` as applicable. This also
-supports an `AWPRJ` namespace or separate core and Provider prefixes.
+`TOKENLESS_CLI` and `SOCKET` as applicable. This also supports an `AWPRJ`
+namespace or separate core and Provider prefixes.
 
 Native integration acceptance prepares backend binaries through a separate
 entrypoint; ordinary package assembly does not invoke it:

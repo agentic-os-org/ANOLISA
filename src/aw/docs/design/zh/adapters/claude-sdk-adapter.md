@@ -77,7 +77,7 @@ PreTool 重试建议通过原生 deny 的有界原因完整返回，不返回 `u
 原 Hook veto/allow/改参、permission 改参、拒绝 `PermissionRequest` matchers、
 原生 Bash 失败、并行工具、两轮会话、连续 34 次策略拒绝/exit 9/SIGTERM fail-closed 后允许执行及
 持久化 AW journal，不调用真实模型或云业务服务。运行文件/transcripts 存在 output
-目录。可选 `--tokenless` 使用已构建的 Protocol v2 CLI 与 PATH 中的 RTK，验证
+目录。可选 `--tokenless` 使用已构建的 Protocol v2 CLI，验证
 Bash 模型可见替换、原始观察值、失败/report 行为、重试拒绝及跳过 MCP 错误压缩。
 私有 UDS 目录也在 output 下，并在 service 停止后删除。socket 路径过长时
 明确要求选择更短的 output 路径。该验证不认证业务部署或其他 SDK

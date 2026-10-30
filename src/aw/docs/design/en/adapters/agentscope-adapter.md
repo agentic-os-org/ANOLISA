@@ -187,8 +187,8 @@ uses the existing sec-core `scan_code`/`observe_tool` and Tokenless
 full retry arguments to the model. A new call must pass native permissions and
 sec-core again. Attributed RTK ownership comes from the new executed arguments,
 not the rejected call ID, and prevents double compression. Keep the exact Toolkit
-tool names and input pointers in the sec-core mapping. RTK must be installed
-separately; `aw config init` continues to target Qoder/OpenClaw.
+tool names and input pointers in the sec-core mapping. `aw config init` continues
+to target Qoder/OpenClaw.
 
 ## Validation
 

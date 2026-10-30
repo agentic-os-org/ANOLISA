@@ -1,4 +1,4 @@
-# Replace paths and RTK_SHA256_OF_EXECUTABLE; native profiles and credentials stay external.
+# Replace paths; native profiles and credentials stay external.
 apiVersion: aw/v1alpha1
 kind: AWConfiguration
 metadata:
@@ -48,10 +48,6 @@ spec:
           - /absolute/path/to/tokenless
           - --data-dir
           - /absolute/path/to/tokenless-state
-          - --rtk
-          - /absolute/path/to/tokenless-install/libexec/tokenless/rtk
-          - --rtk-sha256
-          - RTK_SHA256_OF_EXECUTABLE
       timeout_ms: 2000
       max_output_bytes: 1048576
       config:

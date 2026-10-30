@@ -9,7 +9,7 @@ and protocol libraries remain in `../src/aw/crates/`.
 | Provider | Capability | Source |
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README.md) | Command security checks | First-party sec-core CLI/backend |
-| [Tokenless](tokenless/README.md) | Tool output compression and command suggestions | Separately installed Tokenless CLI and compatible RTK |
+| [Tokenless](tokenless/README.md) | Tool output compression and command suggestions | Separately installed Tokenless CLI |
 
 ## Contribute or distribute
 

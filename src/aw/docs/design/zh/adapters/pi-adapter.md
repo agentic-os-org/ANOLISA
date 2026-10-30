@@ -107,8 +107,8 @@ python3 crates/aw-cli/tests/fixtures/pi/tokenless-smoke.py \
   --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core
 ```
 
-这里运行真实 SDK、AW、Tokenless Provider 和 Protocol v2 CLI。模型 stream、bash
-工具、RTK rewrite 命令及 scanner backend 使用确定性 fixture，不执行建议的 shell
-命令。验证选中的压缩进入模型上下文、新重试重新通过 sec-core、RTK 已处理结果
+这里运行真实 SDK、AW、Tokenless Provider 和 Protocol v2 CLI，改写由 CLI 内置的
+RTK 生成。模型 stream、bash 工具及 scanner backend 使用确定性 fixture，不执行建议的
+shell 命令。验证选中的压缩进入模型上下文、新重试重新通过 sec-core、RTK 已处理结果
 保持不变。两个遥测 sink 均关闭，状态只位于指定测试 root。8 个 Bridge 授权与
 结果字段边界用例也通过默认 Rust Pi 门禁运行。
