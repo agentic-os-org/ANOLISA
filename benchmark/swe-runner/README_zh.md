@@ -399,6 +399,10 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+如果不同用例 ID 映射到相同的可移植明细 CSV 文件名（包括仅大小写不同的名称），
+对应文件名会添加确定性的哈希后缀。无冲突的普通文件名保持不变，CSV 行始终保留
+原始用例 ID。
+
 分析已有 trace：
 
 ```bash
