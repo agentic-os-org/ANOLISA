@@ -50,12 +50,12 @@ fn get_global_manager() -> MutexGuard<'static, MultiModelTokenizer> {
 }
 
 pub fn get_global_tokenizer(model_id: &str) -> Result<Arc<LlmTokenizer>> {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     GLOBAL_TOKENIZER_LOOKUPS.with(|count| count.set(count.get() + 1));
     get_global_manager().get_for_model(model_id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 thread_local! {
     /// Global tokenizer lookups performed on this thread. Thread-local so a
     /// test asserting that a disabled feature performs no lookup cannot race
@@ -64,7 +64,7 @@ thread_local! {
 }
 
 /// Number of global tokenizer lookups performed on the calling thread.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn global_tokenizer_lookup_count() -> usize {
     GLOBAL_TOKENIZER_LOOKUPS.with(std::cell::Cell::get)
 }

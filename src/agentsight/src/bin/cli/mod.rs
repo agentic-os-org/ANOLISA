@@ -32,6 +32,7 @@ pub mod trace;
 /// / integers with no non-string map keys and no custom `Serialize` impls, so
 /// `to_string_pretty` is infallible here — we assert that invariant with
 /// `expect` rather than carry an unreachable error arm.
+#[cfg(target_os = "linux")]
 pub fn print_json<T: serde::Serialize>(value: &T) {
     let json =
         serde_json::to_string_pretty(value).expect("agent-facing JSON payload must serialize");

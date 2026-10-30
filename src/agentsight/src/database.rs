@@ -600,6 +600,7 @@ mod tests {
         ))
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     #[cfg(target_os = "linux")]
     fn checkpoint_ticks_do_not_accelerate_cleanup_and_failed_cleanup_is_retried() {
@@ -631,6 +632,7 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), [true, true, false, false]);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     #[cfg(target_os = "linux")]
     fn yielded_cleanup_resumes_without_waiting_for_the_policy_interval() {
