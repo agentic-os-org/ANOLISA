@@ -33,6 +33,19 @@ from agent_sec_cli.sandbox.rules import (
 )
 
 
+def _sed_edits_in_place(args: List[str]) -> bool:
+    """GNU sed 就地编辑的全部形态：-i、-iSUFFIX、短选项簇（-ni = -n -i）、
+    --in-place、--in-place=SUFFIX。"""
+    for arg in args:
+        if arg == "--":
+            return False
+        if arg == "-i" or arg.startswith("-i") or arg.startswith("--in-place"):
+            return True
+        if arg.startswith("-") and not arg.startswith("--") and "i" in arg[1:]:
+            return True
+    return False
+
+
 class RuleEngine:
     """统一规则匹配引擎 - 支持 rules.py 中所有 Match Schema 字段"""
 
@@ -88,6 +101,16 @@ class RuleEngine:
         # flags: 含这些 flag 才命中（OR 逻辑）
         if "flags" in rule:
             if not any(arg in rule["flags"] for arg in args):
+                return False, ""
+
+        # flags_prefix: 任一参数以这些前缀开头即命中（OR 逻辑；-i 匹配
+        # -i.bak，--in-place 匹配 --in-place=.bak）
+        if "flags_prefix" in rule:
+            if not any(
+                arg.startswith(prefix)
+                for arg in args
+                for prefix in rule["flags_prefix"]
+            ):
                 return False, ""
 
         # subcommands: 子命令匹配（第一个非 flag 参数）
@@ -182,7 +205,30 @@ class CommandClassifier:
                 m, r = self._check_rules(rules, cmd, " ".join(cmd))
                 if m:
                     return True, r
+            return False, ""
+        if self._is_shell_wrapper(parts):
+            # 提取因不安全操作符（$(、反引号、重定向、括号）中止：按安全
+            # 操作符切段做保守评估，deny 层规则仍然生效——否则
+            # `bash -c "rm -rf $(echo /)"` 会整体跳过 destructive/dangerous
+            # 扫描而降级 default（可写沙箱）。
+            script = parts[2]
+            for segment in re.split(r"\s*(?:&&|\|\||;|\|)\s*", script):
+                segment = segment.strip()
+                if not segment:
+                    continue
+                m, r = self._check_rules(rules, self._parse_command(segment), segment)
+                if m:
+                    return True, r
         return False, ""
+
+    @staticmethod
+    def _is_shell_wrapper(parts: List[str]) -> bool:
+        """bash/sh/zsh -c 形式的外壳。"""
+        return (
+            len(parts) >= 3
+            and PurePath(parts[0]).name in ("bash", "sh", "zsh")
+            and parts[1] in ("-c", "-lc")
+        )
 
     # --- 四层检测 ---
 
@@ -244,9 +290,9 @@ class CommandClassifier:
                 return True, f"安全 git 操作: git {subcmd or ''}"
             return False, ""
 
-        # 4. sed 特殊处理：无 -i 时为只读
+        # 4. sed 特殊处理：无就地编辑标志时为只读
         if cmd == "sed":
-            if not any(a == "-i" or a.startswith("-i") for a in args):
+            if not _sed_edits_in_place(args):
                 return True, "sed 只读模式"
             return False, ""
 
