@@ -175,6 +175,7 @@ fn file_guard() {
             "source AGENT = exec \"**\"\nrule unrelated:\nnotify open file \"/tmp/never-matches\" if AGENT\nbecause \"unrelated\"\nrule protected:\nblock unlink file \"{source}\" if AGENT\nbecause \"keep fixture\"\n"
         ),
         policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy: None,
     }).expect("apply file guard");
     for operation in ["unlink", "rename"] {
         assert_eq!(worker.run(operation), "errno=1");

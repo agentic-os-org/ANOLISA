@@ -5,7 +5,7 @@
 //! tests' real-backend calls observe (a lib test asserting that the backend
 //! fails outside btrfs would otherwise see the shim succeed).
 
-use ws_ckpt_common::backend::{SnapshotDeleteOutcome, StorageBackend};
+use ws_ckpt_common::backend::{CreateAdmissionRefused, SnapshotDeleteOutcome, StorageBackend};
 use ws_ckpt_common::{CleanupRetention, DaemonConfig};
 
 use ws_ckpt_daemon::backends::btrfs_base::{BtrfsBaseBackend, BtrfsBaseScenario};
@@ -31,6 +31,10 @@ async fn shim_lock() -> tokio::sync::MutexGuard<'static, ()> {
 /// ride the guarded path exactly as they would on a degraded backend. With
 /// `send_fails`, `btrfs send` exits 1 to force a diff failure. PATH is
 /// restored on Drop.
+///
+/// The diff temp snapshot is admitted like any subvolume creation (#7234),
+/// so diff tests use [`FakeBtrfs::install_admitting`], whose
+/// `filesystem usage` reports a healthy backend.
 struct FakeBtrfs {
     _dir: tempfile::TempDir,
     saved_path: std::ffi::OsString,
@@ -38,6 +42,14 @@ struct FakeBtrfs {
 
 impl FakeBtrfs {
     fn install(send_fails: bool) -> FakeBtrfs {
+        Self::install_with(send_fails, false)
+    }
+
+    fn install_admitting(send_fails: bool) -> FakeBtrfs {
+        Self::install_with(send_fails, true)
+    }
+
+    fn install_with(send_fails: bool, healthy_usage: bool) -> FakeBtrfs {
         let dir = tempfile::tempdir().expect("tempdir");
         let shim = dir.path().join("btrfs");
         let send_arm = if send_fails {
@@ -45,11 +57,16 @@ impl FakeBtrfs {
         } else {
             ""
         };
+        let usage_arm = if healthy_usage {
+            "if [ \"$1\" = 'filesystem' ] && [ \"$2\" = 'usage' ]; then\n  printf 'Device size: 1073741824\\nUsed: 10485760\\nMetadata,single: Size:268435456, Used:1048576\\n'\n  exit 0\nfi\n"
+        } else {
+            ""
+        };
         std::fs::write(
             &shim,
             format!(
-                "#!/bin/sh\n{}if [ \"$1\" = 'subvolume' ] && [ \"$2\" = 'delete' ]; then\n  rm -rf -- \"$3\"\nfi\nexit 0\n",
-                send_arm
+                "#!/bin/sh\n{}{}if [ \"$1\" = 'subvolume' ] && [ \"$2\" = 'delete' ]; then\n  rm -rf -- \"$3\"\nfi\nexit 0\n",
+                send_arm, usage_arm
             ),
         )
         .expect("write shim");
@@ -131,7 +148,7 @@ fn dummy_config() -> DaemonConfig {
 #[tokio::test]
 async fn diff_against_live_uses_internal_dir_and_sweeps_crash_leftovers() {
     let _guard = shim_lock().await;
-    let _shim = FakeBtrfs::install(false);
+    let _shim = FakeBtrfs::install_admitting(false);
     let root = tempfile::tempdir().expect("root");
     let snap_base = root.path().join("snapshots").join("ws-1");
     std::fs::create_dir_all(&snap_base).expect("snap base");
@@ -168,7 +185,7 @@ async fn diff_against_live_uses_internal_dir_and_sweeps_crash_leftovers() {
 #[tokio::test]
 async fn diff_against_live_failure_still_cleans_the_temp_dir() {
     let _guard = shim_lock().await;
-    let _shim = FakeBtrfs::install(true);
+    let _shim = FakeBtrfs::install_admitting(true);
     let root = tempfile::tempdir().expect("root");
     let snap_from = root.path().join("snapshots").join("ws-1").join("snap-1");
     std::fs::create_dir_all(&snap_from).expect("base snapshot dir");
@@ -184,6 +201,25 @@ async fn diff_against_live_failure_still_cleans_the_temp_dir() {
         !tmp_dir.exists(),
         "the internal dir is cleaned on failure too"
     );
+}
+
+/// The temp snapshot is a subvolume creation, so an unreadable backend usage
+/// refuses the diff before the internal dir or snapshot is created (#7234).
+#[tokio::test]
+async fn diff_against_live_requires_create_admission() {
+    let _guard = shim_lock().await;
+    let _shim = FakeBtrfs::install(false);
+    let root = tempfile::tempdir().expect("root");
+    let snap_from = root.path().join("snapshots").join("ws-1").join("snap-1");
+    std::fs::create_dir_all(&snap_from).expect("base snapshot dir");
+    let live = tempfile::tempdir().expect("live dir");
+    let tmp_dir = root.path().join(DIFF_TMP_DIR_NAME).join("ws-1");
+
+    let err = diff_against_live(&snap_from, live.path(), &tmp_dir, root.path())
+        .await
+        .expect_err("unreadable usage must refuse the temp snapshot");
+    assert!(err.downcast_ref::<CreateAdmissionRefused>().is_some());
+    assert!(!tmp_dir.exists(), "nothing is created after a refusal");
 }
 
 /// Bootstrap sweeps crash leftovers out of the daemon-owned `.diff-tmp/`

@@ -73,15 +73,18 @@ test_schema_compression() {
 test_response_compression() {
     log_section "Test 2: Response Compression"
 
-    log_info "Test 2.1: Null removal"
+    log_info "Test 2.1: Null preservation"
     local null_response='{"name":"test","value":null,"count":5}'
     local compressed=$(echo "$null_response" | tokenless compress-response 2>/dev/null)
-    assert_contains "$compressed" '"name"' "Null removal preserves name"
+    assert_contains "$compressed" '"name"' "Response preserves name"
+    assert_contains "$compressed" '"value":null' "Response preserves null"
 
-    log_info "Test 2.2: Debug field removal"
+    log_info "Test 2.2: Diagnostic field preservation"
     local debug_response='{"data":"ok","debug":"info","trace":"stack"}'
     compressed=$(echo "$debug_response" | tokenless compress-response 2>/dev/null)
-    assert_contains "$compressed" '"data"' "Debug removal preserves data"
+    assert_contains "$compressed" '"data"' "Response preserves data"
+    assert_contains "$compressed" '"debug":"info"' "Response preserves debug"
+    assert_contains "$compressed" '"trace":"stack"' "Response preserves trace"
 
     log_info "Test 2.3: Nested object"
     local nested='{"status":"ok","data":{"user":{"name":"John"}}}'

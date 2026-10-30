@@ -1,0 +1,167 @@
+//! Corroborate normalized IDs with original bytes from the admitted same-user Adapter.
+
+use aw_contracts::canonical;
+use serde_json::{json, Value};
+
+#[cfg(test)]
+mod tests;
+
+fn identifier(value: &Value) -> Option<&str> {
+    value.as_str().filter(|text| {
+        !text.trim().is_empty() && text.len() <= 512 && !text.chars().any(char::is_control)
+    })
+}
+
+/// Corroborate native IDs using the caller's strict decoder for all raw JSON.
+/// A callback-provided verification claim is never accepted as evidence.
+pub fn association(
+    adapter: &str,
+    event: &Value,
+    input: Option<&[u8]>,
+    decode: impl Fn(&[u8]) -> Option<Value>,
+) -> Value {
+    let session = identifier(&event["session_id"]);
+    let call = identifier(&event["tool"]["call_id"]);
+    let verified = input.and_then(&decode).is_some_and(|native| {
+        native == event["native"]
+            && session.is_some()
+            && call.is_some()
+            && matches_native(adapter, event, &native, &decode)
+    });
+    json!({
+        "status": if verified { "verified" } else if session.is_some() || call.is_some() { "unverified" } else { "unassociated" },
+        "basis": if verified { "native_callback" } else { "none" },
+        "session_id": session, "tool_call_id": call,
+    })
+}
+
+fn matches_native(
+    adapter: &str,
+    event: &Value,
+    native: &Value,
+    decode: &impl Fn(&[u8]) -> Option<Value>,
+) -> bool {
+    let after = event["name"] == "tool.after";
+    let tool = &event["tool"];
+    let (session, call, name, input, result, seam) = match adapter {
+        "qoder" => (
+            native["session_id"].clone(),
+            native["tool_use_id"].clone(),
+            native["tool_name"].clone(),
+            native["tool_input"].clone(),
+            native["tool_response"].clone(),
+            native["hook_event_name"] == if after { "PostToolUse" } else { "PreToolUse" },
+        ),
+        "qwenpaw" => (
+            native["session_id"].clone(),
+            native
+                .get("aw_invocation_id")
+                .unwrap_or(&native["tool_call"]["id"])
+                .clone(),
+            native["tool_call"]["name"].clone(),
+            match native["tool_call"]["input"]
+                .as_str()
+                .and_then(|text| decode(text.as_bytes()))
+            {
+                Some(value) => value,
+                None => return false,
+            },
+            native["tool_response"].clone(),
+            native["event"] == event["name"],
+        ),
+        "hermes" => {
+            let Some(call) = identifier(&native["extra"]["tool_call_id"]) else {
+                return false;
+            };
+            let Some(request) = identifier(&native["extra"]["api_request_id"]) else {
+                return false;
+            };
+            let scoped = canonical::digest(json!([request, call]).to_string().as_bytes());
+            (
+                native["session_id"].clone(),
+                json!(format!("hermes:{scoped}")),
+                native["tool_name"].clone(),
+                native["tool_input"].clone(),
+                native["extra"]["result"].clone(),
+                if after {
+                    matches!(
+                        native["hook_event_name"].as_str(),
+                        Some("post_tool_call" | "transform_tool_result")
+                    )
+                } else {
+                    native["hook_event_name"] == "pre_tool_call"
+                },
+            )
+        }
+        "openclaw" => {
+            let raw = &native["event"];
+            let context = &native["context"];
+            let Some(call) = raw
+                .get("toolCallId")
+                .or(context.get("toolCallId"))
+                .and_then(identifier)
+            else {
+                return false;
+            };
+            let Some(run) = raw
+                .get("runId")
+                .or(context.get("runId"))
+                .and_then(identifier)
+            else {
+                return false;
+            };
+            let Some(name) = identifier(&raw["toolName"]) else {
+                return false;
+            };
+            let name = if after {
+                crate::adapters::openclaw::policy_name(name)
+            } else {
+                name.to_owned()
+            };
+            (
+                context["sessionId"].clone(),
+                json!(canonical::digest(json!([run, call]).to_string().as_bytes())),
+                json!(name),
+                raw["params"].clone(),
+                raw["result"].clone(),
+                native["hook"]
+                    == if after {
+                        "after_tool_call"
+                    } else {
+                        "before_tool_call"
+                    },
+            )
+        }
+        _ => return false,
+    };
+    let native_name = if adapter == "openclaw" && after {
+        let Some(retained) = identifier(&tool["native_name"]) else {
+            return false;
+        };
+        // A correlated observation retains its replacement's exact spelling,
+        // while the native completion can supply the runtime's policy alias.
+        json!(crate::adapters::openclaw::policy_name(retained))
+    } else {
+        tool["native_name"].clone()
+    };
+    seam && identifier(&session).is_some()
+        && identifier(&call).is_some()
+        && event["session_id"] == session
+        && tool["call_id"] == call
+        && native_name == name
+        && tool["name"] == name
+        && tool["input"] == input
+        && tool["result"] == result
+}
+
+/// Match framework source labels without claiming session or process association.
+pub fn source_matches_adapter(adapter: &Value, name: &Value) -> bool {
+    // Source labels corroborate the framework only, never the native session or process.
+    matches!(
+        (adapter.as_str(), name.as_str()),
+        (Some("qoder"), Some("qoder" | "Qoder"))
+            | (Some("hermes"), Some("hermes" | "Hermes"))
+            | (Some("openclaw"), Some("openclaw" | "OpenClaw"))
+            | (Some("qwenpaw"), Some("qwenpaw"))
+    )
+}

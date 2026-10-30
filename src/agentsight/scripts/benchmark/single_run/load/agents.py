@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from benchmark_stats import numeric
 from mock_llm_server import (
     INPUT_TOKENS,
     PREFLIGHT_OUTPUT_TOKENS,
@@ -82,7 +83,12 @@ def capture_preflight(connection: http.client.HTTPSConnection, run_id: str, inde
             {
                 "request_id": request_id,
                 "model": "benchmark-model",
-                "messages": [{"role": "user", "content": "capture readiness"}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"[agentsight-benchmark:{request_id}] capture readiness",
+                    }
+                ],
             }
         ),
         headers={
@@ -145,6 +151,7 @@ def worker(args: argparse.Namespace) -> int:
         with (root / f"agent-{index}.jsonl").open("w", encoding="utf-8", buffering=1) as log:
             while time.monotonic() < end:
                 request_id = f"bench-{args.run_id}-{index}-{iteration}"
+                marker = f"[agentsight-benchmark:{request_id}] "
                 started = time.monotonic()
                 connection.request(
                     "POST",
@@ -154,7 +161,9 @@ def worker(args: argparse.Namespace) -> int:
                             "request_id": request_id,
                             "model": "benchmark-model",
                             "stream": True,
-                            "messages": [{"role": "user", "content": content}],
+                            "messages": [
+                                {"role": "user", "content": marker + content[len(marker) :]}
+                            ],
                             "metadata": {"agent_id": str(index)},
                         }
                     ),
@@ -236,22 +245,54 @@ def summarize(args: argparse.Namespace, window: dict[str, float]) -> dict[str, A
     transitions: list[tuple[float, int]] = []
     with gzip.open(args.output_dir.parent / "agents.jsonl.gz", "wt", encoding="utf-8") as output:
         for index in range(args.agents):
-            agents.append(
-                json.loads((args.output_dir / f"agent-{index}.json").read_text(encoding="utf-8"))
-            )
+            try:
+                agent = json.loads(
+                    (args.output_dir / f"agent-{index}.json").read_text(encoding="utf-8")
+                )
+                if not isinstance(agent, dict):
+                    raise ValueError("worker result is not an object")
+                rate = numeric(agent.get("tokens_per_second"))
+                if (
+                    type(agent.get("agent")) is not int
+                    or agent["agent"] != index
+                    or type(agent.get("pid")) is not int
+                    or agent["pid"] <= 0
+                    or rate is None
+                    or rate < 0
+                ):
+                    raise ValueError("worker identity or token rate is invalid")
+                agent["tokens_per_second"] = rate
+            except (OSError, ValueError) as error:
+                agent = {
+                    "agent": index,
+                    "pid": None,
+                    "tokens_per_second": 0,
+                    "error": f"unusable worker result: {error}",
+                }
+            agents.append(agent)
             path = args.output_dir / f"agent-{index}.jsonl"
-            if not path.exists():
-                continue
-            with path.open(encoding="utf-8") as log:
-                for line in log:
-                    output.write(line)
-                    item = json.loads(line)
-                    if item["metric"] != "benchmark_requests":
-                        continue
-                    start = max(window["start"], item["stream_start"])
-                    end = min(window["end"], item["stream_end"])
-                    if end > start:
-                        transitions.extend(((start, 1), (end, -1)))
+            try:
+                with path.open(encoding="utf-8", errors="replace") as log:
+                    for line in log:
+                        output.write(line)
+                        try:
+                            item = json.loads(line)
+                            if not isinstance(item, dict):
+                                raise ValueError("worker log record is not an object")
+                            if item.get("metric") != "benchmark_requests":
+                                continue
+                            start, end = numeric(item.get("stream_start")), numeric(
+                                item.get("stream_end")
+                            )
+                            if start is None or end is None or end < start:
+                                raise ValueError("invalid worker stream interval")
+                            start, end = max(window["start"], start), min(window["end"], end)
+                            if end > start:
+                                transitions.extend(((start, 1), (end, -1)))
+                        except ValueError as error:
+                            agent["error"] = f"unusable worker log: {error}"
+            except OSError as error:
+                agent["error"] = f"unreadable worker log: {error}"
     active = peak = 0
     area = 0.0
     previous = window["start"]
@@ -261,6 +302,10 @@ def summarize(args: argparse.Namespace, window: dict[str, float]) -> dict[str, A
         peak = max(peak, active)
         previous = timestamp
     average = area / args.duration
+    pids = [agent["pid"] for agent in agents if agent["pid"] is not None]
+    for agent in agents:
+        if agent["pid"] is not None and pids.count(agent["pid"]) > 1:
+            agent["error"] = "duplicate worker PID"
     failed = [
         agent["agent"]
         for agent in agents
@@ -270,7 +315,7 @@ def summarize(args: argparse.Namespace, window: dict[str, float]) -> dict[str, A
     return {
         "schema_version": 1,
         "requested_agents": args.agents,
-        "distinct_agent_pids": len({agent["pid"] for agent in agents}),
+        "distinct_agent_pids": len(set(pids)),
         "target_tokens_per_second_per_agent": args.tokens_per_second,
         "tokens_per_response": args.tokens_per_response,
         "token_encoding": "cl100k_base",
@@ -355,6 +400,7 @@ def run(args: argparse.Namespace) -> int:
         start = time.monotonic() + args.startup_delay
         window = {"start": start, "end": start + args.duration}
         write_json(args.output_dir / "start.json", window)
+        measurement_error: str | None = None
         deadline = window["end"] + args.tokens_per_response / args.tokens_per_second + 15
         while any(
             (
@@ -368,17 +414,23 @@ def run(args: argparse.Namespace) -> int:
                 child.poll() is not None and not (args.output_dir / f"agent-{index}.json").exists()
                 for index, child in enumerate(children)
             ):
-                raise RuntimeError("a client exited without publishing its load result")
+                measurement_error = "a client exited without publishing its load result"
+                break
             if time.monotonic() > deadline:
-                raise RuntimeError("clients exceeded the stream drain timeout")
+                measurement_error = "clients exceeded the stream drain timeout"
+                break
             time.sleep(0.05)
+        if measurement_error is not None:
+            terminate(children)
         summary = summarize(args, window)
+        if measurement_error is not None:
+            summary.update(passed=False, error=measurement_error)
         write_json(args.output_dir.parent / "agent-summary.json", summary)
         print(
             json.dumps({key: value for key, value in summary.items() if key != "agents"}),
             flush=True,
         )
-        if args.capture_marker is not None:
+        if args.capture_marker is not None and measurement_error is None:
             args.capture_marker.touch()
             release = args.capture_marker.with_name(args.capture_marker.name + ".release")
             deadline = time.monotonic() + args.capture_timeout + 30

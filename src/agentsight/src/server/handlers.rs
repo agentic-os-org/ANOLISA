@@ -1,6 +1,6 @@
 //! API request handlers
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use actix_web::http::StatusCode;
@@ -595,7 +595,7 @@ pub async fn list_agent_names(
         return HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": "GenAI store unavailable"}));
     };
-    match store.list_agent_names(start_ns, end_ns) {
+    match store.list_agent_names(start_ns, end_ns, query.include_auxiliary.unwrap_or(false)) {
         Ok(names) => HttpResponse::Ok().json(names),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
@@ -2383,6 +2383,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&label_dir);
     }
 
+    /// The dashboard clears a filter by sending an empty value. Treating
+    /// `?label=` as "select the empty label set" kept nothing and answered an
+    /// empty 200 even though unlabelled trajectories existed.
+    #[actix_web::test]
+    async fn empty_label_filter_does_not_hide_every_trajectory() {
+        let db = unique_handler_db("empty-label");
+        let tstore = Arc::new(TrajectoryStore::new_with_path(&db).unwrap());
+        tstore
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        let label_dir = temp_root("reuse-empty-label");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/trajectories?label=",
+            "/api/trajectories?exclude_label=",
+            "/api/trajectories?label=&exclude_label=",
+            "/api/trajectories?label=%20",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            let rows: serde_json::Value = awtest::read_body_json(resp).await;
+            assert_eq!(
+                rows.as_array().map(Vec::len),
+                Some(1),
+                "{uri} must not filter out unlabelled trajectories: {rows}"
+            );
+        }
+
+        cleanup_db(&db);
+        let _ = std::fs::remove_dir_all(&label_dir);
+    }
+
     /// `human_backed=false` is a public query field, but the filter used to
     /// recognise only `Some(true)`: the negative request was silently ignored
     /// and answered with every trajectory, including human-settled ones —
@@ -3693,6 +3736,100 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// `stats` groups by `(type, severity)`, so one type answers twice once an
+    /// upgrade changes its severity mapping. The exposition labels a sample
+    /// only by type, so emitting every row verbatim produced two samples with
+    /// the same name and labels in one scrape — at the same scrape timestamp
+    /// Prometheus rejects the whole scrape as a duplicate sample. The rows for
+    /// one type must be summed into a single series.
+    #[actix_web::test]
+    async fn metrics_sum_interruption_rows_that_share_a_type() {
+        let interruption_path = unique_handler_db("metrics_shared_type");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let mut high = make_interruption_event(
+            "int-high",
+            "sess-metrics",
+            "conv-metrics",
+            crate::interruption::InterruptionType::RateLimit,
+        );
+        high.severity = crate::interruption::types::Severity::High;
+        let mut medium = make_interruption_event(
+            "int-medium",
+            "sess-metrics",
+            "conv-metrics",
+            crate::interruption::InterruptionType::RateLimit,
+        );
+        medium.severity = crate::interruption::types::Severity::Medium;
+        istore.insert(&high).unwrap();
+        istore.insert(&medium).unwrap();
+
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        let state = web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+            storage_path: PathBuf::from(":memory:"),
+            genai_store: Some(Arc::new(
+                GenAISqliteStore::new_with_path(
+                    std::path::Path::new(":memory:"),
+                    crate::config::PeriodicStoragePolicy::default(),
+                )
+                .unwrap(),
+            )),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: Some(Arc::clone(&istore)),
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+        });
+
+        let app = awtest::init_service(App::new().app_data(state).service(metrics)).await;
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/metrics").to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let samples: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("agentsight_interruptions_total{type=\"rate_limit\"}"))
+            .collect();
+        assert_eq!(
+            samples,
+            vec!["agentsight_interruptions_total{type=\"rate_limit\"} 2"],
+            "one type must be one Prometheus series:\n{text}"
+        );
+
+        cleanup_db(&interruption_path);
+    }
+
     #[test]
     fn live_process_matches_checks_the_live_executable() {
         let self_pid = std::process::id();
@@ -4651,11 +4788,23 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
                 "# HELP agentsight_interruptions_total Total interruption events by type\n",
             );
             out.push_str("# TYPE agentsight_interruptions_total counter\n");
+            // `stats` groups by `(type, severity)` so a type whose severity
+            // mapping changed across versions stays exact in the by-severity
+            // breakdowns. This exposition labels samples by type only, so the
+            // rows must be summed here: two samples with the same name and
+            // labels in one scrape carry the same timestamp, and Prometheus
+            // rejects the whole scrape as a duplicate sample.
+            let mut counts_by_type: BTreeMap<&str, i64> = BTreeMap::new();
             for s in &stats {
+                *counts_by_type
+                    .entry(s.interruption_type.as_str())
+                    .or_default() += s.count;
+            }
+            for (interruption_type, count) in counts_by_type {
                 out.push_str(&format!(
                     "agentsight_interruptions_total{{type=\"{}\"}} {}\n",
-                    escape_label(&s.interruption_type),
-                    s.count
+                    escape_label(interruption_type),
+                    count
                 ));
             }
             out.push('\n');
@@ -5765,7 +5914,15 @@ pub async fn list_trajectories(
 /// `false` excludes human-settled rows and needs the label store just as much
 /// as `true` needs it.
 fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
-    query.label.is_some() || query.exclude_label.is_some() || query.human_backed.is_some()
+    // An empty value (`?label=`) is the UI clearing the filter, not a request
+    // for the empty label set: parsing it would keep nothing and return an
+    // empty 200 for every unlabelled trajectory.
+    let present = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    present(&query.label) || present(&query.exclude_label) || query.human_backed.is_some()
 }
 
 /// A `reuse.db` read failure while resolving label filters.
@@ -5815,19 +5972,21 @@ fn filter_rows_by_reuse_labels(
         .label
         .as_deref()
         .map(|raw| parse("label", raw))
-        .transpose()?;
+        .transpose()?
+        .filter(|labels| !labels.is_empty());
     let excluded = query
         .exclude_label
         .as_deref()
         .map(|raw| parse("exclude_label", raw))
-        .transpose()?;
+        .transpose()?
+        .filter(|labels| !labels.is_empty());
 
     let Some(labels) = data.reuse_store.as_deref() else {
         // No label store: nothing has been assessed, so a positive filter
         // matches nothing. Serve the empty truth rather than unfiltered rows.
         // `human_backed=false` is the opposite polarity — nothing is settled,
         // so every row belongs in the answer.
-        if query.label.is_some() || query.human_backed == Some(true) {
+        if requested.is_some() || query.human_backed == Some(true) {
             rows.clear();
         }
         return Ok(());

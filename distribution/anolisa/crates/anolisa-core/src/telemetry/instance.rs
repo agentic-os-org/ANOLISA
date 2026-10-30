@@ -18,7 +18,8 @@ use std::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceInfo {
     pub id: String,
-    /// "ecs" | "swas" | "eds" | "unknown"
+    /// "ecs" | "swas" | "eds" | "container" | "unknown"; custom
+    /// `/etc/anolisa-release` values pass through verbatim.
     pub source: String,
     /// instance-type from metadata API (e.g. "ecs.c7.xlarge")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -327,11 +328,12 @@ impl InstanceProber {
 
     // ── Container runtime ─────────────────────────────────────────
 
-    /// Delegate to [`anolisa_env::detect_container`] so the snapshot
-    /// carries the same flavor classification as the rest of the agent
-    /// OS without re-implementing marker/cgroup heuristics here.
+    /// Resolve the container runtime flavor through the shared probe
+    /// ([`crate::telemetry::common::container_flavor`]) so the snapshot
+    /// carries the same classification as product-type detection without
+    /// re-implementing marker/cgroup heuristics here.
     fn probe_container() -> Option<String> {
-        anolisa_env::detect_container()
+        crate::telemetry::common::container_flavor()
     }
 }
 
@@ -548,29 +550,51 @@ mod tests {
                     ("image-id", 200, "ubuntu-test.vhd"),
                 ],
                 |base| {
-                    let dir = TempDir::new().unwrap();
-                    let mut config = crate::telemetry::test_config(&dir);
-                    config.metadata_url = format!("{base}/region-id");
-                    write_instance_snapshot(&config, false).unwrap();
-                    let content =
-                        fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
-                    let snapshot: serde_json::Value = serde_json::from_str(&content).unwrap();
-                    assert_eq!(snapshot["instance.source"], "ecs");
-                    assert_eq!(snapshot["instance.type"], "ecs.g9i.xlarge");
-                    assert_eq!(snapshot["instance.image-id"], "ubuntu-test.vhd");
-                    assert!(!content.contains("i-test"));
-                    assert!(!config.identity_cache_path.exists());
+                    crate::telemetry::common::with_container_flavor(None, || {
+                        let dir = TempDir::new().unwrap();
+                        let mut config = crate::telemetry::test_config(&dir);
+                        config.metadata_url = format!("{base}/region-id");
+                        write_instance_snapshot(&config, false).unwrap();
+                        let content =
+                            fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
+                        let snapshot: serde_json::Value = serde_json::from_str(&content).unwrap();
+                        assert_eq!(snapshot["instance.source"], "ecs");
+                        assert_eq!(snapshot["instance.type"], "ecs.g9i.xlarge");
+                        assert_eq!(snapshot["instance.image-id"], "ubuntu-test.vhd");
+                        assert!(!content.contains("i-test"));
+                        assert!(!config.identity_cache_path.exists());
+                    })
                 },
-            );
+            )
+        });
+    }
+
+    #[test]
+    fn test_snapshot_reports_container_product_type() {
+        // Inside a container the shared chain short-circuits before any
+        // metadata query: instance.source carries the device form while
+        // instance.container keeps the runtime flavor.
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            crate::telemetry::common::with_container_flavor(Some("docker"), || {
+                let dir = TempDir::new().unwrap();
+                let config = crate::telemetry::test_config(&dir);
+                write_instance_snapshot(&config, false).unwrap();
+                let content = fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
+                let snapshot: serde_json::Value = serde_json::from_str(&content).unwrap();
+                assert_eq!(snapshot["instance.source"], "container");
+                assert_eq!(snapshot["instance.container"], "docker");
+            });
         });
     }
 
     #[test]
     fn test_probe_product_type_unknown() {
         crate::telemetry::metadata::with_cloud_init_disabled(|| {
-            let dir = TempDir::new().unwrap();
-            let p = prober(&dir);
-            assert_eq!(p.probe_product_type(), "unknown");
+            crate::telemetry::common::with_container_flavor(None, || {
+                let dir = TempDir::new().unwrap();
+                let p = prober(&dir);
+                assert_eq!(p.probe_product_type(), "unknown");
+            })
         });
     }
 
@@ -579,9 +603,11 @@ mod tests {
         crate::telemetry::metadata::with_cloud_init_responses(
             &[("ds.meta_data.instance.instance-type", "ecs.c7.xlarge")],
             || {
-                let dir = TempDir::new().unwrap();
-                let p = prober(&dir);
-                assert_eq!(p.probe_product_type(), "ecs");
+                crate::telemetry::common::with_container_flavor(None, || {
+                    let dir = TempDir::new().unwrap();
+                    let p = prober(&dir);
+                    assert_eq!(p.probe_product_type(), "ecs");
+                })
             },
         );
     }
@@ -591,9 +617,11 @@ mod tests {
         crate::telemetry::metadata::with_cloud_init_responses(
             &[("ds.meta_data.desktop-id", "ecd-abc123")],
             || {
-                let dir = TempDir::new().unwrap();
-                let p = prober(&dir);
-                assert_eq!(p.probe_product_type(), "eds");
+                crate::telemetry::common::with_container_flavor(None, || {
+                    let dir = TempDir::new().unwrap();
+                    let p = prober(&dir);
+                    assert_eq!(p.probe_product_type(), "eds");
+                })
             },
         );
     }

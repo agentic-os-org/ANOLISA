@@ -1,7 +1,8 @@
 //! Startup recovery for Btrfs rollback temporary subvolumes.
 //!
-//! Ambiguous state stops backend bootstrap because ws-ckpt has no durable
-//! rollback commit record with which to choose between two live candidates.
+//! When both live and tmp are subvolumes the rollback already created the new
+//! live, so recovery finishes it by deleting tmp. Any unverified path still
+//! stops backend bootstrap.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -13,6 +14,8 @@ use nix::fcntl::{renameat2, RenameFlags};
 use tokio::process::Command;
 use tracing::{info, warn};
 use ws_ckpt_common::SNAPSHOTS_DIR;
+
+use super::btrfs_common;
 
 const ROLLBACK_TMP_SUFFIX: &str = ".rollback-tmp";
 
@@ -27,12 +30,15 @@ enum RollbackPathState {
 enum RollbackRecoveryOutcome {
     Noop,
     RestoredLive,
+    CompletedRollback,
+    TmpRetained,
 }
 
 #[async_trait]
 trait RollbackRecoveryOps: Sync {
     async fn inspect(&self, path: &Path) -> Result<RollbackPathState>;
     async fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<()>;
+    async fn delete_subvolume(&self, path: &Path, fs_root: &Path) -> Result<()>;
 }
 
 struct BtrfsRollbackRecoveryOps;
@@ -79,6 +85,10 @@ impl RollbackRecoveryOps for BtrfsRollbackRecoveryOps {
 
     async fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<()> {
         rename_noreplace(from, to).await
+    }
+
+    async fn delete_subvolume(&self, path: &Path, fs_root: &Path) -> Result<()> {
+        btrfs_common::delete_subvolume_space_aware(path, fs_root).await
     }
 }
 
@@ -152,6 +162,29 @@ async fn recover_interrupted_rollback_with<O: RollbackRecoveryOps>(
             );
             Ok(RollbackRecoveryOutcome::RestoredLive)
         }
+        (RollbackPathState::Subvolume, RollbackPathState::Subvolume) => {
+            // The new live exists, so only the final cleanup of `rollback`
+            // is missing. Like that cleanup, a failed delete is non-fatal and
+            // is retried on the next startup.
+            warn!(
+                "Completing interrupted rollback for workspace {ws_id:?}: live {live_path:?} and \
+                 owned temporary {tmp_path:?} are both subvolumes, so the new live was created; \
+                 deleting the temporary, which permanently discards the pre-rollback changes"
+            );
+            if let Err(e) = ops.delete_subvolume(&tmp_path, data_root).await {
+                warn!(
+                    "failed to delete interrupted rollback temporary subvolume {:?} for workspace \
+                     {:?} (non-fatal, retried on next startup): {:#}",
+                    tmp_path, ws_id, e
+                );
+                return Ok(RollbackRecoveryOutcome::TmpRetained);
+            }
+            info!(
+                "Completed interrupted rollback for workspace {:?} by deleting {:?}; kept live {:?}",
+                ws_id, tmp_path, live_path
+            );
+            Ok(RollbackRecoveryOutcome::CompletedRollback)
+        }
         (live_state, tmp_state) => bail!(
             "ambiguous interrupted rollback for workspace {ws_id:?}: live path {live_path:?} is \
              {live_state:?}, temporary path {tmp_path:?} is {tmp_state:?}; refusing to rename or \
@@ -162,9 +195,9 @@ async fn recover_interrupted_rollback_with<O: RollbackRecoveryOps>(
 
 /// Resolves all interrupted rollbacks before workspace state is rebuilt.
 ///
-/// Any owned but ambiguous entry fails the whole backend bootstrap. This is a
-/// deliberate coarse fail-closed boundary until per-workspace quarantine and
-/// durable rollback commit evidence exist.
+/// Any owned entry with an unverified live or tmp path fails the whole backend
+/// bootstrap. This is a deliberate coarse fail-closed boundary until
+/// per-workspace quarantine exists.
 pub(crate) async fn recover_interrupted_rollbacks(data_root: &Path) -> Result<()> {
     recover_interrupted_rollbacks_with(data_root, &BtrfsRollbackRecoveryOps).await
 }
@@ -245,6 +278,7 @@ mod tests {
         states: Mutex<HashMap<PathBuf, RollbackPathState>>,
         calls: Mutex<Vec<String>>,
         fail_rename: bool,
+        fail_delete: bool,
     }
 
     impl FakeRollbackOps {
@@ -292,6 +326,18 @@ mod tests {
                 .remove(from)
                 .ok_or_else(|| anyhow::anyhow!("source missing"))?;
             states.insert(to.to_path_buf(), state);
+            Ok(())
+        }
+
+        async fn delete_subvolume(&self, path: &Path, _fs_root: &Path) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete:{}", path.display()));
+            if self.fail_delete {
+                bail!("injected delete failure");
+            }
+            self.states.lock().unwrap().remove(path);
             Ok(())
         }
     }
@@ -357,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_valid_subvolumes_fail_closed_without_commit_evidence() {
+    async fn both_valid_subvolumes_complete_rollback_by_deleting_tmp() {
         let root = Path::new("/backend");
         let (live, tmp) = rollback_paths(root);
         let ops = FakeRollbackOps::with_states([
@@ -365,14 +411,35 @@ mod tests {
             (tmp.clone(), RollbackPathState::Subvolume),
         ]);
 
-        let error = recover_interrupted_rollback_with(root, OsStr::new("ws-abc123"), &ops)
+        let outcome = recover_interrupted_rollback_with(root, OsStr::new("ws-abc123"), &ops)
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(format!("{error:#}").contains("ambiguous interrupted rollback"));
+        assert_eq!(outcome, RollbackRecoveryOutcome::CompletedRollback);
+        assert_eq!(ops.state(&live), RollbackPathState::Subvolume);
+        assert_eq!(ops.state(&tmp), RollbackPathState::Missing);
+        assert_eq!(ops.calls(), vec![format!("delete:{}", tmp.display())]);
+    }
+
+    #[tokio::test]
+    async fn tmp_delete_failure_keeps_live_and_does_not_block_startup() {
+        let root = Path::new("/backend");
+        let (live, tmp) = rollback_paths(root);
+        let ops = FakeRollbackOps {
+            fail_delete: true,
+            ..FakeRollbackOps::with_states([
+                (live.clone(), RollbackPathState::Subvolume),
+                (tmp.clone(), RollbackPathState::Subvolume),
+            ])
+        };
+
+        let outcome = recover_interrupted_rollback_with(root, OsStr::new("ws-abc123"), &ops)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, RollbackRecoveryOutcome::TmpRetained);
         assert_eq!(ops.state(&live), RollbackPathState::Subvolume);
         assert_eq!(ops.state(&tmp), RollbackPathState::Subvolume);
-        assert!(ops.calls().is_empty(), "neither subvolume may be deleted");
     }
 
     #[tokio::test]

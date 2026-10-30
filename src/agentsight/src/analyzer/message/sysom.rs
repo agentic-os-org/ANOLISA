@@ -78,8 +78,15 @@ pub struct SysomMessage {
     /// Role: "system" | "user" | "assistant" | "tool"
     pub role: String,
 
-    /// Text content
-    #[serde(default)]
+    /// Text content.
+    ///
+    /// Two wire shapes reach this field. An assistant turn that only issued a
+    /// tool call carries `"content": null` (the shape every OpenAI-compatible
+    /// SDK tool loop sends), and a multimodal turn carries a content-block
+    /// array. Both used to fail the whole `llmParamString` decode, taking the
+    /// rest of the request with them, so [`content_as_text`] reads the string
+    /// verbatim, joins the blocks, and treats absent/`null` as "no text".
+    #[serde(default, deserialize_with = "content_as_text")]
     pub content: String,
 
     /// Tool call ID (for role=tool messages)
@@ -96,10 +103,15 @@ pub struct SysomMessage {
 }
 
 /// An assistant-issued tool call (inside request messages)
+///
+/// A request may carry a call without the deprecated `type` field (nothing
+/// here reads it) and with a `null` id before the provider assigns one — the
+/// same tolerance [`SysomToolUseItem`] already has on the response side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomToolCall {
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: String,
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "null_as_default")]
     pub call_type: String,
     pub function: SysomFunction,
 }
@@ -157,12 +169,17 @@ pub struct SysomResponseChoice {
 
 /// Read a field the provider may send as an explicit `null`.
 ///
-/// Absent, `null` and empty all mean "this frame carries no snapshot" in the
-/// cumulative SysOM frames: the provider stops repeating the text once the
-/// answer switches to tool calls, and a later frame of an open call need not
-/// repeat its identity. A `null` must not fail the frame that carries the
-/// call, the way it does not fail the SysOM client's own reader
-/// (`identity_field` reads a `null` id or name as "not reported").
+/// Both directions of the SysOM envelope need this. In a cumulative response
+/// frame, absent, `null` and empty all mean "no snapshot in this frame": the
+/// provider stops repeating the text once the answer switches to tool calls,
+/// and a later frame of an open call need not repeat its identity. In a
+/// request message the same spellings appear on a tool-calling assistant turn
+/// (`content: null`) and on a call whose id the provider has not assigned yet.
+///
+/// A `null` must not fail the payload that carries it, the way it does not
+/// fail the SysOM client's own reader (`identity_field` reads a `null` id or
+/// name as "not reported"). Applying it to a field means "this field is
+/// optional and its absence is not an error".
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -171,11 +188,45 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// Deserialize a `content` field as its text, accepting both wire shapes.
+///
+/// The native DashScope protocol puts a plain string on the field for
+/// `result_format: text`, and a content-block array for a multimodal turn
+/// (`[{"type":"text","text":…},…]`) — on a request message and on a response
+/// choice alike. Every other reader of the envelope concatenates the block
+/// texts with no separator: the shared native reader in the token extractor,
+/// the chatml reader and `parser::llm`'s request view all do. This typed field
+/// is a `String`, so an array failed the whole body's deserialization instead
+/// of just that one field — the response lost its id and tool calls, the
+/// request lost the entire `llmParamString` decode. Reading the array as its
+/// text keeps the siblings' fields and matches what they count for the same
+/// capture.
+fn content_as_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let content = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match content {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(text)) => text,
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| {
+                // A block carries its text on `text`; the `type` tag is the
+                // block kind, not a constraint on which blocks are read, since
+                // a compatible gateway omits it on a plain text block.
+                block.get("text").and_then(|text| text.as_str())
+            })
+            .collect::<String>(),
+        Some(other) => other.to_string(),
+    })
+}
+
 /// The message part of a SysOM response choice
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomResponseMessage {
     /// Text content of the response
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "content_as_text")]
     pub content: String,
 
     /// Tool calls in the response (`tool_use` array, NOT `tool_calls`)
@@ -190,7 +241,15 @@ pub struct SysomResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
-    /// Response choices
+    /// Response choices.
+    ///
+    /// A cumulative frame may report no choices at all — `null` or the field
+    /// omitted — while still carrying the response id, the same way it may
+    /// send a `null` content or identity mid-call. The SysOM client's own
+    /// reader treats absent or null choices as "this frame carries no
+    /// content"; failing the frame here instead dropped it whole, losing the
+    /// id update it carried.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub choices: Vec<SysomResponseChoice>,
 }
 
@@ -395,6 +454,123 @@ mod tests {
         assert!(req.params.stream);
     }
 
+    /// A tool-calling assistant turn is spelled
+    /// `{"role": "assistant", "content": null, "tool_calls": [...]}`, the
+    /// shape every OpenAI-compatible SDK tool loop sends, and a provider may
+    /// leave the deprecated call `type` out while naming only the function.
+    /// The request-side structs required both, so one such turn failed the
+    /// whole `llmParamString` decode and `parse_request` returned none — the
+    /// entire request view, not just that turn, vanished from the call.
+    #[test]
+    fn test_parse_request_keeps_a_null_content_tool_turn() {
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "list_dir", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "a.txt"}
+            ],
+            "stream": true
+        });
+        let body = serde_json::json!({ "llmParamString": params.to_string() });
+
+        let req = SysomParser::parse_request(&body)
+            .expect("a null content or an omitted call type must not drop the request");
+        assert_eq!(req.params.messages.len(), 3);
+        assert_eq!(req.params.messages[1].content, "");
+        let calls = req.params.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the tool call must survive");
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].function.name, "list_dir");
+    }
+
+    /// The same turn with the call `type` spelled out and a `null` id: a
+    /// provider that has no id yet repeats a null rather than omitting it.
+    #[test]
+    fn test_parse_request_keeps_a_null_call_id() {
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [
+                {"role": "assistant", "content": "", "tool_calls": [{
+                    "id": null,
+                    "type": "function",
+                    "function": {"name": "list_dir", "arguments": "{}"}
+                }]}
+            ]
+        });
+        let body = serde_json::json!({ "llmParamString": params.to_string() });
+
+        let req = SysomParser::parse_request(&body).expect("a null id must not drop the request");
+        let calls = req.params.messages[0]
+            .tool_calls
+            .as_ref()
+            .expect("the tool call must survive");
+        assert_eq!(calls[0].id, "");
+    }
+
+    /// End to end through `parse_by_path`, the entry the analyzer uses: a
+    /// request-only capture (the in-flight call) whose body holds one
+    /// tool-calling turn used to parse as no message at all, so the call had
+    /// no request view to attribute.
+    #[test]
+    fn test_parse_by_path_keeps_a_null_content_request() {
+        use crate::analyzer::message::{MessageParser, ParsedApiMessage};
+
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "list_dir", "arguments": "{}"}
+                }]}
+            ]
+        });
+        let body = serde_json::json!({ "llmParamString": params.to_string() });
+
+        match MessageParser::new().parse_by_path(
+            "/api/v1/copilot/generate_copilot_stream_response",
+            Some(&body),
+            None,
+        ) {
+            Some(ParsedApiMessage::SysomMessage { request, .. }) => {
+                let request = request.expect("the request view must survive");
+                assert_eq!(request.params.messages.len(), 2);
+            }
+            other => panic!("expected the SysomMessage request, got {other:?}"),
+        }
+    }
+
+    /// The request side of the same envelope: a multimodal user turn's
+    /// `llmParamString` message carries `content` as a parts array, and the
+    /// typed `SysomMessage` read it as a `String`. The array failed the whole
+    /// `llmParamString` decode, so the request recorded no prompt at all while
+    /// the other request readers join the block texts.
+    #[test]
+    fn test_parse_request_block_array_content() {
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+                ]
+            }],
+            "stream": false,
+            "use_dashscope": true
+        });
+        let body = serde_json::json!({"llmParamString": params.to_string()});
+
+        let req = SysomParser::parse_request(&body).expect("a parts-array message must parse");
+        assert_eq!(req.params.messages[0].content, "what is in this image?");
+    }
+
     #[test]
     fn test_parse_response_non_streaming() {
         let body = serde_json::json!({
@@ -579,6 +755,26 @@ mod tests {
                 .unwrap_or_else(|| panic!("{body}: the tool call must be kept"));
             assert_eq!(tool_use[0].id, "call_abc123");
         }
+    }
+
+    /// The native protocol puts a multimodal answer's content on
+    /// `choices[].message.content` as a parts array. Every other reader of the
+    /// envelope concatenates the block texts, but `SysomResponseMessage.content`
+    /// is a `String`: the array failed the *whole* response's deserialization,
+    /// so the call recorded no output, and the frame's response id and tool
+    /// calls were dropped with it.
+    #[test]
+    fn test_parse_response_block_array_content() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": [{"type": "text", "text": "这张照片"}, {"type": "text", "text": "里有一只猫"}],
+                    "tool_use": null
+                }
+            }]
+        });
+        let resp = SysomParser::parse_response(&body).expect("a parts-array content must parse");
+        assert_eq!(resp.choices[0].message.content, "这张照片里有一只猫");
     }
 
     /// A provider may omit `index` from its tool_use entries entirely, in
@@ -770,5 +966,42 @@ mod tests {
         assert_eq!(tool_use[0].function.name, "read_file");
         assert_eq!(tool_use[0].function.arguments, "{\"path\":\"/tmp/a.txt\"}");
         assert_eq!(resp.choices[0].message.content, "Let me check the file.");
+    }
+
+    /// A closing frame with `"choices": null` still carries the response id;
+    /// failing the frame dropped it whole and the aggregator kept an earlier
+    /// id (or none). The client's own reader treats null choices as "no
+    /// content in this frame", not as a parse error.
+    #[test]
+    fn test_parse_response_sse_null_choices_keeps_id() {
+        let chunks = serde_json::json!([
+            {"id": "chatcmpl-keep", "choices": [{"message": {"content": "Hello"}}]},
+            {"id": "chatcmpl-last", "choices": null}
+        ]);
+        let resp = SysomParser::parse_response(&chunks).unwrap();
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-last"));
+        assert_eq!(resp.choices[0].message.content, "Hello");
+    }
+
+    /// A frame that omits `choices` entirely is the same "no content" case.
+    #[test]
+    fn test_parse_response_sse_missing_choices_keeps_id() {
+        let chunks = serde_json::json!([
+            {"id": "chatcmpl-keep", "choices": [{"message": {"content": "Hello"}}]},
+            {"id": "chatcmpl-last"}
+        ]);
+        let resp = SysomParser::parse_response(&chunks).unwrap();
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-last"));
+        assert_eq!(resp.choices[0].message.content, "Hello");
+    }
+
+    /// The same rule on the non-streaming direct body: a `null` choices
+    /// container parses as "no content" instead of failing the whole call.
+    #[test]
+    fn test_parse_response_non_streaming_null_choices() {
+        let body = serde_json::json!({"id": "chatcmpl-nc", "choices": null});
+        let resp = SysomParser::parse_response(&body).unwrap();
+        assert!(resp.choices.is_empty());
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-nc"));
     }
 }

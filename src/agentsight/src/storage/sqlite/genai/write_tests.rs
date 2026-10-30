@@ -255,3 +255,39 @@ fn failed_batch_rolls_back_and_flush_keeps_only_failed_events() {
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn shared_call_id_on_a_tool_row_does_not_suppress_the_llm_call() {
+    // A stream_chunk/tool_use row carries its parent LLM call id, and it can
+    // be written before the completed call. Dedup must key on the LLM row, not
+    // on any event that happens to share the id: matching the tool row made
+    // `complete_captured` take the promotion path, fail its status-guarded
+    // UPDATE, and return "row already exists" without ever inserting the call.
+    let (store, dir) = fixture();
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO genai_events(event_type,call_id,status,start_timestamp_ns,event_json)
+             VALUES ('tool_use','shared','complete',500,'{}')",
+            [],
+        )
+        .unwrap();
+
+    store.complete_captured(&event("shared")).unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM genai_events
+             WHERE event_type='llm_call' AND call_id='shared'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "the completed LLM call must still be stored");
+    drop(conn);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -47,7 +47,9 @@ use super::driver::{
     DriverPlan, EnableProgress, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
     find_binary_in_path,
 };
-use super::managed_files::{MaterializedMapping, copy_materialized_resource};
+use super::managed_files::{
+    MaterializedMapping, copy_materialized_resource, remove_materialized_resource,
+};
 use crate::manifest::AdapterConfigSetSpec;
 
 /// Default timeout for an OpenClaw CLI invocation.
@@ -874,19 +876,17 @@ impl FrameworkDriver for OpenClawDriver {
         };
         for skill_name in &skill_resources {
             let skill_dir = home.join("skills").join(skill_name);
-            match ctx.ops.remove_tree(&skill_dir) {
-                Ok(true) => messages.push(format!(
-                    "removed openclaw skill dir {}",
-                    skill_dir.display()
-                )),
-                Ok(false) => {} // already gone, idempotent
-                Err(err) => {
-                    messages.push(format!(
-                        "failed to remove skill dir {}: {err}",
-                        skill_dir.display()
-                    ));
-                    cleanup_complete = false;
-                }
+            let resource_id = format!("openclaw_skill_{skill_name}");
+            if let Err(message) = remove_skill_dir(
+                claim,
+                &resource_id,
+                &home,
+                &skill_dir,
+                ctx.ops,
+                &mut messages,
+            ) {
+                messages.push(message);
+                cleanup_complete = false;
             }
         }
 
@@ -3133,6 +3133,90 @@ fn install_rejected_before_mutation(output: &CliOutput) -> bool {
     matches!(lines.next(), Some("OpenClaw config is invalid"))
         && lines.clone().any(|line| line.starts_with("File:"))
         && lines.any(|line| line.starts_with("Problem:"))
+}
+
+/// Remove one copied skill on disable. Receipts that record their
+/// materialized files delete exactly those entries and keep anything else in
+/// the directory; receipts written before files were recorded keep the
+/// previous whole-directory removal.
+pub(crate) fn remove_skill_dir(
+    claim: &AdapterClaim,
+    resource_id: &str,
+    framework_home: &Path,
+    skill_dir: &Path,
+    ops: &dyn super::driver::AdapterOps,
+    messages: &mut Vec<String>,
+) -> Result<(), String> {
+    // The framework home is the Manager-validated boundary. Inspect every
+    // component below it before looking at the root or deleting anything:
+    // symlink_metadata(skill_dir) alone still follows a redirected `skills`.
+    // Checking before the missing-root fast path also preserves receipts for
+    // dangling ancestor links, so restoring the original directory can retry.
+    let relative = skill_dir.strip_prefix(framework_home).map_err(|_| {
+        format!(
+            "skill directory {} is outside framework home {}",
+            skill_dir.display(),
+            framework_home.display()
+        )
+    })?;
+    let mut parent = framework_home.to_path_buf();
+    for component in relative.components() {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Ok(_) => {
+                return Err(format!(
+                    "failed to remove skill dir: refusing cleanup through {}: expected a real directory; restore the original directory and retry disable",
+                    parent.display()
+                ));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "cannot inspect skill directory {}: {err}",
+                    parent.display()
+                ));
+            }
+        }
+    }
+    if !claim
+        .materialized_files
+        .iter()
+        .any(|file| file.resource_id == resource_id)
+    {
+        return match ops.remove_tree(skill_dir) {
+            Ok(true) => {
+                messages.push(format!("removed skill dir {}", skill_dir.display()));
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(err) => Err(format!(
+                "failed to remove skill dir {}: {err}",
+                skill_dir.display()
+            )),
+        };
+    }
+    match remove_materialized_resource(claim, resource_id, ops) {
+        Ok(outcome) => {
+            match &outcome.kept_root {
+                Some(root) => messages.push(format!(
+                    "removed {} ANOLISA-managed file(s) from skill dir {}; kept the directory \
+                     because it holds files ANOLISA did not write or that were modified",
+                    outcome.removed,
+                    root.display()
+                )),
+                None if outcome.removed > 0 => {
+                    messages.push(format!("removed skill dir {}", skill_dir.display()));
+                }
+                None => {}
+            }
+            Ok(())
+        }
+        Err(err) => Err(format!(
+            "failed to remove skill dir {}: {err}",
+            skill_dir.display()
+        )),
+    }
 }
 
 /// Extract skill names from a claim's `skill_resources` by parsing the

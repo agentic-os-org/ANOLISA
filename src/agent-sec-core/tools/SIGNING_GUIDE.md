@@ -2,6 +2,10 @@
 
 [中文版](SIGNING_GUIDE_zh.md)
 
+> **V1 workflow.** This guide targets the V1 `agent-sec-cli verify` command, which
+> the V2 CLI does not provide (see `CHANGELOG.md` 1.0.0). V2 Skill signing and
+> verification use `agent-sec-cli skill-ledger`.
+
 When you build and deploy ANOLISA from source, the deployed skills are **unsigned** by default. Phase 2 of the agent-sec-core security workflow requires valid GPG signatures — skill integrity checks will fail until every skill directory contains a signed `.skill-meta/Manifest.json`.
 
 `sign-skill.sh` (this directory) provides everything you need: prerequisite checking, GPG key generation, batch signing, and public key export.

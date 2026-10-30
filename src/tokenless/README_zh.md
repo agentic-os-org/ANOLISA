@@ -8,30 +8,30 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
 不按 Tokenless 租户或 Session 隔离。
 Flag 迁移、Pipeline 行为和输出恢复详见
-[随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
+[随包提供的 RTK 命令](../../docs/user-guide/zh/tokenless/cli-reference.md#随包提供的-rtk-命令)。
 
-当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行清理和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
+当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行格式压紧和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
-| Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
-| Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
-| 搜索路径共享 | 取决于工作负载 | API 搜索列表（含 Claude 原生 Grep）可共享连续记录的文件路径并保留全部已收到命中；默认开启，通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭；命令输出保持原路由 |
+| Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
+| Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
+| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
-| CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格；较大的表格可保留选定行，明确提示表格不完整，并支持取回字节一致的原文。需要文本替换能力；文件读取透传 |
-| TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
-| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
+| CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
+| TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
+| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
 
 表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试
-结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、可移除字段、
+结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、排版开销、可移除的 Schema 元数据、
 配置阈值，以及工具数据在会话中的占比。短小或已经紧凑的 Payload 可能只节省几个百分
 点，也可能直接原样透传。精确输入、命令、完整结果和限制见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md#运行仓库参考负载)。
+[Tokenless 效果度量](../../docs/user-guide/zh/tokenless/measuring-savings.md#运行仓库参考负载)。
 
 Tool Ready 当前在所有 Adapter 中无条件硬旁路，不会读取依赖规范、执行调用前检查、自动修复环境或阻止工具调用。任何环境变量都无法恢复旧行为；重新启用必须修改源码并重新发布。
 
@@ -48,7 +48,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 | 工作负载 | 主要受益策略 | 原因 |
 |----------|-------------|------|
 | Shell 密集（编译/测试/排查） | Build Log 压缩 + RTK | 已识别的构建/测试命令保留原生输出交给 PostTool 压缩，其他受支持 Shell 命令使用 RTK |
-| API/抓取密集（REST、web_fetch） | 响应压缩 + TOON | JSON 可能含可移除的 debug/null/空值；足够大且结构规则的数据也有可削减的语法开销 |
+| API/抓取密集（REST、web_fetch） | 响应压缩 + TOON | 格式压紧和 TOON 减少表示开销，同时保留全部字段与空值 |
 | 工具数量多的 Agent | Schema 压缩 | 大量 Function Calling 定义可能含冗长描述和可移除元数据 |
 | 长响应需保真 | 可逆压缩（Stash） | 截断后可 `retrieve` 原文，端到端无损，可放心收紧阈值 |
 
@@ -59,10 +59,10 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
   规则的合法 JSON 生成候选结果。在 Active 模式下，只有候选结果的估算 Token 数严格少于原文时
   才输出它。包含可移除内容的小输入仍可能被压缩，而已经紧凑的较大输入也可能原样透传；CLI 会把
   原因写入 stderr，且不记录统计。在 Dry-run 模式下，CLI 始终输出原文，并可能把较小的候选结果
-  记为预测节省。[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md)
+  记为预测节省。[CLI 参考](../../docs/user-guide/zh/tokenless/cli-reference.md)
   中的描述、字符串、数组和深度阈值只决定单项转换何时触发，并不是整个 Payload 的最小大小；
   Agent Adapter 还可能应用独立的
-  [预检门槛](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#adapter-处理规则)。
+  [预检门槛](../../docs/user-guide/zh/tokenless/framework-integration.md#adapter-处理规则)。
 - **模型推理 token / 计费 token**：不在 tokenless 经手范围。
 
 ### 预期效果估算
@@ -82,7 +82,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 > 可恢复省略会附带按需操作：`If needed, run in shell: tokenless retrieve HASH`。AgentScope 则看到 `If needed, call tool tokenless_retrieve with hash_or_marker=HASH`，其中 Tool 名称采用实际静态配置。数据仍在 Stash 时可以取回；恢复会增加 Token 开销，并非每次省略都要恢复。历史 `<<tokenless:HASH>>` Marker 仍可读取，但不再生成。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。至少 33 项且全为 Object 的数组使用 Record Reduction：完整数组进入 Stash，默认保留首尾、错误、结构/数值异常并稳定采样至 32 条基础预算；其他数组截断默认保留头部 32 项与尾部 8 项。完整参数见用户手册 CLI 参考。
 > 对支持实时结果替换的 Agent，恢复提示通过已有 Shell Tool 执行裸 Hash 命令；成功的恢复结果原样返回，不会再次压缩。
-> 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
+> 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/tokenless/index.md)。
 
 ## 集成路径
 
@@ -102,8 +102,9 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
 `tokenless compress`，`registerAgentToolResultMiddleware` 在同轮模型请求之前，把实时工具
-结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
-把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK 输出。
+结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、TOON、阈值、诊断与最终仲裁；Plugin
+把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool。只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
+Core 才恢复原命令以检查文件来源并继续处理；已改变或无法确认的输出保持旁路。
 本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
 候选。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
 PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Content Block 透传。不再注册
@@ -111,7 +112,7 @@ PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Cont
 包括此前发生的截断。2026.8.2 等旧版宿主在注册 middleware 后会把文本限制在
 100,000 个 UTF-16 Code Unit 内，仍在该限制下受支持；建议使用包含上游提交
 `2f620b970a04` 的构建。宿主限制及关闭 PostTool 的方法见
-[OpenClaw 兼容说明](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
+[OpenClaw 兼容说明](../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
 
 该 Adapter 要求 OpenClaw `2026.6.6` 或更高版本；安装脚本在安装前拒绝旧版和无法识别的
 版本，Package Metadata 也声明相同下限。运行时缺少 middleware API 或注册抛错时，插件
@@ -171,7 +172,7 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 `~/.local/share/tokenless/install-receipt`，`scripts/uninstall.sh` 依据该
 回执只删除这些路径；其源码构建路径是 CLI-only（没有 `rtk`，也没有
 adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
-完整的方式对照见 `docs/user-guide/zh/token-saving/tokenless/QUICKSTART.md`。
+完整的方式对照见 `docs/user-guide/zh/tokenless/index.md`。
 
 `~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
 公开路径都不会盲目接管它。所有权必须被证明：npm 的 postinstall 只刷新带有它
@@ -185,12 +186,10 @@ adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样�
 全局包都会被保留。中途失败的替换（tag 缺失、构建报错）会把原安装放回，而不是让
 机器上没有可用 CLI。
 
-当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
-仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
-optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，
-因此 npm 路径无法在 Intel Mac 上提供二进制。独立安装脚本在 macOS 上也不会
-回退到源码构建——它会直接报错退出而不执行 `cargo`——所以 Intel Mac 目前没有
-受支持的安装路径。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
+已发布的 npm 软件包支持 Linux x86_64/aarch64、macOS Apple Silicon 和
+Intel Mac，以及 Windows x64。`@anolisa/tokenless-darwin-x64` 和
+`@anolisa/tokenless-win32-x64` 从 0.9.0 开始提供。独立安装脚本在 macOS 上使用
+npm，并拒绝回退到源码构建：它会报错退出而不执行 `cargo`。Windows 请直接使用 npm。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
 直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
@@ -217,7 +216,8 @@ PostTool JSON、CSV/TSV 表格和符合条件的命令输出 Build Log 会进入
 旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
 
 PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
-输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写，其结果继续旁路 PostTool 压缩。
+输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写；只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
+成功结果才继续进入 PostTool，并保留原命令对应的文件来源保护。
 
 Claude Code 2.1.121 及以上版本、Qoder CLI、
 OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其
@@ -226,7 +226,7 @@ PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有
 有效 Hash 或 Marker 的单条恢复命令，并让其结果绕过压缩，避免二次处理。旧 copilot-shell 和
 不能替换结果的宿主保持无损模式。BeforeModel Schema 压缩仍需要独立的授权恢复能力。
 请求/响应契约和可执行示例见
-[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
+[CLI 参考](../../docs/user-guide/zh/tokenless/cli-reference.md#compress)。
 
 ### Schema 压缩 CLI
 
@@ -250,7 +250,9 @@ tokenless compress-schema -f request.json
 
 `compress-toon` 将 JSON 编码为 TOON 格式（`decompress-toon` 解码回
 JSON）。短于 500 字符的负载默认原样透传（与 Adapter Hook 应用的最小
-长度一致）；传入 `--min-toon-chars 0` 可强制编码：
+长度一致）；传入 `--min-toon-chars 0` 可强制编码。含有 TOON 无法精确
+承载的数值（`1e-400`、`-0.0`、`1e3`，或超出 `f64` 精度的小数）的负载
+同样原样透传，与 PostTool 自动路径的闸门一致：
 
 ```bash
 # TOON 编码（短负载，本次调用关闭最小长度门槛）
@@ -296,9 +298,9 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口并内置对应平台的 RTK；
 TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
 但目前尚未发布到 PyPI。可运行生命周期与 Stats 示例见
-[Python SDK 指南](../../docs/user-guide/zh/token-saving/tokenless/sdk.md)，AgentScope 挂载见
-[AgentScope SDK 集成](../../docs/user-guide/zh/token-saving/tokenless/sdk/agentscope.md)，产品 Adapter 见
-[Agent 集成指南](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md)，内部契约见
+[Python SDK 指南](../../docs/developer-guide/zh/sdk/tokenless/index.md)，AgentScope 挂载见
+[AgentScope SDK 集成](../../docs/developer-guide/zh/sdk/tokenless/agentscope.md)，产品 Adapter 见
+[Agent 集成指南](../../docs/user-guide/zh/tokenless/framework-integration.md)，内部契约见
 [Runtime 设计](docs/design/runtime-library_zh.md)。
 
 同一个 Wheel 还提供不依赖 CLI 的只读 typed Stats 查询。可以让 `TokenlessStats` 指向
@@ -350,15 +352,34 @@ make opencode-install
 Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
 两种方式都会拒绝冲突的文件或链接。在 ANOLISA disable 后若要恢复独立管理，重新运行
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
-完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
+完整生命周期参阅[框架集成](../../docs/user-guide/zh/tokenless/framework-integration.md#opencode)。
 
-### 千问办公插件（macOS 本地模式）
+### 千问办公插件（Windows x64 本地模式）
 
-`qwenwork` Adapter 面向千问办公 QwenWorkCN 的本地会话。PreToolUse **只改写 Bash 输入**；
+Windows x64 支持原生 `tokenless.exe`、`rtk.exe`、npm 启动器和千问办公 PowerShell
+Hook，不支持 Windows ARM64。使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。
+源码构建请参阅 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，
+不需要 Git Bash 或 WSL。
+
+Python Adapter 注册 PowerShell Hook 命令，PreTool 同时处理 Bash 和 PowerShell 输入。
+是否改写由 RTK 决定，不支持的命令透传。PowerShell PostTool 输出按共享命令输出策略处理，
+保留 RTK 去重和文件内容保护。
+参见[Windows 安装与验证](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公windows-x64-本地模式)。
+
+### 千问办公插件（macOS）
+
+`qwenwork` Adapter 同时支持千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell。
+PreToolUse 匹配两种 Shell 的工具名；
 PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
 `mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
 保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，
-与 Qoder CLI、Qwen Code、QwenPaw 独立。
+与 Qoder CLI、Qwen Code、QwenPaw 独立。千问办公工作区 Shell Hook 的数据库和
+Pre/Post 状态使用系统用户默认的 `~/.tokenless`，或 `TOKENLESS_DATA_DIR` 指定的
+有效绝对路径；`$HOME` 不会改变默认目录。路径无效时原样放行，不创建状态。
+已有工作区数据库不会自动迁移。
+Shell 沙箱限制可能导致 RTK 统计和执行回执无法保存，但命令和宿主 Hook 压缩仍可正常工作。
+安装/检测输出会说明这一限制及当前进程的数据目录，不执行沙箱可写性检测。
+RTK 原生数据库保留自身的路径配置。
 
 运行 `anolisa install tokenless` 后，退出千问办公，再显式旁加载插件：
 
@@ -368,11 +389,12 @@ anolisa adapter enable tokenless qwenwork
 anolisa adapter status tokenless
 ```
 
-完成后重启千问办公并开启新的本地会话，在应用内检查激活状态。CLI 验证受管理文件，
+完成后重启千问办公并开启新会话，在应用内检查激活状态。CLI 验证受管理文件，
 加载和激活状态保持 `unknown`。旁加载不修改 settings，也不自动启用已禁用的插件。
-当前不支持安全工作区／VM 会话。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
+Linux VM 会话仍不受支持。工作区 Shell 的状态遵循 Tokenless 数据目录设置，
+其单个 MCP 文本块按 Shell 输出处理。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
 CLI 管理的副本使用 `anolisa adapter disable tokenless qwenwork` 卸载。
-安装、卸载及 1.2.5 验证范围参见[千问办公集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#千问办公macos-本地模式)。
+安装、卸载及兼容性基线参见[千问办公集成](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公macos)。
 
 ### QwenPaw 安装
 
@@ -388,17 +410,18 @@ make qwenpaw-install
 安装器执行 `qwenpaw plugin install <bundle> --force`，由 QwenPaw 把 Bundle 复制到
 `<工作目录>/plugins/tokenless/`（`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
 `~/.copaw`，否则 `~/.qwenpaw`），并按 `requirements.txt` 从对应 GitHub Release
-安装 `anolisa_tokenless` wheel。统计记录写入 `<workspace>/.tokenless`。
+安装 `anolisa_tokenless` wheel。统计记录默认写入 `<workspace>/.tokenless`；可在 QwenPaw 环境中
+设置绝对路径 `TOKENLESS_DATA_DIR` 覆盖此目录。
 
 在把 Bundle 交给 QwenPaw 之前，安装器会先探测这个 wheel URL，资产返回 `404` 时给出说明性报错并停止。
 离线或镜像网络可用 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 跳过探测；
 `ANOLISA_TOKENLESS_PROBE_TIMEOUT` 用于设置单次探测的超时秒数（默认 15）。完整参考见
-[故障排查](../../docs/user-guide/zh/token-saving/tokenless/troubleshooting.md#qwenpaw-安装提示-sdk-wheel-不可用)。
+[故障排查](../../docs/user-guide/zh/tokenless/troubleshooting.md#qwenpaw-安装提示-sdk-wheel-不可用)。
 
 ### DeepSeek Harness 插件
 
 DSH 原生 Bundle 通过 `tools/post-execute` 把可替换的单文本工具结果交给 Tokenless
-PostTool Core。内容检测、JSON 清理、TOON 选择、最终接受和环境错误诊断均由 Core
+PostTool Core。内容检测、JSON 格式压紧、TOON 选择、最终接受和环境错误诊断均由 Core
 负责。缩减结果包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令。Adapter 从 `exec.arguments.command` 检查成功执行的单条恢复命令，
 并让其结果绕过 Core 压缩、原样返回。只有裸 `tokenless` 能从 Shell 的 `PATH` 解析到
@@ -422,7 +445,7 @@ anolisa adapter enable tokenless dsh \
 中已有但本次没有列出的 profile 会卸载 Bundle，因此每次都要列出需要继续使用
 Tokenless 的全部 profile。每个名称必须与 `dsh --profile <profile>` 使用的名称
 一致。配置写在对应 profile 的 `cordis.patch.yml` 中。全部配置项和默认值见
-[DeepSeek Harness 集成参考](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#deepseek-harness-原生处理路径)。
+[DeepSeek Harness 集成参考](../../docs/user-guide/zh/tokenless/framework-integration.md#deepseek-harness-原生处理路径)。
 
 ### AgentScope 框架集成
 
@@ -537,7 +560,7 @@ make package-raw \
   OUTPUT_DIR="$PWD/dist"
 ```
 
-Raw 支持矩阵为 `linux-x86_64`、`linux-aarch64` 和 `macos-aarch64`。
+Raw 支持矩阵为 `linux-x86_64`、`linux-aarch64`、`macos-aarch64` 和 `macos-x86_64`。
 输入可使用 `darwin`/`arm64`、`amd64`/`x64` 别名，产物名始终采用 ANOLISA
 规范名称。脚本不会执行跨平台二进制，而是直接检查 ELF 或 Mach-O 架构，
 并负责嵌入组件自维护的 `.anolisa/component.toml`、展开适配器 Hook 符号链接、
@@ -545,11 +568,18 @@ Raw 支持矩阵为 `linux-x86_64`、`linux-aarch64` 和 `macos-aarch64`。
 `tokenless-<version>-<os>-<arch>.tar.gz`。需要固定其他时间戳时可传入
 `SOURCE_DATE_EPOCH`。
 
+Release 和 Preview 构建均在 Linux 上交叉编译两种 macOS 架构，最低支持
+macOS 11.0。Intel Mac 使用已准备好的 `darwin11-x86_64` profile，同时生成
+内置 RTK 的 `cp311-abi3-macosx_11_0_x86_64` Python wheel。新增构建支持
+不会为此前已发布的版本补充 Intel 制品。
+历史源码 tag 的 Preview 保留该源码的目标矩阵；共享矩阵引入前的 tag
+继续构建原有的三个目标。
+
 npm 打包同样从 `target/npm-prebuilt` 下读取预构建的 `linux-x64`、
 `linux-arm64`、`darwin-x64`、`darwin-arm64` 四个二进制目录，并负责校验和组装：
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 ```
 
 固定目录结构和单目标接口见 [npm/README.md](npm/README.md#packaging-for-npm)。
@@ -559,7 +589,7 @@ node npm/scripts/package-npm.js --all
 `tokenless stats serve --data-dir /var/lib/tokenless --credential-file /run/secrets/tokenless-query`
 提供独立的只读 HTTP 查询服务，默认监听 `127.0.0.1:7397`，通过 Bearer 凭据校验。
 两个文件路径为部署占位值，统计数据库必须已存在。
-接口、分页和内容访问约定见 [CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#只读-http-查询)。
+接口、分页和内容访问约定见 [CLI 参考](../../docs/user-guide/zh/tokenless/cli-reference.md#只读-http-查询)。
 
 `stats summary` 用于查看合计；`show` 用于原样打印完整的压缩前后内容；
 `diff` 用于解释估算 Token 节省，并只突出发生变化的行：
@@ -580,7 +610,7 @@ tokenless stats diff 42 --json
 总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
 active 阶段的输出与输入内容完全一致时才会串成一条链，从而避免重复计算中间
 阶段的 Token。完整选项和度量限制见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
+[Tokenless 效果度量](../../docs/user-guide/zh/tokenless/measuring-savings.md)。
 
 ## Trace 关联
 
@@ -595,9 +625,9 @@ active 阶段的输出与输入内容完全一致时才会串成一条链，从�
 span，不会导出到子进程，因此需要关联能力的宿主或 Adapter 必须
 在启动 Tokenless 前写入其中一个。没有可用上下文时记录结构不变，
 且该标识只写入 SLS JSONL，不会写入本地 `stats.db`。详见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)
+[Tokenless 效果度量](../../docs/user-guide/zh/tokenless/measuring-savings.md)
 与
-[配置与数据隐私](../../docs/user-guide/zh/token-saving/tokenless/configuration-and-privacy.md)。
+[配置与数据隐私](../../docs/user-guide/zh/tokenless/configuration-and-privacy.md)。
 
 ## 数据库位置
 
@@ -681,7 +711,7 @@ python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970
 
 ## 前置依赖
 
-- **Rust** toolchain >= 1.89 — RTK（edition 2024）及 toon-format 所需
+- **Rust** toolchain >= 1.89 — RTK（edition 2024）所需
 - **just** — 用于下载并应用 RTK Patch
 - **Git** — 用于通过 justfile 下载 RTK 源码
 - **CPython 3.11+ 开发环境与 uv** — 仅构建 Python Wheel 或显式包含全部

@@ -18,7 +18,8 @@ OUTPUT_REWRITER="${TOKENLESS_CARGO_OUTPUT_REWRITER:?TOKENLESS_CARGO_OUTPUT_REWRI
 case "$PROFILE/$EXPECTED_TARGET" in
     gnu2.17-x86_64/x86_64-unknown-linux-gnu | \
     gnu2.17-aarch64/aarch64-unknown-linux-gnu | \
-    darwin11-aarch64/aarch64-apple-darwin) ;;
+    darwin11-aarch64/aarch64-apple-darwin | \
+    darwin11-x86_64/x86_64-apple-darwin) ;;
     *) die "Cross profile $PROFILE does not match target $EXPECTED_TARGET" ;;
 esac
 [ -x "$HOST_CARGO" ] || die "host Cargo is not executable: $HOST_CARGO"

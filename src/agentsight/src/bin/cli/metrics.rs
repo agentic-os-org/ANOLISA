@@ -13,6 +13,13 @@ pub struct MetricsCommand {
     /// example a database copied from another host for offline analysis.
     #[structopt(long)]
     pub db: Option<String>,
+
+    /// Output as JSON (one JSON array)
+    ///
+    /// The same per-agent rows the Prometheus lines carry, as objects — for a
+    /// script that wants the numbers without parsing the exposition format.
+    #[structopt(long)]
+    pub json: bool,
 }
 
 impl MetricsCommand {
@@ -53,6 +60,11 @@ impl MetricsCommand {
                 std::process::exit(1);
             }
         };
+
+        if self.json {
+            super::print_json(&summaries);
+            return;
+        }
 
         // ── Prometheus text format output ──────────────────────────────────
 
@@ -124,7 +136,10 @@ mod tests {
     fn db_path_honours_the_override_and_falls_back_to_the_default() {
         // `--db` must reach the query path: reverting the wiring (returning
         // the default unconditionally) makes this fail.
-        let mut c = MetricsCommand { db: None };
+        let mut c = MetricsCommand {
+            db: None,
+            json: false,
+        };
         assert_eq!(c.db_path(), GenAISqliteStore::default_path());
         c.db = Some("/tmp/agentsight_metrics_override.db".into());
         assert_eq!(

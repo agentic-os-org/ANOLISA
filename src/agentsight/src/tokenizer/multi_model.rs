@@ -441,6 +441,11 @@ mod tests {
     /// With `features.tokenizer.enabled = false` the drain fallback must not
     /// reach the global manager at all, otherwise a disabled feature still
     /// constructs/downloads a tokenizer.
+    ///
+    /// Gated on Linux because the drain fallback lives in the linux-only
+    /// `unified` module; without this gate the test target fails to compile
+    /// on other platforms.
+    #[cfg(target_os = "linux")]
     #[test]
     fn disabled_tokenizer_feature_skips_global_lookup() {
         use crate::config::FeatureFlags;

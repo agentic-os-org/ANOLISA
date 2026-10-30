@@ -4,8 +4,9 @@
 
 本套测试验证 Policy Engine 在 daemon 进程突然退出后的恢复行为。
 它运行真实 CLI、UDS 服务、discovery、reconciliation runtime 和 SQLite Repository，
-通过受控 AgentSight HTTP mock 控制远端操作。配套 Rust 测试覆盖精确的 Repository/
-Reconciler 提交边界，不向产品代码添加 failpoint。
+通过受控 AgentSight HTTP mock 控制远端操作。配套 Rust 测试覆盖 Repository/
+Reconciler 提交边界；启用可选 `fault-injection` feature 后，还覆盖未提交的 SQL
+事务内部边界。普通产品构建不包含 fail-rs 依赖及注入代码。
 
 ## 目标与证据边界
 
@@ -14,7 +15,7 @@ Reconciler 提交边界，不向产品代码添加 failpoint。
 | 已接受的 assignment 无需用户再次请求即可恢复 | 内存通知和 discovery worker 随崩溃消失，已提交的 Scope 必须继续作为事实来源。 | discovery 恢复及 `scope_saved`/`binding_saved` 窗口 |
 | 保留 assignment 身份和策略快照 | 更新当前 PolicyTemplate 不应改变已有 Scope 选择的 revision。 | Scope 两次崩溃黑盒场景、Repository 重开契约 |
 | 远端 I/O 前持久化清理责任 | Apply 可能远端成功，但响应或本地结果丢失；`UNKNOWN` 表示仍可能需要清理。 | `unknown_saved`、`applied_before_result` 及 Apply/delete 复合窗口 |
-| 旧 Apply 结果不能撤销删除意图 | 可以保存旧观察，但不能把 `PendingDelete` 覆盖为 `Ready`。 | 三个复合窗口及 CAS 契约 |
+| 旧 Apply 结果不能撤销删除意图 | 旧结果版本失效后整笔拒绝，status 与 Deployment 都不更新；保留已有 UNKNOWN。 | 三个复合窗口及 CAS 契约 |
 | discovery 停止且最后一个 Binding 删除后才删除 Scope | 提前删除父对象会丢失清理责任；没有匹配实例的 Active Scope 仍需保留以继续发现。 | 两次崩溃间的部分清理、Repository 生命周期契约 |
 | 恢复过程中再次崩溃仍能继续 | 重启恢复本身并非原子操作。 | 两次崩溃黑盒场景及 `recovery_saved` |
 | 保持 SQLite 跨进程 WAL 锁 | 外部 SQLite reader 不应破坏 SHM 协调或引发 SIGBUS。 | WAL 锁契约、黑盒 `saved()` 的独立只读连接查询 |
@@ -115,16 +116,83 @@ Binding，其 ID 必须保持不变。最后显式删除后，Binding、Scope、
 | --- | --- | --- |
 | `compound_delete_intent` | 远端 Apply 已提交；Scope `Deleting`，Binding 仍为 `Applying`，Deployment `UNKNOWN`。 | 完成 discovery 停止，清理目标。 |
 | `compound_pending_delete` | 远端 Apply 已提交；Scope `Deleting`，Binding `PendingDelete`，Deployment `UNKNOWN`。 | 继续删除，不再次 Apply。 |
-| `compound_observation_saved` | 旧 Apply 的 `Present` 观察已提交，Binding 仍为 `PendingDelete`。 | 保留删除意图，清理已确认目标。 |
+| `compound_result_superseded` | 旧 Apply 结果已被整笔拒绝，Binding 仍为 `PendingDelete`，Deployment 仍为 `UNKNOWN`。 | 按已有责任清理目标，不再次 Apply。 |
 
 每个复合用例还断言远端操作序列严格为 `apply, delete`。
-该文件用两个父测试覆盖 **12 + 3 个窗口**，加上被 Rust harness 收集的 `crash_child`
-辅助测试；输出“3 tests passed”不代表只覆盖三个崩溃窗口。
+这些 wrapper 场景用两个父测试覆盖 **12 + 3 个窗口**。Rust 还会收集 `crash_child`
+辅助测试和下述 SQL case，因此测试项数不等于崩溃窗口数。
 
 单元测试
 [`sigkill_before_discovery_commit_rolls_back_pin_and_all_bindings`](../../../v2/crates/asc-policy-repository-sqlite/src/tests.rs)
 另在生产 discovery 事务 COMMIT 前杀子进程，验证 PID pin/Binding 及 200 个实例批次
 均不部分保留，重开后可重新准入。该 gate 仅编入 cfg(test)，不进入 daemon binary。
+
+### 可选白盒事务矩阵
+
+[`fault_points.rs`](../../../v2/crates/asc-policy-repository-sqlite/tests/crash_recovery/fault_points.rs)
+提供六组配对场景，覆盖十个事务窗口。每组均有独立命名的 `baseline_*` 测试，
+使用相同准备和 Repository 操作，不配置 failpoint，也不杀子进程。baseline 在默认
+feature 和启用 `fault-injection` 时均运行；六个 crash 变体需要启用该 feature。
+两种模式分别检查预期事务状态，并共享重放、收敛和清理断言。
+
+crash 变体复用原有子进程、SIGKILL、真实 Repository/Reconciler 和远端账本。
+仅子进程配置 fail-rs callback：
+到达断点后确认边界并暂停，父进程杀掉子进程。不以 panic、注入错误或正常事务回滚
+代替进程死亡。
+
+Scope 准入与实例同步是两个事务。已提交 Scope 尚无 Binding 是合法状态；要求一起
+提交的是同一次实例同步事务中的 pin 与 Binding 改动。
+
+| 窗口 | SIGKILL 前的边界 | 恢复要求 |
+| --- | --- | --- |
+| `sql_scope_inserted` | Scope 已 INSERT，准入尚未提交。 | 不保留 Scope 或 Binding；此前 Policy 提交保留。恢复不能发现未接受的 assignment。 |
+| `sql_instances_pinned` | PID pin 已 UPDATE，尚未插入 Binding。 | pin 和 Binding 展开回滚；已提交的 Active Scope 保留。 |
+| `sql_instances_binding_inserted` | 两个策略 Binding 中第一个已插入。 | 不保留部分展开。恢复后恰有两个 Ready Binding；再次重启保持身份且不再 Apply。 |
+| `sql_discovery_stopped` | 停止标记已更新，尚未退休 Binding。 | 标记与退休回滚；此前提交的 Scope 删除意图保留并在恢复后完成。 |
+| `sql_discovery_binding_retired` | 两个 Binding 中第一个已退休。 | 两个 Binding 原快照和版本保留，停止标记未设置；恢复后删除两者且不 Apply。 |
+| `sql_cas_state_saved` | Binding 状态已保存，尚未执行 write receipt SQL。 | 状态、版本、Deployment、receipt 一起回滚。重放原写入只应用一次。 |
+| `sql_cas_after_transaction` | CAS 已提交，尚未向调用者返回结果。 | 状态与对应 digest/receipt 保留。同一写入重放返回 `AlreadyApplied`，不再次增加版本。 |
+| `sql_unknown_state_saved` | Apply claim 已提交；UNKNOWN 已写入但事务未提交。 | Applying 保留，但无 Deployment 或远端 Apply。恢复后执行一次 Apply，再次重启不重复。 |
+| `sql_binding_deleted` | 最后一个 Binding 已 DELETE，尚未执行 Scope 最终删除 SQL。 | 回滚后 Binding、Deleting Scope 及 UNKNOWN 清理责任均保留。恢复可能重复 Delete。 |
+| `sql_scope_finalized` | 最后一个 Binding 和 Scope 已删除，事务尚未提交。 | 回滚后两者及清理责任均保留；恢复删除两者及远端目标。 |
+
+每次重开数据库均执行 `quick_check` 和 `foreign_key_check`。失败时保留临时目录并
+输出路径，包括 DB、仍存在的 WAL/SHM 文件及远端账本。事务内 callback 不会重入
+Repository。这些测试不在 SQLite 的 WAL 写入/fsync 实现内部注入故障，也不覆盖断电。
+
+最终清理在同一事务中移除 Binding 并最终删除 Scope，没有更早提交的空 Deployment
+快照。因此两个移除窗口均断言：即使远端目标已经不存在，回滚后仍保留 Deleting
+Binding、status version 5，以及一个 UNKNOWN Deployment、`lastConfirmed=PRESENT`。
+恢复时重复 Delete，一起移除 Binding 和 Scope，再次重启不产生额外 I/O。测试验证
+清理责任保留，不假设远端删除恰好执行一次。
+
+父场景在整个生命周期共享标准库 mutex，包括 Repository 准备与资源释放。若不
+串行化，另一个测试启动的子进程可能继承尚未关闭的数据库租约 FD；即便设置
+`CLOEXEC`，也要到 exec 才关闭，从而在立即重开数据库时造成假的 `AlreadyOpen`。
+场景间串行化保留各场景内部的 Apply/删除交错。失败场景先释放自己的资源，再释放
+guard；后续场景恢复 poisoned mutex，仍会继续执行。没有添加重试或放宽租约检查。
+
+完整 feature 套件十五项收集测试：六个 baseline、覆盖十个白盒窗口的六个 crash
+变体、原有两个父测试和子进程 helper。baseline 失败指向正常操作、fixture 或环境
+问题；baseline 通过而 crash 失败，可将排查范围缩小到中断、恢复或注入路径，
+但不能仅凭这一结果认定是产品缺陷。旧观察写入现已不可达，删除了该事务内
+断点，改由 `compound_result_superseded` 验证整笔拒绝后 UNKNOWN 与删除意图保留。
+
+## 存储故障与 Runtime 组合回归
+
+[`storage_faults.rs`](../../../v2/apps/asc-daemon/tests/reconciliation/storage_faults.rs)
+使用真实 SQLite、PCP、Adapter 与多 worker runtime，在 Repository 端口模拟写前 I/O
+失败或提交后 `OutcomeUnknown`。它是组件故障测试，不是 SIGKILL 或真实磁盘故障测试；
+重启分支关闭 runtime、释放 Repository 后重新打开同一数据库。
+
+四个写入边界（claim、UNKNOWN 登记、Apply 结果、最终删除）分别覆盖提交前/后和
+运行中恢复/重开数据库，共十六项。受阻 Binding 的存储写入连续失败六次；另一 Binding
+仍须达到 Ready。Scope 删除不发入队通知，恢复后必须清空其 Binding/Scope；断言原
+write ID 重放、无额外 Apply，以及只在重启丢失 DELETE 结果时重复清理。
+
+另外四项使用默认四次自动重试预算，缩短定时器：先让旧 Apply 遇到四次可重试远端
+失败，再叠加结果写入失败和 Scope 删除；分别验证运行中恢复、重开 DB、正常通知和
+新 Delete 首次失败后仍能重试。旧结果取消后 UNKNOWN 不变，新 Delete 不继承旧预算。
 
 ## 相关契约与已知缺口
 
@@ -174,6 +242,24 @@ ASC_TEST_DEFERRED_PROTOCOL=1 PATH="$PWD/v2/target/debug:$PATH" agent-sec-cli/.ve
 ```bash
 (cd v2 && cargo test --locked -p asc-policy-repository-sqlite)
 ```
+
+排查 baseline 失败时，可使用默认 feature，在不注入故障时单独运行同一组 SQL 场景：
+
+```bash
+(cd v2 && cargo test --locked -p asc-policy-repository-sqlite --test crash_recovery baseline_ -- --nocapture)
+```
+
+启用注入点后，在同一套件中运行配对的 baseline 与 crash 测试。构建产物与普通
+daemon/打包产物分开。发布构建不要启用 `fault-injection` 或使用 `--all-features`：
+
+```bash
+(cd v2 && cargo test --locked -p asc-policy-repository-sqlite --features fault-injection --test crash_recovery --target-dir target/fault-injection -- --nocapture)
+```
+
+现有 Source Build workflow 在 Ubuntu 22.04 和 Alinux4 中通过
+`Run V2 policy crash consistency tests` step 执行上述命令，同时运行 baseline 与 crash
+变体。Rust 分别报告每个变体，断言失败后仍运行其余测试；任一变体失败都会使套件失败。
+Python V2 E2E 命令不会收集这些 Rust 测试，raw/RPM 发布构建保持关闭故障注入。
 
 设置 `ASC_CRASH_DAEMON_LOG=debug` 启用 daemon 诊断，fixture 不改变 CLI stderr 契约。
 Teardown 在每个用例临时目录中保存 `daemon-N.stderr.log` 和 `daemon-N.stdout.log`，

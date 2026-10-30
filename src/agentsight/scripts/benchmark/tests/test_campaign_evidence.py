@@ -86,7 +86,79 @@ def test_h2load_summary_preserves_protocol_specific_measurements(
     assert load["latency"]["min"] == 0.12
     assert load["latency"]["avg"] == 12.5
     assert load["latency"]["max"] == 1200
+    assert all(load["latency"][key] is None for key in ("p50", "p95", "p99"))
     assert h2load_stats.duration_ms("bad") is None
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_h2load_percentile_summary_reaches_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newline: str
+) -> None:
+    output = tmp_path / "h2load.txt"
+    # Column order and padded labels follow nghttp2 v1.70.0's summary printer.
+    output.write_bytes(
+        newline.join(
+            [
+                "finished in 1.10s, 90.83 req/s, 10.65KB/s",
+                "requests: 100 total, 100 started, 100 done, 98 succeeded, 2 failed, "
+                "1 errored, 1 timeout",
+                "                 min max median p95 p99 mean sd +/- sd",
+                "request     : 120us 1.20s 10.00ms 50.00ms 100.00ms 12.50ms 2.00ms 92.00%",
+                "connect     : 1ms 9ms 2ms 5ms 8ms 3ms 1ms 95.00%",
+                "TTFB        : 2ms 10ms 3ms 6ms 9ms 4ms 1ms 95.00%",
+                "",
+            ]
+        ).encode("utf-8")
+    )
+    report = tmp_path / "report.md"
+    summary_path = tmp_path / "summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "render_report.py",
+            "--protocol",
+            "h2",
+            "--qps",
+            "100",
+            "--duration",
+            "1.1",
+            "--load-log",
+            str(output),
+            "--output",
+            str(report),
+            "--summary-output",
+            str(summary_path),
+        ],
+    )
+    assert render_report.main() == 0
+    measured = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert measured["latency_ms"] == {
+        "first": None,
+        "last": None,
+        "min": 0.12,
+        "max": 1200.0,
+        "avg": 12.5,
+        "p50": 10.0,
+        "p95": 50.0,
+        "p99": 100.0,
+    }
+    markdown = report.read_text(encoding="utf-8")
+    assert "12.50 ms | 50.00 ms | 100.00 ms | 1200.00 ms" in markdown
+    assert measured["effective_qps"] == 90.83
+
+
+@pytest.mark.parametrize("label", ["time for request", "request     "])
+def test_h2load_incomplete_request_row_does_not_consume_connect_row(
+    tmp_path: Path, label: str
+) -> None:
+    output = tmp_path / "h2load.txt"
+    output.write_text(
+        f"{label}: 120us 1.20s\nconnect     : 1ms 9ms 2ms 5ms 8ms 3ms 1ms 95.00%\n",
+        encoding="utf-8",
+    )
+    load = h2load_stats.summarize_h2load(output)
+    assert all(value is None for value in load["latency"].values())
 
 
 def test_http2_mock_serves_health_sse_json_and_not_found() -> None:
@@ -529,6 +601,7 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
         run = {
             "summary": summary(),
             "evaluation": {"verdict": "FAIL" if label == "overload" else "PASS"},
+            "started_at_unix": 0,
         }
         phases[label] = (run_path, run)
         if label == "recover":
@@ -547,10 +620,9 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
     measurement.joinpath("fault-results.json").write_text(
         json.dumps(
             {
-                "outcomes": {
-                    name: {"handled": 1} for name in campaign_evidence.FAULT_CASES
-                },
+                "outcomes": {name: {"handled": 1} for name in campaign_evidence.FAULT_CASES},
                 "server_healthy_after": True,
+                "sse_truncation_verified": True,
                 "process_alive_before": True,
                 "process_alive_after": True,
             }
@@ -577,6 +649,194 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
     assert fault["failed"] == ["token_accuracy"]
 
 
+@pytest.mark.parametrize("delay", [0, 5, 30])
+def test_recovery_deadline_includes_initial_stall(tmp_path: Path, delay: int) -> None:
+    run_path = tmp_path / "recover" / "run-result.json"
+    measurement = run_path.parent / "measurement"
+    measurement.mkdir(parents=True)
+    started = 100
+    duration = 900
+    rows = []
+    for second in range(started + delay, started + duration):
+        for _ in range(2):
+            for metric, value in (
+                ("benchmark_requests", 1),
+                ("benchmark_http_success", 1),
+                ("benchmark_latency", 30000 if second == started + delay else 10),
+            ):
+                rows.append(
+                    {"metric": metric, "data": {"time": second, "value": value}}
+                )
+    load_path = measurement / "k6.jsonl"
+    load_path.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+    metrics_path = measurement / "metrics.csv"
+    metrics_path.write_text(
+        "timestamp,process_alive,rss_mb\n"
+        + "".join(f"{second},1,100\n" for second in range(started, started + duration)),
+        encoding="utf-8",
+    )
+    load = render_report.summarize_load(load_path)
+    measured = render_report.build_summary(
+        protocol="sse",
+        qps="2",
+        duration=str(duration),
+        load=load,
+        resources=render_report.summarize_resources(metrics_path),
+        drops=render_report.summarize_drops(metrics_path, load["requests"]),
+        validation={
+            "completeness_ratio": 1.0,
+            "match_ratio": 1.0,
+            "token_accuracy": 1.0,
+        },
+    )
+    measured["runtime_clean"] = True
+    evaluation = campaign.evaluate(measured, thresholds())
+    assert evaluation["verdict"] == "PASS"
+    phases = {
+        "stable": (
+            tmp_path / "stable" / "run-result.json",
+            {"summary": summary(), "evaluation": {"verdict": "PASS"}},
+        ),
+        "overload": (
+            tmp_path / "overload" / "run-result.json",
+            {"summary": summary(), "evaluation": {"verdict": "FAIL"}},
+        ),
+        "recover": (
+            run_path,
+            {
+                "summary": measured,
+                "evaluation": evaluation,
+                "started_at_unix": started,
+                "ended_at_unix": started + duration,
+            },
+        ),
+    }
+
+    result = campaign_evidence.recovery_outcome(
+        phases, {"tolerance_ratio": 0.1, "recovery_window_seconds": 2}, thresholds()
+    )
+    assert result["seconds"] == {
+        "effective_qps": float(delay),
+        "latency_p99_ms": float(delay + 1),
+        "rss_mb": 0.0,
+    }
+    assert result["verdict"] == ("FAIL" if delay > 10 else "PASS")
+    assert result["failed"] == (
+        ["effective_qps", "latency_p99_ms"] if delay > 10 else []
+    )
+
+
+@pytest.mark.parametrize("started", [None, True, "invalid", float("nan"), float("inf")])
+def test_recovery_requires_recorded_phase_start(
+    tmp_path: Path, started: object
+) -> None:
+    phases = {}
+    for label in campaign_evidence.RECOVERY_PHASES:
+        run_path = tmp_path / label / "run-result.json"
+        run = {"summary": summary(), "evaluation": {"verdict": "PASS"}}
+        if started is not None:
+            run["started_at_unix"] = started
+        phases[label] = (run_path, run)
+    write_recovery_artifacts(phases["recover"][0])
+
+    result = campaign_evidence.recovery_outcome(
+        phases, {"tolerance_ratio": 0.1, "recovery_window_seconds": 2}, thresholds()
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert result["missing"] == ["recover.started_at_unix"]
+    assert result["seconds"] == {}
+
+
+def test_recovery_window_starts_after_fractional_phase_origin() -> None:
+    samples = [(100.0, 2.0), (101.0, 2.0), (102.0, 2.0)]
+    assert (
+        campaign_evidence.continuous_recovery(
+            samples, 2.0, 0.1, 2, higher_is_better=True, started_at=100.5
+        )
+        is None
+    )
+    samples.append((103.0, 2.0))
+    assert (
+        campaign_evidence.continuous_recovery(
+            samples, 2.0, 0.1, 2, higher_is_better=True, started_at=100.5
+        )
+        == 0.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "field"),
+    [
+        ("recovery", "trace_completeness"),
+        ("fault", "http_success_rate"),
+        ("fault", "trace_completeness"),
+        ("fault", "token_accuracy"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("measurement", "verdict"),
+    [
+        pytest.param(json.loads("1e999"), "INCONCLUSIVE", id="positive-infinity"),
+        pytest.param(float("-inf"), "INCONCLUSIVE", id="negative-infinity"),
+        pytest.param(float("nan"), "INCONCLUSIVE", id="nan"),
+        pytest.param(10**1000, "INCONCLUSIVE", id="overflowing-integer"),
+        pytest.param(True, "INCONCLUSIVE", id="boolean"),
+        pytest.param(None, "INCONCLUSIVE", id="missing"),
+        pytest.param("1.0", "INCONCLUSIVE", id="numeric-string"),
+        pytest.param(1.0, "PASS", id="finite-pass"),
+        pytest.param(0.5, "FAIL", id="finite-failure"),
+    ],
+)
+def test_quality_gates_require_usable_measurements(
+    tmp_path: Path, scenario: str, field: str, measurement: Any, verdict: str
+) -> None:
+    measured = summary()
+    measured[field] = measurement
+    if scenario == "recovery":
+        phases = {}
+        for label in campaign_evidence.RECOVERY_PHASES:
+            run_path = tmp_path / label / "run-result.json"
+            phases[label] = (
+                run_path,
+                {
+                    "summary": measured if label == "recover" else summary(),
+                    "evaluation": {"verdict": "PASS"},
+                    "started_at_unix": 0,
+                },
+            )
+            if label == "recover":
+                write_recovery_artifacts(run_path)
+        outcome = campaign_evidence.recovery_outcome(
+            phases,
+            {"tolerance_ratio": 0.1, "recovery_window_seconds": 2},
+            thresholds(),
+        )
+    else:
+        run_path = tmp_path / "fault" / "run-result.json"
+        measurement_dir = run_path.parent / "measurement"
+        measurement_dir.mkdir(parents=True)
+        measurement_dir.joinpath("fault-results.json").write_text(
+            json.dumps(
+                {
+                    "outcomes": {name: {"handled": 1} for name in campaign_evidence.FAULT_CASES},
+                    "server_healthy_after": True,
+                    "sse_truncation_verified": True,
+                    "process_alive_before": True,
+                    "process_alive_after": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        outcome = campaign_evidence.fault_outcome(
+            run_path, {"summary": measured}, {"repetitions_per_case": 1}, thresholds()
+        )
+    assert outcome["verdict"] == verdict
+    assert outcome["missing"] == ([field] if verdict == "INCONCLUSIVE" else [])
+    assert outcome["failed"] == ([field] if verdict == "FAIL" else [])
+
+
 def test_recovery_evidence_rejects_malformed_references_and_summaries(
     tmp_path: Path,
 ) -> None:
@@ -594,6 +854,7 @@ def test_recovery_evidence_rejects_malformed_references_and_summaries(
             run_path = tmp_path / f"run{call}" / label / "run-result.json"
             run = {
                 "summary": stable_summary if label == "stable" else summary(),
+                "started_at_unix": 0,
                 "evaluation": {"verdict": "FAIL" if label == "overload" else "PASS"},
             }
             phases[label] = (run_path, run)
@@ -661,6 +922,7 @@ def test_fault_evidence_classifies_malformed_artifacts(tmp_path: Path) -> None:
         return {
             "outcomes": outcomes,
             "server_healthy_after": True,
+            "sse_truncation_verified": True,
             "process_alive_before": True,
             "process_alive_after": True,
             **extra,

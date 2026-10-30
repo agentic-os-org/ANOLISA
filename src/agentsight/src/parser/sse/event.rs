@@ -1,6 +1,7 @@
 use crate::chrome_trace::{ChromeTraceEvent, ns_to_us, truncate_at_char_boundary};
 use crate::probes::sslsniff::SslEvent;
 use serde::{Deserialize, Serialize};
+use std::cell::OnceCell;
 use std::fmt;
 use std::rc::Rc;
 
@@ -39,6 +40,14 @@ pub struct ParsedSseEvent {
     source_event: Rc<SslEvent>,
     /// Whether this is a synthetic "done" marker (e.g., from chunked end "0\r\n\r\n")
     is_synthetic_done: bool,
+    parsed_body: Option<Rc<ParsedBody>>,
+    capture_source: Option<Rc<SslEvent>>,
+}
+
+#[derive(Debug)]
+struct ParsedBody {
+    value: serde_json::Value,
+    bytes: OnceCell<Vec<u8>>,
 }
 
 impl ParsedSseEvent {
@@ -59,6 +68,8 @@ impl ParsedSseEvent {
             data_len,
             source_event,
             is_synthetic_done: false,
+            parsed_body: None,
+            capture_source: None,
         }
     }
 
@@ -73,16 +84,69 @@ impl ParsedSseEvent {
             data_len: 0,
             source_event,
             is_synthetic_done: true,
+            parsed_body: None,
+            capture_source: None,
         }
     }
 
     /// Parse data as JSON value
     pub fn json_body(&self) -> Option<serde_json::Value> {
-        serde_json::from_slice::<serde_json::Value>(self.data()).ok()
+        self.with_json(|value| value.cloned())
+    }
+
+    /// Retain reduced JSON without materializing bytes for semantic delivery.
+    pub(crate) fn from_json(
+        id: Option<String>,
+        event: Option<String>,
+        retry: Option<u64>,
+        value: serde_json::Value,
+        source: SslEvent,
+    ) -> Self {
+        let mut result = Self::new(id, event, retry, 0, 0, Rc::new(source));
+        result.parsed_body = Some(Rc::new(ParsedBody {
+            value,
+            bytes: OnceCell::new(),
+        }));
+        result
+    }
+
+    /// Borrow reduced JSON, parsing only events that still carry raw bytes.
+    pub(crate) fn with_json<T>(&self, read: impl FnOnce(Option<&serde_json::Value>) -> T) -> T {
+        if let Some(body) = &self.parsed_body {
+            read(Some(&body.value))
+        } else {
+            read(serde_json::from_slice(self.data()).ok().as_ref())
+        }
+    }
+
+    /// Move reduced JSON when its owning aggregation is consumed.
+    pub(crate) fn into_json_body(mut self) -> Option<serde_json::Value> {
+        if let Some(body) = self.parsed_body.take() {
+            Some(Rc::try_unwrap(body).map_or_else(|shared| shared.value.clone(), |body| body.value))
+        } else {
+            serde_json::from_slice(self.data()).ok()
+        }
+    }
+
+    /// Charge parsed JSON and any lazily requested byte representation.
+    pub(crate) fn parsed_retained_bytes(&self) -> usize {
+        self.parsed_body.as_ref().map_or(0, |body| {
+            std::mem::size_of::<ParsedBody>()
+                + crate::utils::retained::json_bytes(&body.value)
+                + body.bytes.get().map_or(0, Vec::capacity)
+        })
     }
 
     /// Get data (zero-copy)
     pub fn data(&self) -> &[u8] {
+        if let Some(body) = &self.parsed_body {
+            return body.bytes.get_or_init(|| {
+                serde_json::to_vec(&body.value).unwrap_or_else(|error| {
+                    log::warn!("Cannot serialize reduced SSE event: {error}");
+                    Vec::new()
+                })
+            });
+        }
         let buf_len = self.source_event.buf.len();
         let start = self.data_offset.min(buf_len);
         let end = (self.data_offset + self.data_len).min(buf_len);
@@ -107,7 +171,7 @@ impl ParsedSseEvent {
     /// - DashScope/Bailian native protocol: a terminal `finish_reason` inside
     ///   the `output` **object**. It never sends `data: [DONE]`.
     pub fn is_done(&self) -> bool {
-        self.is_done_with_json(self.json_body().as_ref())
+        self.with_json(|json| self.is_done_with_json(json))
     }
 
     /// Whether completion came from HTTP framing rather than SSE payload.
@@ -120,11 +184,14 @@ impl ParsedSseEvent {
         if self.is_synthetic_done || self.event.as_deref() == Some("message_stop") {
             return true;
         }
-        let data = self.data();
-        let text = String::from_utf8_lossy(data);
-        if matches!(text.trim(), "[DONE]" | "[END]") {
+        if json.is_none() && matches!(self.body_str().trim(), "[DONE]" | "[END]") {
             return true;
         }
+        Self::json_is_done(json)
+    }
+
+    /// Detect JSON terminators without allocating an owned SSE event.
+    pub(crate) fn json_is_done(json: Option<&serde_json::Value>) -> bool {
         json.is_some_and(|value| {
             matches!(
                 value.get("type").and_then(serde_json::Value::as_str),
@@ -182,7 +249,11 @@ impl ParsedSseEvent {
 
     /// Get data length
     pub fn data_len(&self) -> usize {
-        self.data_len
+        if self.parsed_body.is_some() {
+            self.data().len()
+        } else {
+            self.data_len
+        }
     }
 
     pub(crate) fn data_offset(&self) -> usize {
@@ -192,6 +263,22 @@ impl ParsedSseEvent {
     /// Get reference to source SslEvent
     pub fn source_event(&self) -> &SslEvent {
         &self.source_event
+    }
+
+    /// Preserve framing bytes when multiline data needs a separate joined payload.
+    pub(crate) fn with_capture_source(mut self, source: Rc<SslEvent>) -> Self {
+        self.capture_source = Some(source);
+        self
+    }
+
+    /// Original TLS read used by the stateful framing and continuation paths.
+    pub(crate) fn capture_event(&self) -> &SslEvent {
+        self.capture_source.as_deref().unwrap_or(&self.source_event)
+    }
+
+    /// Release framing provenance once the continuation buffer has consumed it.
+    pub(crate) fn release_capture_source(&mut self) {
+        self.capture_source = None;
     }
 }
 
@@ -494,6 +581,46 @@ impl SSEEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_json_stays_unserialized_and_moves_into_delivery() {
+        let value = serde_json::json!({"candidates":[{"finishReason":"STOP"}], "text":"汉字🙂"});
+        let event = ParsedSseEvent::from_json(
+            None,
+            None,
+            None,
+            value.clone(),
+            make_event(b"").metadata_only(),
+        );
+        assert!(event.is_done());
+        assert_eq!(event.json_body(), Some(value.clone()));
+        let body = event.parsed_body.as_ref().unwrap();
+        assert!(body.bytes.get().is_none());
+        let address = body.value.get("text").unwrap().as_str().unwrap().as_ptr();
+        let moved = event.into_json_body().unwrap();
+        assert_eq!(moved["text"].as_str().unwrap().as_ptr(), address);
+        assert_eq!(moved, value);
+    }
+
+    #[test]
+    fn reduced_json_materializes_bytes_only_for_raw_consumers() {
+        let value = serde_json::json!({"payload":"hello"});
+        let event = ParsedSseEvent::from_json(
+            None,
+            None,
+            None,
+            value.clone(),
+            make_event(b"").metadata_only(),
+        );
+        let before = event.parsed_retained_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(event.data()).unwrap(),
+            value
+        );
+        assert_eq!(event.data_len(), event.data().len());
+        assert!(event.parsed_retained_bytes() > before);
+        assert_eq!(event.clone().into_json_body(), Some(value));
+    }
 
     fn make_event(data: &[u8]) -> Rc<SslEvent> {
         Rc::new(SslEvent {

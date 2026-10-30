@@ -54,6 +54,7 @@ expected_preview_bindings = (
     "path: tokenless-source",
     "tokenless-source-root: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}",
     "python3 .github/actions/prebuilt-rust-common/plan_matrix.py",
+    '--tokenless-source-root "$TOKENLESS_SOURCE_ROOT"',
 )
 for binding in expected_preview_bindings:
     if binding not in preview:
@@ -124,7 +125,7 @@ PINNED_RTK_COMMIT="$(
 )"
 CURRENT_RTK_COMMIT="$(
     sed -n 's/^RTK_COMMIT="\([0-9a-f]\{40\}\)"$/\1/p' \
-        "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh"
+        "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh"
 )"
 [ -n "$PINNED_RTK_COMMIT" ] || {
     printf 'ERROR: historical RTK setup has no pinned 40-character commit\n' >&2
@@ -224,8 +225,8 @@ grep -Fq "does not match pinned commit $PINNED_RTK_COMMIT" \
 
 # Current sources delegate to their component setup and can pin a newer RTK.
 CURRENT_BUILD="$TEMPORARY/current-source"
-install -d -m 0755 "$CURRENT_BUILD/scripts" "$CURRENT_BUILD/third_party/patches"
-cp "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$CURRENT_BUILD/scripts/"
+install -d -m 0755 "$CURRENT_BUILD/packaging/build" "$CURRENT_BUILD/third_party/patches"
+cp "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh" "$CURRENT_BUILD/packaging/build/"
 cp "$REPO_ROOT/src/tokenless/third_party/patches/rtk-tokenless-stats.patch" \
     "$REPO_ROOT/src/tokenless/third_party/patches/rtk-pytest-error-report.patch" \
     "$CURRENT_BUILD/third_party/patches/"
@@ -244,7 +245,7 @@ RTK_DRIFT="$TEMPORARY/rtk-drift"
 install -d -m 0755 "$RTK_DRIFT"
 printf '[package]\nname = "rtk"\nversion = "0.0.0"\n' > "$RTK_DRIFT/Cargo.toml"
 printf '%040d\n' 0 > "$RTK_DRIFT/.anolisa-rtk-commit"
-if bash "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$RTK_DRIFT" \
+if bash "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh" "$RTK_DRIFT" \
     >"$TEMPORARY/rtk-drift.log" 2>&1; then
     printf 'ERROR: mismatched RTK revision marker was accepted\n' >&2
     exit 1
@@ -369,9 +370,9 @@ if PATH="$FAKE_BIN:$PATH" \
         --output-dir "$TEMPORARY/source-output" \
         --wheel-output-dir "$TEMPORARY/source-wheels" \
         --version 1.2.3 \
-        --target-os linux \
+        --target-os macos \
         --target-arch x86_64 \
-        --profile gnu2.17-x86_64 \
+        --profile darwin11-x86_64 \
         --tag tokenless/v1.2.3 >"$TEMPORARY/source.log" 2>&1; then
     printf 'ERROR: source selection fixture unexpectedly completed\n' >&2
     exit 1
@@ -443,6 +444,18 @@ grep -Fq \
     "\"filenames\":[\"$SHIM_COMPONENT/target/x86_64-unknown-linux-gnu/python-release/libanolisa_tokenless.so\"]" \
     "$SHIM_OUTPUT"
 grep -Fq "\"manifest_path\":\"$SHIM_COMPONENT/Cargo.toml\"" "$SHIM_OUTPUT"
+(
+    cd "$SHIM_COMPONENT"
+    env "${SHIM_ENV[@]}" \
+        TOKENLESS_CROSS_PROFILE=darwin11-x86_64 \
+        TOKENLESS_RUST_TARGET=x86_64-apple-darwin \
+        "$SHIM_BIN/cargo" rustc --target x86_64-apple-darwin \
+        --manifest-path "$SHIM_COMPONENT/Cargo.toml" \
+        --profile python-release > "$SHIM_OUTPUT"
+)
+grep -Fxq \
+    'cross <darwin11-x86_64> <rustc> <--manifest-path> <Cargo.toml> <--profile> <python-release>' \
+    "$SHIM_LOG"
 if env "${SHIM_ENV[@]}" "$SHIM_BIN/cargo" rustc \
     --target "x86_64-unknown-linux-gnu;\$(touch ${MARKER})" \
     >"$TEMPORARY/shim-target.log" 2>&1; then
@@ -464,6 +477,8 @@ if (
 fi
 
 python3 "$ACTION_DIR/test_verify_wheels.py"
+python3 "$ACTION_DIR/test_windows_package.py"
+python3 "$ACTION_DIR/test_windows_entrypoint.py"
 
 for project in tokenless-fixture rtk-fixture; do
     install -d -m 0755 "$TEMPORARY/$project/src"
@@ -484,12 +499,19 @@ ARTIFACT_ROOT="$TEMPORARY/artifacts"
 for target in \
     'linux x86_64 x86_64-unknown-linux-gnu' \
     'linux aarch64 aarch64-unknown-linux-gnu' \
-    'macos aarch64 aarch64-apple-darwin'; do
+    'macos aarch64 aarch64-apple-darwin' \
+    'macos x86_64 x86_64-apple-darwin' \
+    'windows x86_64 x86_64-pc-windows-msvc'; do
     read -r target_os target_arch target_triple <<<"$target"
     artifact_dir="$ARTIFACT_ROOT/tokenless-prebuilt-1.0.0-$target_os-$target_arch"
     archive="$artifact_dir/tokenless-1.0.0-$target_os-$target_arch.tar.gz"
     install -d -m 0755 "$artifact_dir"
-    tar -C "$TEMPORARY" -czf "$archive" payload.txt
+    if [[ "$target_os" = windows ]]; then
+        archive="${archive%.tar.gz}.zip"
+        python3 -m zipfile -c "$archive" "$TEMPORARY/payload.txt"
+    else
+        tar -C "$TEMPORARY" -czf "$archive" payload.txt
+    fi
     (
         cd "$artifact_dir"
         sha256sum "${archive##*/}" > "${archive##*/}.sha256"

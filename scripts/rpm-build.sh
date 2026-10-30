@@ -19,6 +19,10 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${SCRIPT_DIR}/rpmbuild"
 RPMBUILD="${RPMBUILD:-rpmbuild}"
 
+# Component-local packaging may use an empty namespace. This script builds the
+# established ANOLISA runtime layout; discovery contracts belong to the distribution.
+export AWPRJ=anolisa
+
 # Source directories
 SHELL_DIR="${ROOT_DIR}/deprecated/copilot-shell"
 SEC_DIR="${ROOT_DIR}/src/agent-sec-core"
@@ -191,7 +195,8 @@ build_copilot_shell() {
 # Only the CLI/daemon layer differs between V1 and V2, so both callers stage the
 # same component payload here and then add their own layer. Keeping the trees
 # separate matters: the V1 tarball must keep its original payload inventory, so
-# nothing V2-specific may leak into this helper.
+# no V2 runtime binaries may leak into this helper. Shared packaging
+# modules are included because both source trees use the same root Makefile.
 #
 # Note: rust-toolchain.toml is intentionally excluded from the tarball. The
 # source file pins a Rust version that rpmbuild environments may not have, so by
@@ -209,8 +214,10 @@ stage_sec_core_payload() {
     cp -rp "${SEC_DIR}/cosh-extension/"* "$pkg_dir/cosh-extension/"
     cp -p "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
     cp "${SEC_DIR}/Makefile" "$pkg_dir/"
+    # The root entrypoint includes component-owned delivery modules.
     tar -cf - -C "${SEC_DIR}" \
-        .anolisa/ | tar -xf - -C "$pkg_dir/"
+        --exclude='__pycache__' \
+        packaging/ | tar -xf - -C "$pkg_dir/"
     [ -f "${SEC_DIR}/LICENSE" ] && cp "${SEC_DIR}/LICENSE" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
 
@@ -318,7 +325,7 @@ build_agent_sec_core_v2() {
     log "Building RPM: agent-sec-core (V2)"
     log "=========================================="
 
-    local spec_in="${SEC_DIR}/agent-sec-core.spec.v2.in"
+    local spec_in="${SEC_DIR}/packaging/rpm/agent-sec-core.spec.v2.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -390,7 +397,7 @@ build_agent_sec_core_v2() {
     local vendor_tarball="${pkg_name}-${version}-vendor.tar.gz"
     local vendor_staging="${tmp_dir}/vendor"
     log "Step 3/4: Creating vendor tarball ${vendor_tarball}..."
-    bash "${SEC_DIR}/scripts/package-v2-rpm-vendor.sh" "$pkg_dir" "$vendor_staging"
+    bash "${SEC_DIR}/packaging/rpm/package-v2-vendor.sh" "$pkg_dir" "$vendor_staging"
     tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball}" -C "$vendor_staging" .
     rm -rf "$tmp_dir"
 
@@ -417,15 +424,22 @@ build_agentic_os_skills() {
         return 1
     fi
 
-    # Version from env or default
+    # Match the component contract shipped in the RPM unless explicitly overridden.
     local version="${VERSION:-}"
-    if [ -z "$version" ]; then
-        # Try to read from spec changelog (first entry)
-        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    if [ -z "$version" ] && [ -f "${SKILLS_DIR}/component.toml" ]; then
+        version=$(awk '
+            /^\[component\][[:space:]]*$/ { in_component = 1; next }
+            /^\[/ { in_component = 0 }
+            in_component && /^version[[:space:]]*=/ {
+                gsub(/^[^\"]*\"|\".*$/, "")
+                print
+                exit
+            }
+        ' "${SKILLS_DIR}/component.toml")
     fi
     if [ -z "$version" ]; then
-        version="0.0.1"
-        warn "No version specified for os-skills, using default: ${version}"
+        err "Cannot determine os-skills version. Set VERSION or provide component.toml."
+        return 1
     fi
 
     local pkg_name
@@ -477,7 +491,7 @@ build_agentsight() {
     log "Building RPM: agentsight"
     log "=========================================="
 
-    local spec_in="${SIGHT_DIR}/agentsight.spec.in"
+    local spec_in="${SIGHT_DIR}/packaging/rpm/agentsight.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -505,6 +519,11 @@ build_agentsight() {
         log "clang not found, installing..."
         install_package clang || { err "Failed to install clang"; return 1; }
     fi
+    if ! command -v node >/dev/null 2>&1 || \
+        ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+        err "AgentSight RPM builds require Node.js >=22 for the DSH plugin."
+        return 1
+    fi
     local ENFORCER_BIN
     ENFORCER_BIN=$(
         set -e
@@ -526,6 +545,7 @@ build_agentsight() {
             exit 1
         fi
         cargo build --release --bin agentsight
+        make build-dsh-plugin
         ./scripts/build-enforcer.sh >&3
     )
 
@@ -537,7 +557,7 @@ build_agentsight() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"
+    ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/packaging/rpm/stage-rpm-payload.sh" "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
@@ -558,7 +578,7 @@ build_tokenless() {
     log "Building RPM: tokenless"
     log "=========================================="
 
-    local spec_in="${TOKEN_DIR}/tokenless.spec.in"
+    local spec_in="${TOKEN_DIR}/packaging/rpm/tokenless.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -604,19 +624,15 @@ build_tokenless() {
 
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
     # Note: third_party/rtk must be included — it's built separately via --manifest-path
-    # Adapter config files (manifest.json, package.json, openclaw.plugin.json, plugin.yaml)
-    # and the component contract (component.toml) are excluded because they are
-    # generated from .in templates by stamp-adapter-templates during rpmbuild
-    # %build (make build-openclaw-plugin). Excluding them ensures the RPM build
-    # always regenerates from the authoritative .in template, preventing stale
-    # contracts from shipping (see GH-1470).
+    # Adapter configs are generated from their versioned templates during the
+    # RPM build. ANOLISA discovery contracts are delivered by ANOLISA itself.
     tar -cf - -C "$TOKEN_DIR" \
         --exclude='target' \
         --exclude='.git' \
         --exclude='node_modules' \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
-        --exclude='.anolisa/component.toml' \
+        --exclude='target/packaging/anolisa/component.toml' \
         --exclude='adapters/tokenless/manifest.json' \
         --exclude='adapters/tokenless/openclaw/package.json' \
         --exclude='adapters/tokenless/openclaw/openclaw.plugin.json' \
@@ -648,7 +664,7 @@ build_agent_memory() {
     log "Building RPM: agent-memory"
     log "=========================================="
 
-    local spec_in="${MEM_DIR}/agent-memory.spec.in"
+    local spec_in="${MEM_DIR}/packaging/rpm/agent-memory.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -824,7 +840,7 @@ build_skillfs() {
     log "Building RPM: skillfs"
     log "=========================================="
 
-    local spec_in="${SKILLFS_DIR}/skillfs.spec.in"
+    local spec_in="${SKILLFS_DIR}/packaging/rpm/skillfs.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -982,7 +998,7 @@ build_cosh_ng() {
     log "Building RPM: cosh-ng"
     log "=========================================="
 
-    local spec_in="${COSH_DIR}/cosh-ng.spec.in"
+    local spec_in="${COSH_DIR}/packaging/rpm/cosh-ng.spec.in"
     if [ ! -f "$spec_in" ]; then
         err "Spec template not found: $spec_in"
         return 1
@@ -1003,30 +1019,8 @@ build_cosh_ng() {
 
     local pkg_name
     pkg_name=$(parse_spec_name "$spec_in")
-    local component_name
-    component_name=$(awk '
-        $0 == "[component]" { in_component = 1; next }
-        in_component && /^\[/ { exit }
-        in_component && /^name = / {
-            value = $0
-            sub(/^name = "/, "", value)
-            sub(/"$/, "", value)
-            print value
-            exit
-        }
-    ' "${COSH_DIR}/component.toml")
-    if [ "$component_name" != "$pkg_name" ]; then
-        err "cosh-ng identity mismatch: RPM name '${pkg_name}', component name '${component_name}'"
-        return 1
-    fi
-    if ! grep -Fqx "Provides:       anolisa-component(${component_name})" "$spec_in"; then
-        err "cosh-ng spec must provide anolisa-component(${component_name})"
-        return 1
-    fi
-    local manifest_path="%{_datadir}/anolisa/components/${component_name}/component.toml"
-    if ! grep -Fq "install -m 0644 component.toml %{buildroot}${manifest_path}" "$spec_in" \
-        || ! grep -Fqx "$manifest_path" "$spec_in"; then
-        err "cosh-ng spec must install and own ${manifest_path}"
+    if grep -Eq '^[^#]*anolisa/components/' "$spec_in"; then
+        err "cosh-ng RPM must not install or own ANOLISA discovery contracts"
         return 1
     fi
     local gateway_unit="%{_unitdir}/cosh-gateway@.service"
@@ -1054,8 +1048,7 @@ build_cosh_ng() {
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"
 
-    # cosh-ng ships component.toml at repo root — must be in the tarball because
-    # spec %install does `install -m 0644 component.toml ...`.
+    # Include the component packaging rules; ANOLISA supplies its own discovery data.
     tar -cf - -C "$COSH_DIR" \
         --exclude='target' \
         --exclude='.git' \

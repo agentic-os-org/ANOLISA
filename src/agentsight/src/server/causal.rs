@@ -1226,6 +1226,19 @@ fn is_agent(step: &Step) -> bool {
     step.source == StepSource::Agent
 }
 
+/// Index of the step that anchors a round's outcome.
+///
+/// The last substantive Agent message is the delivery; trailing bookkeeping
+/// heartbeats (empty message) and System steps carry no answer, so they must
+/// not be labelled the conclusion. Falls back to any non-user step so a round
+/// without an agent message still renders an endpoint.
+fn last_delivery_index(steps: &[Step]) -> Option<usize> {
+    steps
+        .iter()
+        .rposition(|s| is_agent(s) && !s.message.trim().is_empty())
+        .or_else(|| steps.iter().rposition(|s| !is_user(s)))
+}
+
 fn calls_of(step: &Step) -> &[ToolCall] {
     step.tool_calls.as_deref().unwrap_or(&[])
 }
@@ -1841,7 +1854,7 @@ fn build_case(
     // it is withheld unless nothing else was selected, so a routine heartbeat at
     // the tail of a long session cannot drown out the real failure chain.
     if !alleging || selected_indices.is_empty() {
-        if let Some(i) = steps.iter().rposition(|s| !is_user(s)) {
+        if let Some(i) = last_delivery_index(steps) {
             if seen.insert(i) {
                 selected_indices.push(i);
             }
@@ -1861,7 +1874,7 @@ fn build_case(
         // Reference-only: the agent's last step is used to decide how to
         // label an endpoint node; it does NOT force that step into the
         // selected set (that decision lives above).
-        let last_agent_idx = steps.iter().rposition(|s| !is_user(s));
+        let last_agent_idx = last_delivery_index(steps);
 
         // Kind resolution: normalize the evaluator's free-form value first,
         // then apply anchor-role overrides for the user's first message and

@@ -184,7 +184,10 @@ fn lease_verification_rejects_replaced_database() {
         } else {
             std::fs::copy(&saved, &path).unwrap();
         }
-        assert!(matches!(lease.verify(), Err(RepositoryError::UnsafePath)));
+        assert!(matches!(
+            lease.verify(),
+            Err(RepositoryError::UnsafePath { .. })
+        ));
     }
 }
 
@@ -198,7 +201,10 @@ fn lease_verification_rejects_replaced_directory() {
     std::fs::rename(root.join("state"), root.join("saved-state")).unwrap();
     let replacement = DatabaseLease::acquire(&path).unwrap();
     replacement.verify().unwrap();
-    assert!(matches!(lease.verify(), Err(RepositoryError::UnsafePath)));
+    assert!(matches!(
+        lease.verify(),
+        Err(RepositoryError::UnsafePath { .. })
+    ));
 }
 
 #[test]

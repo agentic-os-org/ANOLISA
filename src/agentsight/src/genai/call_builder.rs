@@ -109,6 +109,7 @@ impl GenAIBuilder {
                 let (parts, finish) = Self::merge_sse_chunks(chunks);
                 let merged = if parts.is_empty() {
                     Self::extract_dashscope_native_parts(chunks)
+                        .or_else(|| finish.map(|reason| (parts, Some(reason))))
                 } else {
                     Some((parts, finish))
                 };
@@ -278,19 +279,27 @@ impl GenAIBuilder {
             .and_then(|rid| response_mapper.get_session_by_response_id(rid))
             .or_else(|| response_mapper.get_session_by_pid(http.pid))
             .map(|s| s.to_string());
-        let session_id = metadata_session.or(mapper_session).or_else(|| {
-            self.id_resolver
-                .resolve_session_id(&agent_name, pid_i32, &first_user_raw, &response_id)
+        let session_id = metadata_session.or(mapper_session);
+        let (session_key, conversation_key) = self.id_resolver.message_keys(
+            &agent_name,
+            pid_i32,
+            &first_user_raw,
+            &last_user_raw,
+            user_message_count,
+            session_id.is_none(),
+        );
+        let session_id = session_id.or_else(|| {
+            session_key.as_ref().and_then(|key| {
+                self.id_resolver
+                    .resolve_session_id_with_key(key, &response_id)
+            })
         });
 
         // conversation_id: SHA256("conversation" + 该 conversation 内最早 response_id)
-        let conversation_id = self.id_resolver.resolve_conversation_id(
-            &agent_name,
-            pid_i32,
-            &last_user_raw,
-            &response_id,
-            user_message_count,
-        );
+        let conversation_id = conversation_key.as_ref().and_then(|key| {
+            self.id_resolver
+                .resolve_conversation_id_with_key(key, &response_id)
+        });
 
         // 若本次响应的 finish_reason 表明本轮对话已经结束（非 tool_calls/tool_use 等
         // 表示流程尚在继续的取值），显式驱逐 (agent_name, pid, last_user_raw) 对应的
@@ -325,12 +334,9 @@ impl GenAIBuilder {
                     })
                     .unwrap_or(false);
                 if !has_tool_call {
-                    self.id_resolver.finish_conversation(
-                        &agent_name,
-                        pid_i32,
-                        &last_user_raw,
-                        user_message_count,
-                    );
+                    if let Some(key) = &conversation_key {
+                        self.id_resolver.finish_conversation_with_key(key);
+                    }
                 }
             }
         }
@@ -732,6 +738,55 @@ impl GenAIBuilder {
                     };
                 }
             }
+            Some(ParsedApiMessage::GeminiMessage { request, .. }) => {
+                if let Some(req) = request.as_ref() {
+                    let mut msgs = Vec::with_capacity(req.contents.len() + 1);
+                    // `systemInstruction` sits outside `contents`, but every
+                    // downstream consumer (SQLite `system_instructions`, SLS
+                    // `gen_ai.system_instructions`, classification) reads a
+                    // system-role message. Without the synthetic entry a
+                    // Gemini call's instructions vanished even when the request
+                    // was fully captured.
+                    if let Some(system) = req.system_instruction.as_ref() {
+                        let parts = Self::gemini_parts_to_message_parts(&system.parts);
+                        if !parts.is_empty() {
+                            msgs.push(InputMessage {
+                                role: "system".to_string(),
+                                parts,
+                                name: None,
+                            });
+                        }
+                    }
+                    msgs.extend(req.contents.iter().map(|content| {
+                        let role = match content.role.as_deref() {
+                            // Gemini names the assistant turns `model`.
+                            Some("model") => "assistant",
+                            Some(role) => role,
+                            None => "user",
+                        };
+                        InputMessage {
+                            role: role.to_string(),
+                            parts: Self::gemini_parts_to_message_parts(&content.parts),
+                            name: None,
+                        }
+                    }));
+                    let generation = req.generation_config.as_ref();
+                    return LLMRequest {
+                        messages: msgs,
+                        temperature: generation.and_then(|config| config.temperature),
+                        max_tokens: generation.and_then(|config| config.max_output_tokens),
+                        frequency_penalty: None,
+                        presence_penalty: None,
+                        top_p: generation.and_then(|config| config.top_p),
+                        top_k: generation.and_then(|config| config.top_k.map(f64::from)),
+                        seed: None,
+                        stop_sequences: generation.and_then(|config| config.stop_sequences.clone()),
+                        stream: req.stream,
+                        tools: None,
+                        raw_body: raw_body(),
+                    };
+                }
+            }
             _ => {}
         }
 
@@ -767,6 +822,52 @@ impl GenAIBuilder {
     // parse_request_body / extract_response_id / openai_msg_to_input /
     // openai_msg_to_output / parse_openai_tool_call_value / parse_sse_response_body /
     // extract_parts_from_sse_body live in `openai_parse.rs` (same impl block).
+
+    /// Convert Gemini content parts into the shared parts-based representation.
+    ///
+    /// Gemini marks part kinds with a key rather than a type tag: text,
+    /// `thought` text (reasoning), whole `functionCall` objects, and
+    /// `functionResponse` results. `inlineData`/`fileData` stay unmodelled
+    /// because [`MessagePart`] has no binary variant, matching the other
+    /// providers' opaque-media handling.
+    fn gemini_parts_to_message_parts(
+        parts: &[crate::analyzer::message::gemini::GeminiPart],
+    ) -> Vec<MessagePart> {
+        let mut converted = Vec::with_capacity(parts.len());
+        for part in parts {
+            if let Some(text) = part.text.as_deref().filter(|text| !text.is_empty()) {
+                if part.thought == Some(true) {
+                    converted.push(MessagePart::Reasoning {
+                        content: text.to_string(),
+                    });
+                } else {
+                    converted.push(MessagePart::Text {
+                        content: text.to_string(),
+                    });
+                }
+            }
+            if let Some(call) = part
+                .function_call
+                .as_ref()
+                .filter(|call| !call.name.is_empty())
+            {
+                converted.push(MessagePart::ToolCall {
+                    // Gemini identifies a call by name; the provider does not
+                    // assign an id on the wire.
+                    id: None,
+                    name: call.name.clone(),
+                    arguments: call.args.clone(),
+                });
+            }
+            if let Some(result) = part.function_response.as_ref() {
+                converted.push(MessagePart::ToolCallResponse {
+                    id: None,
+                    response: result.response.clone().unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+        converted
+    }
 
     fn anthropic_message_content_to_parts(
         content: &crate::analyzer::message::AnthropicMessageContent,
@@ -934,10 +1035,43 @@ impl GenAIBuilder {
                     })
                     .unwrap_or_else(|| (vec![], None))
             }
+            Some(ParsedApiMessage::GeminiMessage { response, .. }) => {
+                response
+                    .as_ref()
+                    .map(|resp| {
+                        // One message per candidate, like the OpenAI arm's one
+                        // per choice. Gemini reports the stop reason per
+                        // candidate, and the pipeline treats the last one as
+                        // decisive.
+                        let msgs: Vec<OutputMessage> = resp
+                            .candidates
+                            .iter()
+                            .map(|candidate| {
+                                let parts = candidate
+                                    .content
+                                    .as_ref()
+                                    .map(|content| {
+                                        Self::gemini_parts_to_message_parts(&content.parts)
+                                    })
+                                    .unwrap_or_default();
+                                OutputMessage {
+                                    role: "assistant".to_string(),
+                                    parts,
+                                    name: None,
+                                    finish_reason: candidate
+                                        .finish_reason
+                                        .clone()
+                                        .filter(|reason| !reason.is_empty()),
+                                }
+                            })
+                            .collect();
+                        let finish = resp.finish_reason().map(str::to_string);
+                        (msgs, finish)
+                    })
+                    .unwrap_or_else(|| (vec![], None))
+            }
             _ => (vec![], None),
         };
-
-        // SysOM response handling
         let (messages, finish_reason) = if messages.is_empty() {
             match message {
                 Some(ParsedApiMessage::SysomMessage { response, .. }) => response
@@ -1121,6 +1255,7 @@ mod tests {
         OpenAIResponse,
     };
     use crate::analyzer::{AnalysisResult, HttpRecord, ParsedApiMessage, TokenRecord};
+    use crate::interruption::{InterruptionDetector, InterruptionType};
     use crate::response_map::ResponseSessionMapper;
     use std::collections::HashMap;
 
@@ -1661,6 +1796,385 @@ mod tests {
         assert_eq!(
             call.response.messages[0].finish_reason.as_deref(),
             Some("STOP")
+        );
+    }
+
+    /// The compact delivery path hands the builder a parsed `GeminiMessage`
+    /// and an HTTP record whose raw bodies were not retained. Neither builder
+    /// had a Gemini arm, so both sides fell back to the (absent) raw bodies and
+    /// the call became semantically empty — dropped before storage even though
+    /// the analyzer had parsed the whole exchange.
+    #[test]
+    fn compact_gemini_call_keeps_request_and_answer() {
+        use crate::analyzer::message::gemini::{
+            GeminiCandidate, GeminiContent, GeminiFunctionCall, GeminiGenerationConfig, GeminiPart,
+            GeminiRequest, GeminiResponse,
+        };
+
+        let builder = GenAIBuilder::new();
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(path, None, None);
+        let message = ParsedApiMessage::GeminiMessage {
+            request: Some(GeminiRequest {
+                model: "gemini-2.5-flash".to_string(),
+                contents: vec![GeminiContent {
+                    role: Some("user".to_string()),
+                    parts: vec![GeminiPart {
+                        text: Some("What is 2+2?".to_string()),
+                        ..Default::default()
+                    }],
+                }],
+                system_instruction: Some(GeminiContent {
+                    role: None,
+                    parts: vec![GeminiPart {
+                        text: Some("Be brief.".to_string()),
+                        ..Default::default()
+                    }],
+                }),
+                generation_config: Some(GeminiGenerationConfig {
+                    temperature: Some(0.2),
+                    max_output_tokens: Some(64),
+                    ..Default::default()
+                }),
+                stream: false,
+            }),
+            response: Some(GeminiResponse {
+                candidates: vec![GeminiCandidate {
+                    content: Some(GeminiContent {
+                        role: Some("model".to_string()),
+                        parts: vec![
+                            GeminiPart {
+                                text: Some("4".to_string()),
+                                ..Default::default()
+                            },
+                            GeminiPart {
+                                thought: Some(true),
+                                text: Some("two plus two".to_string()),
+                                ..Default::default()
+                            },
+                            GeminiPart {
+                                function_call: Some(GeminiFunctionCall {
+                                    name: "lookup".to_string(),
+                                    args: Some(serde_json::json!({"value": 4})),
+                                }),
+                                ..Default::default()
+                            },
+                        ],
+                    }),
+                    finish_reason: Some("STOP".to_string()),
+                    index: Some(0),
+                }],
+                ..Default::default()
+            }),
+        };
+        let parsed = Some(&message);
+
+        let request = builder.build_request(&parsed, &http, false);
+        let response = builder.build_response(&parsed, &http, &None, true, false);
+
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, "system");
+        assert_eq!(request.messages[1].role, "user");
+        assert_eq!(request.temperature, Some(0.2));
+        assert_eq!(request.max_tokens, Some(64));
+
+        assert_eq!(response.messages.len(), 1);
+        let parts = &response.messages[0].parts;
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "4"),
+            "answer text must survive, got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[1], MessagePart::Reasoning { content } if content == "two plus two"),
+            "thought parts must be reasoning, got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[2], MessagePart::ToolCall { name, .. } if name == "lookup"),
+            "functionCall parts must be tool calls, got {parts:?}"
+        );
+        assert_eq!(response.messages[0].finish_reason.as_deref(), Some("STOP"));
+    }
+
+    /// The original defect was not just an empty builder: the whole call was
+    /// semantically empty and the compact delivery path discarded it. Drive
+    /// `build_llm_call_with_raw` through the same `HttpContext` shape the
+    /// analyzer produces, with no raw bodies.
+    #[test]
+    fn compact_gemini_call_is_not_semantically_empty() {
+        use crate::analyzer::HttpContext;
+        use crate::analyzer::message::gemini::{
+            GeminiCandidate, GeminiContent, GeminiPart, GeminiRequest, GeminiResponse,
+        };
+
+        let builder = GenAIBuilder::new();
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(path, None, None);
+        let message = ParsedApiMessage::GeminiMessage {
+            request: Some(GeminiRequest {
+                model: "gemini-2.5-flash".to_string(),
+                contents: vec![GeminiContent {
+                    role: Some("user".to_string()),
+                    parts: vec![GeminiPart {
+                        text: Some("What is 2+2?".to_string()),
+                        ..Default::default()
+                    }],
+                }],
+                system_instruction: None,
+                generation_config: None,
+                stream: false,
+            }),
+            response: Some(GeminiResponse {
+                candidates: vec![GeminiCandidate {
+                    content: Some(GeminiContent {
+                        role: Some("model".to_string()),
+                        parts: vec![GeminiPart {
+                            text: Some("4".to_string()),
+                            ..Default::default()
+                        }],
+                    }),
+                    finish_reason: Some("STOP".to_string()),
+                    index: Some(0),
+                }],
+                ..Default::default()
+            }),
+        };
+        let context = HttpContext {
+            retain_raw: false,
+            http,
+            request: None,
+            response: None,
+        };
+
+        let call = build_call(
+            &builder,
+            &[
+                AnalysisResult::HttpContext(context),
+                AnalysisResult::Message(message),
+            ],
+        )
+        .expect("the compact path carries the parsed Gemini message");
+
+        assert!(
+            !call.is_semantically_empty(),
+            "the answer must not be dropped as empty"
+        );
+        assert_eq!(call.request.messages.len(), 1);
+        assert!(!call.request.stream);
+        assert_eq!(call.response.messages[0].parts.len(), 1);
+    }
+
+    /// Exercise the remaining Gemini part shapes and the absent-response
+    /// branch: a `functionResponse` becomes a tool result, an empty
+    /// `functionCall` name is ignored, and `response: None` yields no
+    /// messages instead of panicking.
+    #[test]
+    fn gemini_function_response_and_missing_response_are_handled() {
+        use crate::analyzer::message::gemini::{
+            GeminiContent, GeminiFunctionCall, GeminiFunctionResponse, GeminiPart, GeminiRequest,
+        };
+
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            None,
+            None,
+        );
+        let request = GeminiRequest {
+            model: "gemini-2.5-flash".to_string(),
+            contents: vec![
+                GeminiContent {
+                    role: Some("model".to_string()),
+                    parts: vec![GeminiPart {
+                        function_call: Some(GeminiFunctionCall {
+                            name: "lookup".to_string(),
+                            args: Some(serde_json::json!({"q": "x"})),
+                        }),
+                        ..Default::default()
+                    }],
+                },
+                GeminiContent {
+                    role: Some("user".to_string()),
+                    parts: vec![
+                        GeminiPart {
+                            function_response: Some(GeminiFunctionResponse {
+                                name: "lookup".to_string(),
+                                response: Some(serde_json::json!({"ok": true})),
+                            }),
+                            ..Default::default()
+                        },
+                        GeminiPart {
+                            function_call: Some(GeminiFunctionCall {
+                                name: String::new(),
+                                args: None,
+                            }),
+                            ..Default::default()
+                        },
+                    ],
+                },
+            ],
+            system_instruction: None,
+            generation_config: None,
+            stream: false,
+        };
+        let message = ParsedApiMessage::GeminiMessage {
+            request: Some(request),
+            response: None,
+        };
+        let parsed = Some(&message);
+
+        let built = builder.build_request(&parsed, &http, false);
+        assert_eq!(built.messages.len(), 2);
+        assert_eq!(built.messages[0].role, "assistant");
+        assert!(matches!(
+            &built.messages[0].parts[0],
+            MessagePart::ToolCall { name, .. } if name == "lookup"
+        ));
+        assert_eq!(built.messages[1].parts.len(), 1);
+        assert!(matches!(
+            &built.messages[1].parts[0],
+            MessagePart::ToolCallResponse { response, .. }
+                if response == &serde_json::json!({"ok": true})
+        ));
+
+        let response = builder.build_response(&parsed, &http, &None, true, false);
+        assert!(response.messages.is_empty());
+    }
+
+    #[test]
+    fn blocked_gemini_completion_keeps_reason_and_classifies_safety() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(
+            path,
+            None,
+            Some(r#"{"candidates":[{"finishReason":"SAFETY","index":0}]}"#.to_string()),
+        );
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(call.response.messages.len(), 1);
+        assert!(call.response.messages[0].parts.is_empty());
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("SAFETY")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
+        );
+    }
+
+    #[test]
+    fn malformed_gemini_completion_keeps_reason_and_classifies_protocol_error() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(
+            path,
+            None,
+            Some(r#"{"candidates":[{"finishReason":"MALFORMED_RESPONSE","index":0}]}"#.to_string()),
+        );
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("MALFORMED_RESPONSE")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::StateMachineError)
+        );
+        assert!(
+            events[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("MALFORMED_RESPONSE")
+        );
+    }
+
+    #[test]
+    fn blocked_openai_sse_completion_keeps_terminal_reason() {
+        let mut http = make_http(
+            "/v1/chat/completions",
+            None,
+            Some(r#"[{"choices":[{"delta":{},"finish_reason":"content_filter"}]}]"#.to_string()),
+        );
+        http.is_sse = true;
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("content_filter")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated)
+        );
+    }
+
+    #[test]
+    fn partially_blocked_gemini_sse_keeps_content_and_safety_reason() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse";
+        let mut http = make_http(
+            path,
+            None,
+            Some(r#"[{"candidates":[{"content":{"parts":[{"text":"partial"}]},"index":0}]},{"candidates":[{"finishReason":"SAFETY","index":0}]}]"#.to_string()),
+        );
+        http.is_sse = true;
+        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+
+        assert!(matches!(
+            &call.response.messages[0].parts[0],
+            MessagePart::Text { content } if content == "partial"
+        ));
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("SAFETY")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated)
+        );
+    }
+
+    #[test]
+    fn blocked_gemini_parsed_response_keeps_terminal_reason_without_raw_body() {
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let response = serde_json::json!({"candidates":[{"finishReason":"SAFETY","index":0}]});
+        let parsed = crate::analyzer::message::MessageParser::new()
+            .parse_by_path(path, None, Some(&response))
+            .expect("parsed Gemini response");
+        let http = make_http(path, None, None);
+        let call = build_call(
+            &GenAIBuilder::new(),
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .expect("call");
+
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("SAFETY")
+        );
+        let events = InterruptionDetector::default().detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter)
         );
     }
 

@@ -8,7 +8,8 @@ The Client registry contains `TargetDeploymentClientFactory` ports. A due Apply
 opens one Client after translation and reuses it through prepare and create/update.
 Delete opens one Client per saved route. Initialization failures follow normal
 attempt bookkeeping and retry classification; no Client is opened for skipped work.
-There are no cross-call plans, prepared requests, pending outcomes or step cursors.
+Plans and prepared requests are call-local. Unconfirmed writes and actual outcomes
+remain in the caller-owned schedule until confirmed or superseded, never across a crash.
 
 The caller must serialize attempts for each Binding in the same Repository.
 In production one Runtime WorkQueue owns this responsibility: its Running entry
@@ -17,17 +18,19 @@ mark the entry dirty. The core has no execution lock or shared lock registry;
 callers must not bypass the queue or start independent queues over the same store.
 Blocking calls must be joined even if an async waiter times out.
 
-The call-local `ExecutionSlot` retains only an outcome and a pending write receipt
-for panic bookkeeping. It is discarded on return or unwind and cannot survive a
-process crash.
+The runtime-owned `ExecutionSlot` retains outcomes and exact pending writes through
+storage failures and panic bookkeeping. It contains no prepared request and is
+discarded on process exit.
 
 ## Storage and execution
 
 [`asc-policy-repository`](../asc-policy-repository/README.md) supplies consistent
 aggregate reads and field-scoped conditional writes. `ReconciliationPatch` has no
-spec field. Registration writes deployments only; completion merges observations
-and conditionally advances the claimed revision/status. A stale Apply can record
-valid target observations while preserving a newer Delete and its retry budget.
+spec field. Registration writes deployments only. Completion atomically saves
+status and observations only while the claimed revision/status version/lifecycle
+match. A stale Apply result is discarded entirely, retaining previously registered
+UNKNOWN cleanup responsibility. Successful writes use the actual receipt version;
+a newer Delete receives its own retry budget even when its notification is lost.
 
 Target references and UNKNOWN responsibility are registered before modifying I/O.
 Only confirmed Absent targets are removed. Delete removes the whole aggregate

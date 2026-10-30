@@ -25,6 +25,8 @@ from .checkpoint_manager import (
     cwd_inside_workspace,
     cwd_inside_workspace_reason,
     get_manager,
+    workspace_registration_path,
+    resolve_workspace_path,
     map_error_to_message,
 )
 
@@ -324,12 +326,31 @@ WS_CKPT_ROLLBACK_SCHEMA: Dict[str, Any] = {
 WS_CKPT_LIST_SCHEMA: Dict[str, Any] = {
     "name": "ws-ckpt-list",
     "description": (
-        "List all snapshots managed by ws-ckpt. Always display the FULL "
-        "untruncated result to the user."
+        "List workspace snapshots, oldest first. For large histories, prefer a bounded "
+        "first page with limit (for example 20). Copy next_cursor unchanged into a "
+        "continuation request when more results are needed; stop only when next_cursor "
+        "is null, even if a page is short or empty. Paged results contain snapshots "
+        "and next_cursor; preserve detail and omitted_fields markers on summary entries. "
+        "Without limit or cursor, return the existing complete table in output."
     ),
     "parameters": {
         "type": "object",
-        "properties": {},
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000,
+                "description": "Maximum snapshots in one page; the byte budget may shorten it.",
+            },
+            "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Opaque next_cursor from the same workspace. Pass unchanged. "
+                    "Without limit, use the CLI default page size of 1000."
+                ),
+            },
+        },
         "additionalProperties": False,
     },
 }
@@ -562,13 +583,13 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
             return rejection
         mgr = get_manager()
         old_path = mgr.config.workspace
-        mgr.set_workspace(new_path)
         from .cron import CrontabManager
         cron_map = mgr.config.cron_schedules
-        warnings = CrontabManager.migrate(old_path, new_path, cron_map)
         err = _persist_plugin_yaml(workspace=new_path, cronSchedules=cron_map)
         if err:
             return _err(f"Failed to persist config: {err}")
+        mgr.set_workspace(new_path)
+        warnings = CrontabManager.migrate(old_path, new_path, cron_map)
         msg = f"Config updated: workspace = {new_path}"
         if warnings:
             msg += "\n\n" + "\n".join(warnings)
@@ -589,10 +610,10 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
         new_schedules, err_msg = parse_schedules_update(str(value), current)
         if err_msg:
             return _err(err_msg)
-        mgr.config.cron_schedules = new_schedules
         err = _persist_plugin_yaml(cronSchedules=new_schedules)
         if err:
             return _err(f"Failed to persist config: {err}")
+        mgr.config.cron_schedules = new_schedules
         cron_note = ""
         if not CrontabManager.sync_with_retry(ws, new_schedules):
             cron_note = (
@@ -699,10 +720,16 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     workspace, ws_err = _resolve_workspace(args)
     if ws_err:
         return ws_err
+    registration = None
     if not preview:
-        rejection = _reject_if_cwd_inside_workspace(workspace)
+        try:
+            registration_path = resolve_workspace_path(workspace)
+        except ValueError as error:
+            return _err(str(error))
+        rejection = _reject_if_cwd_inside_workspace(registration_path)
         if rejection:
             return rejection
+        registration = workspace_registration_path(registration_path)
 
     if num_ancestors is not None:
         cmd = ["ws-ckpt", "rollback", "-w", workspace, "-n", str(num_ancestors)]
@@ -711,19 +738,55 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     if preview:
         cmd.append("--preview")
     success, output = _run_ws_ckpt_cmd(cmd)
-    if success and not preview:
-        get_manager().skip_next_auto_checkpoint = True
+    if success and registration is not None:
+        get_manager().skip_auto_checkpoint_workspaces.add(registration)
     return _ok(output) if success else _err(map_error_to_message(output))
 
 
 def handle_ws_ckpt_list(args: Dict[str, Any], **_kwargs) -> str:
-    """Handle ws-ckpt-list tool call."""
+    """Return a complete table by default, or exactly one explicitly requested page."""
+    paged = "limit" in args or "cursor" in args
+    # Presence is significant: null must not silently request a full listing.
+    if "limit" in args:
+        limit = args["limit"]
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000:
+            return _err("'limit' must be an integer from 1 to 10000")
+    if "cursor" in args:
+        cursor = args["cursor"]
+        if not isinstance(cursor, str) or not cursor:
+            return _err("'cursor' must be a non-empty string")
+
     workspace, ws_err = _require_workspace()
     if ws_err:
         return ws_err
-    cmd = ["ws-ckpt", "list", "-w", workspace, "--format", "table"]
+    cmd = ["ws-ckpt", "list", "-w", workspace, "--format", "json" if paged else "table"]
+    if "limit" in args:
+        cmd.extend(["--limit", str(args["limit"])])
+    if "cursor" in args:
+        cmd.extend(["--cursor", args["cursor"]])
     success, output = _run_ws_ckpt_cmd(cmd)
-    return _ok(output) if success else _err(output)
+    if not success:
+        return _err(output)
+    if not paged:
+        return _ok(output)
+
+    try:
+        page = json.loads(output)
+    except json.JSONDecodeError as exc:
+        return _err(f"Invalid snapshot page JSON: {exc}")
+    if not isinstance(page, dict):
+        return _err("Invalid snapshot page: JSON root must be an object")
+    snapshots = page.get("snapshots")
+    if not isinstance(snapshots, list) or not all(isinstance(item, dict) for item in snapshots):
+        return _err("Invalid snapshot page: 'snapshots' must be an array of objects")
+    if "next_cursor" not in page:
+        return _err("Invalid snapshot page: missing 'next_cursor'")
+    next_cursor = page["next_cursor"]
+    if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+        return _err("Invalid snapshot page: 'next_cursor' must be null or a non-empty string")
+    # Snapshot objects belong to the daemon contract, including summary and
+    # extension fields. Only the top-level Hermes response is projected here.
+    return _json({"success": True, "snapshots": snapshots, "next_cursor": next_cursor})
 
 
 def handle_ws_ckpt_diff(args: Dict[str, Any], **_kwargs) -> str:

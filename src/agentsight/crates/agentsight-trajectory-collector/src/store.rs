@@ -19,6 +19,9 @@ use serde::Serialize;
 
 use agentsight_atif::{AtifTrajectory, Step, StepCategory};
 
+// 将采集用的轻量状态查询与详情查询分离。
+mod source_state;
+
 /// A row of `collected_trajectories` ready for upsert.
 #[derive(Debug, Clone)]
 pub struct TrajectoryRecord {
@@ -250,6 +253,7 @@ impl TrajectoryStore {
             [],
         )?;
         migrate_schema(&conn)?;
+        source_state::initialize(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             db_path: path.to_path_buf(),
@@ -334,8 +338,9 @@ impl TrajectoryStore {
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn upsert_trajectory(&self, record: &TrajectoryRecord) -> Result<()> {
         let now_ns = now_ns();
-        let conn = self.lock_conn()?;
-        conn.execute(
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
             "INSERT INTO collected_trajectories (
                 session_id, schema_version, agent_name, model_name, num_steps,
                 total_prompt_tokens, total_completion_tokens, start_time, end_time,
@@ -381,12 +386,17 @@ impl TrajectoryStore {
         // re-upserted (collected_at_ns churn) on every scan round. Maintenance
         // purges the bookkeeping row again once the trajectory row itself
         // carries the same path and file version (it serves the check directly).
-        conn.execute(
-            "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(file_path) DO UPDATE SET file_size = ?2, file_mtime_ns = ?3",
-            params![record.file_path, record.file_size, record.file_mtime_ns],
-        )?;
+        if record.source == "hermes" {
+            source_state::record(&transaction, record)?;
+        } else {
+            transaction.execute(
+                "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(file_path) DO UPDATE SET file_size = ?2, file_mtime_ns = ?3",
+                params![record.file_path, record.file_size, record.file_mtime_ns],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -756,12 +766,16 @@ impl TrajectoryStore {
             )
         };
         let removed_skipped_files = self.remove_stale_skipped_files(cutoff_ns)?;
+        let removed_source_states = self.remove_stale_source_session_states(cutoff_ns)?;
         let expired_trajectories = match cutoff_ns {
             Some(cutoff) => self.delete_trajectories_before(cutoff)?,
             None => 0,
         };
         let limit_bytes = policy.max_db_size_mb.saturating_mul(1024 * 1024);
-        if (expired_trajectories > 0 || removed_skipped_files > 0 || limit_bytes > 0)
+        if (expired_trajectories > 0
+            || removed_skipped_files > 0
+            || removed_source_states > 0
+            || limit_bytes > 0)
             && self.checkpoint()? == CheckpointOutcome::Busy
         {
             let snapshot = self.size_snapshot()?;

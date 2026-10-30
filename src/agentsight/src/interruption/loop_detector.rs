@@ -358,14 +358,28 @@ fn tokenize(text: &str) -> HashSet<String> {
     let mut tokens = HashSet::new();
     for word in text.split_whitespace() {
         let cjk_chars: Vec<char> = word.chars().filter(|c| is_cjk(*c)).collect();
+        if cjk_chars.is_empty() {
+            tokens.insert(word.to_string());
+            continue;
+        }
         if cjk_chars.len() >= 2 {
             for pair in cjk_chars.windows(2) {
                 tokens.insert(format!("{}{}", pair[0], pair[1]));
             }
-        } else if cjk_chars.len() == 1 {
-            tokens.insert(cjk_chars[0].to_string());
         } else {
-            tokens.insert(word.to_string());
+            tokens.insert(cjk_chars[0].to_string());
+        }
+        // A word can mix scripts — `读取a.conf成功`, `第1000条记录` — and the CJK
+        // pass above only keeps the ideographs, dropping the ASCII run that
+        // carries the part which actually differs between two such outputs. Two
+        // reads of *different* files then tokenize to the same set and score as
+        // identical output, i.e. as a repeated answer, which is what rule 2 and
+        // rule 3 below fire on. Keep every non-CJK run that carries a letter or
+        // digit; punctuation-only runs add nothing.
+        for run in word.split(is_cjk) {
+            if run.chars().any(|c| c.is_alphanumeric()) {
+                tokens.insert(run.to_string());
+            }
         }
     }
     tokens
@@ -374,7 +388,8 @@ fn tokenize(text: &str) -> HashSet<String> {
 /// Compute Jaccard similarity between two text strings.
 ///
 /// Uses whitespace-split tokens for ASCII/Latin text and character bigrams
-/// for CJK text, so deadloop detection works for both English and Chinese.
+/// for CJK text, so deadloop detection works for both English and Chinese. A
+/// word that mixes the two scripts contributes both.
 fn jaccard_similarity(a: &str, b: &str) -> f64 {
     let set_a = tokenize(a);
     let set_b = tokenize(b);
@@ -859,6 +874,50 @@ mod tests {
         assert!(
             sim > 0.7,
             "English similarity should still work, got {sim:.4}"
+        );
+    }
+
+    /// A word that mixes scripts must contribute its ASCII run as well as its
+    /// CJK bigrams. Keeping only the ideographs made two different file names
+    /// tokenize to the same set, so unrelated outputs scored as identical.
+    #[test]
+    fn test_jaccard_mixed_script_words_keep_their_ascii_run() {
+        let a = "读取config.toml成功";
+        let b = "读取main.rs成功";
+        let sim = jaccard_similarity(a, b);
+        assert!(
+            sim < 0.8,
+            "different mixed-script words must not compare as near-identical, got {sim:.4}"
+        );
+
+        // The digits differ, the surrounding ideographs do not.
+        assert!(
+            jaccard_similarity("第1000条记录处理完成", "第2000条记录处理完成") < 0.8,
+            "a differing number inside a CJK sentence must be visible to the comparison"
+        );
+
+        // Identical mixed-script text stays identical.
+        assert_eq!(
+            jaccard_similarity("读取config.toml成功", "读取config.toml成功"),
+            1.0
+        );
+    }
+
+    /// Three reads of *different* files are normal multi-step work, not a
+    /// repeated answer. With the ASCII run dropped, all three snippets below
+    /// tokenized to the same set and the rule fired.
+    #[test]
+    fn test_mixed_script_outputs_are_not_an_output_similarity_loop() {
+        let detector = LoopDetector::default();
+        let calls = vec![
+            make_call(vec!["read_file"], "已读取config.toml，共120行", 100),
+            make_call(vec!["read_file"], "已读取main.rs，共860行", 200),
+            make_call(vec!["read_file"], "已读取Cargo.lock，共2310行", 300),
+        ];
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
+        assert!(
+            result.is_none(),
+            "distinct mixed-script outputs must not be reported as a loop"
         );
     }
 

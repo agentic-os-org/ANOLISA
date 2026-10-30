@@ -21,14 +21,19 @@ REPO = AW.parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def run(command: list[str], cwd: Path, timeout: float = 600, capture: bool = False) -> str:
+def run(
+    command: list[str], cwd: Path, timeout: float = 600, capture: bool = False,
+    umask: int = -1,
+) -> str:
     """Run a bounded command and reap its owned process group on interruption."""
-    print("+ " + " ".join(command), flush=True)
+    permissions = f"umask={umask:04o} " if umask >= 0 else ""
+    print("+ " + permissions + " ".join(command), flush=True)
     with subprocess.Popen(
         command,
         cwd=cwd,
         text=True,
         start_new_session=True,
+        umask=umask,
         stdout=subprocess.PIPE if capture else None,
     ) as process:
         try:
@@ -84,7 +89,40 @@ def output(**values: str) -> None:
             stream.write(lines)
 
 
-def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
+def tokenless_input(path: str) -> bool:
+    """Select real backend contracts only for their source and build inputs."""
+    return path.startswith((
+        "providers/tokenless/src/", "providers/tokenless/tests/",
+        "src/tokenless/crates/tokenless-cli/src/", "src/tokenless/crates/tokenless-protocol/src/",
+        "src/tokenless/crates/tokenless-runtime/src/", "src/tokenless/crates/tokenless-stats/src/",
+        "src/tokenless/third_party/patches/", "src/aw/crates/aw-provider/src/",
+        "src/aw/crates/aw-provider/schemas/", "src/aw/crates/aw-exec/src/",
+        "distribution/packaging/aw/templates/", "distribution/packaging/aw/tests/",
+        "providers/tokenless/packaging/", "src/tokenless/packaging/build/",
+    )) or path in {
+        "providers/tokenless/Cargo.toml", "providers/tokenless/Cargo.lock",
+        "providers/tokenless/rust-toolchain.toml", "src/tokenless/rust-toolchain.toml",
+        "src/tokenless/Cargo.toml", "src/tokenless/Cargo.lock",
+        "src/tokenless/crates/tokenless-cli/Cargo.toml",
+        "src/tokenless/crates/tokenless-protocol/Cargo.toml",
+        "src/tokenless/crates/tokenless-runtime/Cargo.toml",
+        "src/tokenless/crates/tokenless-stats/Cargo.toml",
+        "src/tokenless/Makefile", "src/aw/Cargo.toml", "src/aw/Cargo.lock",
+        "src/aw/rust-toolchain.toml", "src/aw/crates/aw-provider/Cargo.toml",
+        "src/aw/crates/aw-exec/Cargo.toml", "src/aw/crates/aw-package/Cargo.toml",
+        "distribution/Makefile", "providers/tokenless/Makefile",
+        "distribution/packaging/aw/build.py", "distribution/packaging/aw/build.sh",
+        "distribution/packaging/aw/build-integration.sh", "distribution/packaging/aw/integration.py",
+        "distribution/packaging/aw/common.py", "distribution/packaging/aw/package.py",
+        "distribution/packaging/aw/core.Makefile",
+        "src/aw/scripts/check_tokenless.py", "src/aw/scripts/check.py",
+        "src/aw/tests/test_ci_tokenless.py", "src/aw/tests/test_ci_daily_workflow.py",
+        ".github/workflows/aw-ci.yml",
+    }
+
+
+def scope(event_name: str, event: dict, actual: str, repo: Path = REPO,
+          *, compatibility: bool = False) -> bool:
     """Select the complete AW gate for relevant event changes."""
     comparisons = []
     if event_name == "pull_request":
@@ -119,11 +157,10 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
             )
         )
     return any(
-        path.startswith("src/aw/")
-        or (
-            event_name != "pull_request"
-            and path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-preview.yml"}
-        )
+        tokenless_input(path) if compatibility else
+        (path.startswith(("src/aw/", "providers/", "distribution/packaging/aw/"))
+         or tokenless_input(path) or path == "distribution/Makefile"
+         or path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-integration.yml"})
         for path in changed
     )
 
@@ -169,10 +206,28 @@ sys.exit(not result.wasSuccessful())
     )
 
 
+def package_permissions() -> None:
+    """Exercise package readers, transactions and leases under child-local umasks."""
+    commands = [
+        ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "inventory"],
+        ["cargo", "test", "--locked", "-p", "aw-package", "--lib"],
+        ["cargo", "test", "--locked", "-p", "aw-host", "--test", "host", "package_leases"],
+        ["cargo", "test", "--locked", "-p", "aw-service", "--lib", "inspect::package_leases"],
+        ["cargo", "test", "--locked", "-p", "aw-exec", "--lib"],
+        ["cargo", "test", "--locked", "-p", "aw-exec", "--test", "packages"],
+        ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "packages"],
+    ]
+    for mask in (0o022, 0o002):
+        for command in commands:
+            run(command, AW, timeout=120, umask=mask)
+
+
 def check() -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
     selftest()
+    run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
+         "distribution/packaging/aw/tests"], REPO, timeout=120)
     run(["cargo", "fmt", "--all", "--", "--check"], AW)
     from check_native import load
 
@@ -184,12 +239,24 @@ def check() -> None:
             capture=True,
         )
     )
+    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless")]
+    metadata["provider_workspaces"] = []
+    for root in provider_roots:
+        run(["cargo", "fmt", "--all", "--", "--check"], root)
+        metadata["provider_workspaces"].append(json.loads(run(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+            root, capture=True,
+        )))
     structure(metadata, AW)
-    run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], AW)
+    for root in [AW, *provider_roots]:
+        run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], root)
     check_inventory(metadata)
-    run(["cargo", "test", "--workspace", "--locked"], AW)
+    for root in [AW, *provider_roots]:
+        run(["cargo", "test", "--workspace", "--locked", "--no-fail-fast"], root)
+    package_permissions()
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
-    run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], AW)
+    for root in [AW, *provider_roots]:
+        run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)
     if candidate() != actual:
         raise ValueError("checkout changed during validation")
     output(tested_sha=actual)
@@ -207,6 +274,13 @@ def required(env: dict[str, str]) -> None:
         print(f"AW gate passed for {actual}")
     else:
         raise ValueError("AW checks missing, unsuccessful, or tested a different SHA")
+    selected = env.get("TOKENLESS_SELECTED")
+    if selected == "true":
+        if (env.get("TOKENLESS_RESULT") != "success"
+                or env.get("TOKENLESS_TESTED_SHA") != actual):
+            raise ValueError("Tokenless compatibility missing, unsuccessful, or stale")
+    elif selected != "false" or env.get("TOKENLESS_RESULT") != "skipped":
+        raise ValueError("Tokenless compatibility selection/result is invalid")
 
 
 def interrupted(signum: int, _frame: object) -> None:
@@ -227,7 +301,10 @@ def main() -> int:
             selftest(scope_only=True)
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
             selected = scope(os.environ["GITHUB_EVENT_NAME"], event, actual)
-            output(selected=str(selected).lower(), candidate_sha=actual)
+            tokenless = scope(os.environ["GITHUB_EVENT_NAME"], event, actual,
+                              compatibility=True)
+            output(selected=str(selected).lower(), tokenless=str(tokenless).lower(),
+                   candidate_sha=actual)
         elif command == "check":
             check()
         else:

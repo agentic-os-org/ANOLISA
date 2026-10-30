@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark_stats import numeric, percentile
+from collect_metrics import read_internal_metrics
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -22,6 +23,7 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
     cpu: list[float] = []
     cpu_seconds = covered = 0.0
     complete = True
+    previous_end: float | None = None
     for index, row in enumerate(rows):
         timestamp = numeric(row.get("monotonic_timestamp"))
         if timestamp is None:
@@ -36,9 +38,22 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
             if index != 0 or row.get("cpu_pct") or row.get("cpu_interval_seconds"):
                 complete = False
             continue
-        overlap = min(timestamp, end) - max(timestamp - interval, start)
+        interval_start = max(timestamp - interval, start)
+        interval_end = min(timestamp, end)
+        overlap = interval_end - interval_start
         if overlap <= 0:
             continue
+        if previous_end is not None:
+            # Collector timestamps can round at float precision; larger overlap
+            # is repeated evidence and must not satisfy the coverage gate.
+            if interval_start < previous_end - 1e-6:
+                complete = False
+                continue
+            interval_start = max(interval_start, previous_end)
+            overlap = interval_end - interval_start
+            if overlap <= 0:
+                complete = False
+                continue
         value = numeric(row.get("cpu_pct"))
         if value is None or value < 0:
             complete = False
@@ -46,6 +61,7 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
         cpu.append(value)
         cpu_seconds += value / 100 * overlap
         covered += overlap
+        previous_end = interval_end
     return {
         "rss_average_mib": sum(rss) / len(rss) if rss else None,
         "rss_peak_mib": max(rss) if rss else None,
@@ -73,20 +89,27 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "ring_buffer_dropped": [],
         "channel_dropped": [],
     }
+    final_metrics = read_internal_metrics(directory / "internal-metrics.prom")
+    invalid_counters: set[str] = set()
+    for key in drop_samples:
+        value = numeric(final_metrics.get(key))
+        if value is not None and value >= 0:
+            drop_samples[key].append(value)
+        elif key in final_metrics:
+            invalid_counters.add(key)
+    counter_samples = {"eviction_count": evictions, **drop_samples}
     metrics = directory / "metrics.csv"
     if metrics.exists():
         with metrics.open(newline="") as handle:
             rows = list(csv.DictReader(handle))
             for row in rows:
                 alive.append(row.get("process_alive") == "1")
-                if row.get("eviction_count"):
-                    value = float(row["eviction_count"])
-                    if math.isfinite(value) and value >= 0:
-                        evictions.append(value)
-                for key, values in drop_samples.items():
+                for key, values in counter_samples.items():
                     if row.get(key):
-                        value = float(row[key])
-                        if math.isfinite(value) and value >= 0:
+                        value = numeric(row[key])
+                        if value is None or value < 0:
+                            invalid_counters.add(key)
+                        else:
                             values.append(value)
     window = read_json(directory / "agents/start.json")
     start, end = numeric(window.get("start")), numeric(window.get("end"))
@@ -97,6 +120,8 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     resource_error = None
     if not window_valid:
         resource_error = "missing or invalid load measurement window"
+    elif invalid_counters:
+        resource_error = "invalid internal counter samples: " + ", ".join(sorted(invalid_counters))
     elif not resources["samples"] or not resources["cpu_samples_valid"]:
         resource_error = "missing or invalid RSS/CPU samples in the load window"
     elif resources["cpu_measurement_seconds"] < (end - start) * 0.95:
@@ -110,12 +135,27 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and capture.get("completeness_ratio", 0) >= 0.999
         and (capture.get("token_accuracy") or 0) >= 0.999
         and not events_dropped
+        and not invalid_counters.intersection(drop_samples)
     )
     capture_status = (
         "FAIL"
         if worker.get("capture_ready") is False
         else "PASS" if capture_ok else "FAIL" if capture or events_dropped else "UNVERIFIED"
     )
+    ffi = read_json(directory / "ffi-consumer.json") if source.get("mode") == "ffi" else None
+    ffi_error = None
+    if ffi is not None:
+        expected = capture.get("sent", 0) + len(
+            read_json(directory / "clients-ready.json").get("request_ids", [])
+        )
+        if not ffi.get("completed") or worker.get("trace_returncode") != 0:
+            ffi_error = "FFI consumer did not finish successfully"
+        elif ffi.get("llm_events", 0) < expected or expected == 0:
+            ffi_error = f"FFI consumer received {ffi.get('llm_events', 0)}/{expected} LLM events (including preflight)"
+        elif not final_metrics:
+            ffi_error = "missing final FFI pipeline metrics"
+        elif numeric(final_metrics.get("ffi_dropped", "0")) != 0:
+            ffi_error = "FFI consumer queue dropped events"
     valid = (
         worker.get("status") == "complete"
         and worker.get("returncode") == 0
@@ -125,6 +165,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and all(alive)
         and load_status == capture_status == "PASS"
         and not safety_stop
+        and ffi_error is None
     )
     capture_counts = {
         key: capture.get(key)
@@ -147,11 +188,15 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "rss_peak_host_pct": peak / total * 100 if peak is not None and total else None,
         "load": load_status,
         "capture": capture_status,
+        "capture_source": capture.get("capture_source"),
         "capture_completeness": capture.get("completeness_ratio"),
         "capture_token_accuracy": capture.get("token_accuracy"),
         "capture_counts": capture_counts,
         "connection_evictions": max(evictions) if evictions else None,
         "probe_drops": probe_drops,
+        "ffi_consumer": ffi,
+        "ffi_error": ffi_error,
+        "ffi_dropped": numeric(final_metrics.get("ffi_dropped", "0")) if ffi is not None else None,
         "safety_stop": safety_stop or None,
     }
 
@@ -212,6 +257,14 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
     ]
     settings = read_json(output / "settings.json")
     if settings:
+        if settings.get("mode") == "ffi":
+            lines.append(
+                f"Scope: minimal C FFI host, {settings['ffi_api']} callbacks; includes library threads, "
+                "conversion, receipt forwarding and the small C host baseline; excludes application callback work."
+            )
+            lines.append(
+                "Capture validation: FFI callback receipts; independent of AgentSight SQLite storage."
+            )
         lines.append(
             f"Load target: {settings['agents']} agents x {settings['tokens_per_second']:g} output tok/s, "
             f"{settings['duration']:g}s; {settings['tokens_per_response']} tokens/response, "
@@ -267,6 +320,12 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
             + (f"{'-':>28}" if ab else "")
         )
     for label, run in runs.items():
+        if run["ffi_consumer"] is not None:
+            lines.append(
+                f"{label} FFI consumer: {run['ffi_consumer'].get('llm_events', 0)} LLM events (including preflight); dropped={drop_count(run['ffi_dropped'])}"
+            )
+            if run["ffi_error"]:
+                lines.append(f"{label} FFI failed: {run['ffi_error']}")
         lines.append(
             f"{label} CPU measurement: {run['cpu_samples']} samples, "
             f"{display(run['cpu_measurement_seconds'])} s, "

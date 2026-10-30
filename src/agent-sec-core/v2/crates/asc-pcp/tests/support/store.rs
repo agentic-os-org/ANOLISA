@@ -67,9 +67,6 @@ pub fn write_phase(expected: &BindingStateSnapshot, write: &BindingStateWrite) -
     let Some(next) = &write.next else {
         return "finish";
     };
-    if next.preserve_observations_on_conflict {
-        return "finish";
-    }
     if !expected.binding.status.phase.is_reconciling()
         && next
             .status

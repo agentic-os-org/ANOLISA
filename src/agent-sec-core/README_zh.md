@@ -3,7 +3,7 @@
 [English](README.md)
 
 **面向 AI Agent 的 OS 级安全内核。** 为 Agent 负载提供纵深防御：提示词注入检测、
-代码扫描、PII 检测、Skill 完整性追踪、系统基线加固、沙箱隔离，以及本地安全事件
+代码扫描、PII 检测、Skill 完整性追踪、沙箱隔离，以及本地安全事件
 存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
@@ -11,7 +11,7 @@
 
 **AgentSecCore (ANOLISA)** 已登记于 [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa)，当前状态为 **Aligned**。
 
-AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-security/owasp-agentic-top10.md)。
+AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)。
 
 ## 背景
 
@@ -33,18 +33,20 @@ AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制
 | **Code Scanner** | 对 bash / python 代码做静态危险操作分析 | `agent-sec-cli scan-code` |
 | **PII Checker** | 个人数据与凭证检测，支持脱敏输出 | `agent-sec-cli scan-pii` |
 | **Skill Ledger** | 基于 Ed25519 签名的 Skill 完整性账本，仅追加版本链 | `agent-sec-cli skill-ledger` |
-| **Security Baseline** | 系统加固扫描与修复（封装 `loongshield seharden`） | `agent-sec-cli harden` |
 | **Observability** | Agent 生命周期事件记录、会话复盘报告、交互式审查 TUI | `agent-sec-cli observability` |
 | **Security Events** | 本地 JSONL + SQLite 事件存储，支持查询与聚合 | `agent-sec-cli events` |
 | **Sandbox** | 系统调用级命令隔离（bubblewrap + seccomp），作为架构层使用 | `linux-sandbox` |
 
-V1 后台守护进程 `agent-sec-daemon`（以 `agent-sec-core.service` systemd **user** unit
-形式发布）提供健康检查、SkillFS 通知和安全查询 RPC。Prompt Scanner 通过 Rust 扩展
-在进程内执行；daemon 不会预加载 Prompt Scanner 模型，也不提供扫描 RPC。
+V2 源码构建会将 `agent-sec-daemon` 作为 host-level
+`agent-sec-core.service` systemd unit 安装。V2 迁移会通过 Rust 实现保留 hook 使用的
+CLI 命令与集成 capability surface。
 
 ## V2 SkillSec 与 Policy CLI
 
-Rust V2 核心通过现有 `skill-ledger` 命令提供 **SkillSec**：本地扫描、系统密钥签名、版本历史、
+使用 `agent-sec-cli skillsec status` 查看状态，或运行 `agent-sec-cli skillsec --help`。
+旧命令 `skill-ledger` 保留为行为一致的兼容别名；现有 Hook 能力 ID、环境变量及存储数据保持不变。
+
+Rust V2 核心通过 `agent-sec-cli skillsec` 命令提供 **SkillSec**：本地扫描、系统密钥签名、版本历史、
 人工决策、回滚及 SkillFS 激活由一个 root daemon 统一处理。所有本地用户均可管理已启用的默认目录、
 管理员配置范围或已认证 SkillFS 挂载内的 Skill。daemon 启动后自动授权并在后台扫描系统默认目录
 及所有本地账户 HOME 下的标准 Skill 目录，这些位置无需用户配置。`enableDefaultSkillDirs: false`
@@ -60,19 +62,26 @@ V2 systemd 系统服务单元名为 `agent-sec-core.service`，可执行文件�
 使用 `sudo systemctl status agent-sec-core.service` 检查服务状态。
 
 配置、命令以及单独的部署和 Agent Hook 验收边界见
-[V2 核心指南](../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md)。
+[V2 核心指南](../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md)。
 不导入 V1 历史及用户密钥。Hook 适配器通过 daemon 初始化，校验 `check`／`show` 结果，
-保留各宿主策略；详见 [Hook 接入边界](../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
+保留各宿主策略；详见 [Hook 接入边界](../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
 
 Cosh-NG 为同一次 SkillSec Hook 调用中的初始化和查询共预留 10 秒。
 
 Rust V2 客户端在发送请求前校验连接对端的内核 peer UID 为 0。
 
-源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供12 条 Policy、Scope、Binding 管理命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)
+源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供12 条 Policy、Scope、Binding 管理命令。参阅[命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md)
 和 [V2 workspace](v2/README.md)。PAP 状态保存在 SQLite 中，Binding 受理不代表策略已生效。
+默认 Policy 数据目录 `/var/log/agent-sec` 的祖先不安全时，可回退到 `/var/lib/agent-sec/policy`；
+daemon 自己拥有的叶目录权限会先修复为 `0700`。
+两处都有数据库，或选址会绕过已有数据库时拒绝启动；显式 `AGENT_SEC_DATA_DIR` 仍为固定路径。
+详见 [Policy 存储](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#policy-数据库位置)。
 PolicyTemplate 是包含通用规则的可复用策略；AgentSight Adapter 当前仅执行文件删除 block 规则。
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
+
+**兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
+assignment。请更新脚本，使用 `--pid`、`--process-name` 或 `--executable` 选择目标进程。
 
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
@@ -92,7 +101,6 @@ W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
 │  agent-sec-cli           │  agent-sec-daemon            │
 │  scan-prompt / scan-code │  健康检查 + SkillFS 通知      │
 │  scan-pii / skill-ledger │  安全查询 RPC                 │
-│  harden / verify         │                              │
 │  events / observability  │                              │
 ├──────────────────────────┴──────────────────────────────┤
 │  Security Events（JSONL + SQLite）                       │
@@ -140,7 +148,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrapper 与 CI 辅助脚本
 ├── docs/design/               # 设计文档
 ├── tests/                     # 单元测试、集成测试、打包测试、端到端测试
-├── .anolisa/component.toml    # ANOLISA 组件契约
+├── packaging/anolisa/         # ANOLISA 组件契约
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM 打包 spec 模板
@@ -187,18 +195,20 @@ capability。
 |------|------|
 | **操作系统** | Alibaba Cloud Linux / Anolis / RHEL 系列 |
 | **权限** | root 或 sudo（system mode 安装） |
-| **loongshield** | >= 1.2.0（Security Baseline 后端） |
 | **gpg / gnupg2** | >= 2.0（资产签名校验） |
-| **Python** | 3.11.6（已固定；RPM 要求 `>= 3.11, < 3.12`） |
+| **Python** | Agent hook 使用宿主 `python3`；V2 RPM 要求 `>= 3.11, < 3.12` |
 | **Rust** | >= 1.93（用于构建 `linux-sandbox` 与 CLI 原生扩展） |
 | **bubblewrap** | `linux-sandbox` 运行依赖 |
-| **ANOLISA CLI** | >= 0.2.17 |
+| **ANOLISA CLI** | >= 0.3.15 |
 
 ### 安装 AgentSecCore
 
-源码和 RPM 安装支持 Linux x86_64、aarch64。已发布的 ANOLISA raw 包仅支持
-Linux x86_64 和 system mode，需要使用 0.2.17 或更高版本的 CLI。请根据 CLI
-的安装来源完成更新。
+源码和 RPM 安装支持 Linux x86_64、aarch64。ANOLISA raw 包仅支持 Linux x86_64
+和 system mode，需要使用 0.3.15 或更高版本的 CLI。从下一个 `sec-core/v*` tag
+开始，GitHub Release 也会提供 `sec-core-<version>-linux-x86_64.tar.gz`、SHA-256
+校验文件及 CycloneDX SBOM。raw 包包含 Rust V2 CLI 和 daemon 二进制，并为适配器
+hooks 自带固定的 Python 3.11.6 运行时；不包含 V1 Python CLI。请根据 CLI 的安装
+来源完成更新。
 
 ```bash
 # 通过 get.agentic-os.sh 安装的 CLI
@@ -215,7 +225,7 @@ agent-sec-cli --version
 `sec-core` 是 ANOLISA 中的组件名，RPM 继续使用包名 `agent-sec-core`。
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 
@@ -228,14 +238,16 @@ sudo anolisa --install-mode system adopt sec-core
 ./scripts/build-all.sh --component sec-core
 ```
 
-安装文件前，源码构建入口会检查 Node.js 20 或更高版本、bubblewrap、GnuPG 和
-`jq`。user mode 会一次性列出缺少的系统 runtime package 和安装命令，然后退出；
-安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
+安装文件前，源码构建入口会检查 Node.js 20 或更高版本、Python 3、bubblewrap、GnuPG 和
+`jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
+集成资源仍安装到用户目录。Python hook 使用宿主的 `python3`；Qoder 插件安装器当前
+要求 Python >= 3.11, < 3.12。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
+然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
 `--ignore-deps` 跳过检查。
 
-源码构建会把运行时和集成资源安装到用户目录，但不会在 ANOLISA 状态中注册
-组件。请使用已安装的集成脚本，不要继续执行 `anolisa adapter enable`。具体入口见
-[源码集成入口](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#源码集成入口)。
+源码构建不会在 ANOLISA 状态中注册组件。请使用已安装的集成脚本，不要继续执行
+`anolisa adapter enable`。具体入口见
+[源码集成入口](../../docs/user-guide/zh/agent-sec-core/index.md#源码集成入口)。
 
 通过 ANOLISA 管理的 raw 包或已执行 `adopt` 的 RPM 会放置框架 adapter。
 请用拥有目标框架配置的用户启用 adapter。
@@ -251,9 +263,6 @@ anolisa adapter enable sec-core openclaw
 ### 上手命令
 
 ```bash
-# Security Baseline 扫描
-agent-sec-cli harden --scan --config agentos_baseline
-
 # 代码扫描
 agent-sec-cli scan-code --code 'rm -rf /' --language bash
 
@@ -263,9 +272,6 @@ agent-sec-cli scan-prompt --mode standard --text "ignore previous instructions"
 # PII 检测
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
 
-# 验证默认安装根目录中的发布签名 Skill
-agent-sec-cli verify
-
 # Skill 完整性检查
 agent-sec-cli skill-ledger check /path/to/skill
 
@@ -274,27 +280,7 @@ agent-sec-cli events --summary
 ```
 
 完整 CLI 说明与各宿主集成步骤见
-[AgentSecCore 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md)。
-
-### 资产验证
-
-`agent-sec-cli verify` 用于检查 GPG 签名的分发 manifest 和 SHA-256 文件覆盖。它与
-Skill Ledger 职责不同：`verify` 验证发布或部署签名，`skill-ledger` 维护本地 Ed25519
-运行时完整性历史。
-
-批量验证会从两个可选系统根目录发现直接、非隐藏的 Skill 子目录：RPM 安装使用
-`/usr/share/anolisa/skills`，标准 ANOLISA raw 安装使用
-`/usr/local/share/anolisa/skills`。缺失或为空的根目录会被跳过，指向同一 canonical path
-的重复根目录只扫描一次。至少找到一个候选且全部通过时 outcome 为 `verified`；任何候选
-失败时为 `failed`；没有发现候选时为 `no_candidates`。`no_candidates` 会成功退出，
-但不代表已验证任何资产。
-
-这两个根目录是固定的包默认值，不会从任意安装 prefix 动态推导。对于重定位或自定义
-Skill，请使用 `agent-sec-cli verify --skill /path/to/skill`。配置、受信密钥和根目录枚举
-异常仍属于操作失败；候选 Skill 的签名、manifest、哈希、未签名文件或访问失败会产生
-`failed` outcome。
-
-详见 [资产验证用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/asset-verification.md)。
+[AgentSecCore 用户指南](../../docs/user-guide/zh/agent-sec-core/index.md)。
 
 ## Prompt Scanner
 
@@ -326,10 +312,10 @@ L2 分类器默认使用 ModelScope 上的
 后端都需各自执行 `ollama pull`。`warmup` 只检查 Ollama 能否提供当前选定的模型，
 不会自动下载模型。
 
-详见 [Prompt Scanner 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/prompt-scanner.md)。
+详见 [Prompt Scanner 用户使用指南](../../docs/user-guide/zh/agent-sec-core/prompt-scanner.md)。
 
 V2 包提供轻量 Rust 探针 `agent-sec-daemon-health`，发送 health 请求前先校验 daemon 的
-UID。用法见[探针说明](../../docs/user-guide/zh/agent-security/agent-sec-core/internal-commands.md#agent-sec-daemon-health)。
+UID。用法见[探针说明](../../docs/user-guide/zh/agent-sec-core/internal-commands.md#agent-sec-daemon-health)。
 
 ## Code Scanner
 
@@ -362,7 +348,7 @@ model-service timeout 为 1–300 秒，daemon 为可用性检查、chat 和一�
 因此依赖它们的 hook 仍处于延期状态。
 
 完整的 daemon endpoint、CLI 和宿主 hook 状态见
-[Code Scanner 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。
+[Code Scanner 用户指南](../../docs/user-guide/zh/agent-sec-core/code-scanner.md)。
 
 ## PII Checker
 
@@ -381,7 +367,7 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 在 daemon 启动时加载 `/etc/agent-sec/pii-checker/rules.yaml`，也可通过
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` 指定其他文件；重启后更新。
-V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.0.0"`；
+V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.1.1"`；
 覆盖不完整时的 `pass` 不代表检测完整。本阶段保持 Hook 契约，不切换真实宿主，也不新增 PDP 执行控制。
 公共 CLI `--trace-context` 适配通过顶层 OTel 信封传播关联信息，不支持 `params.traceContext`。
 
@@ -389,7 +375,10 @@ V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、�
 此输入 hook 只扫描本轮 `prompt`，不扫描 system prompt 或历史消息。
 较旧的受支持版本保留入站扫描。输入是否阻断取决于策略，工具输出 hook 仍只用于观测。
 
-详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md)。
+`test` 等测试标记只有匹配完整词时才会降低置信度；`latest 13812345678` 保留手机号 finding，
+`test-only` 仍沿用原有的测试上下文处理。
+
+详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-sec-core/pii-checker.md)。
 
 ## Skill Ledger
 
@@ -483,7 +472,7 @@ Skill，随后执行只读的 `skill-ledger check`，并按
 `deny` 是 `block` 的别名。每次
 检查都会把 Qoder trace 标识写入安全审计日志。
 
-设计文档：[`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · 用户指南：[Skill Ledger 用户手册](../../docs/user-guide/zh/agent-security/agent-sec-core/skill-ledger.md)
+设计文档：[`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · 用户指南：[Skill Ledger 用户手册](../../docs/user-guide/zh/agent-sec-core/skill-ledger.md)
 
 ## Agent Capability 视图
 
@@ -513,25 +502,6 @@ agent-sec-cli capabilities --agent hermes --capability pii-check --output json
 
 对于 `prompt-scan`，`env` 条目还会上报 `PROMPT_SCANNER_L2_MODEL`：没有 hook 自己读取它，但每个 hook 都会调用 `scan-prompt` 子进程并由其解析 L2 后端，因此六种集成都会继承该变量。模型名只有原样展示才有意义，所以它保留大小写上报（并做转义与长度封顶）；上报的 `default` 与“不支持的后端”检查都取自 native 扫描引擎，而不是在此再存一份后端列表。引擎不支持的模型名会原样上报并附一条 diagnostic，因为引擎会在构造期报错、扫描直接失败。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
 
-## Security Baseline
-
-`agent-sec-cli harden` 封装 `loongshield seharden`；当未指定动作或 profile 时，
-默认补齐 `--scan --config agentos_baseline`。
-
-```bash
-# 合规扫描
-agent-sec-cli harden --scan --config agentos_baseline
-
-# 预演修复动作
-agent-sec-cli harden --reinforce --dry-run --config agentos_baseline
-
-# 执行修复（需要 root）
-sudo agent-sec-cli harden --reinforce --config agentos_baseline
-
-# 查看完整的下游 loongshield 帮助
-agent-sec-cli harden --downstream-help
-```
-
 ## Observability
 
 Rust V2 的 report/review 仅通过 daemon 查询。普通用户只见自身数据；root 可查全部。查询身份仅来自 UDS peer。report 保留 V1 的 `--session-id`、`--last`、`--format`，review 不增加业务参数，report JSON 不新增 UID 字段。`observability schema` 在本地从 Rust 契约动态生成兼容 V1 的记录 Schema。
@@ -548,7 +518,7 @@ agent-sec-cli observability report --session-id <id> --format json
 agent-sec-cli observability schema
 ```
 
-详见 [Observability 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#observability可观测)。
+详见 [Observability 用户指南](../../docs/user-guide/zh/agent-sec-core/index.md#observability可观测)。
 
 ## Security Events
 
@@ -565,22 +535,22 @@ agent-sec-cli events --count-by category --last-hours 24
 agent-sec-cli events --summary
 ```
 
-详见 [Security Events 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#security-events安全事件)。
+详见 [Security Events 用户指南](../../docs/user-guide/zh/agent-sec-core/index.md#security-events安全事件)。
 
 ## Agent Hook 环境变量
 
 宿主 hook 矩阵由用户指南维护，以保持环境变量和宿主 mode 语义只有一个权威来源：
-[Agent Hook 环境变量](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#agent-hook-环境变量)。
+[Agent Hook 环境变量](../../docs/user-guide/zh/agent-sec-core/index.md#agent-hook-环境变量)。
 
 ## 开发
 
 ```bash
-# 构建全部组件（沙箱、CLI wheel、所有 adapter、skills、组件清单）
+# 构建全部组件（沙箱、V2 Rust CLI/daemon、所有 adapter、skills、组件清单）
 make build-all
 
 # 单独构建
 make build-sandbox
-make build-cli
+make build-cli-v2
 
 # 测试
 make test               # Python + Rust 沙箱 + OpenClaw 插件

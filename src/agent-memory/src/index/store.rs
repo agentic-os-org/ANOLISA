@@ -32,6 +32,22 @@ pub struct BM25Store {
 /// doesn't silently corrupt rows it doesn't understand.
 pub(crate) const SCHEMA_VERSION: i64 = 5;
 
+/// What the index currently records for one path.
+///
+/// The incremental watcher checks this before reading a body. A matching
+/// `(mtime_ms, size)` with an existing vector can avoid another body read and
+/// embedding call. Full scans use the same fingerprint to skip an upsert,
+/// but read the body first and backfill missing vectors separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexStat {
+    /// Last modification time in milliseconds, as stored at index time.
+    pub mtime_ms: i64,
+    /// File size in bytes, as stored at index time.
+    pub size: u64,
+    /// Whether a dense embedding row already exists for this path.
+    pub has_vector: bool,
+}
+
 impl BM25Store {
     pub fn open(
         path: &Path,
@@ -231,6 +247,14 @@ impl BM25Store {
 
         match existing_rowid {
             Some(rowid) => {
+                // A vector describes the extracted body, so metadata-only
+                // refreshes keep it while changed content needs backfilling.
+                tx.execute(
+                    "DELETE FROM files_vec WHERE path = ?1 AND EXISTS (
+                        SELECT 1 FROM files_fts WHERE rowid = ?2 AND body <> ?3
+                     )",
+                    params![rel_path, rowid, body],
+                )?;
                 tx.execute(
                     "UPDATE files SET mtime_ms=?1, size=?2, indexed_at=?3, agent_id=COALESCE(agent_id, ?4) WHERE rowid=?5",
                     params![mtime_ms, size as i64, now, agent_id, rowid],
@@ -258,6 +282,21 @@ impl BM25Store {
         Ok(())
     }
 
+    /// Remove one file's metadata, text, and vector without matching descendants.
+    /// Unlike `remove`, exact matching cannot evict wildcard- or case-alike
+    /// neighbors. Use for known regular files; returns whether any row existed.
+    pub(super) fn remove_file(&mut self, rel_path: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM files_fts WHERE rowid IN (SELECT rowid FROM files WHERE path = ?1)",
+            params![rel_path],
+        )?;
+        let files = tx.execute("DELETE FROM files WHERE path = ?1", params![rel_path])?;
+        let vectors = tx.execute("DELETE FROM files_vec WHERE path = ?1", params![rel_path])?;
+        tx.commit()?;
+        Ok(files > 0 || vectors > 0)
+    }
+
     /// Remove a file's index entry. Returns true if any row existed.
     ///
     /// Cascade semantics: if `rel_path` matches a stored row exactly, that
@@ -274,7 +313,7 @@ impl BM25Store {
         let prefix = format!("{rel_path}/");
         let rowids: Vec<i64> = {
             let mut stmt =
-                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR instr(path, ?2) = 1")?;
             let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, i64>(0))?;
             rows.flatten().collect()
         };
@@ -285,7 +324,7 @@ impl BM25Store {
         }
         // Cascade: remove corresponding vector embeddings.
         tx.execute(
-            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%'",
+            "DELETE FROM files_vec WHERE path = ?1 OR instr(path, ?2) = 1",
             params![rel_path, prefix],
         )?;
         tx.commit()?;
@@ -293,7 +332,7 @@ impl BM25Store {
     }
 
     pub fn search(&self, query: &str, top_k: usize, exclude_cold: bool) -> Result<Vec<SearchHit>> {
-        self.search_scoped(query, top_k, exclude_cold, None)
+        self.search_scoped(query, top_k, exclude_cold, None, None)
     }
 
     /// Search with optional agent scope filter.
@@ -309,12 +348,22 @@ impl BM25Store {
     /// surface the error rather than silently falling back to shared mode,
     /// otherwise a misconfigured `MCP_CLIENT_NAME` would silently widen the
     /// visibility domain.
+    ///
+    /// `category` restricts results to one fact category and is applied **in
+    /// SQL, before `LIMIT`**, on every bm25 path — the MATCH query, its
+    /// OR-quoted retry and the short-CJK LIKE fallback. Facts live under
+    /// `facts/<category>/<ulid>.md`, so the filter is a path-prefix `GLOB`
+    /// (case-sensitive; see `category_glob_pattern`). Filtering in Rust
+    /// *after* the limit instead would return zero hits whenever another
+    /// category filled the unfiltered top-k window, which is exactly what bm25
+    /// term-frequency/length normalization produces.
     pub fn search_scoped(
         &self,
         query: &str,
         top_k: usize,
         exclude_cold: bool,
         agent_scope: Option<&str>,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if query.trim().is_empty() {
             return Err(MemoryError::InvalidArgument("empty search query".into()));
@@ -343,16 +392,28 @@ impl BM25Store {
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         let needs_like_fallback = tokens.iter().any(|t| t.chars().count() < 3);
         if needs_like_fallback {
-            return self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope);
+            return self.search_like(
+                &tokens,
+                top_k,
+                cold_filter,
+                superseded_filter,
+                &scope,
+                category,
+            );
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
+        let match_query = literal_fts_query(&tokens, " ");
         // Agent scope filter: when set, only return results from the specified agent.
         // Use parameterised binding (`?3`) rather than `format!()` so an
         // attacker-controlled `MCP_CLIENT_NAME` cannot escape the literal.
         // `/` and `\` are rejected so a client name like `org/team/agent`
         // cannot be confused with a path component elsewhere in the query.
         let (agent_filter, agent_param) = agent_scope_sql_match(&scope);
+        // The MATCH query numbers its parameters, so the category slot is `?3`
+        // only when the agent filter did not already take it.
+        let category_slot = if agent_param.is_some() { "?4" } else { "?3" };
+        let (category_filter, category_param) = category_filter_sql(category, category_slot);
 
         // Join with files to get mtime for time decay.
         let sql = format!(
@@ -365,41 +426,24 @@ impl BM25Store {
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
+                  {category_filter}
             ORDER BY rank
             LIMIT ?2
         "#
         );
+        let bind = match_bind(&match_query, top_k, &agent_param, &category_param);
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows: Vec<(String, String, f64, String, i64)> = if let Some(ref agent_id) = agent_param
-        {
-            stmt.query_map(params![fts_q, top_k as i64, agent_id], |row| {
-                let body: String = row.get(3)?;
-                let mtime_ms: i64 = row.get(4)?;
+        let rows: Vec<(String, String, f64, String, i64)> = stmt
+            .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, f64>(2)?,
-                    body,
-                    mtime_ms,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })?
-            .flatten()
-            .collect()
-        } else {
-            stmt.query_map(params![fts_q, top_k as i64], |row| {
-                let body: String = row.get(3)?;
-                let mtime_ms: i64 = row.get(4)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                    body,
-                    mtime_ms,
-                ))
-            })?
-            .flatten()
-            .collect()
-        };
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         // OR fallback: FTS5 implicit-AND semantics return 0 results
         // when any single query term is absent from the corpus.
@@ -410,11 +454,7 @@ impl BM25Store {
         // retry with OR-joined quoted tokens so partial matches still
         // surface.
         let rows: Vec<(String, String, f64, String, i64)> = if rows.is_empty() && tokens.len() > 1 {
-            let or_q = tokens
-                .iter()
-                .map(|t| format!("\"{}\"", t))
-                .collect::<Vec<_>>()
-                .join(" OR ");
+            let or_q = literal_fts_query(&tokens, " OR ");
             let or_sql = format!(
                 r#"
                 SELECT f.path,
@@ -425,41 +465,24 @@ impl BM25Store {
                 FROM files_fts
                 JOIN files f ON f.rowid = files_fts.rowid
                 WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
+                      {category_filter}
                 ORDER BY rank
                 LIMIT ?2
-                "#,
-                cold_filter = cold_filter,
-                superseded_filter = superseded_filter,
-                agent_filter = agent_filter,
+                "#
             );
+            let or_bind = match_bind(&or_q, top_k, &agent_param, &category_param);
             let mut or_stmt = self.conn.prepare(&or_sql)?;
-            if let Some(ref agent_id) = agent_param {
-                or_stmt
-                    .query_map(params![or_q, top_k as i64, agent_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    })?
-                    .flatten()
-                    .collect()
-            } else {
-                or_stmt
-                    .query_map(params![or_q, top_k as i64], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    })?
-                    .flatten()
-                    .collect()
-            }
+            or_stmt
+                .query_map(rusqlite::params_from_iter(or_bind.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             rows
         };
@@ -506,7 +529,9 @@ impl BM25Store {
     /// OR fallback). `_` and `%` surviving `sanitize_fts_query` are
     /// backslash-escaped so they match literally. Scoring is a coarse
     /// term-frequency sum plus time decay — no BM25 is available off the
-    /// MATCH path, but recall (not ranking) is the goal.
+    /// MATCH path, but recall (not ranking) is the goal. `category` is applied
+    /// here too, so the LIKE fallback filters before its `LIMIT` exactly like
+    /// the MATCH path does.
     fn search_like(
         &self,
         tokens: &[&str],
@@ -514,11 +539,13 @@ impl BM25Store {
         cold_filter: &str,
         superseded_filter: &str,
         scope: &AgentScope,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
         let (agent_filter, agent_param) = agent_scope_sql_like(scope);
+        let (category_filter, category_param) = category_filter_sql(category, "?");
 
         let run_query =
             |joiner: &str, pool: usize, rank_matches: bool| -> Result<Vec<(String, String, i64)>> {
@@ -558,6 +585,7 @@ impl BM25Store {
                 FROM files_fts
                 JOIN files f ON f.rowid = files_fts.rowid
                 WHERE ({like_clause}) {cold_filter} {superseded_filter} {agent_filter}
+                      {category_filter}
                 {order_clause}
                 LIMIT ?
                 "#
@@ -571,8 +599,11 @@ impl BM25Store {
                 if let Some(ref agent_id) = agent_param {
                     bind.push(rusqlite::types::Value::Text(agent_id.clone()));
                 }
+                if let Some(ref pattern) = category_param {
+                    bind.push(rusqlite::types::Value::Text(pattern.clone()));
+                }
                 // ORDER BY comes after WHERE in the SQL text, so its pattern
-                // params bind after the WHERE + agent params.
+                // params bind after the WHERE + agent + category params.
                 if rank_matches {
                     for s in &like_patterns {
                         bind.push(rusqlite::types::Value::Text(s.clone()));
@@ -588,7 +619,7 @@ impl BM25Store {
                         row.get::<_, i64>(2)?,
                     ))
                 })?;
-                Ok(rows.flatten().collect())
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
             };
 
         let rows = run_query(" AND ", top_k * 4, false)?;
@@ -721,6 +752,7 @@ impl BM25Store {
         if tokens.iter().any(|t| t.chars().count() < 3) {
             return self.detect_conflicts_like(&tokens, threshold);
         }
+        let match_query = literal_fts_query(&tokens, " ");
 
         // Search excluding cold and superseded files.
         let sql = r#"
@@ -732,12 +764,13 @@ impl BM25Store {
             LIMIT 5
         "#;
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_q], |row| {
+        let rows = stmt.query_map(params![match_query], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })?;
 
         let results: Vec<(String, f64)> = rows
-            .flatten()
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|(_, score)| *score >= threshold)
             .collect();
 
@@ -750,7 +783,8 @@ impl BM25Store {
     /// typically-negative BM25 `threshold`. This is deliberately
     /// recall-oriented: when we can't rank, flag every substring match as a
     /// potential conflict rather than silently miss a duplicate/contradiction.
-    /// The caller still reviews flagged conflicts before superseding.
+    /// A row decode failure aborts detection; the caller logs it and writes
+    /// without superseding. Successful results are still reviewed first.
     fn detect_conflicts_like(&self, tokens: &[&str], threshold: f64) -> Result<Vec<(String, f64)>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
@@ -788,8 +822,8 @@ impl BM25Store {
         })?;
 
         let mut out: Vec<(String, f64)> = Vec::new();
-        for row in rows.flatten() {
-            let (path, body, mtime_ms) = row;
+        for row in rows {
+            let (path, body, mtime_ms) = row?;
             // Case-insensitive frequency: SQLite LIKE is ASCII
             // case-insensitive, so a Rust `matches()` (case-sensitive) would
             // under-count and zero the score for mixed-case matches.
@@ -849,15 +883,34 @@ impl BM25Store {
 
     /// Vector-only search: returns `(path, cosine_similarity)` ordered
     /// by descending similarity with time decay boost.
+    ///
+    /// Superseded rows and, when `exclude_cold_on_search` is set, cold rows
+    /// are filtered before ranking so they never consume the `top_k` budget.
+    /// Vector rows without a matching `files` entry remain eligible.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search)
+    }
+
+    // Keep this override private: vector searches use the store default,
+    // while hybrid searches pass their per-call cold policy. Superseded and
+    // optionally cold rows are filtered before ranking; standalone vectors stay eligible.
+    fn search_vec_with_cold(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        exclude_cold: bool,
+    ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
         // JOIN with files to get mtime in a single query (avoids N+1).
+        // exclude_cold binds as 0/1; 0 disables the cold predicate, keeping SQL static.
         let mut stmt = self.conn.prepare(
             "SELECT v.path, v.embedding, f.mtime_ms \
-             FROM files_vec v LEFT JOIN files f ON f.path = v.path",
+             FROM files_vec v LEFT JOIN files f ON f.path = v.path \
+             WHERE COALESCE(f.is_superseded, 0) = 0 \
+               AND (?1 = 0 OR COALESCE(f.is_cold, 0) = 0)",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![exclude_cold], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
@@ -867,10 +920,7 @@ impl BM25Store {
 
         let mut scores: Vec<(String, f64)> = Vec::new();
         for row in rows {
-            let (path, blob, mtime_opt) = match row {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+            let (path, blob, mtime_opt) = row?;
             let stored = blob_to_f32(&blob);
             if stored.len() != q_norm.len() {
                 continue;
@@ -925,9 +975,28 @@ impl BM25Store {
         top_k: usize,
         exclude_cold: bool,
     ) -> Result<Vec<SearchHit>> {
-        // Run both search strategies.
-        let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec(query_vec, top_k * 2);
+        // A row decode failure makes a fallback result untrustworthy, even
+        // when the other strategy succeeds with no matches.
+        let bm25_hits = match self.search(query, top_k * 2, exclude_cold) {
+            Err(e) if is_row_decode_error(&e) => {
+                tracing::error!(
+                    "hybrid search: BM25 row decode failed (tables=files/files_fts, db={}): {e}; {ROW_DECODE_RECOVERY}",
+                    self.conn.path().unwrap_or(":memory:")
+                );
+                return Err(e);
+            }
+            result => result,
+        };
+        let vec_hits = match self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold) {
+            Err(e) if is_row_decode_error(&e) => {
+                tracing::error!(
+                    "hybrid search: vector row decode failed (table=files_vec, db={}): {e}; {ROW_DECODE_RECOVERY}",
+                    self.conn.path().unwrap_or(":memory:")
+                );
+                return Err(e);
+            }
+            result => result,
+        };
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
@@ -1059,8 +1128,50 @@ impl BM25Store {
                 params![rel_path],
                 |r| r.get(0),
             )
+            // Treat an unreadable timestamp as unknown so the next startup/overflow
+            // full scan reindexes a readable file; no periodic scan runs.
             .ok()
     }
+
+    /// Index metadata used by incremental updates and full scans:
+    /// the stored `(mtime_ms, size)` plus whether a vector row exists.
+    /// `None` means the path is not indexed at all.
+    ///
+    /// `size` is stored as `INTEGER`; it is clamped at 0 because a negative
+    /// value can only come from a corrupt row and must never compare equal
+    /// to a real `u64` file length.
+    pub fn index_stat_for(&self, rel_path: &str) -> Option<IndexStat> {
+        self.conn
+            .query_row(
+                "SELECT f.mtime_ms, f.size, v.path IS NOT NULL \
+                 FROM files f LEFT JOIN files_vec v ON v.path = f.path \
+                 WHERE f.path = ?1",
+                params![rel_path],
+                |r| {
+                    Ok(IndexStat {
+                        mtime_ms: r.get(0)?,
+                        size: r.get::<_, i64>(1)?.max(0) as u64,
+                        has_vector: r.get::<_, i64>(2)? != 0,
+                    })
+                },
+            )
+            .ok()
+    }
+}
+
+pub(crate) const ROW_DECODE_RECOVERY: &str = "a server restart may reindex readable files with corrupt timestamps, but cannot reliably repair corrupt paths or vectors; rebuild the index from source data if the error persists";
+
+// Row conversion failures cannot safely degrade to partial hybrid results.
+// IntegralValueOutOfRange is defensive for future narrower integer reads.
+pub(crate) fn is_row_decode_error(error: &MemoryError) -> bool {
+    matches!(
+        error,
+        MemoryError::Sqlite(
+            rusqlite::Error::FromSqlConversionFailure(..)
+                | rusqlite::Error::IntegralValueOutOfRange(..)
+                | rusqlite::Error::InvalidColumnType(..)
+        )
+    )
 }
 
 /// Strip FTS5 snippet highlight markers («, », …) so that prompt-injection
@@ -1170,6 +1281,77 @@ fn like_pattern(token: &str) -> String {
     s
 }
 
+/// Build the `GLOB` pattern that restricts a search to one fact category.
+/// Facts are written to `facts/<category>/<ulid>.md` (see
+/// `consolidation::writer`), so a prefix pattern is exact.
+///
+/// `GLOB` and not `LIKE` because SQLite folds ASCII case in `LIKE`
+/// (`'facts/Interest/x.md' LIKE 'facts/interest/%'` is true), while category
+/// matching has always been a case-sensitive comparison — the Rust-side
+/// `filter_by_category` this pushed into SQL used `==` on the second path
+/// component. On Linux one store can hold both `facts/interest/` and
+/// `facts/Interest/`, and conflating them does more than leak a row: the
+/// wrong-case file also spends a `top_k` slot that a requested-category fact
+/// should have filled.
+///
+/// `GLOB` has no `ESCAPE` clause, so its three metacharacters — `*`, `?` and
+/// `[` — are neutralised by wrapping each in a single-character bracket class
+/// (`[*]`, `[?]`, `[[]`), which `GLOB` reads as a literal. `]` and `^` are
+/// literal outside a class and must not be escaped. That leaves a category
+/// unable to widen the prefix or swallow the trailing separator, the same
+/// guarantee the backslash escaping gave `like_pattern`.
+fn category_glob_pattern(category: &str) -> String {
+    let mut s = String::with_capacity(category.len() + 8);
+    s.push_str("facts/");
+    for c in category.chars() {
+        match c {
+            '*' | '?' | '[' => {
+                s.push('[');
+                s.push(c);
+                s.push(']');
+            }
+            other => s.push(other),
+        }
+    }
+    s.push_str("/*");
+    s
+}
+
+/// Category filter SQL plus the pattern to bind for it. `placeholder` is the
+/// parameter marker the surrounding query needs: a numbered `?3`/`?4` on the
+/// MATCH paths (whose query numbers its parameters), a bare `?` on the LIKE
+/// fallback (which binds a variable number of leading pattern params).
+fn category_filter_sql(category: Option<&str>, placeholder: &str) -> (String, Option<String>) {
+    match category {
+        None => (String::new(), None),
+        Some(cat) => (
+            format!("AND f.path GLOB {placeholder}"),
+            Some(category_glob_pattern(cat)),
+        ),
+    }
+}
+
+/// Bind values for the FTS5 MATCH queries: `?1` = FTS query, `?2` = limit, then
+/// the optional agent-scope and category params in the order their `?N` slots
+/// were allocated (`category_filter_sql` picks `?3` when there is no agent
+/// filter and `?4` when there is one). rusqlite binds positionally, so this
+/// stays in step with the SQL text without a branch per combination.
+fn match_bind(
+    fts_q: &str,
+    top_k: usize,
+    agent_param: &Option<String>,
+    category_param: &Option<String>,
+) -> Vec<rusqlite::types::Value> {
+    let mut bind = vec![
+        rusqlite::types::Value::Text(fts_q.to_string()),
+        rusqlite::types::Value::Integer(top_k as i64),
+    ];
+    for v in [agent_param, category_param].into_iter().flatten() {
+        bind.push(rusqlite::types::Value::Text(v.clone()));
+    }
+    bind
+}
+
 /// Byte-wise ASCII case-insensitive substring search, mirroring SQLite
 /// LIKE semantics (ASCII case-insensitive, exact bytes otherwise).
 /// Returned offsets are always char boundaries: a valid UTF-8 needle
@@ -1220,8 +1402,8 @@ fn make_snippet(body: &str, needle: &str, radius: usize) -> String {
     s
 }
 
-/// Convert a raw query into something safe for FTS5: drop quotes /
-/// punctuation that confuse the parser, AND-join surviving tokens.
+/// Normalize raw query terms, retaining dots in filenames and version numbers.
+/// The returned terms must be quoted before use in an FTS5 MATCH expression.
 /// `-` is dropped because FTS5 interprets a leading `-` as the NOT
 /// operator, so naïvely keeping it would silently invert match intent
 /// (`hello-world` → match docs containing "hello" but NOT "world").
@@ -1235,6 +1417,17 @@ fn sanitize_fts_query(q: &str) -> String {
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Encode sanitized terms as FTS5 literals; SQL binding does not quote MATCH syntax.
+/// A space separator requires all terms; ` OR ` allows any term to match.
+/// Quote escaping is defensive: the current sanitizer already removes quotes.
+fn literal_fts_query(tokens: &[&str], separator: &str) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 pub(crate) fn mtime_ms_of(meta: &std::fs::Metadata) -> i64 {
@@ -1287,32 +1480,193 @@ fn blob_to_f32(blob: &[u8]) -> Vec<f32> {
 }
 
 /// Add `superseded_by` to the frontmatter of an existing markdown file.
+///
+/// The frontmatter opening fence is only recognized at byte 0: indexed files
+/// are not guaranteed to carry frontmatter (`mem_write` stores raw content),
+/// and a `---` separator inside the body must never be mistaken for a fence —
+/// splicing the marker there would corrupt the note.
+///
+/// Fences are LF-only by design: `---\r\n` does not open frontmatter here,
+/// matching all four frontmatter readers, which share the same LF-only
+/// assumption (CRLF notes are a documented out-of-scope gap, consistent
+/// with the pre-fix behaviour).
 fn add_superseded_frontmatter(path: &std::path::Path, new_id: &str) -> std::io::Result<()> {
     let content = std::fs::read_to_string(path)?;
-    if content.contains("superseded_by:") {
+    // Files without a leading frontmatter fence are left untouched: the
+    // DB flag is the authoritative supersession marker (see `supersede`).
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return Ok(());
+    };
+    // Locate the closing fence so the marker lands inside the frontmatter.
+    // A `superseded_by:` mention in the body does not count — only the
+    // frontmatter block can hold the authoritative on-disk marker.
+    let Some(fence_rel) = rest.find("\n---") else {
+        return Ok(()); // unclosed frontmatter — nothing to anchor to
+    };
+    // Empty frontmatter ("---\n---\nbody") is also skipped: `rest` then
+    // starts with the closing fence, so `rest.find("\n---")` finds nothing
+    // and the file stays untouched — the right call, since every reader
+    // fails to see frontmatter there and a marker would never be read
+    // back.
+    let frontmatter = &rest[..fence_rel];
+    if frontmatter.contains("superseded_by:") {
         return Ok(()); // Already superseded.
     }
-    // Insert superseded_by after the first --- line if it exists.
-    if let Some(pos) = content.find("---\n") {
-        let after_first = pos + 4;
-        if let Some(second_pos) = content[after_first..].find("---\n") {
-            // Insert before the closing ---.
-            let insert_point = after_first + second_pos;
-            let new_content = format!(
-                "{}superseded_by: {}\n{}",
-                &content[..insert_point],
-                new_id,
-                &content[insert_point..]
-            );
-            std::fs::write(path, new_content)?;
-        }
-    }
+    // The id must not carry line breaks: a `\n` would terminate the
+    // frontmatter block and let a future caller inject arbitrary keys.
+    // The only production caller passes a 26-char ULID; this pins the
+    // contract without assuming the length.
+    debug_assert!(!new_id.contains('\n') && !new_id.contains('\r'));
+    // Insert as the last frontmatter key, right before the closing fence.
+    let insert_point = 4 + fence_rel + 1;
+    let new_content = format!(
+        "{}superseded_by: {}\n{}",
+        &content[..insert_point],
+        new_id,
+        &content[insert_point..]
+    );
+    std::fs::write(path, new_content)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_file_reports_only_actual_evictions() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        assert!(!store.remove_file("missing.md").unwrap());
+        store.upsert("text.md", 0, 4, "text", None).unwrap();
+        assert!(store.remove_file("text.md").unwrap());
+        assert!(!store.remove_file("text.md").unwrap());
+
+        // Vector cleanup remains unconditional even without file metadata.
+        store.upsert_vec("vector.md", &[1.0, 0.0]).unwrap();
+        assert!(store.remove_file("vector.md").unwrap());
+        assert!(store.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
+        assert!(!store.remove_file("vector.md").unwrap());
+    }
+
+    #[test]
+    fn literal_search_recalls_dotted_terms() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert(
+                "notes/deployment.md",
+                100,
+                80,
+                "Configure config.toml for example.com using release v1.2.3",
+                None,
+            )
+            .unwrap();
+        for query in ["config.toml", "example.com", "v1.2.3"] {
+            let hits = store.search(query, 10, true).unwrap();
+            assert_eq!(hits.len(), 1, "existing memory must match {query:?}");
+            assert_eq!(hits[0].path, "notes/deployment.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_keeps_all_terms_before_or_fallback() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, body) in [
+            ("both.md", "deployment config.toml"),
+            ("word-only.md", "deployment unrelated"),
+            ("file-only.md", "config.toml unrelated"),
+        ] {
+            store
+                .upsert(path, 100, body.len() as u64, body, None)
+                .unwrap();
+        }
+        let hits = store.search("deployment config.toml", 10, true).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(),
+            vec!["both.md"],
+            "a dotted term must not turn an AND search into OR fallback"
+        );
+
+        // With no exact conjunction, the existing OR fallback still applies.
+        let hits = store.search("absent config.toml", 10, true).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.path != "word-only.md"));
+    }
+
+    #[test]
+    fn literal_search_treats_boolean_words_as_text() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert("null.md", 100, 30, "constraint NOT NULL", None)
+            .unwrap();
+        store
+            .upsert("other.md", 100, 20, "constraint required", None)
+            .unwrap();
+
+        for query in ["NOT", "constraint NOT NULL"] {
+            let hits = store.search(query, 10, true).unwrap();
+            assert_eq!(
+                hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(),
+                vec!["null.md"],
+                "natural-language query must retain {query:?} literally"
+            );
+        }
+
+        store.upsert("gate.md", 100, 10, "AND gate", None).unwrap();
+        let hits = store.search("AND", 10, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "gate.md");
+    }
+
+    #[test]
+    fn literal_search_preserves_scope_and_short_term_fallback() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, agent) in [("alpha.md", "alpha"), ("beta.md", "beta")] {
+            store
+                .upsert(path, 100, 30, "花名 config.toml", Some(agent))
+                .unwrap();
+        }
+        for query in ["config.toml", "花名 config.toml"] {
+            let hits = store
+                .search_scoped(query, 10, true, Some("isolated:alpha"), None)
+                .unwrap();
+            assert_eq!(hits.len(), 1, "scoped query {query:?}");
+            assert_eq!(hits[0].path, "alpha.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_combines_category_and_agent_filters_before_limit() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, agent) in [
+            ("facts/config/alpha.md", "alpha"),
+            ("facts/config/beta.md", "beta"),
+            ("facts/other/alpha.md", "alpha"),
+        ] {
+            store
+                .upsert(path, 100, 30, "config.toml NOT NULL", Some(agent))
+                .unwrap();
+        }
+        for query in ["config.toml", "NOT", "absent config.toml"] {
+            let hits = store
+                .search_scoped(query, 1, true, Some("isolated:alpha"), Some("config"))
+                .unwrap();
+            assert_eq!(hits.len(), 1, "combined filters for {query:?}");
+            assert_eq!(hits[0].path, "facts/config/alpha.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_conflicts_accept_dots_and_boolean_words() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert("fact.md", 100, 40, "config.toml requires NOT NULL", None)
+            .unwrap();
+        for query in ["config.toml", "NOT", "config.toml requires NOT NULL"] {
+            let conflicts = store.detect_conflicts(query, -2.0).unwrap();
+            assert_eq!(conflicts.len(), 1, "conflict query {query:?}");
+            assert_eq!(conflicts[0].0, "fact.md");
+        }
+    }
 
     #[test]
     fn upsert_search_remove_roundtrip() {
@@ -1329,6 +1683,158 @@ mod tests {
         s.remove("notes/a.md").unwrap();
         let hits = s.search("rust", 5, true).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_reports_row_decode_errors_in_match_and_or_paths() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("good.md", 100, 10, "deploymentmarker", Some("alpha"))
+            .unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker", Some("alpha"))
+            .unwrap();
+        // Fault injection in a private SQLite index; normal writes use i64 timestamps.
+        s.conn
+            .execute(
+                "UPDATE files SET mtime_ms = 'invalid' WHERE path = 'bad.md'",
+                [],
+            )
+            .unwrap();
+
+        for scope in [None, Some("isolated:alpha")] {
+            for query in ["deploymentmarker", "deploymentmarker absentterm"] {
+                assert!(matches!(
+                    s.search_scoped(query, 5, true, scope, None),
+                    Err(MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(
+                        _,
+                        _,
+                        _
+                    )))
+                ));
+            }
+        }
+        assert!(s.search("nomatchingterm", 5, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_like_reports_row_decode_errors_in_and_or_paths() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "花名登记为小云", None).unwrap();
+        s.conn
+            .execute("UPDATE files SET mtime_ms = 'invalid'", [])
+            .unwrap();
+
+        for query in ["花名", "花名 zz"] {
+            assert!(matches!(
+                s.search(query, 5, true),
+                Err(ref e) if is_row_decode_error(e)
+            ));
+        }
+    }
+
+    #[test]
+    fn conflict_search_reports_row_decode_errors_in_match_and_like_paths() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker 花名登记", None)
+            .unwrap();
+        s.conn
+            .execute("UPDATE files SET path = X'00' WHERE path = 'bad.md'", [])
+            .unwrap();
+
+        for query in ["deploymentmarker", "花名"] {
+            assert!(matches!(
+                s.detect_conflicts(query, -2.0),
+                Err(ref e) if is_row_decode_error(e)
+            ));
+        }
+    }
+
+    #[test]
+    fn hybrid_reports_bm25_row_decode_error() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker", None)
+            .unwrap();
+        s.conn
+            .execute("UPDATE files SET mtime_ms = 'invalid'", [])
+            .unwrap();
+
+        assert!(
+            s.search_hybrid("nomatchingterm", &[1.0, 0.0], 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            s.search_hybrid("deploymentmarker", &[1.0, 0.0], 5),
+            Err(ref e) if is_row_decode_error(e)
+        ));
+    }
+
+    #[test]
+    fn vector_and_hybrid_report_vector_row_decode_error() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("known.md", 100, 10, "deploymentmarker", None)
+            .unwrap();
+        s.upsert_vec("known.md", &[1.0, 0.0]).unwrap();
+        // Keep BM25 intact while making the vector row's path unreadable as text.
+        s.conn
+            .execute(
+                "UPDATE files_vec SET path = X'00' WHERE path = 'known.md'",
+                [],
+            )
+            .unwrap();
+
+        for result in [
+            s.search_vec(&[1.0, 0.0], 5).map(|_| ()),
+            s.search_hybrid("deploymentmarker", &[1.0, 0.0], 5)
+                .map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(ref e) if is_row_decode_error(e)
+            ));
+        }
+    }
+
+    #[test]
+    fn search_reports_invalid_utf8_as_row_decode_error() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("bad.md", 100, 10, "deploymentmarker", None)
+            .unwrap();
+        s.conn
+            .execute("UPDATE files SET path = CAST(X'FF' AS TEXT)", [])
+            .unwrap();
+
+        let err = s.search("deploymentmarker", 5, true).unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))
+        ));
+        let err = s
+            .search_hybrid("deploymentmarker", &[1.0, 0.0], 5)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))
+        ));
+    }
+
+    #[test]
+    fn row_decode_error_classification_covers_integer_overflow() {
+        let err = MemoryError::Sqlite(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
+        assert!(is_row_decode_error(&err));
+        assert!(!is_row_decode_error(&MemoryError::Sqlite(
+            rusqlite::Error::QueryReturnedNoRows
+        )));
+    }
+
+    #[test]
+    fn hybrid_keeps_vector_fallback_for_query_errors() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert_vec("vector.md", &[1.0, 0.0]).unwrap();
+        s.conn.execute_batch("DROP TABLE files_fts").unwrap();
+
+        let hits = s.search_hybrid("deploymentmarker", &[1.0, 0.0], 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "vector.md");
     }
 
     #[test]
@@ -1397,19 +1903,285 @@ mod tests {
 
         // isolated:alpha sees only its own — not beta, not the unscoped row.
         let hits = s
-            .search_scoped("花名", 10, true, Some("isolated:alpha"))
+            .search_scoped("花名", 10, true, Some("isolated:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths, vec!["own.md"]);
 
         // filter:alpha sees its own + unscoped, never beta.
         let hits = s
-            .search_scoped("花名", 10, true, Some("filter:alpha"))
+            .search_scoped("花名", 10, true, Some("filter:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert!(paths.contains(&"own.md"));
         assert!(paths.contains(&"legacy.md"));
         assert!(!paths.contains(&"other.md"));
+    }
+
+    /// Regression for GH-4366: `category` used to be applied in Rust *after*
+    /// the SQL `LIMIT top_k`, so a category whose facts ranked below the
+    /// unfiltered window came back empty even though matching rows existed.
+    #[test]
+    fn search_category_filters_in_sql_before_limit() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        // Six lesson facts repeat every query term (bm25 ranks them high);
+        // six interest facts mention two of them once (ranked below).
+        for i in 0..6 {
+            s.upsert(
+                &format!("facts/lesson/01JLESSON{i}.md"),
+                100,
+                10,
+                &format!(
+                    "quantum lattice dynamics quantum lattice dynamics \
+                     quantum lattice dynamics variant {i}"
+                ),
+                None,
+            )
+            .unwrap();
+            s.upsert(
+                &format!("facts/interest/01JINTEREST{i}.md"),
+                100,
+                10,
+                "the agent noted a quantum lattice once",
+                None,
+            )
+            .unwrap();
+        }
+
+        // Premise: the unfiltered top-5 window is entirely lesson facts, so a
+        // post-LIMIT filter would have nothing left to return.
+        let all = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 5, "expected a full top_k window");
+        assert!(
+            all.iter().all(|h| h.path.starts_with("facts/lesson/")),
+            "premise broken, the top-5 window is not all lesson facts: {all:?}"
+        );
+
+        // The AND query matches no interest fact, so this also exercises the
+        // OR-quoted retry carrying the category filter.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("interest"))
+            .unwrap();
+        assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+        assert!(
+            hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+            "category=interest returned other paths: {hits:?}"
+        );
+
+        // An unknown category is a non-matching path prefix, not an error.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("nope"))
+            .unwrap();
+        assert!(hits.is_empty());
+
+        // Non-fact paths never match the facts/<category>/ prefix.
+        s.upsert(
+            "notes/interest/x.md",
+            100,
+            10,
+            "quantum lattice dynamics",
+            None,
+        )
+        .unwrap();
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 5, true, None, Some("interest"))
+            .unwrap();
+        assert!(
+            !hits.iter().any(|h| h.path.starts_with("notes/")),
+            "category filter leaked a non-fact path: {hits:?}"
+        );
+    }
+
+    /// The short-CJK LIKE fallback must filter by category before its own
+    /// `LIMIT`, and must combine with the agent-scope filter.
+    #[test]
+    fn search_like_category_filters_before_limit() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("facts/lesson/01JCJK0.md", 100, 10, "花名是小云", None)
+            .unwrap();
+        s.upsert(
+            "facts/interest/01JCJK1.md",
+            100,
+            10,
+            "花名是大云",
+            Some("alpha"),
+        )
+        .unwrap();
+        s.upsert(
+            "facts/interest/01JCJK2.md",
+            100,
+            10,
+            "花名是老云",
+            Some("beta"),
+        )
+        .unwrap();
+
+        let hits = s
+            .search_scoped("花名", 10, true, None, Some("interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths.len(), 2, "expected both interest facts: {paths:?}");
+
+        // Category + isolated agent scope together.
+        let hits = s
+            .search_scoped("花名", 10, true, Some("isolated:alpha"), Some("interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/interest/01JCJK1.md"]);
+
+        // The lesson fact is untouched by an interest filter.
+        let hits = s
+            .search_scoped("花名", 10, true, None, Some("lesson"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/lesson/01JCJK0.md"]);
+    }
+
+    #[test]
+    fn category_glob_pattern_escapes_wildcards() {
+        assert_eq!(category_glob_pattern("lesson"), "facts/lesson/*");
+        // `*`, `?` and `[` would otherwise widen the prefix or stand in for an
+        // arbitrary character; a bracket class pins each to itself.
+        assert_eq!(category_glob_pattern("a*b"), "facts/a[*]b/*");
+        assert_eq!(category_glob_pattern("a?b"), "facts/a[?]b/*");
+        assert_eq!(category_glob_pattern("a[b"), "facts/a[[]b/*");
+        // `]` and `^` are literal outside a class, and GLOB has no backslash
+        // escape, so neither is touched.
+        assert_eq!(category_glob_pattern("a]b^c"), "facts/a]b^c/*");
+        assert_eq!(category_glob_pattern("a\\b"), "facts/a\\b/*");
+        // A CJK category survives byte-for-byte.
+        assert_eq!(category_glob_pattern("花名"), "facts/花名/*");
+    }
+
+    /// The escaped metacharacters must match literally once they reach SQL, not
+    /// just in the pattern string above.
+    #[test]
+    fn search_category_glob_metacharacters_are_literal() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert(
+            "facts/int?rest/01JMETA0.md",
+            100,
+            10,
+            "quantum lattice dynamics",
+            None,
+        )
+        .unwrap();
+        s.upsert(
+            "facts/intxrest/01JMETA1.md",
+            100,
+            10,
+            "quantum lattice dynamics",
+            None,
+        )
+        .unwrap();
+
+        // `?` matches the literal question mark, and nothing else.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 10, true, None, Some("int?rest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/int?rest/01JMETA0.md"]);
+
+        // The category that `?` would have wildcarded matches its own literal.
+        let hits = s
+            .search_scoped("quantum lattice dynamics", 10, true, None, Some("intxrest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/intxrest/01JMETA1.md"]);
+    }
+
+    /// Regression for the P2 review on this PR: SQLite `LIKE` folds ASCII case,
+    /// so pushing the filter into SQL as a `LIKE` made `category="interest"`
+    /// match `facts/Interest/` too — the Rust-side `filter_by_category` it
+    /// replaced compared with a case-sensitive `==`. The wrong-case file did not
+    /// merely leak into the results, it occupied a `top_k` slot and displaced a
+    /// fact from the category actually requested.
+    #[test]
+    fn search_category_matching_is_case_sensitive() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        // Six lowercase-category facts, then one mixed-case sibling that
+        // repeats the query terms so bm25 ranks it above all six.
+        for i in 0..6 {
+            s.upsert(
+                &format!("facts/interest/01JINTEREST{i}.md"),
+                100,
+                10,
+                &format!("quantum lattice note about interest topic {i}"),
+                None,
+            )
+            .unwrap();
+        }
+        s.upsert(
+            "facts/Interest/mixedcase.md",
+            100,
+            10,
+            "quantum lattice quantum lattice quantum lattice",
+            None,
+        )
+        .unwrap();
+
+        // Premise: unfiltered, the mixed-case fact is inside the top-5 window,
+        // so a case-insensitive filter would spend one of those five slots on
+        // it rather than pushing it out before the LIMIT.
+        let all = s
+            .search_scoped("quantum lattice", 5, true, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 5, "expected a full top_k window");
+        assert!(
+            all.iter().any(|h| h.path == "facts/Interest/mixedcase.md"),
+            "premise broken, the mixed-case fact is not in the window: {all:?}"
+        );
+
+        let hits = s
+            .search_scoped("quantum lattice", 5, true, None, Some("interest"))
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            5,
+            "expected five lowercase interest hits: {hits:?}"
+        );
+        assert!(
+            hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+            "case-insensitive category match leaked facts/Interest/: {hits:?}"
+        );
+
+        // And the mixed-case category is reachable on its own terms.
+        let hits = s
+            .search_scoped("quantum lattice", 5, true, None, Some("Interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/Interest/mixedcase.md"]);
+    }
+
+    /// Same case-sensitivity requirement on the short-CJK `LIKE` fallback path,
+    /// which carries its own `LIMIT` and its own copy of the category filter.
+    #[test]
+    fn search_like_category_matching_is_case_sensitive() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("facts/interest/01JCJKC0.md", 100, 10, "花名是小云", None)
+            .unwrap();
+        s.upsert("facts/interest/01JCJKC1.md", 100, 10, "花名是大云", None)
+            .unwrap();
+        s.upsert("facts/Interest/mixedcase.md", 100, 10, "花名是老云", None)
+            .unwrap();
+
+        let hits = s
+            .search_scoped("花名", 5, true, None, Some("interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["facts/interest/01JCJKC0.md", "facts/interest/01JCJKC1.md"],
+            "LIKE fallback conflated facts/Interest/ with facts/interest/"
+        );
+
+        let hits = s
+            .search_scoped("花名", 5, true, None, Some("Interest"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["facts/Interest/mixedcase.md"]);
     }
 
     #[test]
@@ -1592,6 +2364,49 @@ mod tests {
         // The new file should rank higher (same relevance, larger decay boost)
         assert_eq!(hits[0].path, "new.md");
         assert_eq!(hits[1].path, "old.md");
+    }
+
+    #[test]
+    fn negative_lambda_inverts_recency_ranking() {
+        // The damage `AppConfig::validate` now refuses to load: `time_decay`
+        // computes `exp(-lambda * age_days)`, so a negative lambda makes the
+        // factor *grow* with age. Same corpus as `search_ranks_recent_higher`
+        // — identical bodies, so identical BM25 relevance, and the recency
+        // boost is the only thing that can separate the two rows — but the
+        // ordering comes out inverted: every auto-recall query starts
+        // preferring the stale memory. The store consumes the value verbatim
+        // (it has no way to tell a deliberate setting from a sign typo), so
+        // the guard belongs at the config boundary, asserted at the end.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(-0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 100 * 86_400_000,
+            20,
+            "rust ownership rules",
+            None,
+        )
+        .unwrap();
+        s.upsert("new.md", now_ms, 20, "rust ownership rules", None)
+            .unwrap();
+
+        let hits = s.search("rust", 5, true).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].path, "old.md",
+            "a negative lambda must invert the recency ordering; if this \
+             flips, the score no longer depends on the sign of the decay \
+             exponent and this test documents nothing"
+        );
+
+        // The config guard is what keeps that lambda out of a real store.
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.memory.index.time_decay_lambda = -0.01;
+        assert!(cfg.validate().is_err(), "negative lambda must be rejected");
     }
 
     /// Corpus for the relevance-ordering tests below.
@@ -2049,7 +2864,7 @@ mod tests {
 
         // isolated:alpha sees ONLY alpha's own — not beta, not legacy.
         let hits = s
-            .search_scoped("agent alpha", 10, true, Some("isolated:alpha"))
+            .search_scoped("agent alpha", 10, true, Some("isolated:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths.len(), 2, "isolated:alpha should see 2 own memories");
@@ -2058,7 +2873,7 @@ mod tests {
         // filter:alpha sees alpha's own + unscoped (NULL) — legacy included,
         // but never beta's.
         let hits = s
-            .search_scoped("agent alpha", 10, true, Some("filter:alpha"))
+            .search_scoped("agent alpha", 10, true, Some("filter:alpha"), None)
             .unwrap();
         let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
         assert!(paths.contains(&"u/legacy.md"));
@@ -2072,12 +2887,111 @@ mod tests {
         // widened to shared mode.
         for bad in ["isolated:foo'bar", "filter:a;b", "isolated:with/slash"] {
             let err = s
-                .search_scoped("agent alpha", 10, true, Some(bad))
+                .search_scoped("agent alpha", 10, true, Some(bad), None)
                 .unwrap_err();
             assert!(
                 matches!(err, MemoryError::InvalidArgument(_)),
                 "expected InvalidArgument for {bad:?}, got {err:?}"
             );
         }
+    }
+
+    /// Open an on-disk store whose db sits at `<tmp>/.anolisa/index/bm25.db`,
+    /// so `supersede` derives `mount_root = <tmp>` exactly as in production.
+    fn open_store_at_mount(tmp: &Path) -> Result<BM25Store> {
+        // Canonicalize so `mount_root` is comparable with the canonicalized
+        // file paths `supersede()` checks: a symlinked TMPDIR (macOS
+        // /var/folders, or any container with a linked /tmp) otherwise
+        // fails the containment guard and the tests break.
+        let root = tmp.canonicalize().unwrap();
+        let db_path = root.join(".anolisa").join("index").join("bm25.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        BM25Store::open_for_test(&db_path)
+    }
+
+    #[test]
+    fn supersede_leaves_frontmatter_less_file_untouched() {
+        // Regression: the marker search used the first `---\n` anywhere in
+        // the file, so a `mem_write` note without frontmatter whose body
+        // uses `---` separators got `superseded_by:` spliced into its body.
+        // Calls the helper directly: going through `supersede()` would tie
+        // the assertion to the mount-root canonicalization guard, and the
+        // file-untouched outcome would also hold if supersede() never
+        // reached the helper.
+        let note = tempfile::NamedTempFile::new().unwrap();
+        let original = "# Deploy checklist\n\nsteps\n\n---\n\nrollback\n\n---\n\nend\n";
+        std::fs::write(note.path(), original).unwrap();
+        add_superseded_frontmatter(note.path(), "01HNEWFACT").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(note.path()).unwrap(),
+            original,
+            "frontmatter-less note must not be modified"
+        );
+    }
+
+    #[test]
+    fn supersede_marks_frontmatter_file_inside_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let note = tmp.path().join("facts").join("lesson").join("x.md");
+        std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+        let original = "---\nid: abc\ntitle: t\n---\n\nbody text\n";
+        std::fs::write(&note, original).unwrap();
+
+        let mut s = open_store_at_mount(tmp.path()).unwrap();
+        s.upsert("facts/lesson/x.md", 0, 10, original, None)
+            .unwrap();
+        s.supersede("facts/lesson/x.md", "01HNEWFACT").unwrap();
+
+        let after = std::fs::read_to_string(&note).unwrap();
+        // Marker present, and inside the frontmatter block — before the
+        // closing fence, not in the body.
+        let marker = after.find("superseded_by: 01HNEWFACT").unwrap();
+        let closing = after[4..].find("\n---").unwrap() + 4;
+        assert!(
+            marker < closing,
+            "marker must stay inside frontmatter: {after:?}"
+        );
+        // Body content is preserved verbatim after the closing fence.
+        assert!(after.ends_with("---\n\nbody text\n"));
+    }
+
+    #[test]
+    fn supersede_ignores_superseded_by_mention_in_body() {
+        // The "already superseded" short-circuit must look at the
+        // frontmatter only; a body that merely mentions the key still
+        // gets marked.
+        let tmp = tempfile::tempdir().unwrap();
+        let note = tmp.path().join("facts").join("lesson").join("y.md");
+        std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+        let original = "---\nid: abc\n---\n\nnotes about superseded_by: semantics\n";
+        std::fs::write(&note, original).unwrap();
+
+        let mut s = open_store_at_mount(tmp.path()).unwrap();
+        s.upsert("facts/lesson/y.md", 0, 10, original, None)
+            .unwrap();
+        s.supersede("facts/lesson/y.md", "01HNEWFACT").unwrap();
+
+        let after = std::fs::read_to_string(&note).unwrap();
+        assert!(after.contains("superseded_by: 01HNEWFACT"));
+        assert!(after.contains("notes about superseded_by: semantics"));
+    }
+
+    #[test]
+    fn supersede_skips_unclosed_frontmatter() {
+        // A file that starts with `---\n` but never closes the block has
+        // no frontmatter region to anchor the marker in — leave it alone.
+        // Direct helper call for the same reason as the frontmatter-less
+        // case above; the closed-fence tests keep the end-to-end path
+        // through supersede() covered.
+        let note = tempfile::NamedTempFile::new().unwrap();
+        let original = "---\nlooks like frontmatter but never closes\n";
+        std::fs::write(note.path(), original).unwrap();
+        add_superseded_frontmatter(note.path(), "01HNEWFACT").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(note.path()).unwrap(),
+            original,
+            "unclosed frontmatter must not be modified"
+        );
     }
 }

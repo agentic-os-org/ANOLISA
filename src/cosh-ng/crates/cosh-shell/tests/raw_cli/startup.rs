@@ -179,9 +179,326 @@ fn raw_cli_startup_banner_renders_cached_upgrade_notice() {
 }
 
 #[cfg(target_os = "linux")]
+fn assert_upgrade_uses_login_path(profile_only: bool, profile_times_out: bool, ai_enabled: bool) {
+    let home = temp_shell_home("upgrade-login-path");
+    let bin = home.join("bin");
+    fs::create_dir(&bin).expect("create upgrade bin");
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_cosh-shell")).unwrap();
+    let status = serde_json::json!({"ok": true, "data": {"components": [{
+        "active": true, "scope": "system", "health": [{
+            "name": format!("integrity:{}", executable.display())
+        }]
+    }]}});
+    write_executable(&bin.join("anolisa"), &format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$PATH\" >> \"$HOME/upgrade-path\"\ncase \"$*\" in\n'status cosh-ng --json') printf '%s\\n' '{status}';;\n'--install-mode system update cosh-ng --dry-run --json') printf '%s\\n' '{{\"ok\":true,\"data\":{{\"to_version\":\"99.0.0\",\"plan\":[\"update\"]}}}}';;\n*) exit 1;;\nesac\n"
+    ));
+    let delay = if profile_times_out { "6" } else { "0.2" };
+    fs::write(home.join(".bash_profile"),
+        format!("sleep {delay}\nprintf 'profile-hit\\n' >> \"$HOME/profile-hits\"\nexport PATH=\"$HOME/bin:$PATH\"\nPS1='upgrade-login$ '\n")
+    ).unwrap();
+    let inherited = if profile_only {
+        "/usr/bin:/bin".to_owned()
+    } else {
+        format!("{}:/usr/bin:/bin", bin.display())
+    };
+    let ready = if profile_times_out || !ai_enabled {
+        "upgrade-login$ "
+    } else {
+        "Update available: cosh-ng"
+    };
+    let input: &[u8] = if ai_enabled {
+        b"exit\n"
+    } else {
+        b"sleep 1; exit\n"
+    };
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash", "--login"],
+        &[
+            ("HOME", &home.display().to_string()),
+            ("PATH", &inherited),
+            ("COSH_SHELL_AI", if ai_enabled { "on" } else { "off" }),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_BOOTSTRAP_PATH", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_UPGRADE_CHECK", "1"),
+            (
+                "COSH_SHELL_UPGRADE_CHECK_CACHE",
+                &home.join("upgrade-cache.json").display().to_string(),
+            ),
+            ("COSH_SHELL_LANG", "en-US"),
+        ],
+        &home,
+        &[(ready, input)],
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("profile-hits"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "{output}"
+    );
+    if profile_times_out || !ai_enabled {
+        assert!(
+            !home.join("upgrade-path").exists(),
+            "AI-off or unresolved startup PATH must not launch an upgrade probe: {output}"
+        );
+        assert!(!home.join("upgrade-cache.json").exists(), "{output}");
+        fs::remove_dir_all(home).unwrap();
+        return;
+    }
+    assert!(output.contains("Update available: cosh-ng"), "{output}");
+    let paths = fs::read_to_string(home.join("upgrade-path")).expect("upgrade command PATH");
+    assert_eq!(paths.lines().count(), 2, "{paths}");
+    assert!(
+        paths
+            .lines()
+            .all(|path| path.starts_with(&format!("{}:", bin.display()))),
+        "{paths}"
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_probe_uses_profile_only_anolisa_once() {
+    assert_upgrade_uses_login_path(true, false, true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_probe_keeps_inherited_path_control() {
+    assert_upgrade_uses_login_path(false, false, true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_probe_skips_an_unresolved_startup_path() {
+    assert_upgrade_uses_login_path(false, true, true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_probe_ai_off_blocks_profile_only_anolisa() {
+    assert_upgrade_uses_login_path(true, false, false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_upgrade_probe_uses_profile_only_rpm_and_package_manager() {
+    let home = temp_shell_home("upgrade-login-rpm-path");
+    let bin = home.join("bin");
+    fs::create_dir(&bin).unwrap();
+    write_executable(&bin.join("anolisa"), "#!/bin/sh\nexit 1\n");
+    write_executable(&bin.join("rpm"),
+        "#!/bin/sh\nprintf 'rpm:%s\\n' \"$PATH\" >> \"$HOME/upgrade-path\"\nprintf 'cosh-ng\\n0:0.1.0-1\\n'\n");
+    write_executable(&bin.join("dnf"),
+        "#!/bin/sh\nprintf 'dnf:%s\\n' \"$PATH\" >> \"$HOME/upgrade-path\"\nprintf 'cosh-ng.aarch64 99.0.0-1 fixture\\n'\nexit 100\n");
+    fs::write(home.join(".bash_profile"),
+        "printf 'profile-hit\\n' >> \"$HOME/profile-hits\"\nexport PATH=\"$HOME/bin:$PATH\"\nPS1='upgrade-rpm$ '\n").unwrap();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash", "--login"],
+        &[
+            ("HOME", &home.display().to_string()),
+            ("PATH", "/usr/bin:/bin"),
+            ("COSH_SHELL_AI", "on"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_BOOTSTRAP_PATH", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_UPGRADE_CHECK", "1"),
+            (
+                "COSH_SHELL_UPGRADE_CHECK_CACHE",
+                &home.join("upgrade-cache.json").display().to_string(),
+            ),
+            ("COSH_SHELL_LANG", "en-US"),
+        ],
+        &home,
+        &[("Update available: cosh-ng", b"exit\n")],
+    );
+    assert!(output.contains("sudo dnf update cosh-ng"), "{output}");
+    assert_eq!(
+        fs::read_to_string(home.join("profile-hits"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "{output}"
+    );
+    let paths = fs::read_to_string(home.join("upgrade-path")).unwrap();
+    let expected_path = format!("{}:", bin.display());
+    assert_eq!(paths.lines().count(), 2, "{paths}");
+    assert!(
+        paths
+            .lines()
+            .any(|line| line.starts_with(&format!("rpm:{expected_path}"))),
+        "{paths}"
+    );
+    assert!(
+        paths
+            .lines()
+            .any(|line| line.starts_with(&format!("dnf:{expected_path}"))),
+        "{paths}"
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[cfg(target_os = "linux")]
 const UPGRADE_PROBE_RELEASE_MARKER: &str = "upgrade-probe-release";
 #[cfg(target_os = "linux")]
 const UPGRADE_PROBE_PID_FILE: &str = "upgrade-probe.pid";
+
+#[cfg(target_os = "linux")]
+fn spawn_startup_upgrade_policy_fixture(
+    ai: Option<&str>,
+    banner_enabled: bool,
+    upgrade_enabled: bool,
+    cached: bool,
+) -> TerminalSession {
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_cosh-shell"))
+        .expect("canonical cosh-shell executable");
+    let current_evr = format!("{}-1", env!("CARGO_PKG_VERSION"));
+    let cache = serde_json::json!({
+        "version": 1,
+        "checked_at": 0,
+        "executable": executable,
+        "method": "rpm",
+        "notice": {
+            "package": "cosh-ng",
+            "current": current_evr,
+            "latest": "99.0.0-1",
+            "command": "sudo dnf update cosh-ng"
+        }
+    })
+    .to_string();
+    let rpm = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/rpm-probe.calls\"\n\
+         printf 'cosh-ng\\n0:{}-1\\n'\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut files = vec![
+        (
+            "bin/anolisa",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/anolisa-probe.calls\"\nexit 1\n",
+        ),
+        ("bin/rpm", rpm.as_str()),
+        (
+            "bin/dnf",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/dnf-probe.calls\"\n\
+             printf 'cosh-ng.x86_64 99.0.0-1 fixture\\n'\nexit 100\n",
+        ),
+    ];
+    if cached {
+        files.push(("upgrade-cache.json", cache.as_str()));
+    }
+    let mut envs = vec![
+        ("PATH", "$HOME/bin:/usr/bin:/bin"),
+        (
+            "COSH_SHELL_STARTUP_BANNER",
+            if banner_enabled { "1" } else { "0" },
+        ),
+        (
+            "COSH_SHELL_UPGRADE_CHECK",
+            if upgrade_enabled { "on" } else { "off" },
+        ),
+        ("COSH_SHELL_UPGRADE_CHECK_CACHE", "$HOME/upgrade-cache.json"),
+    ];
+    if let Some(ai) = ai {
+        envs.push(("COSH_SHELL_AI", ai));
+    }
+    TerminalSession::spawn_for_shell_with_startup_env("bash", "enhanced", 200, &files, &envs)
+}
+
+#[cfg(target_os = "linux")]
+fn assert_no_startup_upgrade_probe(mut session: TerminalSession) {
+    session.send(b"sleep 1; printf '\\nupgrade-%s\\n' observed\n");
+    session.wait_screen("startup observation window completes", |screen| {
+        screen.contents().contains("\nupgrade-observed")
+    });
+    assert!(
+        !session.home().join("anolisa-probe.calls").exists(),
+        "startup launched the background ownership probe"
+    );
+    assert!(
+        !session.home().join("dnf-probe.calls").exists(),
+        "startup launched a package upgrade check"
+    );
+    session.finish();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_upgrade_policy_ai_off_blocks_probe() {
+    assert_no_startup_upgrade_probe(spawn_startup_upgrade_policy_fixture(
+        Some("off"),
+        true,
+        true,
+        false,
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_upgrade_policy_ai_off_preserves_cache_and_rpm_lookup() {
+    let session = spawn_startup_upgrade_policy_fixture(Some("off"), true, true, true);
+    let contents = session.screen().contents();
+    assert!(contents.contains("Update available: cosh-ng"), "{contents}");
+    assert!(contents.contains("sudo dnf update cosh-ng"), "{contents}");
+    assert!(
+        session.home().join("rpm-probe.calls").exists(),
+        "cached RPM notice must retain its local ownership lookup"
+    );
+    assert_no_startup_upgrade_probe(session);
+}
+
+#[cfg(target_os = "linux")]
+fn assert_startup_upgrade_probe_runs(ai: Option<&str>) {
+    let mut session = spawn_startup_upgrade_policy_fixture(ai, true, true, false);
+    session.wait_screen("AI-enabled startup completes its package probe", |screen| {
+        screen.contents().contains("Update available: cosh-ng")
+    });
+    let calls = fs::read_to_string(session.home().join("dnf-probe.calls"))
+        .expect("AI-enabled startup executes fixture dnf");
+    assert_eq!(calls.trim(), "check-update cosh-ng");
+    session.finish();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_upgrade_policy_ai_on_executes_probe() {
+    assert_startup_upgrade_probe_runs(Some("on"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_upgrade_policy_default_ai_executes_probe() {
+    assert_startup_upgrade_probe_runs(None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_upgrade_policy_upgrade_optout_blocks_probe() {
+    assert_no_startup_upgrade_probe(spawn_startup_upgrade_policy_fixture(
+        Some("on"),
+        true,
+        false,
+        false,
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_upgrade_policy_banner_optout_blocks_probe() {
+    assert_no_startup_upgrade_probe(spawn_startup_upgrade_policy_fixture(
+        Some("on"),
+        false,
+        true,
+        false,
+    ));
+}
 
 /// Spawns bash with a fake system-scope anolisa whose status probe records its PID in
 /// `UPGRADE_PROBE_PID_FILE` and blocks until the test writes `UPGRADE_PROBE_RELEASE_MARKER`,

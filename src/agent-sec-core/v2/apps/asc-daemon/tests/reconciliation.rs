@@ -19,6 +19,9 @@ use asc_policy_types::target::TargetBindingPlan;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "reconciliation/storage_faults.rs"]
+mod storage_faults;
+
 #[derive(Default)]
 struct Client {
     plans: Mutex<Vec<TargetBindingPlan>>,

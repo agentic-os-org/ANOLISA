@@ -10,6 +10,12 @@ const LIVE_GENERATION_DOMAIN: &[u8] = b"ws-ckpt/live-workspace-generation/v2\0";
 const BTRFS_FSID_SIZE: usize = 16;
 const BTRFS_UUID_SIZE: usize = 16;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SubvolumeLineage {
+    pub uuid: [u8; 16],
+    pub parent_uuid: Option<[u8; 16]>,
+}
+
 fn token_from_ids(
     fsid: [u8; BTRFS_FSID_SIZE],
     subvolume_uuid: [u8; BTRFS_UUID_SIZE],
@@ -221,13 +227,12 @@ mod linux {
         );
     };
 
-    fn open_live_subvolume(data_root: &Path, ws_id: &str) -> anyhow::Result<File> {
-        let path = data_root.join(ws_id);
+    fn open_subvolume(path: &Path) -> anyhow::Result<File> {
         OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
-            .with_context(|| format!("failed to open live workspace {}", path.display()))
+            .open(path)
+            .with_context(|| format!("failed to open subvolume {}", path.display()))
     }
 
     pub(super) fn live_generation(
@@ -235,7 +240,7 @@ mod linux {
         ws_id: &str,
     ) -> anyhow::Result<WorkspaceGenerationTokenV2> {
         validate_workspace_id_v2(ws_id).map_err(anyhow::Error::msg)?;
-        let live = open_live_subvolume(data_root, ws_id)?;
+        let live = open_subvolume(&data_root.join(ws_id))?;
         let metadata = live
             .metadata()
             .context("failed to inspect open live workspace")?;
@@ -258,6 +263,27 @@ mod linux {
             .context("BTRFS_IOC_GET_SUBVOL_INFO failed for live workspace")?;
 
         token_from_ids(fs_info.fsid, subvol_info.uuid)
+    }
+
+    pub(super) fn subvolume_lineage(path: &Path) -> anyhow::Result<SubvolumeLineage> {
+        let subvolume = open_subvolume(path)?;
+        ensure!(
+            subvolume.metadata()?.st_ino() == BTRFS_ROOT_INODE,
+            "not a subvolume root: {path:?}"
+        );
+        let mut info = BtrfsIoctlGetSubvolInfoArgs::default();
+        // SAFETY: `subvolume` keeps the fd valid and `info` matches the Linux UAPI layout.
+        unsafe { btrfs_ioc_get_subvol_info(subvolume.as_raw_fd(), &mut info) }
+            .with_context(|| format!("read lineage of {}", path.display()))?;
+        ensure!(
+            info.uuid.iter().any(|byte| *byte != 0),
+            "btrfs subvolume UUID is zero"
+        );
+        let parent_uuid = info.parent_uuid.iter().any(|byte| *byte != 0);
+        Ok(SubvolumeLineage {
+            uuid: info.uuid,
+            parent_uuid: parent_uuid.then_some(info.parent_uuid),
+        })
     }
 
     #[cfg(test)]
@@ -316,6 +342,16 @@ mod linux {
 
             assert!(live_generation(root.path(), "../escape").is_err());
         }
+
+        #[test]
+        fn lineage_of_ordinary_directory_or_symlink_fails_closed() {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("dir")).unwrap();
+            symlink(root.path().join("dir"), root.path().join("link")).unwrap();
+
+            assert!(subvolume_lineage(&root.path().join("dir")).is_err());
+            assert!(subvolume_lineage(&root.path().join("link")).is_err());
+        }
     }
 }
 
@@ -333,6 +369,16 @@ pub(super) fn live_generation(
     _ws_id: &str,
 ) -> anyhow::Result<WorkspaceGenerationTokenV2> {
     anyhow::bail!("secure btrfs live-generation identity is only available on Linux")
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn subvolume_lineage(path: &Path) -> anyhow::Result<SubvolumeLineage> {
+    linux::subvolume_lineage(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn subvolume_lineage(_path: &Path) -> anyhow::Result<SubvolumeLineage> {
+    anyhow::bail!("btrfs subvolume lineage is only available on Linux")
 }
 
 #[cfg(test)]

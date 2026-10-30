@@ -1,36 +1,29 @@
-//! Native Preview package contracts, installation and selected-Agent configuration.
-//! Configuration and mutable runtime state remain outside immutable prefixes.
+//! AW extension installation and offline framework configuration.
+//! Provider admission wraps a private file ownership and transaction engine.
 
 pub mod config_edit;
 mod configuration;
+pub mod database;
 mod filesystem;
-mod install;
-mod manifest;
-pub mod package;
+pub mod plan;
+#[cfg(test)]
+mod provider_tests;
+mod store;
+pub mod transaction;
 
+pub use crate::store::description::ProviderDeclaration;
+pub use crate::store::{
+    digest, Error, MutationFailure, MutationNotice, MutationReport, MutationResult, NoticeCode,
+    Payload, RecoveryState, Result,
+};
 pub use configuration::{configure, document, Policy, Settings};
-pub use install::{install, install_cancellable, uninstall, uninstall_cancellable};
-pub use manifest::{digest, inspect, Component, Manifest, Payload};
 
-/// Packaging failure; cleanup diagnostics never replace the original error.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// Filesystem or process operation failed.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    /// Manifest decoding or encoding failed.
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-    /// Configuration encoding failed.
-    #[error(transparent)]
-    Yaml(#[from] serde_yaml_ng::Error),
-    /// The requested operation violates the Preview contract.
-    #[error("{0}")]
-    Invalid(String),
+fn require_aw_database(paths: &database::DatabasePaths) -> Result<()> {
+    require(
+        paths.manager() == database::PackageManager::Aw,
+        "AW extension operations require an AW-owned package database",
+    )
 }
-
-/// Result shared by native package operations.
-pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn require(condition: bool, message: impl Into<String>) -> Result<()> {
     if condition {

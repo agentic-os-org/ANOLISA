@@ -801,7 +801,7 @@ mod tests {
         let root = SkillRoot::resolved(identity.clone(), physical.io_dir).unwrap();
         let executor = SkillSecExecutor::new(service.clone())
             .with_environment(Arc::new(MappedEnvironment(root.clone())));
-        let control = ExecutionControl {
+        let control = || ExecutionControl {
             deadline: deadline(),
             cancelled: false,
         };
@@ -816,7 +816,7 @@ mod tests {
             },
             caller_uid: 1001,
         };
-        let outcome = executor.execute(&control, &request);
+        let outcome = executor.execute(&control(), &request);
         assert!(outcome.success, "{outcome:?}");
         assert_eq!(outcome.data["skillCount"], 1);
         let shown = service.show(&root, deadline()).unwrap();
@@ -843,7 +843,7 @@ mod tests {
         );
         assert_eq!(service.check(&root, deadline()).unwrap()["status"], "deny");
         let status = executor.execute(
-            &control,
+            &control(),
             &SkillSecRequest {
                 command: SkillSecCommand::Status { verbose: true },
                 caller_uid: 1001,
@@ -919,11 +919,11 @@ mod tests {
             },
             caller_uid: 1001,
         };
-        let control = ExecutionControl {
+        let control = || ExecutionControl {
             deadline: deadline(),
             cancelled: false,
         };
-        let certified = executor.execute(&control, &request);
+        let certified = executor.execute(&control(), &request);
         assert_eq!(certified.exit_code, 0);
         assert_eq!(certified.data["output"]["keyCreated"], false);
         let check = SkillSecRequest {
@@ -934,7 +934,7 @@ mod tests {
             },
             caller_uid: 1001,
         };
-        let outcome = executor.execute(&control, &check);
+        let outcome = executor.execute(&control(), &check);
         assert_eq!(outcome.exit_code, 1);
         assert!(outcome.error_type.is_empty());
         assert!(
@@ -970,7 +970,7 @@ mod tests {
         service
             .active_requests
             .store(2, std::sync::atomic::Ordering::Release);
-        assert_eq!(executor.execute(&control, &check).error_type, "Busy");
+        assert_eq!(executor.execute(&control(), &check).error_type, "Busy");
     }
 
     #[test]
@@ -981,7 +981,7 @@ mod tests {
         let bad_root = SkillRoot::direct(bad_path).unwrap();
         let identities = vec![bad_root.identity, root.identity.clone()];
         let executor = SkillSecExecutor::new(service.clone());
-        let control = ExecutionControl {
+        let control = || ExecutionControl {
             deadline: deadline(),
             cancelled: false,
         };
@@ -994,7 +994,7 @@ mod tests {
             },
             caller_uid: 1001,
         };
-        let outcome = executor.execute(&control, &request);
+        let outcome = executor.execute(&control(), &request);
         assert_eq!(outcome.exit_code, 1);
         assert_eq!(outcome.error_type, "SkillLedgerError");
         assert_eq!(outcome.data["output"]["results"][0]["status"], "error");
@@ -1012,7 +1012,7 @@ mod tests {
             force: false,
             scanners: None,
         };
-        let outcome = executor.execute(&control, &request);
+        let outcome = executor.execute(&control(), &request);
         assert_eq!(outcome.data["output"]["results"][1]["status"], "noop");
         assert_eq!(outcome.error_type, "SkillLedgerError");
         request.command = SkillSecCommand::Check {
@@ -1020,7 +1020,7 @@ mod tests {
             all: true,
             skill_dirs: identities.clone(),
         };
-        let outcome = executor.execute(&control, &request);
+        let outcome = executor.execute(&control(), &request);
         assert_eq!(outcome.data["output"]["results"][1]["status"], "pass");
         assert_eq!(outcome.exit_code, 1);
     }

@@ -9,6 +9,69 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.2] - 未发布
+
+### 变更
+
+- 可通过 core 和 plugins RPM 分别选择安装命令行程序与框架集成。
+- adapter 的注册和卸载使用所选的安装路径。
+
+## [0.9.1] - 2026-10-29
+
+### 修复
+
+- Qoder 压缩 stdout 时保留原生 Bash 结果封装，保留退出状态和遥测字段，不再将它们序列化到模型文本中。其他结果形态保持原有替换行为（[#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)）。
+- 可识别的 `head` 和 `tail` 命令现在保持原生执行，包括受支持的包装命令和包含它们的复合命令，从而保留请求的行范围。显式 RTK 调用和自定义 RTK 包装前缀保持原有行为（[#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)）。
+- QwenWork 工作区 Hook 默认使用系统用户的 `~/.tokenless` 目录，并遵循绝对路径的 `TOKENLESS_DATA_DIR`，在工作目录变化时仍将状态保存在同一位置。已有工作区历史不会自动迁移。安装和检测命令会报告解析后的目录，并说明 Shell 沙箱权限可能导致 RTK 统计和执行凭据无法保存（[#9215](https://github.com/agentic-os-org/ANOLISA/pull/9215)）。
+- unittest 和 Django 的详细测试日志现在可以压缩重复的成功测试记录，同时保留汇总、非通过结果、异常堆栈和数据库初始化输出。原文仍可恢复，多行描述和未知输出保持原样（[#9083](https://github.com/agentic-os-org/ANOLISA/pull/9083)）。
+- HTML 表格中的 `rowspan="0"` 现在延伸到当前行组末尾，并使单元格保持在正确的列标题下。原始页面仍可逐字节恢复（[#9012](https://github.com/agentic-os-org/ANOLISA/pull/9012)）。
+- Windows 构建现在从 Cargo 解析出的目标目录收集本次构建的 Tokenless 和 RTK 可执行文件，避免环境变量或配置重定向构建输出后出现产物缺失或误用旧文件（[#9018](https://github.com/agentic-os-org/ANOLISA/pull/9018)）。
+
+## [0.9.0] - 2026-10-25
+
+### 新增
+
+- Windows x64 支持包括原生 CLI、内置 RTK、npm 启动器、Python ABI3 Wheel，以及用于本地会话的 QwenWork 适配器。发布构建生成 Windows ZIP 和 Wheel 产物；npm 安装仍需等待单独的 registry 发布。暂不支持 Windows ARM 和 QwenWork VM 会话（[#8853](https://github.com/agentic-os-org/ANOLISA/pull/8853)、[#9011](https://github.com/agentic-os-org/ANOLISA/pull/9011)、[#9015](https://github.com/agentic-os-org/ANOLISA/pull/9015)）。
+- Intel Mac（macOS x86_64）现已纳入 raw 归档、npm 二进制和 Python Wheel 的发布构建目标。npm 安装仍需等待单独的 registry 发布（[#8770](https://github.com/agentic-os-org/ANOLISA/pull/8770)）。
+
+### 变更
+
+- **Rust 调用方的不兼容变更：** 从 `JsonCompressionConfig` 初始化代码中移除 `drop_nulls` 和 `drop_empty_fields`，从 `JsonCompressionContext` 初始化代码中移除 `preserve_top_level_shape`。完整 JSON 候选现在保留全部字段和空值，包括数组位置；部分输入的 Token 节省会减少或保持原样。显式截断和记录缩减保留原有恢复策略，CLI 参数不变（[#8814](https://github.com/agentic-os-org/ANOLISA/pull/8814)）。
+- TOON 编码采用 spec v4.4，更紧凑地表示嵌套记录数组和按 ID 索引的对象。消费新的嵌套与键索引头部前，需将解码器使用的 `toon-format` 从 0.5.0 升级到 0.7.0。此前保存的无效空对象数组文档仍需从原始 JSON 恢复，codec 更新不会修复这些文档（[#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)）。
+
+### 修复
+
+- JSON 压缩和 Stash 恢复保留原始数字字面量，避免精度损失。TOON 候选必须保留留下的数值和数字类型，否则压缩保留精确 JSON，直接调用 `compress-toon` 则逐字节返回原始输入（[#7784](https://github.com/agentic-os-org/ANOLISA/pull/7784)、[#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)）。
+- 所有被跟踪的 RTK 调用都明确报告输出逐字节未变，且实际执行命令匹配时，PostTool 可继续压缩。输出已变或证据缺失、过期、不匹配时仍跳过 RTK 结果；不支持恢复的适配器仍只使用无损候选（[#8901](https://github.com/agentic-os-org/ANOLISA/pull/8901)）。
+- `compress-response` 和 `compress-schema` 现在逐字节输出载荷，不再追加换行。实际压缩模式的统计与输出字节一致；dry-run 仍输出原始输入并记录预测节省（[#7789](https://github.com/agentic-os-org/ANOLISA/pull/7789)）。
+- stderr 不可写时，提示消息不再使已成功的压缩、原样输出或统计操作发生 panic（[#7796](https://github.com/agentic-os-org/ANOLISA/pull/7796)、[#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)）。
+- Codex 适配器安装与卸载命令在 `ANOLISA_DRY_RUN=1` 下按真实生命周期分支预览操作，不修改文件或注册。二进制和源码目录均缺失时会提前失败，不再预览实际安装无法到达的步骤（[#7723](https://github.com/agentic-os-org/ANOLISA/pull/7723)）。
+
+## [0.8.8] - 2026-10-21
+
+### 新增
+
+- 可选择启用的统计服务通过 Bearer 凭据提供只读记录，支持按会话和工具筛选、分页及按需读取内容，供 AgentSight 等集成使用。远程监听需使用私有网络或 TLS 代理（[#7303](https://github.com/agentic-os-org/ANOLISA/pull/7303)）。
+- 原生 `find` 路径列表现在可在可逆视图中共享重复目录前缀，同时保留每条路径及换行细节；有歧义或无收益的输出保持原样（[#7953](https://github.com/agentic-os-org/ANOLISA/pull/7953)）。
+- macOS 插件在新对话中加载后，QwenWorkCN 1.3.2 的 workspace Shell 调用可使用 Tokenless；原生 Bash 继续受支持，Linux VM 执行仍不支持（[#8725](https://github.com/agentic-os-org/ANOLISA/pull/8725)）。
+
+### 变更
+
+- CSV 和 TSV 压缩现在保留全部行与单元格，不再抽样，也不再为表格写入 Stash。部分输出的 Token 节省会减少；此前存储的缩减视图仍可恢复（[#8584](https://github.com/agentic-os-org/ANOLISA/pull/8584)）。
+
+### 修复
+
+- CLI 在 stdout 或 stderr 不可写时不再 panic。已完成的操作遇到关闭的输出管道会正常退出，其他输出失败会报告错误；统计清空提示未送达时也不会确认删除（[#7777](https://github.com/agentic-os-org/ANOLISA/pull/7777)、[#7773](https://github.com/agentic-os-org/ANOLISA/pull/7773)）。
+- Qoder、Claude Code 和 QwenWork 的安装与卸载脚本在 `ANOLISA_DRY_RUN=1` 下只预览操作，不修改注册或文件；OpenCode 预览也会列出有条件创建的插件目录（[#7715](https://github.com/agentic-os-org/ANOLISA/pull/7715)、[#7731](https://github.com/agentic-os-org/ANOLISA/pull/7731)、[#7747](https://github.com/agentic-os-org/ANOLISA/pull/7747)、[#7750](https://github.com/agentic-os-org/ANOLISA/pull/7750)）。
+- Qoder 现在会更早展开较短的 Shell 结果再压缩。QwenPaw 在任一 PostTool 内容块失败时保留完整原始响应，并遵守绝对路径的 `TOKENLESS_DATA_DIR`（[#8290](https://github.com/agentic-os-org/ANOLISA/pull/8290)）。
+- QwenPaw 会在插件执行工具调用前拒绝缺少必需 SDK 构造参数的 Runtime Wheel（[#7744](https://github.com/agentic-os-org/ANOLISA/pull/7744)）。
+- 直接替换工具响应的宿主现在会把完整原始响应字段交给 Core，不再在 Cosh 包装提取时丢失字段（[#7633](https://github.com/agentic-os-org/ANOLISA/pull/7633)）。
+- Codex 适配器现在能识别正确的限定插件标识；解码后的 `tool_input` 不是对象时，PreToolUse 事件会原样通过（[#7565](https://github.com/agentic-os-org/ANOLISA/pull/7565)、[#6984](https://github.com/agentic-os-org/ANOLISA/pull/6984)）。
+- Pipeline Worker 遇到无效请求类型时会返回错误，并继续处理后续请求（[#7569](https://github.com/agentic-os-org/ANOLISA/pull/7569)）。
+- Git Diff 和 HTML 压缩在 Stash 写入失败时会保留原始工具结果并一致地报告 Stash 错误，不再将整次 PostTool 调用判为 Pipeline 错误（[#6619](https://github.com/agentic-os-org/ANOLISA/pull/6619)）。
+- `stats show` 现在能区分压缩后内容为空、未存储压缩后内容，以及未发生压缩（[#7809](https://github.com/agentic-os-org/ANOLISA/pull/7809)）。
+- QwenPaw 预发布 Wheel URL 现在使用符合 PEP 440、可被 pip 安装的文件名，同时保留 Release Tag 的原始拼写（[#7662](https://github.com/agentic-os-org/ANOLISA/pull/7662)）。
+
 ## [0.8.7] - 2026-10-15
 
 ### 修复

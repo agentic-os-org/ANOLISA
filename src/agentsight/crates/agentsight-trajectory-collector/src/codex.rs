@@ -11,7 +11,9 @@
 //!     `*_output` counterparts
 //!   - `event_msg`: payload.type ∈ `user_message` (the authoritative user
 //!     input; the role=user `response_item` also carries injected context),
-//!     `token_count`, `agent_message` (duplicate of assistant response_item)
+//!     `token_count`, `agent_message` (duplicate of assistant response_item),
+//!     `item_completed` (`CommandExecution` items carry the exit verdict the
+//!     `*_output` text does not spell out)
 
 use std::collections::HashMap;
 
@@ -19,7 +21,7 @@ use anyhow::Result;
 
 use agentsight_atif::{
     Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult, Step, StepSource,
-    ToolCall, ATIF_SCHEMA_VERSION,
+    ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
 };
 
 /// Return `true` when the events look like a Codex rollout stream
@@ -45,9 +47,44 @@ struct AgentTurn {
     tool_calls: Vec<ToolCall>,
     observations: Vec<ObservationResult>,
     metrics: Option<Metrics>,
+    /// Tool calls whose `*_output` has not arrived yet, innermost last. Codex
+    /// reports each command a call ran as an `item_completed` between the call
+    /// and its output, so an item belongs to the innermost call still open.
+    open_calls: Vec<String>,
+    /// Whether one of those commands failed, keyed by the call it belongs to.
+    command_failed: HashMap<String, bool>,
 }
 
 impl AgentTurn {
+    /// Attribute one `CommandExecution` item to the innermost open call.
+    ///
+    /// The item has no `call_id`; the rollout orders it between its call and
+    /// that call's output, and one call can run several commands whose mixed
+    /// outcomes collapse into "this call failed if any of them did".
+    fn record_command(&mut self, item: &serde_json::Value) {
+        let Some(call_id) = self.open_calls.last() else {
+            return;
+        };
+        let failed = item
+            .get("status")
+            .and_then(|v| v.as_str())
+            .is_some_and(|status| status == "failed")
+            || item
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .is_some_and(|code| code != 0);
+        let entry = self.command_failed.entry(call_id.clone()).or_insert(false);
+        *entry = *entry || failed;
+    }
+
+    /// Drop a call from the open stack once its output arrives; an output with
+    /// no matching call leaves the stack untouched.
+    fn close_call(&mut self, call_id: &str) {
+        if let Some(pos) = self.open_calls.iter().rposition(|c| c == call_id) {
+            self.open_calls.remove(pos);
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.reasoning.is_empty()
             && self.messages.is_empty()
@@ -186,6 +223,17 @@ pub fn convert_codex_events(
                         }
                     }
                 }
+                "item_completed" => {
+                    // A `CommandExecution` item carries the exit verdict the
+                    // `*_output` text does not spell out; it has no `call_id`,
+                    // so it is attributed to the innermost call still open.
+                    let item = payload.get("item").unwrap_or(&serde_json::Value::Null);
+                    if payload_type_str(item) == "CommandExecution" {
+                        if let Some(t) = turn.as_mut() {
+                            t.record_command(item);
+                        }
+                    }
+                }
                 // `agent_message` duplicates the assistant response_item.
                 _ => {}
             },
@@ -223,7 +271,9 @@ pub fn convert_codex_events(
                 }
                 "custom_tool_call" | "function_call" | "local_shell_call" => {
                     let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
-                    t.tool_calls.push(extract_tool_call(payload));
+                    let call = extract_tool_call(payload);
+                    t.open_calls.push(call.tool_call_id.clone());
+                    t.tool_calls.push(call);
                 }
                 "custom_tool_call_output" | "function_call_output" | "local_shell_call_output" => {
                     let call_id = payload
@@ -234,11 +284,18 @@ pub fn convert_codex_events(
                         .to_string();
                     let content = joined_output(payload.get("output"));
                     let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
+                    t.close_call(&call_id);
+                    let extra = t.command_failed.remove(&call_id).map(|failed| {
+                        HashMap::from([(
+                            EXTRA_IS_ERROR.to_string(),
+                            serde_json::Value::Bool(failed),
+                        )])
+                    });
                     t.observations.push(ObservationResult {
                         source_call_id: Some(call_id),
                         content: Some(serde_json::Value::String(content)),
                         subagent_trajectory_ref: None,
-                        extra: None,
+                        extra,
                     });
                 }
                 _ => {}
@@ -999,6 +1056,92 @@ mod tests {
             extra["assistant_message_count"], agent_steps as i64,
             "a turn that only reported tokens still produced a step"
         );
+    }
+
+    #[test]
+    fn test_command_execution_failure_reaches_its_own_call() {
+        // A `custom_tool_call` may run several shell commands; the rollout then
+        // reports one `event_msg/item_completed` per command between the call
+        // and its output, and the item carries no `call_id`. The window between
+        // a call and its output is therefore the only join key, and the outcome
+        // must land on that call's observation only.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-9\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"run them\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"input\":\"{\\\"cmd\\\":\\\"false\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"exec-1\",\"status\":\"failed\",\"exit_code\":1,\"stdout\":\"\",\"stderr\":\"boom\\n\"}}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_1\",\"output\":[{\"type\":\"input_text\",\"text\":\"exit=1\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call_2\",\"name\":\"exec\",\"input\":\"{\\\"cmd\\\":\\\"true\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"exec-2\",\"status\":\"completed\",\"exit_code\":0,\"stdout\":\"ok\\n\",\"stderr\":\"\"}}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:07Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_2\",\"output\":[{\"type\":\"input_text\",\"text\":\"exit=0\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let results = &traj.steps[1].observation.as_ref().unwrap().results;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].source_call_id.as_deref(), Some("call_1"));
+        assert_eq!(results[1].source_call_id.as_deref(), Some("call_2"));
+        assert_eq!(
+            results[0].is_error(),
+            Some(true),
+            "the failed command belongs to the first call"
+        );
+        assert_eq!(
+            results[1].is_error(),
+            Some(false),
+            "the second call completed"
+        );
+    }
+
+    #[test]
+    fn test_command_execution_window_of_several_commands() {
+        // One call, four commands, mixed outcomes: the call fails when any of
+        // its commands failed, and no command may leak onto the next call.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-10\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"run them\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"input\":\"{\\\"cmd\\\":\\\"four\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"exec-1\",\"status\":\"completed\",\"exit_code\":0}}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"exec-2\",\"status\":\"failed\",\"exit_code\":2}}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"exec-3\",\"status\":\"completed\",\"exit_code\":0}}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:06Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_1\",\"output\":[{\"type\":\"input_text\",\"text\":\"mixed\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:07Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call_2\",\"name\":\"exec\",\"input\":\"{\\\"cmd\\\":\\\"true\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:08Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_2\",\"output\":[{\"type\":\"input_text\",\"text\":\"ok\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let results = &traj.steps[1].observation.as_ref().unwrap().results;
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].is_error(),
+            Some(true),
+            "one command of call_1 failed"
+        );
+        assert_eq!(
+            results[1].is_error(),
+            None,
+            "call_2 reported no command, so its outcome is unknown"
+        );
+    }
+
+    #[test]
+    fn test_command_execution_outside_a_call_window_is_ignored() {
+        // A command reported with no call open (a late event, or a call of
+        // another turn) cannot be attributed; it must not invent an observation
+        // nor shift onto the next call.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-11\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"go\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"input\":\"{\\\"cmd\\\":\\\"true\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_1\",\"output\":[{\"type\":\"input_text\",\"text\":\"ok\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"exec-late\",\"status\":\"failed\",\"exit_code\":1}}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let results = &traj.steps[1].observation.as_ref().unwrap().results;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_call_id.as_deref(), Some("call_1"));
+        assert_eq!(results[0].is_error(), None);
     }
 
     #[test]

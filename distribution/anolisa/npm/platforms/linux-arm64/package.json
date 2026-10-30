@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/cli-linux-arm64",
-  "version": "0.3.18",
+  "version": "0.3.21",
   "description": "ANOLISA CLI native binary for Linux aarch64",
   "license": "Apache-2.0",
   "repository": {
@@ -11,7 +11,8 @@
   "os": ["linux"],
   "cpu": ["arm64"],
   "files": [
-    "bin/"
+    "bin/",
+    "share/"
   ],
   "preferUnplugged": true
 }

@@ -14,6 +14,7 @@ pub mod query;
 pub mod reader;
 pub mod record;
 pub mod recorder;
+pub mod rtk_outcome;
 pub mod sls;
 pub mod tokenizer;
 pub mod trace;

@@ -1,6 +1,6 @@
 use crate::state::DaemonState;
 use std::sync::Arc;
-use ws_ckpt_common::backend::DiffError;
+use ws_ckpt_common::backend::{CreateAdmissionRefused, DiffError};
 use ws_ckpt_common::{
     default_auto_cleanup_keep, delete_workspace_policy, load_config_file, save_workspace_policy,
     ConfigReport, DaemonConfig, EffectivePolicy, ErrorCode, FileConfig, GlobalPolicySnapshot,
@@ -318,6 +318,9 @@ pub(crate) async fn dispatch_with_context(
             code: match e.downcast_ref::<DiffError>() {
                 Some(DiffError::UnsupportedWorkspacePath { .. }) => {
                     ErrorCode::UnsupportedWorkspacePath
+                }
+                None if e.downcast_ref::<CreateAdmissionRefused>().is_some() => {
+                    ErrorCode::DiskSpaceInsufficient
                 }
                 None => ErrorCode::InternalError,
             },
@@ -1410,9 +1413,7 @@ mod tests {
         let arc = state.get_by_wsid(&ws_id).unwrap();
         arc.write()
             .await
-            .index
-            .snapshots
-            .insert("snap-1".into(), recovery_snapshot());
+            .insert_snapshot("snap-1".into(), recovery_snapshot());
         let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
         std::fs::create_dir_all(snapshot_dir.join("snap-1")).unwrap();
         std::fs::create_dir(snapshot_dir.join("unindexed-snapshot")).unwrap();
@@ -1485,9 +1486,7 @@ mod tests {
         let arc = state.get_by_wsid(&ws_id).unwrap();
         arc.write()
             .await
-            .index
-            .snapshots
-            .insert("new-snapshot".into(), recovery_snapshot());
+            .insert_snapshot("new-snapshot".into(), recovery_snapshot());
         let response = dispatch(&state, Request::RecoverConfirmed { preview }).await;
         assert!(
             matches!(

@@ -1,0 +1,77 @@
+{
+  "format": 1,
+  "packages": [],
+  "constraints": [
+    {
+      "kind": "unix_socket",
+      "value": "${SOCKET}"
+    }
+  ],
+  "providers": {
+    "security": {
+      "protocol": "aw-provider/v1alpha1",
+      "transport": {
+        "type": "stdio",
+        "location": "agent",
+        "argv": [
+          "${PROVIDERS_DIR}/sec-core/aw-provider-sec-core",
+          "--cli",
+          "${SEC_CORE_CLI}",
+          "--socket",
+          "${SOCKET}"
+        ]
+      },
+      "timeout_ms": 2000,
+      "max_output_bytes": 4096,
+      "config": {
+        "version": 1,
+        "mode": "block",
+        "unmapped_tool": "error",
+        "tools": {
+          "Bash": {
+            "language": "bash",
+            "input_pointer": "/command"
+          },
+          "exec": {
+            "language": "bash",
+            "input_pointer": "/command"
+          }
+        }
+      }
+    }
+  },
+  "events": {
+    "tool.before": {
+      "enabled": true,
+      "required": true,
+      "steps": [
+        {
+          "id": "scan-code",
+          "match": {"tools": ["native:qoder:Bash", "native:openclaw:exec"]},
+          "provider": "security",
+          "operation": "scan_code",
+          "effects": [
+            "observe",
+            "block"
+          ],
+          "on_error": "block"
+        }
+      ]
+    },
+    "tool.after": {
+      "enabled": true,
+      "required": true,
+      "steps": [
+        {
+          "id": "observe-completion",
+          "provider": "security",
+          "operation": "observe_tool",
+          "effects": [
+            "observe"
+          ],
+          "on_error": "report"
+        }
+      ]
+    }
+  }
+}

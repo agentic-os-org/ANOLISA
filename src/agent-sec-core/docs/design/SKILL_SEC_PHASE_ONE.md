@@ -9,6 +9,12 @@ acceptance boundaries. The current contract does not support key rotation and us
 `managedSkillDirs` configuration as its only persisted discovery set. Earlier dated rotation and
 private-registry acceptance results below are historical, not current capability claims.
 
+The current Rust CLI entry point is `agent-sec-cli skillsec`. `skill-ledger` remains a
+compatibility alias for the same command tree, request parameters, output and exit codes.
+This naming transition does not change `action.skill_sec`, audit event types, capability IDs,
+environment variables or persistent data. Existing Hook callers remain compatible. CLI contract
+tests cover both spellings; the core workflow and discovery process tests use `skillsec`.
+
 ## Delivery and acceptance
 
 The core migration and Agent Hook integration are separate PRs. This PR covers the Rust core,
@@ -436,6 +442,8 @@ source consistency, findings and bounded review messages separate.
 
 Publication writes the minimal schema-1 `activation.json` and directory xattr consumed by SkillFS.
 It exposes a verified snapshot, a safe pending-review stub, or a null target for an explicit block.
+The pending stub preserves the directory name as a YAML string, escaping characters that YAML
+treats as line breaks or rejects when literal; its description and review instructions remain fixed.
 `contractWritten`, `activationXattr.written` and `activationPending` distinguish committed business
 state from incomplete publication. An xattr failure never undoes a signed decision; activation or
 startup reconcile retries it. This is publication evidence, not proof of an observed FUSE effect.
@@ -511,7 +519,7 @@ Startup, status and aggregate requests share this one configured discovery set.
 
 Default scope is enabled by `enableDefaultSkillDirs` (also true when omitted). Daemon startup
 reads local `/etc/passwd` homes and adds the system and standard user patterns documented in the
-[V2 guide](../../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#system-configuration-and-trust).
+[V2 guide](../../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md#system-configuration-and-trust).
 No caller environment or CLI discovery participates. Default-only discovery is bounded to 10,000
 entries and 1,024 additional Skills; explicit patterns remain intact. Per-directory failures retain
 discoveries with `discoveryErrors` and a failed outcome. Account/configuration changes require a restart.
@@ -657,7 +665,7 @@ configuration preservation, absence of automatic activation/key creation and V1 
 The installed Python V2 E2E fixtures isolate daemon state/audit and exercise ordinary-UID PAP
 denial against a root process. These checks remain distinct from actual systemd lifecycle and
 real FUSE evidence. The
-[core guide](../../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md) gives
+[core guide](../../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md) gives
 source/RPM commands, shared-volume requirements and state-matched upgrade/rollback instructions.
 
 Historical delivery acceptance (before the current alignment) passed on Alibaba Cloud Linux 4, x86_64. After alignment with the upstream system daemon, the
@@ -687,7 +695,7 @@ instead of a distribution-specific `Result` string. Earlier failed fixture attem
 The follow-up keeps the `skill-ledger` command and capability IDs, host languages, matching rules,
 policy defaults and enablement. It changes daemon-owned initialization and validation of command-specific results. Cosh receives
 a 10-second host deadline for sequential initialization (3 seconds) and querying (5 seconds). It does not introduce a shared Hook framework or a second policy layer.
-The [user guide](../../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration)
+The [user guide](../../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md#agent-hook-integration)
 defines the six adapters' behavior and execution-error boundaries.
 
 The work is delivered as four logical commits: initialization; result handling; real Rust CLI/daemon

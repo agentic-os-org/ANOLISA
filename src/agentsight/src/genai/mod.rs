@@ -13,6 +13,7 @@ pub mod id_resolver;
 pub mod instance_id;
 pub mod logtail;
 mod openai_parse;
+mod resource;
 mod retained;
 pub(crate) use retained::DeferredPayload;
 pub mod semantic;

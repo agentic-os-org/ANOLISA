@@ -38,7 +38,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json = "1.0"
-toon-format = { version = "0.5", default-features = false }
+toon-format = { version = "0.7", default-features = false }
 tokenless-schema = { path = "../../crates/tokenless-schema" }
 tokenless-compressors = { path = "../../crates/tokenless-compressors" }
 tokenless-ccr = { path = "../../crates/tokenless-ccr" }

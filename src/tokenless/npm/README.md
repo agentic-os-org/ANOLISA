@@ -37,6 +37,7 @@ via the `toon-format` library — see `tokenless compress-toon` /
 | Linux (glibc) | aarch64 | `@anolisa/tokenless-linux-arm64` |
 | macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` |
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
+| Windows | x86_64 (MSVC; not yet published) | `@anolisa/tokenless-win32-x64` |
 
 The correct platform-specific binaries are automatically installed via `optionalDependencies`.
 
@@ -107,7 +108,10 @@ tokenless env-check --all
 
 ## Build from Source
 
-Source builds are **Linux-only**. macOS users should install the prebuilt
+Source builds support **Linux and Windows x64**. Windows uses
+`./packaging/build/build-windows.ps1` from the component directory; see
+[Windows build instructions](../../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
+Windows ARM64 is unsupported. macOS users should install the prebuilt
 binaries via `npm install -g anolisa-tokenless`; the macOS CLI binaries are
 cross-compiled from Linux and published as npm platform packages.
 
@@ -127,6 +131,7 @@ make install
 - **Rust** toolchain >= 1.91 (required by rtk v0.49.0)
 - **just** — build runner for rtk setup
 - **Git** — for rtk source download
+- **Node.js 22+ and npm** — for the framework plugin build and validation
 
 ## Packaging for npm
 
@@ -147,7 +152,7 @@ baseline.
 Package one target:
 
 ```bash
-node npm/scripts/package-npm.js --target linux-arm64
+node packaging/npm/package-npm.js --target linux-arm64
 ```
 
 For the current host, the Make entry point can build the native executables
@@ -160,7 +165,7 @@ make npm-package
 Package the complete matrix:
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 # or
 make npm-package-all
 ```

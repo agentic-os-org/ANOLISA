@@ -26,6 +26,7 @@ import campaign
 import campaign_manifest
 from campaign_config import safety_settings, validate_campaign
 from campaign_evidence import finite_float
+from campaign_manifest import write_json
 from collect_metrics import GIB, MIB, allocated_size, available_memory_bytes
 
 BTF_PATH = Path("/sys/kernel/btf/vmlinux")
@@ -74,16 +75,6 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object: {path}")
     return value
-
-
-def write_json(path: Path, value: dict[str, Any]) -> None:
-    """Atomically replace a JSON checkpoint."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
 
 
 def file_sha256(path: Path) -> str:
@@ -205,7 +196,14 @@ def prepare_isolated_storage(
 def mounted_storage(storage_directory: Path) -> Iterator[None]:
     """Expose one version's state only inside the runner's mount namespace."""
     command = ["mount", "--bind", str(storage_directory), str(STATE_MOUNT_TARGET)]
-    mounted = subprocess.run(command, capture_output=True, text=True, check=False)
+    mounted = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
     if mounted.returncode != 0:
         detail = (mounted.stderr or mounted.stdout).strip()
         raise RuntimeError(
@@ -219,6 +217,8 @@ def mounted_storage(storage_directory: Path) -> Iterator[None]:
             ["umount", str(STATE_MOUNT_TARGET)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
         if unmounted.returncode != 0:
@@ -236,7 +236,12 @@ def has_ebpf_privilege(binary: Path) -> bool:
     if not getcap:
         return False
     result = subprocess.run(
-        [getcap, str(binary)], capture_output=True, text=True, check=False
+        [getcap, str(binary)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     fields = result.stdout.lower().split()
     capability_field = fields[-1] if fields else ""
@@ -373,11 +378,16 @@ class TracerProcess:
         self.log: TextIO | None = None
 
     def __enter__(self) -> int:
+        try:
+            return self._start()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _start(self) -> int:
         log_path = Path(self.version["log_file"])
         metrics_path = (
-            Path(self.version["metrics_file"])
-            if self.version.get("metrics_file")
-            else None
+            Path(self.version["metrics_file"]) if self.version.get("metrics_file") else None
         )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if metrics_path is not None:
@@ -470,6 +480,13 @@ class BenchmarkServer:
         self.log: TextIO | None = None
 
     def __enter__(self) -> Self:
+        try:
+            return self._start()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _start(self) -> Self:
         self.runtime.mkdir(parents=True, exist_ok=True)
         certificate = self.runtime / "server.crt"
         key = self.runtime / "server.key"

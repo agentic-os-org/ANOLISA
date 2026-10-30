@@ -431,6 +431,197 @@ pub(crate) fn copy_materialized_resource(
     Ok(())
 }
 
+/// Outcome of removing one materialized resource on disable.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct MaterializedRemoval {
+    /// Receipt-recorded entries that were deleted.
+    pub removed: usize,
+    /// Destination root left in place because it still holds entries the
+    /// receipt does not own (user or runtime files) or files whose content
+    /// no longer matches the receipt.
+    pub kept_root: Option<PathBuf>,
+}
+
+/// Remove exactly the entries a receipt materialized under `resource_id`.
+///
+/// The destination is shared framework state (for example
+/// `~/.openclaw/skills/<name>`), so a whole-tree delete would also destroy
+/// files ANOLISA never wrote: content the user added, or a same-named skill
+/// that existed before enable. Only recorded entries whose bytes still match
+/// the receipt are deleted; directories are removed only once empty, deepest
+/// first, ending with the root. Anything else stays and is reported.
+pub(crate) fn remove_materialized_resource(
+    claim: &AdapterClaim,
+    resource_id: &str,
+    ops: &dyn AdapterOps,
+) -> Result<MaterializedRemoval, AdapterError> {
+    let root = match claim.resource(resource_id).map(|resource| &resource.kind) {
+        Some(ClaimResourceKind::OwnedPath { path } | ClaimResourceKind::ExternalPath { path }) => {
+            path.clone()
+        }
+        _ => {
+            return Err(invalid_materialized(
+                claim,
+                format!("materialized resource '{resource_id}' is not a filesystem root"),
+            ));
+        }
+    };
+    match std::fs::symlink_metadata(&root) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MaterializedRemoval::default());
+        }
+        Ok(meta) if meta.is_dir() => {}
+        // A file or symlink where the receipt recorded a directory is not
+        // ANOLISA's output; leave it and keep the receipt for a retry.
+        Ok(_) => {
+            return Err(AdapterError::Io {
+                path: root.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "materialized root is no longer a directory",
+                ),
+            });
+        }
+        Err(source) => return Err(AdapterError::Io { path: root, source }),
+    }
+    let mut outcome = MaterializedRemoval::default();
+    let mut directories = BTreeSet::new();
+    for file in claim
+        .materialized_files
+        .iter()
+        .filter(|file| file.resource_id == resource_id)
+    {
+        validate_relative(&file.relative_path)
+            .map_err(|reason| invalid_materialized(claim, reason))?;
+        let path = root.join(&file.relative_path);
+        if has_replaced_materialized_parent(&root, &path) {
+            outcome.kept_root = Some(root.clone());
+            continue;
+        }
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if !dir.starts_with(&root) {
+                break;
+            }
+            directories.insert(dir.to_path_buf());
+            parent = dir.parent();
+        }
+        match std::fs::symlink_metadata(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            _ => {}
+        }
+        // A file the user edited after enable is theirs now; keep it.
+        if verify_file(
+            &path,
+            file.kind,
+            file.sha256.as_deref(),
+            file.symlink_target.as_deref(),
+        )
+        .is_err()
+        {
+            outcome.kept_root = Some(root.clone());
+            continue;
+        }
+        if ops.remove_path(&path)? {
+            outcome.removed += 1;
+        }
+    }
+    directories.insert(root.clone());
+    let mut directories = directories.into_iter().collect::<Vec<_>>();
+    directories.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in directories {
+        if has_replaced_materialized_parent(&root, &dir) {
+            outcome.kept_root = Some(root.clone());
+            continue;
+        }
+        // Only real directories: a recorded parent replaced by a file or a
+        // symlink is not ANOLISA's to delete.
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            if dir.exists() || std::fs::symlink_metadata(&dir).is_ok() {
+                outcome.kept_root = Some(root.clone());
+            }
+            continue;
+        }
+        match ops.remove_path(&dir) {
+            Ok(_) => {}
+            Err(AdapterError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::DirectoryNotEmpty =>
+            {
+                outcome.kept_root = Some(root.clone());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(outcome)
+}
+
+fn has_replaced_materialized_parent(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut parent = root.to_path_buf();
+    if !std::fs::symlink_metadata(&parent).is_ok_and(|meta| meta.is_dir()) {
+        return true;
+    }
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(meta) if meta.is_dir() => {}
+            // Missing ancestors mean there is no entry left to remove.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+            // Inspect each prefix without following links: matching leaf
+            // bytes do not confer ownership of a redirected destination.
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// Whether a receipt-declared materialized root already holds content that
+/// the prior receipt for the same component does not own, so enable would
+/// write into (and a later disable clean up) a directory ANOLISA never
+/// created: a user's own same-named skill or another component's output.
+pub(crate) fn foreign_materialized_roots(
+    next: &AdapterClaim,
+    prior: Option<&AdapterClaim>,
+) -> Vec<PathBuf> {
+    let owned_by_prior = |root: &Path| {
+        prior.is_some_and(|prior| {
+            prior.resources.iter().any(|resource| match &resource.kind {
+                ClaimResourceKind::OwnedPath { path }
+                | ClaimResourceKind::ExternalPath { path } => path == root,
+                _ => false,
+            })
+        })
+    };
+    let resource_ids = next
+        .materialized_files
+        .iter()
+        .map(|file| file.resource_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut foreign = Vec::new();
+    for resource_id in resource_ids {
+        let Some(
+            ClaimResourceKind::OwnedPath { path: root }
+            | ClaimResourceKind::ExternalPath { path: root },
+        ) = next.resource(resource_id).map(|resource| &resource.kind)
+        else {
+            continue;
+        };
+        let occupied = match std::fs::symlink_metadata(root) {
+            Ok(meta) if meta.is_dir() => std::fs::read_dir(root)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(true),
+            Ok(_) => true,
+            Err(_) => false,
+        };
+        if occupied && !owned_by_prior(root) {
+            foreign.push(root.clone());
+        }
+    }
+    foreign
+}
+
 /// Remove outputs owned only by a prior receipt before replacing it.
 ///
 /// Exact-entry removal deliberately leaves unrelated files in materialized

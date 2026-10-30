@@ -26,7 +26,7 @@
 //!   * **Delegated managed/adopted** — U5: `dnf update` through the
 //!     delegated executor, then re-observe and refresh the cached
 //!     observation. dnf picks the target version. After the record refresh
-//!     persisted, the package-owned contract snapshot is refreshed too
+//!     persisted, the distribution-owned contract snapshot is refreshed too
 //!     ([`complete_delegated_update`]); a refresh failure demotes the
 //!     operation to `partial` instead of overstating it as `ok`.
 //!   * **Delegated observed** — U6: refuses; management consent (`adopt`)
@@ -3073,7 +3073,7 @@ pub(crate) mod tests {
         assert_eq!(record.status, LifecycleStatus::Installed);
     }
 
-    /// Publish a package-owned contract in the FHS package datadir plus the
+    /// Publish a distribution-owned contract in the FHS package datadir plus the
     /// stale pre-update snapshot an earlier install left behind, as an RPM
     /// upgrade of the package would leave them.
     pub(crate) fn seed_package_contract_and_stale_snapshot(
@@ -3161,7 +3161,7 @@ pub(crate) mod tests {
                 ObjectStatus::Installed,
             ),
         );
-        // A stale snapshot without a package-owned contract: nothing
+        // A stale snapshot without a distribution-owned contract: nothing
         // authoritative exists to refresh from, so it must stay untouched.
         let layout = common::resolve_layout(&c);
         let snapshot =
@@ -4651,6 +4651,113 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             owned_artifact(&find_component(&c, "foo")).version,
             "0.1.0",
             "refused update must not change the recorded version"
+        );
+    }
+
+    /// A v2 contract that adds a hook phase no anolisa command runs is the
+    /// same authoring defect a fresh install refuses; the update path must
+    /// run the identical check in download-verify, so the dead phase cannot
+    /// be smuggled in through `anolisa update`. Pins that the refusal leaves
+    /// the installed files and the recorded state untouched.
+    #[test]
+    fn raw_update_refuses_when_new_artifact_adds_strict_dead_hook_phase() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body: &[u8] = b"installed 0.1.0\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+
+        // v2's contract adds a strict pre_restart: valid manifest
+        // vocabulary, but no anolisa command resolves it and strict
+        // requires it to run.
+        let manifest = format!(
+            "{}{}",
+            raw_manifest("foo", "0.2.0"),
+            "\n[[component.hooks]]\nphase = \"pre_restart\"\nscript = \"{datadir}/hooks/foo/pre-restart.sh\"\nstrict = true\n"
+        );
+        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let artifact = tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/foo", new_body),
+        ]);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &artifact,
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("update must refuse a strict phase no command runs");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("no anolisa command runs"),
+            "refusal must name the dead phase, got: {}",
+            err.reason()
+        );
+        assert!(
+            err.reason().contains("strict"),
+            "refusal must state the strict contract, got: {}",
+            err.reason()
+        );
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            old_body,
+            "refused update must not change the old binary"
+        );
+        assert_eq!(
+            owned_artifact(&find_component(&c, "foo")).version,
+            "0.1.0",
+            "refused update must not change the recorded version"
+        );
+    }
+
+    /// The non-strict twin is the default capability limitation: the
+    /// update proceeds — a new version must not be blocked just because
+    /// it declares one hook the current CLI will not execute — and the
+    /// dead phase is surfaced as a warning instead.
+    #[test]
+    fn raw_update_proceeds_when_new_artifact_adds_non_strict_dead_hook_phase() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body: &[u8] = b"installed 0.1.0\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+
+        let manifest = format!(
+            "{}{}",
+            raw_manifest("foo", "0.2.0"),
+            "\n[[component.hooks]]\nphase = \"pre_restart\"\nscript = \"{datadir}/hooks/foo/pre-restart.sh\"\nstrict = false\n"
+        );
+        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let artifact = tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/foo", new_body),
+        ]);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &artifact,
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect("a non-strict dead phase must not block the update");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            new_body,
+            "the update must place the new binary"
+        );
+        assert_eq!(
+            owned_artifact(&find_component(&c, "foo")).version,
+            "0.2.0",
+            "the update must record the new version"
         );
     }
 

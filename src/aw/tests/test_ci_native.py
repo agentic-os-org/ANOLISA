@@ -2,25 +2,149 @@
 
 import ast
 import copy
+from contextlib import chdir
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from test_ci_checks import AW, GateFixture
 from check_native import load
 from native_acceptance import Commands, verify_bundle, verify_case
 from native_reports import validate_case
 from native_summary import summarize
+import native_acceptance
 
 
 class NativeTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()
         self.manifest = load(AW)
+
+    def test_setup_reports_survive_relative_and_absolute_output_paths(self) -> None:
+        run = Commands.run
+        row = self.manifest["agents"]["qoder"]
+
+        def command(commands, argv, cwd, timeout=600, **kwargs):
+            if len(argv) > 1 and argv[1] == str(AW / "scripts/native_qoder.py"):
+                # Replace the download with a real child writing the same report
+                # from setup's working directory, without credentials or network.
+                report = argv[argv.index("--report") + 1]
+                return run(
+                    commands,
+                    [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; import sys; "
+                        "Path(sys.argv[1]).write_text('{}')",
+                        report,
+                    ],
+                    cwd,
+                    5,
+                )
+            return "{}"
+
+        for mode in ("relative", "absolute"):
+            output = self.root / mode / "evidence with spaces"
+            argument = str(output.relative_to(self.root) if mode == "relative" else output)
+            argv = [
+                "native_acceptance.py",
+                "--agent",
+                "qoder",
+                "--candidate-sha",
+                "a" * 40,
+                "--bin",
+                "candidate-binaries",
+                "--output",
+                argument,
+            ]
+            with self.subTest(mode=mode), chdir(self.root), patch.object(
+                sys, "argv", argv
+            ), patch.dict(
+                os.environ, {"QODER_PERSONAL_ACCESS_TOKEN": "test-private-token"}
+            ), patch.object(
+                native_acceptance, "plan"
+            ), patch.object(
+                native_acceptance, "load", return_value=self.manifest
+            ), patch.object(
+                native_acceptance, "verify_bundle"
+            ), patch.object(
+                native_acceptance.platform, "python_version", return_value=row["python"]
+            ), patch.object(
+                Commands, "run", autospec=True, side_effect=command
+            ), patch.object(
+                native_acceptance, "verify_case"
+            ):
+                native_acceptance.main()
+                self.assertEqual(json.loads((output / "qoder-version.json").read_text()), {})
+                self.assertEqual(
+                    json.loads((output / "result.json").read_text())["status"], "passed"
+                )
+
+    def test_native_secret_gate_rejects_unmerged_candidates_and_workflow_refs(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
+        step = workflow.split(
+            "      - name: Require a trusted candidate before executing repository code\n", 1
+        )[1].split("      - name: Validate native coverage", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+        def git(*args):
+            return subprocess.check_output(
+                ["git", *args], cwd=self.root, text=True, stderr=subprocess.PIPE, timeout=10
+            ).strip()
+
+        def commit(path, value):
+            (self.root / path).write_text(value)
+            git("add", ".")
+            git("commit", "-qm", "fixture")
+            return git("rev-parse", "HEAD")
+
+        git("init", "-q", "--initial-branch=main")
+        git("config", "user.name", "AW fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        base = commit("README.md", "base")
+        head = commit("README.md", "trusted main")
+        git("update-ref", "refs/remotes/origin/main", head)
+        git("checkout", "-qb", "feature", base)
+        feature = commit("candidate.py", "raise RuntimeError('untrusted')")
+        git("checkout", "-qb", "release/unmerged", head)
+        release = commit("candidate.py", "raise RuntimeError('unmerged release')")
+        for candidate, ref, passed in (
+            (base, "refs/heads/main", True),
+            (head, "refs/heads/main", True),
+            (feature, "refs/heads/main", False),
+            (release, "refs/heads/main", False),
+            (head, "refs/heads/feature", False),
+            (head, "refs/tags/release", False),
+        ):
+            with self.subTest(candidate=candidate, ref=ref):
+                git("checkout", "--detach", candidate)
+                result = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", script],
+                    cwd=self.root,
+                    env={**os.environ, "CANDIDATE_SHA": candidate, "WORKFLOW_REF": ref},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, passed, result.stderr)
+        result_job = workflow.split("  result:\n", 1)[1]
+        self.assertLess(
+            result_job.index("Require a trusted integration plan"),
+            result_job.index("uses: actions/checkout@v4"),
+        )
+        self.assertIn("if: always() && needs.plan.result == 'success'", result_job)
+        script = result_job.split("        run: ", 1)[1].splitlines()[0]
+        for outcome in ("success", "failure", "cancelled", "skipped"):
+            result = subprocess.run(
+                ["bash", "-euc", script], env={**os.environ, "PLAN_RESULT": outcome}, timeout=5
+            )
+            self.assertEqual(result.returncode == 0, outcome == "success")
 
     def test_new_agent_requires_native_accounting(self) -> None:
         (self.root / "tests").mkdir()
@@ -34,7 +158,7 @@ class NativeTests(GateFixture):
     def test_missing_entrypoint_and_empty_suites_fail(self) -> None:
         from unittest.mock import patch
 
-        for mode in ("missing", "empty", "manual", "unpinned", "deadline"):
+        for mode in ("missing", "empty", "manual", "unpinned", "deadline", "excessive-timeout"):
             manifest = copy.deepcopy(self.manifest)
             row = manifest["agents"]["agentscope"]
             if mode == "missing":
@@ -46,7 +170,7 @@ class NativeTests(GateFixture):
             elif mode == "unpinned":
                 row["requirements"] = ["agentscope>=2"]
             else:
-                row["cases"][0]["timeout_seconds"] = 0
+                row["cases"][0]["timeout_seconds"] = 2401 if mode == "excessive-timeout" else 0
             original = Path.read_text
 
             def read(path: Path, *args: object, **kwargs: object) -> str:
@@ -58,10 +182,46 @@ class NativeTests(GateFixture):
                 with self.assertRaises(ValueError):
                     load(AW)
 
+    def test_qoder_reload_pin_entrypoint_and_cases_are_required(self) -> None:
+        original = Path.read_text
+        for mode in ("pin", "version", "suite", "entrypoint", "case"):
+            manifest = copy.deepcopy(self.manifest)
+            row = manifest["agents"]["qoder"]
+            case = next(item for item in row["cases"] if item["name"] == "runtime-reload")
+            if mode == "pin":
+                del row["qoder_reload_cli"]
+            elif mode == "version":
+                row["qoder_reload_cli"] = copy.deepcopy(row["qoder_cli"])
+            elif mode == "suite":
+                row["cases"].remove(case)
+            elif mode == "entrypoint":
+                case["argv"][1] = "tests/test_claude_sdk_native.py"
+            else:
+                case["results"][0]["cases"]["names"].remove("add-hook")
+
+            def read(path, *args, **kwargs):
+                if path == AW / "tests/native-matrix.json":
+                    return json.dumps(manifest)
+                return original(path, *args, **kwargs)
+
+            with self.subTest(mode=mode), patch.object(Path, "read_text", read):
+                with self.assertRaises(ValueError):
+                    load(AW)
+
+    def test_qoder_reload_rejects_missing_credential_before_launch(self) -> None:
+        import importlib.util
+
+        source = AW / "crates/aw-cli/tests/fixtures/qoder/reload.py"
+        spec = importlib.util.spec_from_file_location("aw_qoder_reload", source)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        with patch.dict(os.environ, {}, clear=True), patch.object(fixture, "install") as install:
+            with self.assertRaisesRegex(RuntimeError, "QODER_PERSONAL_ACCESS_TOKEN"):
+                fixture.exercise(self.root, self.root)
+            install.assert_not_called()
+
     def reports(self) -> None:
         for agent, row in self.manifest["agents"].items():
-            if row["mode"] == "manual":
-                continue
             directory = self.root / agent
             directory.mkdir(exist_ok=True)
             for case in row["cases"]:
@@ -168,7 +328,8 @@ class NativeTests(GateFixture):
                         elif mode == "renamed":
                             rows[0][spec["key"]] = "unexpected-case"
                         elif mode == "duplicate":
-                            rows[0] = rows[1]
+                            # Single-case reports need an extra row to form a duplicate.
+                            rows[:] = [rows[0]] * max(2, len(rows))
                         elif spec.get("values"):
                             rows[0][next(iter(spec["values"]))] = False
                         else:
@@ -200,7 +361,7 @@ class NativeTests(GateFixture):
                     verify_case(case, output, directory)
 
     def test_real_pi_fixture_with_empty_cases_fails_acceptance(self) -> None:
-        fixture = AW / "crates/aw-service/tests/fixtures/pi"
+        fixture = AW / "crates/aw-cli/tests/fixtures/pi"
         source = (fixture / "public-smoke.py").read_text()
         assignment = next(
             node
@@ -255,7 +416,8 @@ class NativeTests(GateFixture):
         self.reports()
         text, passed = summarize(self.manifest, self.root, "a" * 40, outcomes)
         self.assertTrue(passed)
-        self.assertIn("MANUAL — not tested", text)
+        self.assertNotIn("MANUAL — not tested", text)
+        self.assertIn("| qoder | PASS |", text)
         for mode in ("missing", "stale", "empty", "failed-case", "failed-job", "skipped-job"):
             self.reports()
             jobs = dict(outcomes)
@@ -294,7 +456,7 @@ class NativeTests(GateFixture):
             os.kill(int(child_pid.read_text()), 0)
 
     def test_ledger_failures_bound_wait_and_reap_descendants(self) -> None:
-        for stage in ("open", "write", "flush"):
+        for stage in ("open", "write", "flush", "timeout", "interrupt", "no-children"):
             directory = self.root / stage
             directory.mkdir()
             with self.subTest(stage=stage):
@@ -312,6 +474,16 @@ class NativeTests(GateFixture):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertTrue(json.loads(result.stdout.splitlines()[-1])["descendant_reaped"])
+
+    def test_runner_rejects_existing_children_without_signalling_them(self) -> None:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with self.assertRaisesRegex(RuntimeError, "already has an owned child"):
+                Commands(self.root, dict(os.environ)).run(["/bin/true"], self.root)
+            self.assertIsNone(child.poll())
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
 
     def test_empty_reduced_and_skipped_native_suites_fail(self) -> None:
         case = {"name": "unit", "tests": 2, "report": "unittest"}
@@ -339,6 +511,8 @@ class NativeTests(GateFixture):
             "tokenless",
             "rtk",
             "policy",
+            "agent-sec-cli",
+            "agent-sec-daemon",
         )
         for name in names:
             file = self.root / name

@@ -1,4 +1,4 @@
-//! Authoritative local Policy state. No automatic repair, fallback, or remote I/O.
+//! Authoritative local Policy state with strict path selection and no automatic database repair.
 #![forbid(unsafe_code)]
 mod migration;
 mod pap;
@@ -8,22 +8,27 @@ mod records;
 mod table;
 #[cfg(feature = "test-support")]
 mod test_support;
-pub use path::DatabaseLease;
+pub use path::{DatabaseLease, select_policy_database_path};
 
 use asc_pap::PapError;
 use asc_policy_repository::StoreError;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Safe startup and storage failure categories; SQL values never enter diagnostics.
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
-    #[error("unsafe Policy data path or permissions (directory 0700, files 0600 required)")]
-    UnsafePath,
+    #[error("unsafe Policy data path '{}': {reason}", path.display())]
+    UnsafePath {
+        /// Path that failed validation or contains conflicting state.
+        path: PathBuf,
+        /// Required invariant and actual path metadata or selection conflict.
+        reason: String,
+    },
     #[error("Policy database already owned by another daemon")]
     AlreadyOpen,
-    #[error("Policy file operation failed")]
+    #[error("Policy file operation failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Storage(#[from] StoreError),
@@ -61,7 +66,7 @@ impl RepositoryError {
     fn store(self) -> StoreError {
         match self {
             Self::Storage(e) => e,
-            Self::UnsafePath => StoreError::Corrupt,
+            Self::UnsafePath { .. } => StoreError::Corrupt,
             _ => StoreError::Unavailable,
         }
     }
@@ -178,7 +183,7 @@ impl SqlitePolicyRepository {
         if let Err(error) = &result {
             let category = match error {
                 RepositoryError::Storage(error) => Some(*error),
-                RepositoryError::UnsafePath => Some(StoreError::Corrupt),
+                RepositoryError::UnsafePath { .. } => Some(StoreError::Corrupt),
                 RepositoryError::Io(_) => Some(StoreError::Io),
                 _ => None,
             };

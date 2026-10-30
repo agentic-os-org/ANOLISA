@@ -1,0 +1,132 @@
+%define anolis_release 1
+%global debug_package %{nil}
+
+Name:           agentsight
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        eBPF-based AI Agent Observability Tool
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+
+# Build dependencies (required for OpenSSL compilation during cargo build)
+BuildRequires:  perl-IPC-Cmd
+BuildRequires:  perl-core
+BuildRequires:  python3
+# %%systemd_* scriptlet macros expand at rpmbuild time (see %%post/%%preun/%%postun)
+BuildRequires:  systemd-rpm-macros
+
+Requires:       %{name}-core = %{version}-%{release}
+Provides:       anolisa-component(agentsight)
+
+%description
+Compatibility package selecting matching agentsight-core through an
+exact-version dependency, without a runtime payload of its own. The DSH plugin
+is optional.
+
+%package core
+Summary:        AgentSight tracing, dashboard and enforcement runtime
+Requires:       elfutils-libelf
+# An older monolithic package still owns these files; upgrade it to the
+# compatibility package in the same transaction before transferring ownership.
+Conflicts:      agentsight < %{version}
+Conflicts:      anolisa < 0.3.21
+Requires(post):   rpm
+Requires(post):   (%{_bindir}/systemctl if systemd)
+Requires(preun):  (%{_bindir}/systemctl if systemd)
+Requires(postun): (%{_bindir}/systemctl if systemd)
+
+%description core
+AgentSight eBPF tracing, embedded dashboard, enforcer, system configuration and
+service units. Installing this package does not explicitly start the services.
+
+%package plugins
+Summary:        AgentSight DSH plugin resources
+Requires:       %{name}-core = %{version}-%{release}
+Requires:       nodejs >= 22
+BuildArch:      noarch
+
+%description plugins
+Optional DSH plugin runtime and descriptor. Register it with the target DSH
+installation separately; package installation does not change user profiles.
+
+%prep
+%setup -q
+
+%build
+# Binary is built by packaging/rpm/rpm-build.sh prior to rpmbuild and included in the source tarball.
+
+%install
+rm -rf $RPM_BUILD_ROOT
+install -d -m 0755 %{buildroot}%{_bindir} %{buildroot}%{_unitdir} \
+    %{buildroot}%{_docdir}/agentsight %{buildroot}%{_sysconfdir}/agentsight
+
+install -p -m 0755 agentsight agentsight-enforcer \
+    %{buildroot}%{_bindir}/
+python3 packaging/systemd/render.py --bindir "%{_bindir}" \
+    --binary "%{_bindir}/agentsight" \
+    --launcher "%{buildroot}%{_bindir}/agentsight-start" \
+    --unitdir "%{buildroot}%{_unitdir}"
+install -p -m 0644 agentsight.json %{buildroot}%{_sysconfdir}/agentsight/config.json
+install -p -m 0644 README.md README_zh.md LICENSE %{buildroot}%{_docdir}/agentsight/
+install -d -m 0755 %{buildroot}%{_datadir}/agentsight/adapters/dsh
+cp -Rp dsh-plugin/lib %{buildroot}%{_datadir}/agentsight/adapters/dsh/
+install -p -m 0644 dsh-plugin/package.json dsh-plugin/cordis.patch.yml \
+    %{buildroot}%{_datadir}/agentsight/adapters/dsh/
+
+%post core
+# A transfer from the monolithic package is an upgrade, even though core is
+# newly installed. Preserve the existing unit enablement during that transfer.
+if ! rpm -q agentsight >/dev/null 2>&1; then
+    %systemd_post agentsight-enforcer.service
+    %systemd_post agentsight.service
+fi
+# Fresh install: surface opt-in features that are disabled by default.
+if [ "$1" -eq 1 ]; then
+    echo "AgentSight: dead-loop detection/auto-kill is disabled by default."
+    echo "  To enable: set \"deadloop\": {\"enabled\": true} in /etc/agentsight/config.json,"
+    echo "  then run: systemctl reload agentsight.service"
+fi
+
+%preun core
+%systemd_preun agentsight.service
+%systemd_preun agentsight-enforcer.service
+
+%postun core
+%systemd_postun agentsight.service
+%systemd_postun agentsight-enforcer.service
+
+%files
+
+%files core
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) %{_bindir}/agentsight
+%attr(0755,root,root) %{_bindir}/agentsight-enforcer
+%attr(0755,root,root) %{_bindir}/agentsight-start
+%config(noreplace) %{_sysconfdir}/agentsight/config.json
+%{_unitdir}/agentsight.service
+%{_unitdir}/agentsight-enforcer.service
+%doc %{_docdir}/agentsight/README.md
+%doc %{_docdir}/agentsight/README_zh.md
+%license %{_docdir}/agentsight/LICENSE
+
+%files plugins
+%defattr(0644,root,root,0755)
+%{_datadir}/agentsight/adapters/dsh/
+
+%changelog
+* Tue Jul 28 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.9.0-1
+- Release AgentSight 0.9.0
+- Add optimization dashboard, trajectory collection, and ATIF v1.7 support
+- Fix Anthropic parsing, trajectory collection, dashboard, and trace output issues
+
+* Sat Apr 11 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.2.0-1
+- Add systemd service file (agentsight.service)
+- Add systemd post/preun/postun hooks for service management
+- Update installation path to /usr/local/bin
+- Support dashboard (token and session analysis)
+- Support HTTP/2 protocol
+
+* Mon Mar 30 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.1.0-1
+- Initial AgentSight RPM package

@@ -153,7 +153,7 @@ impl Aggregator {
                 ParsedMessage::Request(r) => Some(r.source_event.as_ref()),
                 ParsedMessage::Response(r) => Some(r.source_event.as_ref()),
                 ParsedMessage::RawData(event) => Some(event.as_ref()),
-                ParsedMessage::SseEvent(event) => Some(event.source_event()),
+                ParsedMessage::SseEvent(event) => Some(event.capture_event()),
                 ParsedMessage::Http2Frames(frames) => {
                     frames.first().map(|f| f.source_event.as_ref())
                 }
@@ -165,7 +165,10 @@ impl Aggregator {
             .iter()
             .any(|message| matches!(message, ParsedMessage::SseEvent(_)));
         let handled = response_event.and_then(|event| {
-            if self.http.accepts_response_bytes(event) || self.http.accepts_compact_sse_bytes(event)
+            if self.http.discard_retired_sse(event) {
+                Some(None)
+            } else if self.http.accepts_response_bytes(event)
+                || self.http.accepts_compact_sse_bytes(event)
             {
                 Some(self.http.process_raw_body_data(event))
             } else if captured_sse && self.http.accepts_unmatched_sse(event) {
@@ -188,9 +191,11 @@ impl Aggregator {
             self.enforce_bytes_budget();
             results.extend(self.http.take_ready());
             results.extend(self.http2.take_ready());
+            self.publish_connection_metrics();
             for result in &results {
                 export_trace_events(result);
             }
+            timer.record_outputs(results.len());
             return results;
         }
 
@@ -222,6 +227,8 @@ impl Aggregator {
         results.extend(self.http.take_ready());
         results.extend(self.http2.take_ready());
 
+        self.publish_connection_metrics();
+
         // Export chrome trace if enabled
         for r in &results {
             export_trace_events(r);
@@ -241,11 +248,15 @@ impl Aggregator {
         &mut self,
         event: &crate::probes::sslsniff::SslEvent,
     ) -> Option<Vec<AggregatedResult>> {
+        if self.http.discard_retired_sse(event) {
+            return Some(Vec::new());
+        }
         if !self.http.accepts_compact_sse_bytes(event) {
             return None;
         }
         let complete = self.http.process_raw_body_data(event);
         self.enforce_bytes_budget();
+        self.publish_connection_metrics();
         let mut results = self.http.take_ready();
         results.extend(self.http2.take_ready());
         results.extend(complete);
@@ -343,6 +354,7 @@ impl Aggregator {
         self.http.drain_pending(reason);
         self.http2.abandon_pending(reason);
         self.enforce_bytes_budget();
+        self.publish_connection_metrics();
         let mut results = self.http.take_ready();
         results.extend(self.http2.take_ready());
         results
@@ -353,6 +365,7 @@ impl Aggregator {
         self.http.tick(now);
         self.http2.tick(now);
         self.enforce_bytes_budget();
+        self.publish_connection_metrics();
         let mut results = self.http.take_ready();
         results.extend(self.http2.take_ready());
         results
@@ -362,8 +375,8 @@ impl Aggregator {
         while self.bytes_budget != 0
             && self.connection_metrics().connection_cache_bytes > self.bytes_budget
         {
-            let h1 = self.http.oldest_activity();
-            let h2 = self.http2.oldest_activity();
+            let h1 = self.http.eviction_priority();
+            let h2 = self.http2.eviction_priority();
             let removed = match (h1, h2) {
                 (Some(a), Some(b)) if a <= b => self.http.abandon_oldest(),
                 (Some(_), None) => self.http.abandon_oldest(),
@@ -374,6 +387,9 @@ impl Aggregator {
                 break;
             }
         }
+    }
+
+    fn publish_connection_metrics(&self) {
         let metrics = self.connection_metrics();
         metrics::gauge!("agentsight_http_conn_active").set(metrics.pending_connection_count as f64);
         metrics::gauge!("agentsight_http_conn_retained_bytes")
@@ -1116,6 +1132,56 @@ mod tests {
         assert_eq!(stream.stream_id.stream_id, 3);
         assert_eq!(aggregator.connection_metrics().pending_connection_count, 1);
         assert!(aggregator.connection_metrics().connection_cache_bytes <= budget);
+    }
+
+    #[test]
+    fn shared_bytes_reclaim_oldest_when_all_http_versions_are_protected() {
+        let mut aggregator = Aggregator::new();
+        let parser = Parser::new();
+        for (rw, bytes) in [
+            (
+                1,
+                b"POST /v1/messages HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+            ),
+            (
+                0,
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".as_slice(),
+            ),
+        ] {
+            assert!(
+                aggregator
+                    .process_result(parser.parse_ssl_event(Rc::new(ssl_event(7, 2, bytes, rw))))
+                    .is_empty()
+            );
+        }
+        let headers = hpack::Encoder::new().encode([
+            (b":method".as_slice(), b"POST".as_slice()),
+            (b":path".as_slice(), b"/v1/messages".as_slice()),
+        ]);
+        assert!(
+            feed_http2(
+                &mut aggregator,
+                vec![test_frame(1, 1, 5, headers, test_event(7, 1, 1, 100))]
+            )
+            .is_empty()
+        );
+        aggregator.bytes_budget = aggregator.connection_metrics().connection_cache_bytes - 1;
+        aggregator.enforce_bytes_budget();
+        assert!(matches!(
+            &aggregator.http.take_ready()[..],
+            [AggregatedResult::Abandoned {
+                reason: super::super::RemoveReason::OverBudget,
+                ..
+            }]
+        ));
+        assert!(
+            !aggregator
+                .http
+                .is_sse_active(&ConnectionId { pid: 7, ssl_ptr: 2 })
+        );
+        assert!(aggregator.http2.take_ready().is_empty());
+        assert_eq!(aggregator.http2.active_stream_count(), 1);
+        assert!(aggregator.connection_metrics().connection_cache_bytes <= aggregator.bytes_budget);
     }
 
     #[test]

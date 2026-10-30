@@ -31,6 +31,13 @@ fn delayed_query_cannot_reclaim_a_released_instance_session() {
             &json!({"name":"tool.before","tool":{}}),
             json!({"status":"verified","session_id":"resumed"}),
             deadline,
+            aw_config::Validator::new()
+                .unwrap()
+                .parse(include_bytes!(
+                    "../../../../aw-config/examples/aw.minimal.yaml"
+                ))
+                .unwrap()
+                .as_value(),
         )
         .unwrap();
     contexts.sessions.lock().unwrap().active.remove("first");
@@ -81,6 +88,7 @@ fn poisoned_audit_prevents_context_publication() {
             Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),
@@ -176,6 +184,57 @@ fn native_run_scoping_and_missing_evidence_are_preserved_for_every_adapter() {
             assert_eq!(
                 association(adapter, &next, Some(&bytes))["status"],
                 "unverified"
+            );
+        }
+    }
+}
+
+#[test]
+fn evidence_limits_accept_schema_integer_spellings_without_rewriting_config() {
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/evidence-unit-tests");
+    std::fs::create_dir_all(&parent).unwrap();
+    let base = aw_config::Validator::new()
+        .unwrap()
+        .parse(include_bytes!(
+            "../../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone();
+    for limits in [
+        [1, 1, 1, 4096],
+        [1000, 4096, 32, 262144],
+        [60000, 4194304, 128, 2097152],
+    ] {
+        for suffix in ["", ".0", "e0"] {
+            let mut document = base.clone();
+            document["spec"]["agents"]["qoder"]["evidence"] = json!({
+                "source_id":"fixture", "endpoint":"http://127.0.0.1:1",
+            });
+            for (field, value) in ["query_timeout_ms", "query_bytes", "max_items", "max_bytes"]
+                .into_iter()
+                .zip(limits)
+            {
+                document["spec"]["agents"]["qoder"]["evidence"][field] =
+                    serde_json::from_str(&format!("{value}{suffix}")).unwrap();
+            }
+            let bytes = serde_json::to_vec(&document).unwrap();
+            let directory = tempfile::tempdir_in(&parent).unwrap();
+            let runtime = Runtime::new(
+                bytes.clone(),
+                &directory.path().join("journal"),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+            let settings = &runtime.contexts.sources["qoder"];
+            assert_eq!(settings.query_timeout_ms, limits[0]);
+            assert_eq!(settings.query_bytes, limits[1] as usize);
+            assert_eq!(settings.max_items, limits[2] as usize);
+            assert_eq!(settings.max_bytes, limits[3] as usize);
+            assert_eq!(runtime.bytes, bytes);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&runtime.bytes).unwrap(),
+                document
             );
         }
     }

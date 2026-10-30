@@ -1,5 +1,71 @@
 # Changelog
 
+## [1.1.2] - Unreleased
+
+### Changed
+
+- Install the security runtime, framework integrations and skills through separate RPMs.
+
+## 1.1.1
+
+**Breaking Changes**
+
+- Removed the unsupported `--cgroup-id` flag from `scope create`; cgroup assignment
+  was never accepted by PAP or the AgentSight Adapter, and the flag now fails locally
+  with exit code 2. Select target processes with `--pid`, `--process-name`, or
+  `--executable` instead. (#9134)
+
+**Code Scanning**
+
+- Evaluated command strings passed to Python process APIs (`os.system`, `os.popen`,
+  `subprocess`) against the existing Shell rules, with native rule IDs, severity, and
+  evidence retained; dynamically built commands and argv arrays remain uninferred.
+  (#9128)
+
+**Skill Ledger Runtime**
+
+- Added `skillsec` as the primary `agent-sec-cli` command group name, retaining
+  `skill-ledger` as a compatible alias with identical arguments, output, and exit
+  codes. (#8907)
+- Escaped the YAML-sensitive characters that JSON quoting leaves literal in a pending
+  Skill placeholder, so accepted Skill names containing control characters or Unicode
+  separators survive publication and frontmatter parsing unchanged. (#8948)
+
+## 1.1.0
+
+**Breaking Changes**
+
+- Switched source builds and installs to the V2 Rust CLI and host-level systemd
+  daemon, replacing the source-build Python runtime, user sandbox, and venv
+  layout; source-install scripts must migrate to the V2 hook-facing command
+  surface. (#3510)
+
+**V2 Policy & Daemon Runtime**
+
+- Rejected stale policy reconciliation results atomically, tracked real write-receipt
+  versions, and let newer Delete intents supersede exhausted Apply retries, with
+  deterministic crash-recovery coverage for SQLite persistence. (#6944)
+
+**Storage Safety**
+
+- Fell back to `/var/lib/agent-sec/policy/policy-state.db` for default Policy storage
+  when the primary directory is unsafe, checking both candidates before initialization
+  and rejecting conflicting databases with actionable diagnostics. (#8782)
+
+**Skill Ledger Runtime**
+
+- Raised a typed `SkillLedgerError` instead of a raw `NotADirectoryError` when
+  `skill export --output` points to an existing file. (#6105)
+
+**Build & Packaging**
+
+- Updated rustls to 0.23.45 to address a Dependabot security advisory. (#7783)
+
+**Raw Packaging**
+
+- Added a Linux x86_64 sec-core prebuilt raw-archive release target with SHA-256 and
+  CycloneDX SBOM sidecars. (#8461)
+
 ## 1.0.1
 
 **Breaking Changes**

@@ -27,6 +27,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::telemetry::common::{ProductType, detect_product_type};
+use crate::telemetry::metadata::MetadataClient;
 
 /// Current register.json schema version
 pub const REGISTER_SCHEMA_VERSION: &str = "2";
@@ -185,6 +186,10 @@ pub struct RegistrationManager {
     pub register_path: PathBuf,
     /// Path to /etc/anolisa-release
     pub release_path: PathBuf,
+    /// Metadata API key URL used by the shared product-type probe chain.
+    /// Only consulted when the release file and container detection both
+    /// miss, so hosts with `/etc/anolisa-release` never pay a probe cost.
+    pub metadata_url: String,
 }
 
 impl Default for RegistrationManager {
@@ -199,6 +204,7 @@ impl RegistrationManager {
         Self {
             register_path: PathBuf::from("/etc/anolisa/register.json"),
             release_path: PathBuf::from("/etc/anolisa-release"),
+            metadata_url: crate::telemetry::TelemetryConfig::default().metadata_url,
         }
     }
 
@@ -207,6 +213,7 @@ impl RegistrationManager {
         Self {
             register_path,
             release_path,
+            metadata_url: "http://127.0.0.1:19999/no-such-endpoint".to_string(),
         }
     }
 
@@ -560,9 +567,13 @@ impl RegistrationManager {
 
     // ── Product type detection ─────────────────────────────────────────
 
-    /// Read `PRODUCT_TYPE` from `/etc/anolisa-release`, falling back to `Unknown`.
+    /// Resolve the product type through the shared probe chain
+    /// (release file → container detection → metadata API → unknown),
+    /// the same chain telemetry reporting uses, so `anolisa register status`
+    /// and uploaded logs never disagree on the classification.
     pub fn detect_product_type(&self) -> ProductType {
-        detect_product_type(&self.release_path)
+        let client = MetadataClient::from_key_url(&self.metadata_url);
+        detect_product_type(&self.release_path, &client)
     }
 
     /// Detect whether sysom services are active (sysak_meta active).
@@ -1062,8 +1073,24 @@ mod tests {
 
     #[test]
     fn test_product_type_fallback_unknown() {
-        let dir = TempDir::new().unwrap();
-        assert_eq!(mgr(&dir).detect_product_type(), ProductType::Unknown);
+        // Pin bare-metal + a dead metadata URL so the fallback only reflects
+        // the missing release file, not the host running the test suite.
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            crate::telemetry::common::with_container_flavor(None, || {
+                let dir = TempDir::new().unwrap();
+                assert_eq!(mgr(&dir).detect_product_type(), ProductType::Unknown);
+            })
+        });
+    }
+
+    #[test]
+    fn test_product_type_container_when_no_release() {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            crate::telemetry::common::with_container_flavor(Some("docker"), || {
+                let dir = TempDir::new().unwrap();
+                assert_eq!(mgr(&dir).detect_product_type(), ProductType::Container);
+            })
+        });
     }
 
     #[test]

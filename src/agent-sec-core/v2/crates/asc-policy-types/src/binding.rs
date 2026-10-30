@@ -91,8 +91,9 @@ impl Validate for PreparedBinding {
 /// Delete requests keep the revision. Pending/running Apply and Ready accept an
 /// identical UPDATE as a no-op. `ApplyFailed` allows a same-spec retry.
 /// Delete intent is irreversible: `PendingDelete`, `Deleting` and `DeleteFailed` reject
-/// every UPDATE. DELETE may supersede Applying; its observations must still be
-/// recorded before cleanup. Repeated pending/running DELETE is a no-op, while
+/// every UPDATE. DELETE may supersede Applying; previously registered targets
+/// remain responsible for cleanup, and stale results are discarded atomically.
+/// Repeated pending/running DELETE is a no-op, while
 /// `DeleteFailed` can retry with a fresh retry budget.
 ///
 /// Workers claim pending work, complete Apply as Ready, or return failures to
@@ -139,7 +140,7 @@ impl BindingStatus {
     }
 
     /// Returns the status produced by DELETE, without changing spec or revision.
-    /// A running Apply may be superseded; its remote observations still matter.
+    /// Supersedes a running Apply while retaining its registered cleanup targets.
     #[must_use]
     pub const fn request_delete(self) -> Self {
         match self {

@@ -17,6 +17,13 @@ Btrfs-based workspace snapshot system for AI Agents. ws-checkpoint is a runtime 
 - **TOML config hot-reload** — single config entry at `/etc/ws-ckpt/config.toml`, `ws-ckpt reload` applies instantly
 - **Capacity alerting** — warns when any workspace exceeds 1000 snapshots or 90% filesystem usage
 
+After a successful rollback through the OpenClaw or Hermes plugin, the next
+turn-end checkpoint is skipped only for the restored workspace, whether the
+rollback uses its ID or registered path. Other
+workspaces keep their automatic checkpoints; preview and failed rollbacks do
+not suppress them. OpenClaw keeps this state within the originating session,
+so another session finishing first cannot consume it.
+
 ## Project Structure
 
 ```
@@ -28,11 +35,10 @@ ws-ckpt/
 │   │   ├── common/            # Shared types, IPC protocol codec
 │   │   ├── daemon/            # Daemon core logic
 │   │   └── cli/               # CLI client
-│   ├── systemd/               # systemd service files
 │   └── skills/                # OS Skills
 ├── docs/                      # Documentation
-├── ws-ckpt.spec.in            # RPM spec template
-├── build-rpm.sh               # RPM build script
+├── packaging/                 # RPM/raw specs, service resources and delivery rules
+├── build-rpm.sh               # Compatibility wrapper for packaging/rpm/build.sh
 └── .gitignore
 ```
 
@@ -53,11 +59,10 @@ the first `checkpoint`.
 ### Build
 
 ```bash
-cd src
-cargo build --release
+make build
 ```
 
-[Maintainer guide: Raw packaging and GitHub builds](../../docs/developer-guide/en/ws-ckpt/packaging.md)
+[Maintainer guide: Raw packaging and GitHub builds](../../contribute/en/ws-ckpt/packaging.md)
 
 ### Install (RPM)
 
@@ -96,6 +101,10 @@ ws-ckpt delete --workspace ~/my-workspace -s feature
 
 ### Snapshot Management
 
+The Hermes `ws-ckpt-list` tool also accepts `{"limit":20}` for one page and
+`{"limit":20,"cursor":"<next_cursor>"}` to continue. Stop only at `next_cursor:null`;
+`{}` still returns the complete table. See the [user guide](../../docs/user-guide/en/ws-ckpt/index.md#hermes-snapshot-list-pagination).
+
 ```bash
 # List all snapshots
 ws-ckpt list --workspace ~/my-workspace
@@ -125,7 +134,7 @@ pins recovered orphans until explicitly deleted. Query them with
 IDs with `ws-ckpt delete -w <workspace> -s <complete-id> --force`. Delete no longer
 accepts prefixes. Missing pinned snapshots and guarded evidence remain unavailable;
 deleting an absent target returns `SnapshotNotFound`. Upgrade CLI and daemon together.
-See [snapshot recovery](../../docs/user-guide/en/runtime/ws-ckpt.md#snapshot-recovery-after-an-interrupted-cleanup).
+See [snapshot recovery](../../docs/user-guide/en/ws-ckpt/index.md#snapshot-recovery-after-an-interrupted-cleanup).
 
 ### Recovering interrupted initialization
 
@@ -141,7 +150,7 @@ registered workspace's live subvolume was deleted externally, use
 `ws-ckpt unregister -w <workspace> --force` to remove its stale registration;
 this restores no data and preserves snapshots and backups. For both commands,
 `--force` only skips interactive confirmation. See the
-[recovery guide](../../docs/user-guide/en/runtime/ws-ckpt.md#recovering-interrupted-initialization-and-stale-registrations).
+[recovery guide](../../docs/user-guide/en/ws-ckpt/index.md#recovering-interrupted-initialization-and-stale-registrations).
 
 ### Configuration
 
@@ -197,6 +206,8 @@ ws-ckpt reload
 
 The OpenClaw adapter requires OpenClaw >= 2026.2.13. Installation stops rather than leaving a partial integration when the detected version or config capabilities cannot update the tool allowlist safely.
 
+Hermes plugin enable/disable calls have a timeout so an unresponsive runtime does not block local setup or cleanup indefinitely; see [Plugin Installation](../../docs/user-guide/en/ws-ckpt/index.md#plugin-installation) for recovery steps.
+
 ## Components
 
 | Component | Status | Description |
@@ -229,7 +240,7 @@ cargo clippy --workspace -- -D warnings
 
 ## Documentation
 
-- [User guide](../../docs/user-guide/en/runtime/ws-ckpt.md)
+- [User guide](../../docs/user-guide/en/ws-ckpt/index.md)
 - [RPM packaging](docs/RPM-PACKAGING.md)
 
 ## License

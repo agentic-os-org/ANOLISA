@@ -169,6 +169,17 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ needs.package.outputs.tag }}
 
+      - name: Build sec-core precompiled package
+        id: sec-core-prebuilt
+        if: matrix.component == 'agent-sec-core'
+        uses: ./.github/actions/build-sec-core-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
       - name: Build agentsight precompiled package
         id: agentsight-prebuilt
         if: matrix.component == 'agentsight'
@@ -242,6 +253,7 @@ jobs:
           COMPONENT: ${{ matrix.component }}
           ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
           AGENT_MEMORY_DIRECTORY: ${{ steps.agent-memory-prebuilt.outputs.artifact-directory }}
+          SEC_CORE_DIRECTORY: ${{ steps.sec-core-prebuilt.outputs.artifact-directory }}
           OS_SKILLS_DIRECTORY: ${{ steps.os-skills-prebuilt.outputs.artifact-directory }}
           AGENTSIGHT_DIRECTORY: ${{ steps.agentsight-prebuilt.outputs.artifact-directory }}
           COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
@@ -252,6 +264,7 @@ jobs:
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
             agent-memory) ARTIFACT_DIRECTORY="$AGENT_MEMORY_DIRECTORY" ;;
+            agent-sec-core) ARTIFACT_DIRECTORY="$SEC_CORE_DIRECTORY" ;;
             os-skills) ARTIFACT_DIRECTORY="$OS_SKILLS_DIRECTORY" ;;
             agentsight) ARTIFACT_DIRECTORY="$AGENTSIGHT_DIRECTORY" ;;
             cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
@@ -375,6 +388,19 @@ jobs:
             --layout aggregate \
             --write-checksums /tmp/python-wheels/SHA256SUMS-python-wheels.txt
 
+      - name: Package ANOLISA distribution manifests
+        if: needs.package.outputs.component == 'anolisa'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          distribution/anolisa/scripts/package-manifests.sh "/tmp/archives/manifests-${VERSION}.tar.gz"
+          cp "/tmp/archives/manifests-${VERSION}.tar.gz" /tmp/archives/manifests-latest.tar.gz
+          (
+            cd /tmp/archives
+            sha256sum "manifests-${VERSION}.tar.gz" manifests-latest.tar.gz > SHA256SUMS-manifests.txt
+          )
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -419,6 +445,10 @@ jobs:
               find /tmp/prebuilt -mindepth 2 -maxdepth 2 -type f -print |
                 LC_ALL=C sort
             )
+          fi
+          if [ "$COMPONENT" = anolisa ]; then
+            ASSETS+=("/tmp/archives/manifests-${VERSION}.tar.gz")
+            ASSETS+=(/tmp/archives/manifests-latest.tar.gz /tmp/archives/SHA256SUMS-manifests.txt)
           fi
           if [ "$COMPONENT" = tokenless ]; then
             while IFS= read -r asset; do

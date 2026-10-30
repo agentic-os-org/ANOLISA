@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
-use tokenless_compressors::JsonCompressionConfig;
+use tokenless_compressors::{JsonCompressionConfig, numbers_are_exact};
 use tokenless_protocol::{
     Attribution as ProtocolAttribution, BeforeModelRequest, BeforeModelResponse, ContentOrigin,
     OutputOptimization, PostToolCapabilities, PostToolRequest, PostToolResponse, PreToolRequest,
@@ -28,7 +28,7 @@ mod taxonomy;
 
 pub use entry::{EntryOptions, EntryOutcome, dispatch_with_store, response_operation};
 use entry::{
-    before_model_with_store, post_tool_with_store, pre_tool_with_rtk,
+    before_model_with_store, post_tool_with_outcomes, pre_tool_with_rtk,
     retrieve_authorized_with_store,
 };
 use post_tool::{PostToolPipeline, PostToolPipelineConfig};
@@ -64,7 +64,7 @@ pub struct RuntimeConfig {
     /// Whether compressed output is returned. Disabled mode calculates and
     /// records predicted savings but returns the original input.
     pub compression_enabled: bool,
-    /// Whether API search results share consecutive file paths. Enabled by default.
+    /// Whether search records and non-file path lists share paths. Enabled by default.
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
     pub diff_compression_enabled: bool,
@@ -469,9 +469,10 @@ impl TokenlessRuntime {
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
             rtk_path: None,
-            rtk_data_dir: None,
+            rtk_data_dir: Some(self.data_dir.clone()),
         };
-        let outcome = post_tool_with_store(request, &options, self.stash_store.as_ref())?;
+        let outcome =
+            post_tool_with_outcomes(request, &options, self.stash_store.as_ref(), attribution)?;
         record_entry_stats(
             attribution,
             &outcome.stats,
@@ -601,7 +602,7 @@ impl TokenlessRuntime {
         if let Some(recorder) = &self.stats_recorder
             && let Err(e) = recorder.record(&record)
         {
-            warn_stats(&format!(
+            warn_soft(&format!(
                 "[tokenless-stats] WARNING: failed to record stats entry: {e}",
             ));
         }
@@ -703,7 +704,7 @@ fn finish_schema_compression(
 }
 
 /// Encode JSON as TOON and apply the shared minimum-length gate,
-/// no-savings, and dry-run policies.
+/// numeric fidelity gate, no-savings, and dry-run policies.
 ///
 /// Payloads with fewer than `min_toon_chars` characters pass through
 /// unchanged as [`Disposition::Passthrough`] because TOON savings on small
@@ -712,6 +713,11 @@ fn finish_schema_compression(
 /// yields token savings, restoring the pre-gate behavior. The input is
 /// still validated as JSON, so short invalid payloads fail instead of
 /// passing through.
+///
+/// A payload whose numbers TOON cannot carry also passes through unchanged
+/// as [`Disposition::Passthrough`], mirroring the two guards the PostTool
+/// JSON domain applies before TOON may replace exact JSON. Size alone never
+/// authorizes a lossy encoding.
 ///
 /// # Errors
 ///
@@ -732,22 +738,34 @@ pub fn compress_toon(
     // Character count, not byte length: the adapter hooks measure the same
     // threshold in Unicode code points, so CJK payloads gate identically.
     if input.chars().count() < min_toon_chars {
-        return Ok(CompressResult {
-            output: input.to_string(),
-            compressed_output: input.to_string(),
-            disposition: Disposition::Passthrough,
-            before_tokens,
-            after_tokens: before_tokens,
-            stash_writes: None,
-            stash_errors: None,
-            unrecoverable_truncations: None,
-            stash_size: None,
-        });
+        return Ok(toon_passthrough(input, before_tokens));
+    }
+    // Numeric fidelity gate, first half: decline the payload before encoding
+    // when a source literal cannot survive a `serde_json` round trip
+    // (`1e-400` underflows, `1.234567890123456789` rounds). This is the very
+    // predicate the PostTool JSON domain applies, shared through
+    // `tokenless_compressors` so the two TOON entries cannot drift apart.
+    // TOON spec v4.4 made keyed object maps and nested record arrays short
+    // enough to win the size comparison, so such payloads now reach this
+    // entry where 0.5.0 left them as JSON.
+    if !numbers_are_exact(input) {
+        return Ok(toon_passthrough(input, before_tokens));
     }
     let compressed_output = toon_format::encode_default(&value)
         .map_err(|error| RuntimeError::ToonEncode(error.to_string()))?
         .trim_end()
         .to_string();
+    // Numeric fidelity gate, second half: a candidate that does not decode
+    // back to the parsed value drops something TOON cannot represent
+    // (`-0.0` loses its sign, `1e3` returns as an integer), so the original
+    // JSON is emitted instead. An empty candidate stays on the no-savings
+    // branch below, which already reports it without claiming an encoding.
+    if !compressed_output.is_empty()
+        && !toon_format::decode_default::<serde_json::Value>(&compressed_output)
+            .is_ok_and(|decoded| decoded == value)
+    {
+        return Ok(toon_passthrough(input, before_tokens));
+    }
     let after_tokens = estimate_tokens(&compressed_output);
     let disposition = if compressed_output.is_empty() || after_tokens >= before_tokens {
         Disposition::NoSavings
@@ -774,6 +792,25 @@ pub fn compress_toon(
     })
 }
 
+/// Original-text result for a TOON attempt the policy declined to encode.
+///
+/// Both the minimum-length gate and the numeric fidelity gate report
+/// [`Disposition::Passthrough`]; callers that need to tell them apart
+/// compare the payload length against the same `min_toon_chars`.
+fn toon_passthrough(input: &str, before_tokens: usize) -> CompressResult {
+    CompressResult {
+        output: input.to_string(),
+        compressed_output: input.to_string(),
+        disposition: Disposition::Passthrough,
+        before_tokens,
+        after_tokens: before_tokens,
+        stash_writes: None,
+        stash_errors: None,
+        unrecoverable_truncations: None,
+        stash_size: None,
+    }
+}
+
 fn validate_input_size(input: &str) -> Result<(), RuntimeError> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(RuntimeError::InputTooLarge {
@@ -786,12 +823,12 @@ fn validate_input_size(input: &str) -> Result<(), RuntimeError> {
 /// Best-effort stderr warning whose own write failure cannot fail the
 /// command. `eprintln!` panics when writing to stderr fails (a full
 /// filesystem behind redirected logs, a closed descriptor), which would
-/// turn a fail-soft stats-recording warning into a process failure —
-/// the stats layer must stay invisible to the compression and
+/// turn an optional-state warning into a process failure —
+/// optional state must stay invisible to the compression and
 /// retrieval results. The write errors are discarded: there is no
 /// fallback channel to report a failed warning on, and failing the
 /// command here is exactly the regression to avoid.
-pub(crate) fn warn_stats(message: &str) {
+pub(crate) fn warn_soft(message: &str) {
     use std::io::Write;
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(message.as_bytes());
@@ -853,14 +890,12 @@ pub fn compress_response_with_store(
             stash_enabled: options.stash_enabled,
             require_reversibility: options.require_reversible,
             force_json: true,
-            preserve_top_level_shape: false,
             allow_toon: false,
             min_toon_chars: MIN_TOON_CHARS,
             json: json_config(options),
         },
         stash_store,
-    )
-    .map_err(|error| RuntimeError::Pipeline(error.to_string()))?;
+    );
 
     // Legacy measurement channel (see `CompressResult::compressed_output`):
     // the candidate the adapter produced, or the original when none ran.
@@ -969,7 +1004,7 @@ pub fn retrieve_recorded(
             None,
             None,
         ) {
-            warn_stats(&format!(
+            warn_soft(&format!(
                 "[tokenless-stats] WARNING: failed to record retrieve event: {e}",
             ));
         }
@@ -1085,14 +1120,14 @@ fn record_entry_stats(
                         "json_truncation"
                     };
                     if let Err(e) = recorder.record_artifacts(stats_id, artifact_kind, stash_keys) {
-                        warn_stats(&format!(
+                        warn_soft(&format!(
                             "[tokenless-stats] WARNING: failed to record stash artifacts: {e}"
                         ));
                     }
                 }
             }
             Err(e) => {
-                warn_stats(&format!(
+                warn_soft(&format!(
                     "[tokenless-stats] WARNING: failed to record stats entry: {e}",
                 ));
             }
@@ -1122,12 +1157,12 @@ mod tests {
     /// able to fail the command when stderr itself cannot be written
     /// (a full filesystem behind redirected logs). `eprintln!` panics
     /// on that shape, turning the fail-soft warning into exit 101 while
-    /// the compression output is fine; `warn_stats` must survive it.
+    /// the compression output is fine; `warn_soft` must survive it.
     /// Redirect fd 2 to /dev/full, call the helper, restore, and assert
     /// the call returned — a panicking write makes this test fail.
     #[test]
     #[cfg(target_os = "linux")]
-    fn warn_stats_survives_an_unwritable_stderr() {
+    fn warn_soft_survives_an_unwritable_stderr() {
         use std::os::unix::io::AsRawFd;
 
         let dev_full = std::fs::OpenOptions::new()
@@ -1140,7 +1175,7 @@ mod tests {
             libc::dup2(dev_full.as_raw_fd(), 2);
         }
         // The helper's whole contract: no panic, error discarded.
-        warn_stats("[tokenless-stats] WARNING: simulated stderr failure");
+        warn_soft("[tokenless-stats] WARNING: simulated stderr failure");
         // Restore before any assert can print.
         let restored = unsafe { libc::dup2(saved, 2) };
         let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -1318,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_response_api_removes_top_level_nulls() {
+    fn explicit_response_api_preserves_top_level_nulls() {
         let mut value = serde_json::Map::new();
         value.insert(
             "keep".to_owned(),
@@ -1332,10 +1367,10 @@ mod tests {
         let result =
             compress_response_with_store(&input, &CompressOptions::default(), true, None).unwrap();
 
-        assert_eq!(result.disposition, Disposition::Applied);
+        assert_eq!(result.disposition, Disposition::NoSavings);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&result.output).unwrap(),
-            serde_json::json!({"keep": "value"})
+            serde_json::Value::Object(value)
         );
     }
 
@@ -1469,13 +1504,8 @@ mod tests {
     }
 
     #[test]
-    fn pure_cleanup_savings_are_lossless_and_pass_required_reversibility() {
-        // Dropped debug fields, nulls, and empties keep the pre-pipeline
-        // judgment that they are cleanup, not content loss: with no
-        // truncation the candidate is lossless and applies even where
-        // reversible output is required and no stash exists. (The
-        // pre-pipeline path rejected exactly this combination.)
-        let input = serde_json::to_string(&serde_json::json!({
+    fn compaction_is_lossless_and_passes_required_reversibility() {
+        let input = serde_json::to_string_pretty(&serde_json::json!({
             "value": 1,
             "noise": null,
             "debug": "x".repeat(200),
@@ -1492,7 +1522,11 @@ mod tests {
         )
         .unwrap();
         assert!(result.applied());
-        assert!(!result.output.contains("debug"));
+        assert_eq!(result.unrecoverable_truncations.unwrap_or(0), 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.output).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&input).unwrap()
+        );
     }
 
     #[test]
@@ -2005,6 +2039,79 @@ mod tests {
         // The same contract holds with the gate disabled.
         let error = compress_toon("not json", true, 0).unwrap_err();
         assert!(matches!(error, RuntimeError::InvalidJson(_)));
+    }
+
+    /// 40 uniform records keyed by ID: the shape TOON spec v4.4 encodes as a
+    /// keyed tabular map, short enough to win the size comparison where 0.5.0
+    /// expanded every entry into an indented block longer than compact JSON.
+    fn keyed_records(ratio: &str) -> String {
+        let entries = (0..40)
+            .map(|index| {
+                let ratio = if index == 3 { ratio } else { "0.5" };
+                format!(r#""u{index}":{{"name":"user{index}","active":true,"ratio":{ratio}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"users":{{{entries}}}}}"#)
+    }
+
+    #[test]
+    fn toon_declines_numbers_it_cannot_retain() {
+        // The control proves this shape really does reach TOON, so every
+        // rejection below is the numeric gate rather than a size accident.
+        let clean = keyed_records("0.5");
+        assert!(clean.chars().count() >= MIN_TOON_CHARS);
+        let control = compress_toon(&clean, true, MIN_TOON_CHARS).unwrap();
+        assert!(control.applied());
+        assert!(control.after_tokens < control.before_tokens);
+
+        // `1e-400` underflows, `1.234567890123456789` rounds and
+        // `18446744073709551617` exceeds `u64`, so the literal scan rejects
+        // all three. `-0.0` and `1e3` survive the scan and are caught only by
+        // the decode round trip: TOON writes them as `0` and `1000`, losing
+        // the sign and the float type.
+        for ratio in [
+            "1e-400",
+            "-0.0",
+            "1e3",
+            "1.234567890123456789",
+            "18446744073709551617",
+        ] {
+            let input = keyed_records(ratio);
+            let result = compress_toon(&input, true, MIN_TOON_CHARS).unwrap();
+            assert_eq!(
+                result.disposition,
+                Disposition::Passthrough,
+                "ratio {ratio} must not be encoded"
+            );
+            assert_eq!(result.output, input, "ratio {ratio} must survive verbatim");
+            assert_eq!(
+                result.compressed_output, input,
+                "ratio {ratio} must not report a candidate"
+            );
+            assert_eq!(result.before_tokens, result.after_tokens, "ratio {ratio}");
+        }
+    }
+
+    #[test]
+    fn toon_numeric_gate_also_governs_dry_run() {
+        // Dry run predicts what an enabled run would emit, so a payload the
+        // gate declines must not be booked as a predicted saving either.
+        let input = keyed_records("1e-400");
+        let result = compress_toon(&input, false, MIN_TOON_CHARS).unwrap();
+        assert_eq!(result.disposition, Disposition::Passthrough);
+        assert_eq!(result.output, input);
+        assert_eq!(result.compressed_output, input);
+    }
+
+    #[test]
+    fn toon_numeric_gate_ignores_the_length_override() {
+        // `min_toon_chars = 0` opts out of the length gate only. A caller
+        // asking for short payloads to be encoded still gets exact numbers.
+        let input = r#"{"a":[1e-400,1e-400,1e-400]}"#;
+        let result = compress_toon(input, true, 0).unwrap();
+        assert_eq!(result.disposition, Disposition::Passthrough);
+        assert_eq!(result.output, input);
     }
 
     #[test]

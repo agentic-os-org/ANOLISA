@@ -6,11 +6,8 @@ license = "Apache-2.0"
 description = "Local AW Provider service and versioned Unix socket client"
 publish = false
 
-[[bin]]
-name = "aw"
-path = "src/main.rs"
-
 [dependencies]
+aw-adapter = { workspace = true }
 aw-contracts = { workspace = true }
 aw-config = { workspace = true }
 aw-core = { workspace = true }
@@ -20,7 +17,6 @@ aw-provider = { workspace = true }
 libc = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
-semver = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
 sha2 = { workspace = true }

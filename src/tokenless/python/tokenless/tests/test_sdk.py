@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 import tempfile
@@ -216,6 +218,19 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             package_files.return_value.joinpath.return_value = object()
             with self.assertRaisesRegex(RuntimeError, "unpacked wheel"):
                 self.sdk()
+
+    def test_packaged_rtk_uses_the_platform_executable_name(self) -> None:
+        package = Path(self.temporary_directory.name) / "package"
+        (package / "_bin").mkdir(parents=True)
+        for platform, name in (("win32", "rtk.exe"), ("linux", "rtk"), ("darwin", "rtk")):
+            with self.subTest(platform=platform):
+                executable = package / "_bin" / name
+                executable.touch(mode=0o755)
+                with patch("sys.platform", platform), patch(
+                    "anolisa_tokenless.sdk.files", return_value=package
+                ):
+                    self.assertEqual(self.sdk()._rtk_path, executable)
+                executable.unlink()
 
     async def test_pre_tool_uses_core_rewrite_and_preserves_input(self) -> None:
         sdk = self.sdk()
@@ -472,7 +487,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(stats, sdk.stats)
         self.assertEqual(stats.status.data_dir, sdk.runtime.data_dir)
 
-    async def test_tabular_pipeline_preserves_raw_recovery_and_bypasses_retrieved_output(self) -> None:
+    async def test_tabular_pipeline_preserves_all_cells_without_recovery(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
         for delimiter in (",", "\t"):
             with self.subTest(delimiter=delimiter):
@@ -497,14 +512,15 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                         attribution=Attribution("sdk-agent", "table-session", "table-call"),
                     )
                 )
-                self.assertEqual(result.applied_operations, (AppliedOperation.TABULAR_ROW_REDUCTION,))
+                self.assertEqual(result.applied_operations, (AppliedOperation.TABULAR_COMPACTION,))
                 self.assertEqual(result.content_type.value, "tabular")
-                self.assertEqual(result.recoverability.value, "retrievable")
-                self.assertIn("Incomplete table", result.output)
-                restored = await sdk.retrieve(
-                    RetrieveRequest(result.stash_keys[0], frozenset(result.stash_keys), self.attribution)
+                self.assertEqual(result.recoverability.value, "lossless")
+                self.assertEqual(result.stash_keys, ())
+                self.assertNotIn("Incomplete table", result.output)
+                self.assertEqual(
+                    list(csv.reader(io.StringIO(result.output), delimiter=delimiter)),
+                    list(csv.reader(io.StringIO(original), delimiter=delimiter)),
                 )
-                self.assertEqual(restored.payload.encode(), original.encode())
                 for kind, optimization in (
                     (ResultKind.RETRIEVE, OutputOptimization.NONE),
                     (ResultKind.TOOL, OutputOptimization.RTK),
@@ -513,7 +529,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                         PostToolRequest(
                             result_kind=kind,
                             tool_name="tokenless_retrieve",
-                            content=restored.payload,
+                            content=original,
                             status=ToolResultStatus.SUCCESS,
                             content_origin=ContentOrigin.API_RESPONSE,
                             output_optimization=optimization,

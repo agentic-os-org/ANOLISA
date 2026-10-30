@@ -213,6 +213,44 @@ fn owned_artifact(installation: &Installation) -> &OwnedArtifact {
 }
 
 #[test]
+fn no_deps_system_install_skips_runtime_requirements_after_locked_replanning() {
+    for no_deps in [false, true] {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let repo_url = write_local_repo(&repo);
+        let manifest = format!(
+            "{}\n[[component.dependencies]]\nname = \"future-kernel\"\nkind = \"platform-capability\"\nmin_kernel = \"9999.0\"\n",
+            component_manifest_toml("agentsight", "0.2.0", &["system"])
+        );
+        let artifact = build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"#!/bin/sh\nexit 0\n"),
+        ]);
+        replace_repo_artifact(&repo, "agentsight", &artifact);
+        let ctx = ctx_with_prefix(false, Some(tmp.path().join("system")));
+        let mut args = args("agentsight");
+        args.repo = Some(repo_url);
+        args.no_deps = no_deps;
+        let result = handle_with_fake_rpm(args, &ctx);
+        let layout = common::resolve_layout(&ctx);
+        if no_deps {
+            result.expect("system install must skip dependencies even after replanning under lock");
+            assert!(layout.bin_dir.join("agentsight").is_file());
+            let store = StateStore::load_for_layout(
+                &layout.state_dir.join("installed.toml"),
+                anolisa_platform::privilege::effective_uid(),
+                &layout,
+            )
+            .unwrap();
+            assert!(store.find(ObjectKind::Component, "agentsight").is_some());
+        } else {
+            assert!(result.unwrap_err().reason().contains("future-kernel"));
+            assert!(!layout.bin_dir.join("agentsight").exists());
+        }
+    }
+}
+
+#[test]
 fn install_dry_run_resolves_without_writing_files() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
@@ -793,6 +831,13 @@ fn install_raw_end_to_end_from_local_repo() {
                     "%{NAME}\n",
                     "anolisa-component(agentsight)",
                 ] => "no package provides anolisa-component(agentsight)",
+                [
+                    "-q",
+                    "--whatprovides",
+                    "--qf",
+                    "%{NAME}\n",
+                    "anolisa-component-core(agentsight)",
+                ] => "no package provides anolisa-component-core(agentsight)",
                 ["-q", "agentsight"]
                 | [
                     "-q",
@@ -1456,6 +1501,83 @@ fn install_raw_pre_install_hook_skipped_as_missing_on_fresh_install() {
     assert!(
         !sentinel.exists(),
         "pre_install must skip when its script is not yet on disk"
+    );
+}
+
+/// A *strict* declaration of a contract phase no anolisa command executes
+/// is an authored-input defect: the author requires the hook to run and
+/// this CLI cannot run it, so the install handler must refuse it as
+/// `INVALID_ARGUMENT` with exit status 2 — not `EXECUTION_FAILED`/exit 1 —
+/// before laying any files, the same distinction `validate_owned_install`
+/// draws between bad input and machine failure.
+#[test]
+fn install_raw_strict_dead_hook_phase_is_invalid_argument() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_hook(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        "pre_restart",
+        true,
+        "#!/bin/sh\ntrue\n",
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect_err("a strict hook phase no anolisa command runs must be refused");
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert_eq!(err.exit_code(), 2, "authored-input defects exit 2");
+    assert!(
+        err.reason().contains("no anolisa command runs"),
+        "reason must explain the refusal: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("pre_restart"),
+        "reason must name the declared phase: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("strict"),
+        "reason must state the strict contract: {}",
+        err.reason()
+    );
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "refused install must not lay the binary"
+    );
+}
+
+/// A non-strict declaration of a phase no anolisa command executes is the
+/// default capability limitation: the install proceeds and lays the
+/// component, with the dead phase surfaced as a warning naming it — not a
+/// reason to reject the whole component.
+#[test]
+fn install_raw_non_strict_dead_hook_phase_warns_and_proceeds() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_hook(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        "pre_restart",
+        false,
+        "#!/bin/sh\ntrue\n",
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("a non-strict dead phase must not block the install");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        layout.bin_dir.join("agentsight").exists(),
+        "the install must lay the binary"
     );
 }
 
@@ -2303,6 +2425,7 @@ fn install_all_dry_run_rejects_conflicts_between_planned_components() {
         component: None,
         all: true,
         fail_fast: false,
+        no_deps: false,
         version: None,
         backend: Some("raw".to_string()),
         repo: None,
@@ -2392,6 +2515,7 @@ package = "agentsight"
         component: None,
         all: true,
         fail_fast: false,
+        no_deps: false,
         version: None,
         backend: Some("raw".to_string()),
         repo: Some(override_url),

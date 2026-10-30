@@ -295,6 +295,11 @@ fn parse_dmesg_lines(content: &str) -> Result<Vec<OomKillEvent>, Box<dyn std::er
     let mut events = Vec::new();
     // Boot epoch, only needed for boot-relative stamps; read once per scan.
     let boot_ns = boot_time_ns();
+    // Last report per pid, to fold the structured and summary spellings of one
+    // kill. `dmesg -T` has one-second resolution, so the pair can straddle a
+    // boundary and defeat the downstream exact-(pid, timestamp) dedup.
+    let mut last_report: std::collections::HashMap<i32, (bool, i64)> =
+        std::collections::HashMap::new();
 
     for line in content.lines() {
         // Summary format: "Killed process <pid> (<name>)"
@@ -302,14 +307,14 @@ fn parse_dmesg_lines(content: &str) -> Result<Vec<OomKillEvent>, Box<dyn std::er
         // Both must be recognised — memcg OOM on modern kernels (5.0+) emits
         // only the structured line, so matching the summary alone misses it (#3130).
         let parsed = if line.contains("Killed process") {
-            parse_killed_process(line)
+            parse_killed_process(line).map(|parsed| (parsed, false))
         } else if line.contains("oom-kill:") {
-            parse_oom_kill_structured(line)
+            parse_oom_kill_structured(line).map(|parsed| (parsed, true))
         } else {
             continue;
         };
 
-        let (pid, process_name) = match parsed {
+        let ((pid, process_name), structured) = match parsed {
             Some(v) => v,
             None => continue,
         };
@@ -328,6 +333,17 @@ fn parse_dmesg_lines(content: &str) -> Result<Vec<OomKillEvent>, Box<dyn std::er
                 _ => continue,
             },
         };
+
+        // One kill reported in both formats. Same-format reports stay separate:
+        // they are two kills of a recycled pid, not two descriptions of one.
+        if let Some((previous_structured, previous_ts)) = last_report.get(&pid) {
+            if *previous_structured != structured
+                && timestamp_ns.abs_diff(*previous_ts) <= 1_000_000_000
+            {
+                continue;
+            }
+        }
+        last_report.insert(pid, (structured, timestamp_ns));
 
         events.push(OomKillEvent {
             timestamp_ns,
@@ -1201,6 +1217,29 @@ esac
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].pid, 669334);
         assert_eq!(events[0].process_name, "python3");
+    }
+
+    #[test]
+    fn parse_dmesg_lines_collapses_one_kill_reported_twice() {
+        // A memcg OOM emits both the structured `oom-kill:` line and the
+        // "Killed process" summary. `dmesg -T` has one-second resolution, so
+        // the pair straddling a second boundary used to produce two events and
+        // two agent_crash rows for one kill.
+        let dmesg = "[Fri Apr 17 10:00:00 2026] oom-kill:constraint=CONSTRAINT_MEMCG,task=python3,pid=12345,uid=0\n\
+                     [Fri Apr 17 10:00:01 2026] Out of memory: Killed process 12345 (python3) total-vm:1024kB\n";
+        let events = parse_dmesg_lines(dmesg).expect("parse");
+        assert_eq!(events.len(), 1, "one kill must produce one event");
+        assert_eq!(events[0].pid, 12345);
+        assert_eq!(events[0].process_name, "python3");
+    }
+
+    #[test]
+    fn parse_dmesg_lines_keeps_distinct_kills_of_one_pid() {
+        // Two structured reports seconds apart are two kills (a recycled pid),
+        // not two descriptions of one.
+        let dmesg = "[Fri Apr 17 10:00:00 2026] oom-kill:constraint=CONSTRAINT_MEMCG,task=python3,pid=12345,uid=0\n\
+                     [Fri Apr 17 10:00:05 2026] oom-kill:constraint=CONSTRAINT_MEMCG,task=python3,pid=12345,uid=0\n";
+        assert_eq!(parse_dmesg_lines(dmesg).expect("parse").len(), 2);
     }
 
     #[test]

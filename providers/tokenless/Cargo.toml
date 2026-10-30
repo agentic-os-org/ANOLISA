@@ -1,0 +1,36 @@
+[package]
+name = "aw-provider-tokenless"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "AW tool lifecycle Provider bridge to the Tokenless Protocol v2 CLI"
+publish = false
+
+[dependencies]
+aw-exec = { workspace = true }
+aw-provider = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+shlex = { workspace = true }
+libc = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+aw-provider-sec-core = { workspace = true }
+
+[workspace]
+resolver = "2"
+
+[workspace.dependencies]
+aw-exec = { path = "../../src/aw/crates/aw-exec" }
+aw-provider = { path = "../../src/aw/crates/aw-provider" }
+aw-provider-sec-core = { path = "../agent-sec-core" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+shlex = "1"
+tempfile = "3"
+thiserror = "2"

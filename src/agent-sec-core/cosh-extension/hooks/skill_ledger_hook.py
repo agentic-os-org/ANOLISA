@@ -224,6 +224,8 @@ def _supported_skill_bases(cwd: str) -> list[Path]:
         Path(data_home) / "anolisa/skills",
         Path("/usr/share/anolisa/skills"),
         Path("/usr/local/share/anolisa/skills"),
+        Path("/usr/share/agent-sec-core/skills"),
+        Path("/usr/local/share/agent-sec-core/skills"),
     ]
 
 

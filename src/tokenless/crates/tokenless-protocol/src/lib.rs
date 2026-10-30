@@ -305,7 +305,7 @@ pub enum PreToolAction {
 pub enum OutputOptimization {
     /// No earlier optimization is known.
     None,
-    /// RTK rewrote the command and owns the resulting output shape.
+    /// RTK owns the output unless complete receipts confirm it was unchanged.
     Rtk,
 }
 
@@ -405,7 +405,8 @@ pub struct PostToolRequest {
     /// Shell command line behind a `command_output` result, when the host has it.
     ///
     /// Core reports a plain print of local files such as `cat page.html` as
-    /// `file_read`; the field is ignored for every other origin.
+    /// `file_read`. RTK fallback requires the exact registered execution command,
+    /// including its generation; missing or modified commands retain RTK ownership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// Optimization state returned by PreTool.
@@ -509,14 +510,15 @@ pub enum AppliedOperation {
     TabularCompaction,
     /// CSV/TSV rows were omitted behind a reference to the original text.
     TabularRowReduction,
-    /// Consecutive search records share a full path without removing source text.
+    /// Search listings share full paths or directory prefixes without dropping records.
     SearchPathSharing,
     /// Unmodified Git diff context was reduced with the original available in Stash.
     DiffReduction,
     /// An HTML page was rendered as Markdown with enumerated non-content elements
     /// removed and the original available in Stash.
     HtmlExtraction,
-    /// Empty and diagnostic JSON fields were removed.
+    /// JSON was serialized compactly, optionally unwrapping one JSON string
+    /// envelope, without omitting payload values.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
     JsonRecordReduction,

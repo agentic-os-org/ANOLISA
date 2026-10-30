@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -164,7 +164,8 @@ impl AgentAdapter for QwenCliAdapter {
             message: "starting co stream-json backend".to_string(),
         })?;
 
-        let mut child = Command::new(&prepared.program)
+        let mut command = super::command_with_trusted_startup_path(&prepared.program);
+        let mut child = command
             .args(qwen_args_with_prompt(&prepared))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

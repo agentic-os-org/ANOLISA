@@ -4,15 +4,19 @@
 
 This reference describes the fields accepted by the current configuration
 validator. For a starter file, current availability and the intended Agent
-workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
+workflow, begin with the [user guide](../../../user-guide/en/aw/index.md).
 
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships
 between fields. The local Host performs Provider discovery and admission; the
-selected Adapter performs its native preparation checks before binding. Qoder
-requires CLI >=1.1.64 and records the probed version instead of an exact-release gate; OpenClaw,
-QwenPaw, Hermes, Pi, Claude SDK and AgentScope SDK retain their adapter-specific
-version or revision restrictions. AgentScope SDK requires exactly 2.0.6.
+selected Adapter performs its native preparation checks before binding. Framework
+versions are recorded as runtime metadata. `aw config validate` checks the schema,
+references and capability combinations without requiring installed frameworks.
+`aw run` checks the installed entrypoint and its native registration contract;
+Plugin and SDK bridges require readiness receipts. SDK factories and callbacks
+check their required interfaces and protocol fields. Qoder CLI uses native command
+Hooks without a startup receipt.
+See [verified combinations](native-agents.md) for the native test baselines.
 For a working four-framework example, start with the [integration walkthrough](integration.md).
 
 ## Document fields
@@ -31,7 +35,9 @@ All fields below are inside `spec` unless stated otherwise.
 | `execution.guarantee` | Only `native_hook`; no OS, final or protected guarantee |
 | `execution.default_event_budget_ms` | Required positive shared event budget, not a fresh budget for each step |
 | `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; the service persists execution metadata |
-| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw`, `hermes`, `pi`, `claude-sdk` or `agentscope`; recognition is not runtime certification |
+| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `qoder-sdk`, `openclaw`, `hermes`, `pi`, `claude-sdk` or `agentscope`; recognition is not runtime certification |
+| `agents.<id>.shutdown_grace_ms` | External-signal shutdown grace, 1..120000 ms, default 2000; see [lifecycle](deployment/lifecycle.md) |
+| `daemon.limits` | Resident service concurrency limits; see [capacity settings](deployment/lifecycle.md#concurrent-service-budgets) |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |
 | `agents.<id>.qoder.sequential` | Optional boolean for `adapter: qoder`; marks generated native groups as sequential; false does not override other matching groups |
 | `providers.<id>.protocol` | Defaults to invoke-only `aw-hook/v1alpha1`; explicit `aw-provider/v1alpha1` retains structured messages, `native-hook/v1alpha1` retains native callback bytes |
@@ -47,6 +53,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `events.tool.before.guard` | Optional reference to a declared `security.violation` event, enabled when this before event is enabled |
 | `steps[].id`, `steps[].enabled` | ID unique within its event; enabled defaults to `true` |
 | `steps[].provider` | Declared Provider ID whose protocol must match the step form |
+| `steps[].match.tools` | Optional tool selector array for a tool-before/after step; intersects the event selector; omitted means all tools |
 | `steps[].operation` | Defaults to `invoke` for boolean Hooks (the only supported value); structured Providers require an explicit operation checked against discovery |
 | `steps[].native` | Empty object selecting native callback execution; mutually exclusive with `operation` and `effects` |
 | `steps[].effects` | Required nonempty unique list; all requested on a boolean match, an admitted upper bound for structured Providers; omit for native steps |
@@ -64,6 +71,63 @@ fields. Missing Provider references and duplicate step IDs are errors even in
 disabled steps, so enabling a step does not uncover a hidden reference typo.
 Defaults are documented behavior, not values inserted into the parsed document.
 
+## Qoder SDK execution assets
+
+Set these fields under `agents.<id>.qoder_sdk` for a `qoder-sdk` target.
+Omit them when the application needs no execution extensions.
+
+| Field | Integration and limits |
+| --- | --- |
+| `sites` | Nonempty unique list of `global` and/or `cn`; the first entry is the default. Omitted: `[global]`. Install the selected SDK packages in the application directory. |
+| `command_wrappers` | Up to 16 grants for native Bash consumers. Each is `{path, sha256}` with an absolute regular-file path and a 64-character lowercase hexadecimal SHA-256. |
+| `runtime_preloads` | Up to 16 grants with the same file shape, for trusted Worker imports. |
+| `declarative_plugins` | Default `false`; admit snapshots of local role, Agent, command and skill assets on ordinary resident Queries using managed daemons. |
+
+Each granted file is limited to 16 MiB. Keep wrappers and preloads immutable in
+the image. AW verifies files before SDK probing and rechecks them for each Query;
+a mismatch rejects startup. These limits count installed assets, not lifetime
+Queries or tool calls. Changing assets or sites requires a worker restart.
+
+The Bridge accepts `awSite: "global"` or `"cn"` in `startDaemon`,
+`createQuery().options` and `createSdkMcpServer`. Omitted Query sites inherit the
+managed daemon's site; an explicit different site is rejected.
+
+### Worker imports
+
+On `startDaemon`, `executableArgs` accepts paired `--import` arguments naming
+admitted preload paths. `pathToQoderCLIExecutable`, if provided, must identify
+the selected SDK package's official Worker. AW rejects other executable and
+transport replacements. Direct Queries reject `executableArgs` because the pinned
+Worker-thread transport ignores it; use a managed daemon for imports.
+
+### Declarative plugin snapshots
+
+With `declarative_plugins: true`, pass local plugin roots through native
+`options.plugins: [{type: "local", path: "/absolute/plugin"}]`. Use metadata
+manifests and declarative Markdown. Agent `tools` selections are supported.
+AW rejects executable plugin Hooks, MCP/settings redirection, shell interpolation,
+`permissionMode`, `allowed-tools`, and skill/command `context` or `agent`
+frontmatter. Unknown or ambiguous frontmatter and symlinks are rejected.
+Use managed SDK Hooks or MCP factories for executable behavior.
+
+| Snapshot resource | Per-Query limit |
+| --- | --- |
+| Files and directories across all plugin roots | 10,000 entries |
+| Total content | 128 MiB |
+| Directory depth below each root | 64 |
+
+AW forces `skills.disableShellExecution: true` and confirms native settings
+before releasing the first prompt. Direct Queries reject this profile because
+they cannot confirm the effective settings. Reloadable launches reject plugin
+snapshots and command wrappers before SDK probing. This profile was verified with
+SDK 1.0.56 / Worker 1.1.78. Other releases must retain the native settings and
+cleanup interfaces; revalidate on SDK upgrades.
+
+After confirmed native and callback drain, AW removes snapshots. Unconfirmed
+cleanup retains snapshots and scope ownership; inspect the failure and restart
+the worker. Native command consumers additionally require explicit approval and
+completion acknowledgement; see the [Qoder SDK factory](agents/qoder-sdk.md#native-bash-command-consumers).
+
 ## Default boolean hooks
 
 Omitting a Provider's `protocol` selects `aw-hook/v1alpha1`. Its step omits
@@ -75,7 +139,7 @@ correlation internally. Nonzero exit, timeout, incomplete stdin, invalid or
 oversized output remains a failure governed by `on_error`. Stdout is capped at
 32 bytes as well as the configured output ceiling. Existing explicitly declared
 structured and native protocols keep their behavior. See the
-[boolean script example](../../../user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
+[boolean script example](providers/hooks.md).
 
 ## Native commands and runtime support
 
@@ -99,15 +163,18 @@ Runtime currently admits `tool.before` with `observe`/`block` and `tool.after`
 with `observe` or a single final structured `replace_result`, plus native steps
 at these points. Boolean/native steps cannot request result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
-Other recognized events, exact selectors, guards and stronger execution guarantees
-are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope 2.0.6 factories have launch Adapters;
-their supported versions, entrypoints and
-after-event coverage are listed in the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
+Other recognized events, guards and stronger execution guarantees
+are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope factories have launch Adapters;
+their verified baselines, entrypoints and
+after-event coverage are listed in the [native Agent reference](native-agents.md).
 
 ## Events, effects and tool selection
 
-The configuration recognizes these 16 names. Their descriptions define the
-vocabulary; runtime support is the narrower surface described above.
+The configuration recognizes these 16 names. Public Provider dispatch currently
+covers only `tool.before` and `tool.after`; the other fourteen names are reserved.
+Implementation status is in the [16-Hook overview](../../../user-guide/en/aw/capabilities.md#16-common-hooks).
+See the [capability matrix](../../../user-guide/en/aw/capabilities.md#hook-support-matrix)
+for Adapter effect support.
 
 | Event | Meaning |
 | --- | --- |
@@ -135,8 +202,8 @@ parameters. It is not a second native Hook or a promise to run after every
 third-party Hook. Parameter changes after the check require another check at
 the actual enforcement boundary.
 
-`tool.before` permits `observe`, `block`, `replace_input`. `tool.after` permits
-`observe`, `replace_result`. Other events are observation-only in this revision.
+The schema vocabulary permits `tool.before` to declare `observe`, `block`, `replace_input`. `tool.after` permits
+`observe`, `replace_result`. Other events accept observation effects in the schema. Runtime admission supports only the two implemented tool events and rejects `replace_input`.
 `ask` is reserved for before steps; an active step requesting it is rejected.
 An explicitly disabled before step can retain `ask` for future editing, without
 acquiring approval capability. Native host approval is unaffected.
@@ -145,13 +212,41 @@ acquiring approval capability. Native host approval is unaffected.
 `withhold_result` is valid only after a tool. `report` records a failure and
 continues. Withholding requires a verified model-consumption boundary; replacing
 a history entry is insufficient. Required redaction must not use `report`.
-The service must enforce these requirements at admission and execution.
+The service enforces these requirements at admission and execution. Ordinary
+Qoder SDK and QwenPaw resident launches declare `withhold_result` for structured Provider
+and boolean Hook after steps. Reloadable launches and native-command steps reject it.
 
-Selectors are `*`, `bash`, `file_read`, `file_write`, or
-`native:<adapter>:<exact-name>` for any declared adapter ID. Native selectors
-are host-specific, not portable tool semantics. There are no regex/glob selectors
-other than the single `*`. All-tools routing includes native custom tools and
-preserves their input; it does not make every Provider understand every tool.
+Both tool events and their steps accept `match.tools`. A step runs only when
+the tool matches both lists; entries within one list are alternatives. Omitting
+either selector, or using `["*"]`, selects all tools at that level. Lists must
+be nonempty and unique; `*` must stand alone. The rule applies to structured
+Providers, boolean Hooks and native commands.
+
+Selectors are case-sensitive `*`, `bash`, `file_read`, `file_write`, or
+`native:<adapter>:<exact-name>`. Standard names match normalized
+`event.tool.name`. Native selectors match the registered Adapter ID in
+`event.agent.adapter` and the retained `event.tool.native_name`; the Adapter ID
+is separate from the configured target name. For example, `native:qoder:Bash`
+selects Qoder's exact `Bash` name. There are no regex or glob patterns; `*` is the
+only wildcard. Provider-private tool mappings remain independently configured.
+
+Before startup, AW projects event and step selectors for the selected Adapter, excluding steps whose intersection is provably empty. Only remaining steps participate in Provider preparation and effect admission; structure and references are still checked across the complete configuration.
+`aw validate` reports projected-out steps for each target. `aw config validate --json` uses `result.projected_out_steps` with target, event and step_id.
+OpenClaw after normalizes `bash`, `apply-patch` and `cron` to `exec`, `apply_patch` and `automations`; native_name retains the callback's original name.
+
+Selection occurs in the shared Host after callback normalization, binding checks
+and the once-only step claim. An unmatched step completes with `kind: skipped`,
+no effects and no invocation process. It still validates the normalized event,
+checks cancellation and the shared deadline, and retains step order, correlation
+and completion accounting. Enabled structured Providers still complete
+`describe` and `validate_config` during preparation, even when a later tool
+does not match.
+
+A skipped or neutral step grants no permission. Native denial and pending
+permission requests retain precedence; unsupported argument rewrites remain
+rejected. A Tokenless PreTool suggestion requires a fresh call through selected
+security steps and native permission checks. PostTool replacement remains one
+final authorized text slot, preserving the native envelope and failure status.
 
 `required: false` cannot authorize dropping an active control effect or its
 failure action. Runtime admission checks every enabled step against
@@ -164,11 +259,20 @@ reported explicitly. Parsing alone does not perform that admission.
 The parser accepts one UTF-8 YAML or JSON document, bounded to 4 MiB before and
 after expansion and nesting depth 32. Duplicate keys, non-string mapping keys,
 custom YAML tags, merge keys, non-finite numbers and multiple documents fail.
-Ordinary aliases are expanded within those limits. Diagnostics include field
+Ordinary aliases are expanded within those limits. JSON input follows the same
+YAML scalar resolution: an exponent spelling such as `1e3` arrives as
+float-typed `1000.0`, which the schema's integer type accepts. A JSON starter
+document mirrors the YAML starter at
+[aw.minimal.json](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.minimal.json).
+Decimal integer scalars outside both the signed and unsigned 128-bit ranges are
+rejected rather than rounded into floats, including scalars tagged `!!float`.
+Use exponent/decimal notation for floating-point values and quoted strings for
+exact large identifiers. This does not expand the existing integer value range.
+
+Diagnostics include field
 paths or source locations and constraints without echoing field values.
 
 This alpha configuration is separate from existing capability wire records and
 their Schema IDs/digests. Do not pass Provider configuration through the
 integer-only wire canonicalizer. No native files are installed or changed by
-this validator; rollback consists of removing the new library dependency and
-restoring any configuration draft edited by the caller.
+this validator; rollback restores configuration compatible with the selected binary.

@@ -1,7 +1,15 @@
 {
   "version": 1,
   "required_targets": [
+    "aw-adapter/lib/aw_adapter",
+    "aw-cli/lib/aw_cli",
+    "aw-cli/test/config_edit_cli",
+    "aw-cli/test/inventory",
+    "aw-cli/test/packages",
+    "aw-cli/test/packages_pty",
+    "aw-cli/test/standalone",
     "aw-config/test/configuration",
+    "aw-config/test/policy_update",
     "aw-contracts/test/canonical",
     "aw-contracts/test/contracts",
     "aw-contracts/test/orchestration",
@@ -10,7 +18,8 @@
     "aw-core/test/journal",
     "aw-exec/test/execution",
     "aw-host/test/host",
-    "aw-package/test/installation",
+    "aw-cli/test/installation",
+    "aw-package/lib/aw_package",
     "aw-provider-sec-core/test/provider",
     "aw-provider-tokenless/test/managed_rtk",
     "aw-provider-tokenless/test/pretool",
@@ -19,58 +28,101 @@
     "aw-provider/test/admission",
     "aw-provider/test/protocol",
     "aw-provider/test/views",
-    "aw-service/bin/aw",
     "aw-service/lib/aw_service",
-    "aw-service/test/agentscope",
-    "aw-service/test/claude_sdk",
-    "aw-service/test/inspect",
-    "aw-service/test/launcher",
-    "aw-service/test/openclaw",
-    "aw-service/test/pi",
-    "aw-service/test/posttool",
-    "aw-service/test/pretool",
-    "aw-service/test/qwenpaw",
-    "aw-service/test/service"
+    "aw-cli/test/agentscope",
+    "aw-cli/test/claude_sdk",
+    "aw-cli/test/inspect",
+    "aw-cli/test/launcher",
+    "aw-cli/test/openclaw",
+    "aw-cli/test/pi",
+    "aw-cli/test/posttool",
+    "aw-cli/test/pretool",
+    "aw-cli/test/qwenpaw",
+    "aw-cli/test/service",
+    "aw-exec/test/packages",
+    "aw-cli/test/qoder_sdk",
+    "aw-cli/test/native_configuration",
+    "aw-config/test/native_sources"
   ],
   "cases": {
+    "package-doctor-files": {
+      "target": "aw-cli/test/inventory",
+      "test": "list_keeps_recorded_packages_while_doctor_reports_missing_files"
+    },
+    "package-database-contract": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::malformed_records_reject_unknown_schema_fields_duplicates_and_escaping_paths"
+    },
+    "package-description": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::generic_package_descriptions_allow_external_names_stable_versions_and_no_provider"
+    },
+    "package-pty-consent": {
+      "target": "aw-cli/test/packages_pty",
+      "test": "confirmation::tty_acceptance_runs_removal_and_quiet_does_not_bypass_the_prompt"
+    },
+    "package-pty-refusal": {
+      "target": "aw-cli/test/packages_pty",
+      "test": "confirmation::tty_refusal_default_and_eof_preserve_every_installed_byte"
+    },
+    "package-pty-signal": {
+      "target": "aw-cli/test/packages_pty",
+      "test": "confirmation::prompt_interrupts_retain_signal_exit_codes_without_starting_removal"
+    },
+    "package-pty-channel": {
+      "target": "aw-cli/test/packages_pty",
+      "test": "confirmation::mixed_terminal_channels_and_json_never_open_a_confirmation_prompt"
+    },
+    "package-pty-metadata": {
+      "target": "aw-cli/test/packages_pty",
+      "test": "confirmation::prompt_metadata_escapes_terminal_and_bidi_control_characters"
+    },
+    "package-pty-color": {
+      "target": "aw-cli/test/packages_pty",
+      "test": "terminal::actual_pty_obeys_auto_environment_and_explicit_color_choices"
+    },
+    "package-pty-output-failure": {
+      "target": "aw-cli/test/packages_pty",
+      "test": "terminal::output_write_failure_does_not_undo_a_completed_installation"
+    },
     "catalog": {
-      "target": "aw-service/bin/aw",
-      "test": "cli::adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema"
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema"
     },
     "security-retry": {
-      "target": "aw-service/test/pretool",
+      "target": "aw-cli/test/pretool",
       "test": "retry_neutrality_cannot_undo_security_denials_or_fail_closed_errors"
     },
     "final-replacement": {
-      "target": "aw-service/test/posttool",
+      "target": "aw-cli/test/posttool",
       "test": "adapters_keep_observers_and_user_hooks_before_one_final_replacement"
     },
     "qoder-lifecycle": {
-      "target": "aw-service/test/launcher",
+      "target": "aw-cli/test/launcher",
       "test": "two_agent_instances_release_independently_and_leave_the_daemon_running"
     },
     "openclaw-lifecycle": {
-      "target": "aw-service/test/openclaw",
+      "target": "aw-cli/test/openclaw",
       "test": "plugin_callbacks_preserve_configuration_profile_raw_events_and_native_parallelism"
     },
     "hermes-lifecycle": {
-      "target": "aw-service/test/launcher",
+      "target": "aw-cli/test/launcher",
       "test": "hermes_probes_and_install_writers_cancel_and_reap_on_signals"
     },
     "qwenpaw-lifecycle": {
-      "target": "aw-service/test/qwenpaw",
+      "target": "aw-cli/test/qwenpaw",
       "test": "app_exit_before_readiness_releases_instance_and_owned_files"
     },
     "pi-lifecycle": {
-      "target": "aw-service/test/pi",
+      "target": "aw-cli/test/pi",
       "test": "foreground_factory_installs_both_hooks_and_releases_binding"
     },
     "claude-sdk-lifecycle": {
-      "target": "aw-service/test/claude_sdk",
+      "target": "aw-cli/test/claude_sdk",
       "test": "claude_hook_cli_preserves_deny_success_failure_identity_and_audit"
     },
     "agentscope-lifecycle": {
-      "target": "aw-service/test/agentscope",
+      "target": "aw-cli/test/agentscope",
       "test": "no_factory_attachment_never_reports_ready_and_releases_binding_files"
     },
     "security-block": {
@@ -128,6 +180,690 @@
     "cancel-initialization": {
       "target": "aw-service/lib/aw_service",
       "test": "audit::tests::cancellation_fences_hook_opens_blocked_in_initial_audit_claim"
+    },
+    "policy_update_boundary": {
+      "target": "aw-config/test/policy_update",
+      "test": "launch_and_service_edits_are_rejected_without_values"
+    },
+    "policy_update_offline_cli": {
+      "target": "aw-cli/test/launcher",
+      "test": "policy_update::policy_scope_validation_does_not_launch_agents_or_providers_or_modify_files"
+    },
+    "runtime-reload": {
+      "target": "aw-cli/test/launcher",
+      "test": "runtime_policy::prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting"
+    },
+    "reload-busy": {
+      "target": "aw-cli/test/service",
+      "test": "policy::whole_request_and_unfinished_tools_return_busy_without_deferred_activation"
+    },
+    "reload-race": {
+      "target": "aw-cli/test/service",
+      "test": "policy::request_arriving_during_preparation_wins_and_parallel_update_is_busy"
+    },
+    "reload-rollback": {
+      "target": "aw-cli/test/service",
+      "test": "policy::failed_preparation_conflict_and_frozen_edits_preserve_policy_and_context"
+    },
+    "reload-cancel": {
+      "target": "aw-cli/test/service",
+      "test": "policy::disconnected_update_cancels_preparation_without_later_activation"
+    },
+    "package-plan-readonly": {
+      "target": "aw-cli/test/packages",
+      "test": "management::dry_run_is_repeatable_and_creates_neither_database_nor_prefix"
+    },
+    "package-independent-install": {
+      "target": "aw-cli/test/packages",
+      "test": "management::generic_packages_support_selective_removal_exact_dependencies_and_reinstall"
+    },
+    "package-registered-prefix": {
+      "target": "aw-cli/test/packages",
+      "test": "management::prefix_queries_follow_registration_from_another_user_database_location"
+    },
+    "package-generic-plan": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::management::generic_install_plan_is_read_only_and_does_not_require_aw_core"
+    },
+    "package-cross-prefix-reverse-dependency": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::management::registered_reverse_dependencies_in_other_prefixes_prevent_removal"
+    },
+    "package-interrupted-rollback": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::sigkill_before_database_commit_rolls_back_and_replay_is_idempotent"
+    },
+    "package-interrupted-commit": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::sigkill_after_commit_and_before_cleanup_finishes_without_undoing_payload"
+    },
+    "package-recovery-conflict": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::recovery_keeps_user_replacements_and_retains_management_metadata"
+    },
+    "package-runtime-lease": {
+      "target": "aw-exec/test/packages",
+      "test": "active_shared_lease_blocks_mutation_until_the_last_owner_releases_it"
+    },
+    "package-provider-lease": {
+      "target": "aw-host/test/host",
+      "test": "package_leases::prepared_hosts_retain_managed_files_until_the_last_snapshot_drops"
+    },
+    "package-config-locks": {
+      "target": "aw-package/lib/aw_package",
+      "test": "configuration::installed::tests::registered_configuration_holds_both_read_locks_through_publication"
+    },
+    "package-system-lock-migration": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::committed_system_lock_permissions_survive_interrupted_cleanup_and_retry"
+    },
+    "package-manager-authority": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::management::externally_managed_installations_reject_raw_install_and_uninstall"
+    },
+    "package-capacity-admission": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::plan::install::tests::combined_prefix_byte_limit_blocks_append_without_preventing_later_removal"
+    },
+    "package-journal-publication-gap": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::journal_creation_gap_retires_only_its_empty_directory_and_allows_new_operations"
+    },
+    "package-journal-retirement-gap": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::final_journal_unlink_gap_preserves_committed_payload_and_recovery_is_idempotent"
+    },
+    "package-journal-capacity": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::journal::snapshots::tests::maximum_database_snapshots_fit_the_journal_and_preserve_exact_bytes"
+    },
+    "package-doctor-registration-metadata": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::registered_raw_metadata_loss_is_reported_while_central_listing_remains_available"
+    },
+    "package-doctor-empty-registration": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::empty_registered_raw_installations_still_require_their_locator_and_lock"
+    },
+    "package-doctor-native-metadata": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::native_records_do_not_require_raw_management_metadata"
+    },
+    "package-doctor-lock-symlink": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::doctor_metadata::a_symlinked_registered_lock_is_reported_without_following_or_replacing_it"
+    },
+    "package-cli-doctor-metadata": {
+      "target": "aw-cli/test/packages",
+      "test": "metadata::installed_raw_metadata_loss_fails_doctor_json_but_preserves_listed_package_facts"
+    },
+    "package-cli-doctor-empty": {
+      "target": "aw-cli/test/packages",
+      "test": "metadata::removed_last_package_still_requires_the_registered_prefix_metadata"
+    },
+    "package-scope-split-sequence": {
+      "target": "aw-cli/test/packages",
+      "test": "scope::split_extensions_and_uninstall_require_consistent_explicit_scope"
+    },
+    "package-prefix-action-capacity": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::plan::install::tests::capacity::aggregate_journal_admission_keeps_whole_prefix_removal_possible"
+    },
+    "package-metadata-action-capacity": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::plan::install::tests::capacity::locator_and_new_parent_directories_count_toward_transaction_capacity"
+    },
+    "package-journal-capacity-matches-planning": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::capacity::action_capacity_matches_preparation_for_current_locator_changes"
+    },
+    "package-journal-capacity-overflow": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::capacity::journal_record_guards_reject_action_and_directory_overflow_before_publication"
+    },
+    "package-commit-sync-retains-recovery": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::durability::failed_database_directory_sync_retains_backups_until_recovery_confirms_commit"
+    },
+    "package-commit-sync-rollback": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::durability::failed_commit_sync_keeps_rollback_material_if_the_old_database_returns"
+    },
+    "package-registration-lease-lifetime": {
+      "target": "aw-cli/test/launcher",
+      "test": "registration_packages::persistent_registration_protects_aw_and_agent_packages_until_cancelled"
+    },
+    "package-registration-writer-order": {
+      "target": "aw-cli/test/launcher",
+      "test": "registration_packages::an_existing_package_writer_blocks_persistent_registration_before_native_execution"
+    },
+    "package-journal-byte-count": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::capacity::tests::counted_journal_matches_real_serde_and_bounds_shorter_runtime_identities"
+    },
+    "package-journal-deep-path-bytes": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::capacity::tests::deep_parent_paths_and_locator_actions_enter_the_encoded_budget"
+    },
+    "package-journal-existing-parent-bytes": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::capacity::tests::existing_parents_keep_the_same_conservative_byte_reservation"
+    },
+    "package-journal-final-marker-bytes": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::capacity::tests::locator_removal_reserves_its_existing_identity"
+    },
+    "package-journal-future-database-growth": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::capacity::tests::future_removal_reserves_maximum_snapshots_despite_current_database_growth"
+    },
+    "package-plan-byte-limit": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::plan::capacity::tests::encoded_byte_overflow_blocks_execution_before_any_database_or_payload_write"
+    },
+    "package-plan-removal-byte-reserve": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::plan::capacity::tests::installation_admission_reserves_the_future_whole_removal_encoded_budget"
+    },
+    "qoder-sdk-lifecycle": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "query_hooks_preserve_first_call_identity_and_cleanup"
+    },
+    "qoder-sdk-reload": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "existing_queries_update_only_after_native_cleanup"
+    },
+    "task-scope-isolation": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::task_scopes_isolate_context_reject_nested_and_reclaim_capacity"
+    },
+    "task-scope-preparation-close": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::closing_parent_cancels_inflight_scope_preparation"
+    },
+    "task-scope-owner-death": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::dead_worker_scope_is_reaped_without_releasing_live_parent"
+    },
+    "task-scope-disconnected-preparation": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::disconnected_scope_preparation_releases_its_reservation"
+    },
+    "task-scope-capacity": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::scope_capacity_and_invalid_owner_fail_without_extra_bindings"
+    },
+    "task-scope-parent-drain": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::parent_close_cancels_active_child_steps_and_rejects_late_calls"
+    },
+    "task-scope-launcher-death": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::launcher_death_drains_all_owned_scopes_and_rejects_old_handles"
+    },
+    "task-scope-lost-handoff": {
+      "target": "aw-cli/test/service",
+      "test": "scopes::unacknowledged_handoff_expires_and_cannot_invoke_or_revive"
+    },
+    "sdk-scope-dispatch-owner": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::queued_step_rechecks_worker_and_launcher_before_provider_dispatch"
+    },
+    "sdk-scope-dispatch-after-audit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::audited_step_rechecks_worker_and_launcher_before_provider_dispatch"
+    },
+    "sdk-scope-ack-durable": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::committed_acknowledgement_survives_audit_delay_across_handoff_deadline"
+    },
+    "sdk-scope-ack-expired-audit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::expired_acknowledgement_has_no_success_record"
+    },
+    "sdk-scope-ack-audit-failure": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::scopes::tests::failed_acknowledgement_audit_cancels_committed_task"
+    },
+    "sdk-scope-transport": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles"
+    },
+    "sdk-scope-expired-close": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::expired_sdk_handoff_can_close_without_reviving_callbacks"
+    },
+    "sdk-scope-process-cli": {
+      "target": "aw-cli/test/service",
+      "test": "sdk_scopes::sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers"
+    },
+    "sdk-scope-observation-root": {
+      "target": "aw-cli/test/evidence",
+      "test": "scopes::owned_roots_allow_observation_and_reject_task_admission"
+    },
+    "sdk-scope-observation-child": {
+      "target": "aw-cli/test/evidence",
+      "test": "scopes::preparing_and_active_task_scopes_exclude_observation"
+    },
+    "pi-resident-observation": {
+      "target": "aw-cli/test/pi",
+      "test": "resident_observation_is_rejected_before_ready_but_off_is_allowed"
+    },
+    "pi-legacy-observation": {
+      "target": "aw-cli/test/pi",
+      "test": "legacy_pi_observation_remains_supported"
+    },
+    "attach-cli": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_first_hook_busy_detach_isolation_and_owned_cleanup"
+    },
+    "attach-scope": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_rejects_wrong_pid_and_shared_profile_without_writes"
+    },
+    "attach-cancel": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::cancelled_unconfirmed_install_retains_bridge_until_confirmed_cleanup"
+    },
+    "detach-idle": {
+      "target": "aw-cli/test/service",
+      "test": "policy::detach::unbind_keeps_busy_requests_and_native_cleanup_protected"
+    },
+    "attach-settings": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "attachment::files::tests::settings_updates_preserve_native_data_and_reject_symlinks_and_racing_edits"
+    },
+    "attach-default-settings": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_creates_missing_native_settings_without_launching_an_agent"
+    },
+    "attach-qwenpaw": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection"
+    },
+    "attach-network": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::process::tests::qwenpaw_requires_the_callers_network_namespace"
+    },
+    "attach-python-options": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::process::tests::qwenpaw_python_options_preserve_profile_isolation_and_command_boundaries"
+    },
+    "attach-profile-default": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_default_peer_is_shared"
+    },
+    "attach-profile-empty": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_empty_peer_uses_default"
+    },
+    "attach-profile-tilde": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_tilde_peer_is_shared"
+    },
+    "attach-profile-legacy": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_legacy_default_takes_precedence"
+    },
+    "attach-profile-relative": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_relative_peer_uses_its_cwd"
+    },
+    "attach-profile-isolation": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::qwenpaw_profile_different_home_remains_isolated"
+    },
+    "update-single-config": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::edited_connection_config_updates_explicitly_and_detaches_without_bootstrap_file"
+    },
+    "reload-connection-conflict": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::edited_reloadable_launch_rejects_connection_before_starting_another_daemon"
+    },
+    "ordinary-connection-conflict": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_stop"
+    },
+    "attach-rollback-confirmed": {
+      "target": "aw-cli/test/launcher",
+      "test": "single_config::rejected_reattach_confirms_qoder_unload_before_deleting_bridge"
+    },
+    "attach-relocated-group": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "attachment::tests::edited_owned_groups_are_retained_and_unrelated_groups_survive_removal"
+    },
+    "attach-confirmation-cleanup": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::confirm::tests::receipt_cleanup_waits_for_writer_and_rejects_a_late_callback"
+    },
+    "attach-relative-script": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::process::tests::relative_interpreted_entrypoint_uses_the_selected_process_working_directory"
+    },
+    "qoder-sdk-single-config": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "single_configuration_keeps_sdk_updates_busy_checks_and_service_identity"
+    },
+    "attach-dotenv-shared": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_shared_peer_is_rejected_before_writes"
+    },
+    "attach-dotenv-removed": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_removed_after_startup_does_not_prove_isolation"
+    },
+    "attach-dotenv-absent": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_absence_does_not_prove_an_initially_missing_profile"
+    },
+    "attach-dotenv-explicit": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_preserves_explicit_independent_profile"
+    },
+    "attach-dotenv-disabled": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_runtime_id_keeps_independent_default_profile"
+    },
+    "attach-dotenv-home": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_home_alias_requires_initial_home"
+    },
+    "attach-dotenv-empty": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::profiles::dotenv::qwenpaw_dotenv_preserves_initially_empty_profile"
+    },
+    "service-idle-unbind-version": {
+      "target": "aw-service/lib/aw_service",
+      "test": "client::tests::discovery_rejects_daemons_without_idle_unbind_semantics"
+    },
+    "claude-managed-mcp": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::claude_mcp::tests::mcp_source_keeps_scope_identity_and_only_successful_plain_text_is_replaceable"
+    },
+    "claude-managed-mcp-ownership": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "managed_mcp_freezes_registered_tools_and_checked_results"
+    },
+    "invocation-long-history": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::invocations::tests::old_active_call_survives_unbounded_later_retirement"
+    },
+    "invocation-overload-unit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::invocations::tests::overload_consumes_sequence_and_changed_identity_remains_rejected"
+    },
+    "invocation-retirement": {
+      "target": "aw-cli/test/service",
+      "test": "invocations::producer_calls_reclaim_both_phases_and_reject_late_or_changed_callbacks"
+    },
+    "invocation-overload": {
+      "target": "aw-cli/test/service",
+      "test": "invocations::invocation_overload_is_observable_and_recovers_without_replaying_old_calls"
+    },
+    "invocation-configuration": {
+      "target": "aw-config/test/configuration",
+      "test": "daemon_limits_accept_concurrent_budgets_and_reject_invalid_values"
+    },
+    "claude-producer-drain": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "model_producer_identity_and_callback_drain_contracts"
+    },
+    "pi-producer": {
+      "target": "aw-cli/test/pi",
+      "test": "model_producer_rejects_replayed_changed_and_overloaded_calls"
+    },
+    "invocation-control-reserve": {
+      "target": "aw-cli/test/service",
+      "test": "invocations::saturated_connections_reserve_capacity_for_invocation_drain_and_status"
+    },
+    "invocation-numbers": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::invocations::tests::numeric_spellings_match_without_accepting_changed_values_or_types"
+    },
+    "invocation-enable-race": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::hooks::tests::legacy_hook_admission_atomically_excludes_protocol_enable"
+    },
+    "invocation-legacy-used": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::hooks::tests::completed_uncorrelated_event_cannot_switch_protocol"
+    },
+    "invocation-retire-close-race": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::hooks::tests::late_close_during_second_phase_drain_leaves_no_retired_lease"
+    },
+    "pi-execution-drain": {
+      "target": "aw-cli/test/pi",
+      "test": "execution_drain_fences_registration_and_transport_failures"
+    },
+    "scope-native-skips": {
+      "target": "aw-cli/test/pretool",
+      "test": "tool_scope::all_native_dialects_close_skipped_callbacks_without_failure_blocks"
+    },
+    "scope-qoder-sdk-order": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "tool_scope::scoped_callbacks_keep_skips_neutral_and_later_denials_authoritative"
+    },
+    "scope-qoder-sdk-close": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "tool_scope::all_skipped_callbacks_close_and_preserve_existing_native_vetoes"
+    },
+    "scope-pi-order": {
+      "target": "aw-cli/test/pi",
+      "test": "tool_scope::scoped_callbacks_preserve_names_skips_and_later_denials"
+    },
+    "scope-pi-close": {
+      "target": "aw-cli/test/pi",
+      "test": "tool_scope::all_skipped_callbacks_close_and_native_permissions_keep_precedence"
+    },
+    "scope-pi-result": {
+      "target": "aw-cli/test/pi",
+      "test": "tool_scope::skipped_final_replacement_preserves_native_envelope_and_failure"
+    },
+    "scope-sdk-result": {
+      "target": "aw-cli/test/posttool",
+      "test": "tool_scope::skipped_replacement_is_neutral_for_claude_and_qwen_callbacks"
+    },
+    "scope-openclaw-names": {
+      "target": "aw-cli/test/posttool",
+      "test": "openclaw_scope::exact_native_selectors_preserve_standalone_callback_names"
+    },
+    "scope-openclaw-completion": {
+      "target": "aw-cli/test/posttool",
+      "test": "openclaw_scope::exact_native_selectors_preserve_replacement_completion_identity"
+    },
+    "qwenpaw-resident-boolean-withhold": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::boolean_after_failure_withholds_result_and_stops_next_dispatch"
+    },
+    "qwenpaw-resident-native-denial": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::native_denial_text_survives_resident_scope_transport"
+    },
+    "qwenpaw-resident-observation": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident_observation_is_rejected_before_launch"
+    },
+    "qwenpaw-managed-association": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "association::tests::qwenpaw_dispatch_identity_keeps_native_call_and_exact_input"
+    },
+    "qwenpaw-resident-withhold": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::withhold_failure_blocks_result_and_next_dispatch_through_launcher"
+    },
+    "qwenpaw-resident-report": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::report_failure_preserves_results_and_next_dispatch_through_launcher"
+    },
+    "qwenpaw-resident-denial": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::before_denial_prevents_native_execution_through_resident_factory"
+    },
+    "qwenpaw-resident-registration": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::registration_and_missing_factory_fail_closed_and_release_launch"
+    },
+    "qwenpaw-withhold-reload-rejection": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::reloadable_entry_rejects_withhold_before_service_or_plugin_creation"
+    },
+    "qoder-sdk-strict-post": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "post::strict_post_failures_close_the_query_and_report_continues"
+    },
+    "qoder-sdk-post-drain": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "post::strict_post_joins_original_callbacks_and_preserves_native_results"
+    },
+    "qoder-sdk-private-fence": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "installed_bridge_fences_queries_after_private_cleanup_failure"
+    },
+    "claude-response-cleanup": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "managed_response_iterators_close_before_native_teardown"
+    },
+    "resident-policy-handoff": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::resident_claim_covers_preparation_unacknowledged_scope_and_final_cleanup"
+    },
+    "resident-policy-race": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::resident_reservation_wins_during_candidate_preparation"
+    },
+    "resident-policy-owner-exit": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::owner_exit_during_activation_audit_preserves_previous_policy"
+    },
+    "resident-policy-capacity": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::resident_request_capacity_is_concurrent_and_configured"
+    },
+    "qoder-sdk-startup-policy-receipt": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "resident_reload::first_query_policy_update_preserves_launch_receipt"
+    },
+    "qoder-sdk-resident-reload": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "resident_reload::ordinary_queries_update_hooks_post_and_mcp_after_cleanup"
+    },
+    "resident-policy-audit-fence": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::policy::tests::terminal_audit_failure_fences_committed_policy_without_false_rejection"
+    },
+    "resident-policy-deadline": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::hook::deadline_tests::discovery_consumes_one_transport_budget_without_renewal"
+    },
+    "native-config-consumer": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "original_native_loader_and_host_preserve_sources_and_enforce_only_admitted_scope"
+    },
+    "native-config-failures": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "native_errors_and_covered_provider_failures_never_become_uncovered_success"
+    },
+    "native-config-updates": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "native_live_handle_retains_updates_without_mutating_admitted_policy"
+    },
+    "native-config-editor": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "editor_conflicts_invalid_candidates_and_stale_saves_preserve_native_files"
+    },
+    "native-config-cli": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "cli_records_and_removes_only_descriptors_and_reports_no_runtime_claims"
+    },
+    "native-source-schema": {
+      "target": "aw-config/test/native_sources",
+      "test": "native_references_preserve_spelling_and_keep_public_schema_strict"
+    },
+    "native-config-context": {
+      "target": "aw-cli/test/native_configuration",
+      "test": "native_loader_receives_original_context_and_runs_once_with_or_without_descriptors"
+    },
+    "package-lock-permissions-rollback": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::transaction::tests::existing_lock_permissions_remain_private_when_precommit_changes_roll_back"
+    },
+    "package-scope-system-dry-run": {
+      "target": "aw-cli/test/packages",
+      "test": "scope::explicit_system_dry_run_selects_system_scope_without_creating_state"
+    },
+    "package-product-authority": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::product_files_are_owned_only_by_the_product_database"
+    },
+    "package-product-execution-authority": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::execution_binds_manager_even_when_a_caller_reuses_the_same_root"
+    },
+    "package-product-runtime-lease": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::product_mutations_obey_the_same_runtime_leases_as_aw"
+    },
+    "package-current-locator-authority": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::current_locators_record_explicit_manager_and_authority"
+    },
+    "package-system-default-query-scope": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::ownership::default_user_paths_can_follow_an_aw_system_locator_for_read_only_queries"
+    },
+    "package-system-explicit-query-scope": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "command::inventory::tests::explicit_user_scope_still_rejects_a_recorded_system_prefix_before_reading_its_database"
+    },
+    "provider-artifact-ordinary-and-new-core-bundles-are-rejected-by-both-library-install-entries": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::ordinary_and_new_core_bundles_are_rejected_by_library_install"
+    },
+    "provider-artifact-independent-provider-install-preserves-plan-json-and-owned-cleanup": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::independent_provider_install_preserves_plan_json_and_owned_cleanup"
+    },
+    "provider-artifact-foreign-manager-cannot-use-aw-mutation-or-recovery-entries": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::foreign_manager_cannot_use_aw_mutation_or_recovery_entries"
+    },
+    "provider-artifact-aw-cannot-claim-or-recover-an-ordinary-software-database": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::aw_cannot_claim_or_recover_an_ordinary_software_database"
+    },
+    "provider-artifact-previous-manifest-bundles-are-rejected-before-any-writes": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::previous_manifest_bundles_are_rejected_before_any_writes"
+    },
+    "provider-artifact-historical-receipts-cannot-be-queried-configured-migrated-or-removed-by-aw": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::historical_receipts_cannot_be_queried_configured_migrated_or_removed_by_aw"
+    },
+    "provider-artifact-unmanaged-configuration-needs-no-raw-registration-or-installed-core": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::unmanaged_configuration_needs_no_raw_registration_or_installed_core"
+    },
+    "provider-artifact-checked-planning-binds-admission-to-the-descriptor-used-for-execution": {
+      "target": "aw-package/lib/aw_package",
+      "test": "provider_tests::checked_planning_binds_admission_to_the_descriptor_used_for_execution"
+    },
+    "package-unmanaged-core-config": {
+      "target": "aw-cli/test/standalone",
+      "test": "native_or_unregistered_aw_initializes_without_package_database"
+    },
+    "package-explicit-locator-manager": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::a_current_locator_requires_an_explicit_manager"
+    },
+    "package-retired-metadata-rejection": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::previous_metadata_directories_are_rejected_without_decoding_their_contents"
+    },
+    "package-current-source-version-contract": {
+      "target": "aw-package/lib/aw_package",
+      "test": "store::tests::database::stored_versions_and_source_commits_use_the_current_description_contract"
     }
   },
   "agents": {
@@ -152,10 +888,12 @@
       },
       "lifecycle": [
         "agentscope-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
         "final-replacement"
@@ -165,30 +903,57 @@
       "events": {
         "tool.before": {
           "observe": [
-            "security-retry"
+            "security-retry",
+            "claude-managed-mcp-ownership"
           ],
           "block": [
-            "security-retry"
+            "security-retry",
+            "claude-managed-mcp-ownership"
           ]
         },
         "tool.after": {
           "observe": [
-            "final-replacement"
+            "final-replacement",
+            "claude-managed-mcp-ownership"
           ],
           "replace_result": [
-            "final-replacement"
+            "final-replacement",
+            "claude-managed-mcp-ownership",
+            "scope-sdk-result"
           ]
         }
       },
       "lifecycle": [
         "claude-sdk-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli",
+        "sdk-scope-observation-root",
+        "sdk-scope-observation-child",
+        "claude-managed-mcp",
+        "invocation-long-history",
+        "invocation-overload-unit",
+        "invocation-retirement",
+        "invocation-overload",
+        "invocation-configuration",
+        "claude-producer-drain",
+        "invocation-control-reserve",
+        "invocation-numbers",
+        "invocation-enable-race",
+        "invocation-legacy-used",
+        "invocation-retire-close-race",
+        "scope-native-skips",
+        "claude-response-cleanup"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "claude-managed-mcp",
+        "scope-sdk-result"
       ]
     },
     "hermes": {
@@ -212,10 +977,12 @@
       },
       "lifecycle": [
         "hermes-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
         "final-replacement"
@@ -242,23 +1009,29 @@
       },
       "lifecycle": [
         "openclaw-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "scope-openclaw-names",
+        "scope-openclaw-completion"
       ]
     },
     "pi": {
       "events": {
         "tool.before": {
           "observe": [
-            "security-retry"
+            "security-retry",
+            "scope-pi-order"
           ],
           "block": [
-            "security-retry"
+            "security-retry",
+            "scope-pi-order"
           ]
         },
         "tool.after": {
@@ -266,19 +1039,43 @@
             "final-replacement"
           ],
           "replace_result": [
-            "final-replacement"
+            "final-replacement",
+            "scope-pi-result"
           ]
         }
       },
       "lifecycle": [
         "pi-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli",
+        "sdk-scope-observation-root",
+        "sdk-scope-observation-child",
+        "pi-resident-observation",
+        "pi-legacy-observation",
+        "invocation-long-history",
+        "invocation-overload-unit",
+        "invocation-retirement",
+        "invocation-overload",
+        "invocation-configuration",
+        "pi-producer",
+        "invocation-control-reserve",
+        "invocation-numbers",
+        "invocation-enable-race",
+        "invocation-legacy-used",
+        "invocation-retire-close-race",
+        "scope-native-skips",
+        "scope-pi-close"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips",
+        "scope-pi-order"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "scope-pi-result"
       ]
     },
     "qoder": {
@@ -302,10 +1099,29 @@
       },
       "lifecycle": [
         "qoder-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "runtime-reload",
+        "reload-busy",
+        "reload-race",
+        "reload-rollback",
+        "reload-cancel",
+        "attach-cli",
+        "attach-scope",
+        "attach-cancel",
+        "detach-idle",
+        "attach-settings",
+        "attach-default-settings",
+        "update-single-config",
+        "reload-connection-conflict",
+        "ordinary-connection-conflict",
+        "attach-rollback-confirmed",
+        "attach-relocated-group",
+        "attach-relative-script",
+        "scope-native-skips"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips"
       ],
       "tokenless": [
         "final-replacement"
@@ -326,18 +1142,124 @@
             "final-replacement"
           ],
           "replace_result": [
-            "final-replacement"
+            "final-replacement",
+            "scope-sdk-result"
           ]
         }
       },
       "lifecycle": [
         "qwenpaw-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "runtime-reload",
+        "reload-busy",
+        "reload-race",
+        "reload-rollback",
+        "reload-cancel",
+        "detach-idle",
+        "attach-qwenpaw",
+        "attach-network",
+        "attach-python-options",
+        "attach-profile-default",
+        "attach-profile-empty",
+        "attach-profile-tilde",
+        "attach-profile-legacy",
+        "attach-profile-relative",
+        "attach-profile-isolation",
+        "attach-dotenv-shared",
+        "attach-dotenv-removed",
+        "attach-dotenv-absent",
+        "attach-dotenv-explicit",
+        "attach-dotenv-disabled",
+        "attach-dotenv-home",
+        "attach-dotenv-empty",
+        "scope-native-skips",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli",
+        "qwenpaw-resident-observation",
+        "qwenpaw-managed-association",
+        "qwenpaw-resident-withhold",
+        "qwenpaw-resident-boolean-withhold",
+        "qwenpaw-resident-native-denial",
+        "qwenpaw-resident-report",
+        "qwenpaw-resident-denial",
+        "qwenpaw-resident-registration",
+        "qwenpaw-withhold-reload-rejection",
+        "resident-policy-handoff",
+        "resident-policy-race",
+        "resident-policy-owner-exit",
+        "resident-policy-capacity",
+        "resident-policy-audit-fence",
+        "resident-policy-deadline"
       ],
       "security": [
-        "security-retry"
+        "security-retry",
+        "scope-native-skips",
+        "qwenpaw-resident-observation",
+        "qwenpaw-managed-association",
+        "qwenpaw-resident-withhold",
+        "qwenpaw-resident-boolean-withhold",
+        "qwenpaw-resident-native-denial",
+        "qwenpaw-resident-report",
+        "qwenpaw-resident-denial",
+        "qwenpaw-resident-registration",
+        "qwenpaw-withhold-reload-rejection"
       ],
       "tokenless": [
+        "final-replacement",
+        "scope-sdk-result",
+        "qwenpaw-resident-denial"
+      ]
+    },
+    "qoder-sdk": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry",
+            "scope-qoder-sdk-order"
+          ],
+          "block": [
+            "security-retry",
+            "scope-qoder-sdk-order"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "qoder-sdk-lifecycle",
+            "qoder-sdk-strict-post"
+          ]
+        }
+      },
+      "lifecycle": [
+        "qoder-sdk-lifecycle",
+        "cancel-initialization",
+        "qoder-sdk-reload",
+        "qoder-sdk-single-config",
+        "scope-native-skips",
+        "scope-qoder-sdk-close",
+        "sdk-scope-transport",
+        "sdk-scope-expired-close",
+        "sdk-scope-process-cli",
+        "qoder-sdk-post-drain",
+        "qoder-sdk-private-fence",
+        "resident-policy-handoff",
+        "resident-policy-race",
+        "resident-policy-owner-exit",
+        "resident-policy-capacity",
+        "qoder-sdk-resident-reload",
+        "qoder-sdk-startup-policy-receipt",
+        "resident-policy-audit-fence",
+        "resident-policy-deadline"
+      ],
+      "security": [
+        "security-retry",
+        "scope-native-skips",
+        "scope-qoder-sdk-order",
+        "qoder-sdk-strict-post",
+        "qoder-sdk-private-fence"
+      ],
+      "tokenless": [
+        "security-retry",
         "final-replacement"
       ]
     }
@@ -362,6 +1284,6 @@
     ]
   },
   "opt_in_targets": {
-    "aw-package/test/installed": "Installed all-in-one Preview acceptance runs in package CI; requires installed binaries and a real sec-core socket or root."
+    "aw-package/test/installed": "Installed Provider acceptance runs in package CI; requires installed binaries and a real sec-core socket or root."
   }
 }

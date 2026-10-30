@@ -1,3 +1,4 @@
+use super::input_events::latest_capture_submission_generation;
 use super::*;
 use crate::raw_input::UserPtyInputGeneration;
 

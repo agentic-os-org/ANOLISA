@@ -9,6 +9,45 @@
 
 ## [未发布]
 
+## [0.5.5] - 未发布
+
+### 变更
+
+- 可通过独立 RPM 安装运行时和随附 Skill。
+- 随附 Skill 迁至 ANOLISA 的共享 skills 目录。
+
+## [0.5.4] - 2026-10-28
+
+### 修复
+
+- Skill 移入另一个 Skill 目录后，及时移除 `/skills` 和 `skill-discover` 中残留的
+  顶层条目，使实时发现结果与重新扫描一致
+  ([#9124](https://github.com/agentic-os-org/ANOLISA/pull/9124))。
+- 选择 Yarn 时，带包名、选项或不明确 shell 语法的 npm install 命令保留原样，
+  避免转换为无效命令 ([#9003](https://github.com/agentic-os-org/ANOLISA/pull/9003))。
+- chat 使用统计将 `--logs-dir` 按字面路径处理，支持方括号等字符，
+  避免误统计相似名称的同级目录
+  ([#9180](https://github.com/agentic-os-org/ANOLISA/pull/9180))。
+
+## [0.5.3] - 2026-10-23
+
+### 新增
+
+- `skillfs mount --config mount.toml --managed` 支持自动恢复，保留启动时的配置，
+  同时读取来源的当前内容。配置变更在成功停止并重新启动后生效
+  ([#8883](https://github.com/agentic-os-org/ANOLISA/pull/8883))。
+
+### 修复
+
+- Managed mount 在点号开头的挂载点和慢主机上稳定启动，worker 启动失败时及时报错
+  ([#8080](https://github.com/agentic-os-org/ANOLISA/pull/8080))。
+- Flat 和 Hermes 安装时隐藏暂存目录，发布后保持元数据读取和目录列表一致
+  ([#7767](https://github.com/agentic-os-org/ANOLISA/pull/7767))。
+- 创建、重命名和嵌套 manifest 修改后，同名 Skill 归属和 discovery 保持一致；
+  安装和重命名遵守配置的大小上限
+  ([#7742](https://github.com/agentic-os-org/ANOLISA/pull/7742))。
+- Skill 解析和 CLI 输出正确处理空白 frontmatter、按字符计算的名称长度诊断及控制字符转义。
+
 ## [0.5.2] - 2026-10-15
 
 ### 修复

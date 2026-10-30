@@ -192,3 +192,43 @@ fn tool_queries_deduplicate_ids_and_share_a_budget() {
     ));
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+/// A `config.json` saved as UTF-8-with-BOM must load at this boundary just
+/// like its unmarked twin: every other JSON config boundary already applies
+/// the shared one-leading-BOM rule, and rejecting it here took the whole
+/// serve process down on a config the rest of the server accepts.
+#[test]
+fn bom_prefixed_config_loads_like_its_unmarked_twin() {
+    let directory = std::env::temp_dir().join(format!("tokenless-bom-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let credential = directory.join("credential");
+    std::fs::write(&credential, "fixture-token").unwrap();
+    let configuration = directory.join("agentsight.json");
+    let config =
+        json!({"tokenless_api": {"url": "http://127.0.0.1:8", "credential_file": credential}})
+            .to_string();
+    std::fs::write(&configuration, format!("\u{feff}{config}")).unwrap();
+    let client = QueryClient::from_config_path(Some(&configuration))
+        .unwrap()
+        .expect("a BOM-prefixed config must load like its unmarked twin");
+    assert_eq!(client.endpoint, "http://127.0.0.1:8");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn detail_store_failures_map_to_client_or_server_errors() {
+    use crate::storage::sqlite::genai::TokenlessRecordError;
+
+    // A stored shape that violates the contract is the caller's problem: the
+    // list endpoint already answers 400 for it. Storage failures stay 503.
+    assert_eq!(
+        detail_store_error_status(&TokenlessRecordError::Invalid(
+            "record is not a JSON object"
+        )),
+        400
+    );
+    assert_eq!(
+        detail_store_error_status(&TokenlessRecordError::Poisoned),
+        503
+    );
+}

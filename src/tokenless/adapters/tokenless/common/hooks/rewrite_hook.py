@@ -26,6 +26,7 @@ from hook_utils import (
     _TOKENLESS_LOCAL_SHARE,
     build_pre_tool_request,
     mark_rtk_optimized,
+    prepare_hook_input,
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
@@ -39,16 +40,6 @@ _AGENT_ID = resolve_agent_id()
 
 
 def main() -> None:
-    tokenless_bin = resolve_binary(
-        "tokenless",
-        _TOKENLESS_FALLBACK,
-        _TOKENLESS_LOCAL_SHARE,
-        _TOKENLESS_LOCAL_LIB,
-    )
-    if not tokenless_bin:
-        warn("tokenless is not installed. Hook disabled.")
-        skip()
-
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError, ValueError):
@@ -58,6 +49,17 @@ def main() -> None:
         # A payload that is not a JSON object carries no command to
         # rewrite; take the same silent path as undecodable input instead
         # of raising, as the sibling schema hook already does.
+        skip()
+
+    input_data = prepare_hook_input(input_data, _AGENT_ID)
+    tokenless_bin = resolve_binary(
+        "tokenless",
+        _TOKENLESS_FALLBACK,
+        _TOKENLESS_LOCAL_SHARE,
+        _TOKENLESS_LOCAL_LIB,
+    )
+    if not tokenless_bin:
+        warn("tokenless is not installed. Hook disabled.")
         skip()
 
     tool_input = input_data.get("tool_input", {})
@@ -72,10 +74,20 @@ def main() -> None:
     if not tool_use_id:
         skip()
 
+    tool_name = input_data.get("tool_name", "")
+    # Managed engines call their Windows shell "Bash"; the legacy engine runs Bash.
+    if (
+        os.name == "nt"
+        and _AGENT_ID == "qwenwork"
+        and tool_name == "Bash"
+        and os.environ.get("QWENWORK_PLUGIN_HOOK_COMPATIBILITY") == "managed-tool-hooks-v1"
+    ):
+        tool_name = "PowerShell"
+
     request = build_pre_tool_request(
         tool_input,
         _AGENT_ID,
-        input_data.get("tool_name", ""),
+        tool_name,
         "command",
         session_id=session_id,
         tool_use_id=tool_use_id,

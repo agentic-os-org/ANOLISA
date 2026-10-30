@@ -47,13 +47,14 @@ impl Http2StreamAggregator {
                 body_len: 0,
                 source_event: Rc::new(frame.source_event.metadata_only()),
             };
-            let stream = match SseStream::new(&response, self.max_sse_bytes) {
+            let mut stream = match SseStream::new(&response, self.max_sse_bytes) {
                 Ok(stream) => stream,
                 Err(error) => {
                     log::warn!("Cannot initialize HTTP/2 SSE decoder | stream={id:?}: {error}");
                     return None;
                 }
             };
+            stream.set_native_incremental(self.native_incremental(id));
             self.sse_streams.put(id, stream);
         }
         let stream = self.sse_streams.get_mut(&id)?;
@@ -110,29 +111,67 @@ impl Http2StreamAggregator {
         stream.end_timestamp_ns = timestamp;
         stream.captured_sse_event_count = Some(count);
         stream.response_body_decoded = true;
+        stream.reduced_sse_events = Some(events);
+    }
+
+    fn native_incremental(&self, id: StreamId) -> Option<bool> {
+        let headers = self.decoded_headers_store.get(&id)?.request.as_ref()?;
+        let path = headers.iter().find(|(name, _)| name == ":path")?.1.as_str();
+        if !crate::parser::llm::is_dashscope_native_path(path) {
+            return None;
+        }
+        let frames = match self.streams.peek(&id)? {
+            Http2StreamState::WaitingRequestData {
+                request_data_frames,
+                ..
+            }
+            | Http2StreamState::RequestComplete {
+                request_data_frames,
+                ..
+            }
+            | Http2StreamState::ReceivingResponse {
+                request_data_frames,
+                ..
+            } => request_data_frames,
+            Http2StreamState::Complete(stream) => &stream.request_data_frames,
+        };
+        let bytes: Vec<_> = frames
+            .iter()
+            .flat_map(|frame| {
+                strip_data_padding(frame.payload(), frame.flags)
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        let encoding = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+            .map(|(_, value)| value.as_str());
+        let body = crate::utils::decompress::decompress_body_to_string(&bytes, encoding)?;
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()?
+            .pointer("/parameters/incremental_output")?
+            .as_bool()
+    }
+}
+
+impl Http2Stream {
+    /// Materialize compact SSE only when a consumer requests body bytes.
+    pub(super) fn encode_sse_events(events: &[crate::parser::sse::ParsedSseEvent]) -> Vec<u8> {
+        let mut bytes = Vec::new();
         for event in events {
-            let mut source = event.source_event().metadata_only();
             if let Some(kind) = &event.event {
-                source.buf.extend_from_slice(b"event: ");
-                source.buf.extend_from_slice(kind.as_bytes());
-                source.buf.push(b'\n');
+                bytes.extend_from_slice(b"event: ");
+                bytes.extend_from_slice(kind.as_bytes());
+                bytes.push(b'\n');
             }
             for line in event.data().split(|byte| *byte == b'\n') {
-                source.buf.extend_from_slice(b"data: ");
-                source.buf.extend_from_slice(line);
-                source.buf.push(b'\n');
+                bytes.extend_from_slice(b"data: ");
+                bytes.extend_from_slice(line);
+                bytes.push(b'\n');
             }
-            source.buf.push(b'\n');
-            source.len = source.buf.len() as u32;
-            let len = source.buf.len();
-            stream.response_data_frames.push(ParsedHttp2Frame {
-                frame_type: Http2FrameType::Data,
-                flags: 0,
-                stream_id: id.stream_id,
-                payload_offset: 0,
-                payload_len: len,
-                source_event: Rc::new(source),
-            });
+            bytes.push(b'\n');
         }
+        bytes
     }
 }

@@ -15,9 +15,11 @@ pub mod inspect;
 pub mod launch_service;
 
 pub use client::Client;
+pub use runtime::process::Process as ProcessIdentity;
 pub use server::Server;
 pub use wire::{
-    Binding, Capabilities, EventHandle, Identity, Operation, Request, Response, RunOutcome, VERSION,
+    Binding, Capabilities, EventHandle, Identity, LifecyclePhase, Operation, Request, Response,
+    RunOutcome, VERSION,
 };
 
 /// Service boundary failure; remote messages contain only stable error codes.
@@ -32,7 +34,7 @@ pub enum Error {
     /// Client or server contract validation failed.
     #[error("AW service: {0}")]
     Rejected(String),
-    /// A failed preparation has durable evidence even though no binding was returned.
+    /// A rejected operation has durable evidence even though no result was returned.
     #[error("AW service: {code} (audit {audit_key})")]
     Attempt {
         /// Stable rejection code.

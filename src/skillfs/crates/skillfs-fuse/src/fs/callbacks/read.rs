@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use super::super::read_resolution::ReadResolution;
 use crate::handles::open_options_from_flags;
-use crate::path::{PathType, is_skill_discover_path};
+use crate::path::{PathType, hermes_nested_sync_eligible, is_skill_discover_path};
 use crate::security::{SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, openat_leaf};
@@ -858,6 +858,21 @@ impl SkillFs {
                     warn!(op = "open", ?physical, error = %e, "nested SKILL.md O_TRUNC failed");
                     reply.error(errno(&e));
                     return;
+                }
+                // A truncated nested manifest must re-parse into the store
+                // like the flat O_TRUNC branch above — but hidden working
+                // copies stay out of the store exactly like discovery.
+                if hermes_nested_sync_eligible(
+                    self.staging_matcher.as_deref(),
+                    category,
+                    skill_name,
+                    &physical,
+                ) {
+                    self.send_sync(SyncEvent::Reparse {
+                        skill_name: skill_name.clone(),
+                        source_path: physical.clone(),
+                        max_skill_size: self.max_skill_size,
+                    });
                 }
                 self.observe_mutation(
                     &nested_id,

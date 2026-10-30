@@ -4,7 +4,7 @@ use std::path::{Component, Path};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use ws_ckpt_common::backend::DiffError;
+use ws_ckpt_common::backend::{CreateAdmissionRefused, DiffError};
 use ws_ckpt_common::{
     validate_checkpoint_id_v2, validate_workspace_id_v2, ErrorCode, GuardedCheckpointEvidenceV2,
     GuardedCheckpointOutcomeV2, GuardedCheckpointRejectionCodeV2, GuardedRollbackEvidenceV2,
@@ -218,6 +218,13 @@ pub(crate) async fn checkpoint(
     };
 
     if let Err(error) = state.backend.create_snapshot(ws_id, checkpoint_id).await {
+        // Admission refuses before any snapshot exists: retry is safe (#7234).
+        if error.downcast_ref::<CreateAdmissionRefused>().is_some() {
+            return rejected(
+                GuardedCheckpointRejectionCodeV2::InsufficientSpace,
+                format!("{error:#}"),
+            );
+        }
         return backend_effect_error(format!(
             "guarded checkpoint backend operation failed; reconcile before retrying: {error:#}"
         ));
@@ -263,7 +270,7 @@ pub(crate) async fn checkpoint(
             "snapshot was created but durable evidence save failed; reconcile before retrying: {error:#}"
         ));
     }
-    workspace.index = next_index;
+    workspace.replace_index(next_index);
     Response::GuardedCheckpointV2Ok { evidence }
 }
 
@@ -538,6 +545,7 @@ pub(crate) async fn rollback(
             format!("failed to durably reserve guarded rollback operation: {error:#}"),
         );
     }
+    // Only guarded_rollbacks changed; snapshot membership and ordering are unchanged.
     workspace.index = started_index;
 
     // Revalidate all mutable provider state after the durable intent write. The
@@ -589,6 +597,15 @@ pub(crate) async fn rollback(
     }
 
     if let Err(error) = state.backend.rollback(ws_id, target_snapshot_id).await {
+        // Admission refuses before the workspace is moved: release the
+        // reservation so the operation stays retryable (#7234).
+        if error.downcast_ref::<CreateAdmissionRefused>().is_some() {
+            let response = rollback_rejected(
+                GuardedRollbackRejectionCodeV2::InsufficientSpace,
+                format!("{error:#}"),
+            );
+            return abort_reserved_rollback(state, &mut workspace, operation_id, response).await;
+        }
         return mark_rollback_unknown(
             state,
             &mut workspace,
@@ -850,6 +867,7 @@ async fn abort_reserved_rollback(
     aborted.guarded_rollbacks.remove(operation_id);
     match crate::index_store::save_durable(&state.index_dir(&workspace.ws_id), &aborted).await {
         Ok(()) => {
+            // Only guarded_rollbacks changed; snapshot membership and ordering are unchanged.
             workspace.index = aborted;
             rejection
         }
@@ -939,6 +957,9 @@ fn rollback_diff_rejected(error: anyhow::Error, context: &str) -> Response {
     let code = match error.downcast_ref::<DiffError>() {
         Some(DiffError::UnsupportedWorkspacePath { .. }) => {
             GuardedRollbackRejectionCodeV2::UnsupportedWorkspacePath
+        }
+        None if error.downcast_ref::<CreateAdmissionRefused>().is_some() => {
+            GuardedRollbackRejectionCodeV2::InsufficientSpace
         }
         None => GuardedRollbackRejectionCodeV2::DaemonNotReady,
     };

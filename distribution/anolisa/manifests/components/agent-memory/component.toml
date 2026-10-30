@@ -1,6 +1,7 @@
+# Distribution-owned integration contract; version follows the component Cargo.toml.
 [component]
 name = "agent-memory"
-version = "0.2.10"
+version = "0.2.13"
 layer = "runtime"
 domain = "state"
 display_name = "Agent Memory"
@@ -11,7 +12,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.3.21"
 
 [backends.rpm]
 package = "agent-memory"
@@ -44,11 +45,13 @@ type = "config"
 source = "share/anolisa/mcp-servers/agent-memory.json"
 target = "{datadir}/mcp-servers/agent-memory.json"
 mode = "0644"
+render = "anolisa-json-command-v1"
 
 [[component.layout.files]]
 source = "share/anolisa/agent-memory/anolisa-memory@.service"
 target = "{userunitdir}/anolisa-memory@.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.layout.files]]
 source = "adapters/agent-memory/manifest.json"
@@ -78,3 +81,7 @@ detect = { binary = "openclaw" }
 
 [adapters.bundle]
 entry = "openclaw.plugin.json"
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/adapters/agent-memory/openclaw/"
+managed_packages = ["agent-memory-plugins"]

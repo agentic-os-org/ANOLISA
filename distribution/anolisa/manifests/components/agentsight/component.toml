@@ -1,6 +1,6 @@
 [component]
 name = "agentsight"
-version = "0.8.0"
+version = "0.15.1"
 layer = "runtime"
 domain = "observability"
 display_name = "AgentSight"
@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.3.15"
 
 [backends.rpm]
 package = "agentsight"
@@ -63,11 +63,13 @@ type = "executable"
 source = "share/anolisa/agentsight/agentsight.service"
 target = "{unitdir}/agentsight.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.layout.files]]
 source = "share/anolisa/agentsight/agentsight-enforcer.service"
 target = "{unitdir}/agentsight-enforcer.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.capabilities]]
 path = "{bindir}/agentsight"
@@ -90,3 +92,20 @@ start = false
 type = "binary_version"
 binary = "{bindir}/agentsight"
 timeout_secs = 5
+
+# The DSH bundle is delivered by the optional RPM plugins package.
+[[adapters]]
+framework = "dsh"
+adapter_type = "plugin"
+plugin_id = "agentsight"
+detect = { binary = "dsh" }
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/agentsight/adapters/dsh/"
+managed_packages = ["agentsight-plugins"]
+
+[adapters.bundle]
+entry = "package.json"
+
+[adapters.compat]
+framework_version = ">=0.1.0-rc.2 <0.2.0"

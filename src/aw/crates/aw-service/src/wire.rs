@@ -8,15 +8,15 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha3";
+pub const VERSION: &str = "aw-service/v1alpha7";
 
-/// Configuration snapshot and daemon lifetime to which every mutable request binds.
+/// Bootstrap configuration and daemon lifetime to which mutable requests bind.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Identity {
     /// Fresh Linux UUID for each service start, preventing stale handle reuse.
     pub generation: String,
-    /// SHA-256 of the exact configuration document.
+    /// SHA-256 of the exact bootstrap document; instance policy revisions are separate.
     pub config_revision: String,
 }
 
@@ -32,6 +32,21 @@ pub struct Capabilities {
     pub entrypoint: String,
     /// Supported effects by event.
     pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions supported at the exact launch entrypoint.
+    #[serde(default)]
+    pub failure_actions: BTreeMap<String, Vec<String>>,
+}
+
+impl From<AdapterCapabilities> for Capabilities {
+    fn from(value: AdapterCapabilities) -> Self {
+        Self {
+            adapter: value.adapter,
+            version: value.version,
+            entrypoint: value.entrypoint,
+            events: value.events,
+            failure_actions: value.failure_actions,
+        }
+    }
 }
 
 impl From<Capabilities> for AdapterCapabilities {
@@ -41,6 +56,7 @@ impl From<Capabilities> for AdapterCapabilities {
             version: value.version,
             entrypoint: value.entrypoint,
             events: value.events,
+            failure_actions: value.failure_actions,
         }
     }
 }
@@ -93,6 +109,22 @@ pub enum RunOutcome {
     Failed,
 }
 
+/// Native bridge lifecycle; only Adapters interpret framework event names.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePhase {
+    /// Stable bridge has registered and can accept requests.
+    Ready,
+    /// A whole Agent request is entering the shared admission gate.
+    RequestStart,
+    /// The native runtime confirms the whole request has finished.
+    RequestEnd,
+    /// Tool execution is entering, before its policy callbacks.
+    ToolStart,
+    /// Tool execution and its policy callbacks have terminated.
+    ToolEnd,
+}
+
 /// One bounded local RPC. The client never retries it automatically.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +137,20 @@ pub struct Request {
     pub deadline_ns: u64,
     /// Requested operation.
     pub operation: Operation,
+}
+
+impl Request {
+    pub(crate) fn admit(&self, identity: &Identity) -> crate::Result<std::time::Instant> {
+        if self.api_version != VERSION {
+            return Err(crate::rejected("protocol_version"));
+        }
+        if self.identity.as_ref() != Some(identity)
+            && !(self.identity.is_none() && matches!(self.operation, Operation::Status))
+        {
+            return Err(crate::rejected("stale_service"));
+        }
+        crate::deadline::decode(self.deadline_ns)
+    }
 }
 
 /// No operation grants native permission or certifies effect adoption.
@@ -127,6 +173,102 @@ pub enum Operation {
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
     },
+    /// Tie a prepared root binding to its same-user launcher lifetime.
+    OwnInstance {
+        /// Prepared root instance; ownership is immutable after registration.
+        instance_id: String,
+        /// Launcher PID, corroborated with start time, UID and PID namespace.
+        pid: u32,
+    },
+    /// Prepare an isolated task binding under an owned root's immutable policy.
+    OpenScope {
+        /// Owned root; nested task scopes and restricted reload roots are rejected.
+        parent_id: String,
+        /// Task worker PID: the root launcher itself or one of its descendants.
+        pid: u32,
+        /// Absolute task working directory.
+        cwd: String,
+        /// Complete explicit task environment, with no daemon inheritance.
+        #[serde(with = "environment")]
+        environment: BTreeMap<OsString, OsString>,
+    },
+    /// Read the immutable task policy before preparing and acknowledging native routes.
+    ScopePolicy {
+        /// Prepared task scope under an owned resident reload root.
+        instance_id: String,
+    },
+    /// Confirm that the native owner received its task handle within five seconds.
+    AcknowledgeScope {
+        /// Prepared task binding; callbacks remain closed until acknowledgement.
+        instance_id: String,
+    },
+
+    /// Enable producer-sequenced reclamation on a fresh owned binding.
+    EnableInvocations {
+        /// Owned binding whose adapter supplies stable producer identities.
+        instance_id: String,
+    },
+    /// Reserve one invocation before forwarding it to native dispatch.
+    RegisterInvocation {
+        /// Binding generation is carried by the outer request identity.
+        instance_id: String,
+        /// Strictly increasing producer sequence, starting at one.
+        sequence: u64,
+        /// Stable native identity reused by every callback phase.
+        call_id: String,
+        /// Native tool name before dialect normalization.
+        tool_name: String,
+        /// Immutable tool input observed at the producer.
+        input: Value,
+    },
+    /// Cancel and drain both phases before reclaiming their details.
+    FinishInvocation {
+        /// Binding which owns the invocation.
+        instance_id: String,
+        /// Sequence returned by the owning producer.
+        sequence: u64,
+        /// Stable identity paired with the sequence.
+        call_id: String,
+    },
+    /// Opt an AW-launched instance into stable bridge policy updates before spawning.
+    EnableReload {
+        /// Prepared instance whose Adapter supports the stable bridge.
+        instance_id: String,
+    },
+    /// Corroborate the foreground process independently of optional observation.
+    AssociateProcess {
+        /// Instance owned by the launcher.
+        instance_id: String,
+        /// Foreground child PID; start time, UID and namespace are read locally.
+        pid: u32,
+    },
+    /// Record an Adapter-confirmed native lifecycle boundary.
+    BridgeLifecycle {
+        /// Owning reloadable instance.
+        instance_id: String,
+        /// Native process invoking the bridge, corroborated against the root process.
+        pid: u32,
+        /// Adapter-normalized lifecycle phase.
+        phase: LifecyclePhase,
+        /// Request or tool identity; ready uses an empty identity.
+        key: String,
+    },
+    /// Read the active Adapter callback plan; never activates a pending update.
+    HookPlan {
+        /// Owning instance with a ready stable bridge.
+        instance_id: String,
+        /// Native event name.
+        event: String,
+    },
+    /// Prepare a candidate and activate only at an idle native request boundary.
+    UpdatePolicy {
+        /// Existing instance, located independently of the candidate digest.
+        instance_id: String,
+        /// Compare-and-swap guard for the current instance policy.
+        expected_revision: String,
+        /// Complete candidate document, bounded by aw-config before preparation.
+        config: String,
+    },
     /// Start optional instance observation once, probing the configured source within bounds.
     StartObservation {
         /// Prepared instance owned by this launcher.
@@ -148,7 +290,7 @@ pub enum Operation {
         /// Original native callback bytes used to corroborate the identity.
         native_input: Vec<u8>,
     },
-    /// Release a binding; active events must be closed first.
+    /// Release an idle binding; reloadable instances reject active native requests/tools.
     Unbind {
         /// Service-issued identifier.
         instance_id: String,
@@ -176,8 +318,9 @@ pub enum Operation {
     /// and observer-only middleware trace; the first native bytes are retained.
     /// OpenClaw binds compression and native completion to one original snapshot;
     /// its pinned completion view supplies native metadata without renewing claims.
-    /// Closed correlations remain claimed until unbind; they cannot start a new budget.
-    /// At most 1024 correlations are retained per instance; exhaustion is explicit.
+    /// Sequenced bindings require a producer registration and reclaim both phases
+    /// after FinishInvocation drains them. Unknown or retired identities fail closed.
+    /// Legacy bindings retain at most 1024 claims until unbind; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.
         instance_id: String,
@@ -189,7 +332,8 @@ pub enum Operation {
     /// Cancel one native correlation, wait for cleanup and forbid later opens.
     ///
     /// Closing before an in-flight open wins must also prevent that open from
-    /// creating an abandoned event. Repeated closes are idempotent.
+    /// creating an abandoned event. Repeated closes are idempotent while the
+    /// invocation is retained; sequenced bindings reject closes after retirement.
     CloseHookEvent {
         /// Owning binding instance.
         instance_id: String,

@@ -1970,18 +1970,33 @@ fn pending_staging_inbox_not_affected() {
 use skillfs_fuse::security::{PostPublishGraceController, PostPublishWritePattern};
 
 struct PostPublishFixture {
-    #[allow(dead_code)]
     source: tempfile::TempDir,
     mountpoint: tempfile::TempDir,
     handle: Option<MountHandle>,
     notify_client: Arc<InMemoryNotifyClient>,
     notify_controller: Arc<NotifyController>,
-    #[allow(dead_code)]
+    resolver: Arc<ActiveSkillResolver>,
     post_publish_controller: Arc<PostPublishGraceController>,
 }
 
 impl PostPublishFixture {
     fn new(grace_ms: u64, seed: impl FnOnce(&Path)) -> Self {
+        Self::with_patterns(
+            grace_ms,
+            vec![PostPublishWritePattern::PrefixRecursive(
+                ".openclaw".to_string(),
+            )],
+            seed,
+        )
+    }
+
+    /// Fixture variant with an explicit post-publish whitelist, for the
+    /// exact / single-level pattern listing regressions.
+    fn with_patterns(
+        grace_ms: u64,
+        pp_patterns: Vec<PostPublishWritePattern>,
+        seed: impl FnOnce(&Path),
+    ) -> Self {
         let source = tempfile::tempdir().unwrap();
         seed(source.path());
 
@@ -2023,16 +2038,13 @@ impl PostPublishFixture {
             );
         }
 
-        let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
-            ".openclaw".to_string(),
-        )];
         let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(grace_ms), pp_patterns);
 
         let config = MountConfig {
             notify_controller: Some(notify_ctrl.clone()),
             staging_matcher: Some(matcher),
             staging_controller: Some(staging_ctrl),
-            active_resolver: Some(resolver),
+            active_resolver: Some(resolver.clone()),
             post_publish_controller: Some(pp_ctrl.clone()),
             ..MountConfig::default()
         };
@@ -2055,6 +2067,7 @@ impl PostPublishFixture {
             handle: Some(handle),
             notify_client,
             notify_controller: notify_ctrl,
+            resolver,
             post_publish_controller: pp_ctrl,
         }
     }
@@ -2329,6 +2342,527 @@ fn post_publish_grace_readdir_does_not_list_hidden_skill_contents() {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect::<Vec<_>>())
+    );
+}
+
+#[test]
+fn post_publish_grace_hidden_whitelisted_dir_lists_during_grace() {
+    skip_if_no_fuse!();
+
+    // Staging-rename flow: the published skill has no activation (hidden),
+    // so only the grace window lets the installer reach whitelisted paths.
+    let fixture = PostPublishFixture::new(5000, |src| {
+        create_skill(src, "existing");
+    });
+
+    let staging = fixture.skill_path(".openclaw-install-stage-lsdir");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: lsdir\ndescription: test\n---\n",
+    )
+    .unwrap();
+
+    let final_path = fixture.skill_path("lsdir");
+    std::fs::rename(&staging, &final_path).unwrap();
+    fixture.wait_for_notify(1);
+
+    // Grace-authorized installer writes into the whitelisted directory.
+    std::fs::create_dir(final_path.join(".openclaw")).unwrap();
+    std::fs::write(final_path.join(".openclaw/meta.json"), "{}").unwrap();
+
+    // Exact-path reads succeed through the grace bypass (lookup/getattr/open
+    // already honor grace)...
+    let content = std::fs::read_to_string(final_path.join(".openclaw/meta.json")).unwrap();
+    assert_eq!(content, "{}");
+
+    // ...so enumerating that same directory must succeed too instead of
+    // ENOENT from the hidden-skill view: readdir/opendir ignored grace.
+    let entries = common::list_dir_names(&final_path.join(".openclaw"));
+    assert!(
+        entries.contains(&"meta.json".to_string()),
+        "readdir of the grace-whitelisted dir must honor grace: {:?}",
+        entries
+    );
+
+    // The hidden skill root itself keeps its carve-out: it must stay
+    // unlistable during grace.
+    assert!(
+        std::fs::read_dir(&final_path).is_err(),
+        "readdir on the hidden skill root must still fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_exact_dir_pattern_does_not_list_unapproved_children() {
+    skip_if_no_fuse!();
+
+    // An exact pattern authorizes the directory itself, not its contents:
+    // live children under `.openclaw` that the whitelist never covered must
+    // not leak into the grace listing (stat of the child answers ENOENT, so
+    // listing it would break the exact-path agreement).
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::Exact(".openclaw".to_string())],
+        |src| {
+            create_skill(src, "existing");
+        },
+    );
+
+    let staging = fixture.skill_path(".openclaw-install-stage-exactls");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: exactls\ndescription: test\n---\n",
+    )
+    .unwrap();
+    // Live content the exact pattern never authorized: the installer cannot
+    // write it through the mount, so the grace listing must not show it.
+    std::fs::create_dir(staging.join(".openclaw")).unwrap();
+    std::fs::write(
+        staging.join(".openclaw").join("private-name.txt"),
+        "live only",
+    )
+    .unwrap();
+
+    let final_path = fixture.skill_path("exactls");
+    std::fs::rename(&staging, &final_path).unwrap();
+    fixture.wait_for_notify(1);
+
+    // The whitelisted directory stays reachable through the grace bypass:
+    // the listing must succeed (not ENOENT) ...
+    let entries = common::list_dir_names(&final_path.join(".openclaw"));
+    assert!(
+        !entries.contains(&"private-name.txt".to_string()),
+        "exact pattern must not leak unapproved children into the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.is_empty(),
+        "no child of an exact-pattern directory is whitelisted: {:?}",
+        entries
+    );
+
+    // ... and the child stays unreadable, matching the read surface.
+    assert!(
+        std::fs::read(final_path.join(".openclaw").join("private-name.txt")).is_err(),
+        "read of the unapproved child must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_single_level_pattern_does_not_list_grandchildren() {
+    skip_if_no_fuse!();
+
+    // `.openclaw/*` authorizes `.openclaw/cache` (a matching directory)
+    // without authorizing its children. A fallback skill traverses
+    // `.openclaw` through its snapshot, so live grandchildren under
+    // `.openclaw/cache` must not leak into the grace listing.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::PrefixSingleLevel(
+            ".openclaw".to_string(),
+        )],
+        |src| {
+            create_skill(src, "existing");
+            // Live source of the fallback skill: a grandchild the
+            // single-level pattern never authorized.
+            let live = src.join("fallback-skill");
+            std::fs::create_dir_all(live.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---\nname: fallback-skill\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("cache").join("tmp-a.txt"),
+                "live only",
+            )
+            .unwrap();
+            // Trusted snapshot: `.openclaw` exists (so traversal reaches the
+            // matching `cache` directory) but holds no grandchild entry.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---\nname: fallback-skill\ndescription: test\n---\n",
+            )
+            .unwrap();
+        },
+    );
+
+    // The skill falls back to its trusted snapshot ...
+    fixture.resolver.set(
+        "fallback-skill",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("fallback-skill")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    // ... and a post-publish grace session is active for it.
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    // Traversal works: `.openclaw` resolves through the snapshot and the
+    // whitelisted `.openclaw/cache` directory through the grace bypass.
+    let cache_dir = fixture
+        .skill_path("fallback-skill")
+        .join(".openclaw")
+        .join("cache");
+    assert!(
+        std::fs::metadata(&cache_dir).is_ok(),
+        "whitelisted cache dir must be reachable during grace"
+    );
+
+    let entries = common::list_dir_names(&cache_dir);
+    assert!(
+        !entries.contains(&"tmp-a.txt".to_string()),
+        "single-level pattern must not leak grandchildren into the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.is_empty(),
+        "no grandchild of `.openclaw` is whitelisted by `.openclaw/*`: {:?}",
+        entries
+    );
+
+    // Stated agreement with exact-path reads: the grandchild stats as ENOENT
+    // (not whitelisted, absent from the snapshot).
+    assert!(
+        std::fs::read(cache_dir.join("tmp-a.txt")).is_err(),
+        "read of the unapproved grandchild must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_exact_dir_pattern_lists_snapshot_visible_children() {
+    skip_if_no_fuse!();
+
+    // Exact pattern `.openclaw` authorizes the directory itself. Children
+    // outside the whitelist are still stat-able when the trusted snapshot
+    // carries them (shared and snapshot-only names), while live-only
+    // unapproved children answer ENOENT — the grace listing must show
+    // exactly the readable set.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::Exact(".openclaw".to_string())],
+        |src| {
+            create_skill(src, "existing");
+            // Fallback skill: the live tree holds a shared name plus an
+            // unapproved private name under `.openclaw`.
+            let live = src.join("exact-snap");
+            std::fs::create_dir_all(live.join(".openclaw")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---
+name: exact-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(live.join(".openclaw").join("shared.txt"), "live shared").unwrap();
+            std::fs::write(live.join(".openclaw").join("private.txt"), "live private").unwrap();
+            // Trusted snapshot: the shared name (trusted content) plus a
+            // snapshot-only name the live tree never had.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---
+name: exact-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(snap.join(".openclaw").join("shared.txt"), "trusted shared").unwrap();
+            std::fs::write(
+                snap.join(".openclaw").join("snapshot-only.txt"),
+                "trusted only",
+            )
+            .unwrap();
+        },
+    );
+
+    // Snapshot-resolved skill under an active grace session.
+    fixture.resolver.set(
+        "exact-snap",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("exact-snap")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    fixture
+        .post_publish_controller
+        .start_session("exact-snap", PostPublishSessionKind::StagingRename);
+
+    let openclaw = fixture.skill_path("exact-snap").join(".openclaw");
+    assert!(
+        std::fs::metadata(&openclaw).is_ok(),
+        "exact-pattern directory must be reachable during grace"
+    );
+
+    let entries = common::list_dir_names(&openclaw);
+    assert!(
+        !entries.contains(&"private.txt".to_string()),
+        "live-only unapproved child must stay out of the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"shared.txt".to_string()),
+        "snapshot-backed shared name stays stat-able and must be listed: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"snapshot-only.txt".to_string()),
+        "snapshot-only name is readable through the ordinary view and must be listed: {:?}",
+        entries
+    );
+
+    // Reads agree with the listing: the shared name answers from the
+    // trusted snapshot, the snapshot-only name succeeds, and the private
+    // live-only name fails.
+    assert_eq!(
+        std::fs::read_to_string(openclaw.join("shared.txt")).unwrap(),
+        "trusted shared"
+    );
+    assert_eq!(
+        std::fs::read_to_string(openclaw.join("snapshot-only.txt")).unwrap(),
+        "trusted only"
+    );
+    assert!(
+        std::fs::read(openclaw.join("private.txt")).is_err(),
+        "read of the live-only unapproved child must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_single_level_pattern_lists_snapshot_visible_grandchildren() {
+    skip_if_no_fuse!();
+
+    // `.openclaw/*` authorizes `.openclaw/cache` without authorizing its
+    // children. Grandchildren outside the whitelist stay stat-able when
+    // the trusted snapshot carries them, while live-only unapproved
+    // grandchildren answer ENOENT — the grace listing must show exactly
+    // the readable set.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::PrefixSingleLevel(
+            ".openclaw".to_string(),
+        )],
+        |src| {
+            create_skill(src, "existing");
+            let live = src.join("single-snap");
+            std::fs::create_dir_all(live.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---
+name: single-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("cache").join("shared.txt"),
+                "live shared",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("cache").join("private.txt"),
+                "live private",
+            )
+            .unwrap();
+            // Trusted snapshot: `.openclaw` exists so traversal reaches the
+            // matching `cache` directory; the cache carries the shared name
+            // (trusted content) plus a snapshot-only name.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---
+name: single-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                snap.join(".openclaw").join("cache").join("shared.txt"),
+                "trusted shared",
+            )
+            .unwrap();
+            std::fs::write(
+                snap.join(".openclaw")
+                    .join("cache")
+                    .join("snapshot-only.txt"),
+                "trusted only",
+            )
+            .unwrap();
+        },
+    );
+
+    // Snapshot-resolved skill under an active grace session.
+    fixture.resolver.set(
+        "single-snap",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("single-snap")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    fixture
+        .post_publish_controller
+        .start_session("single-snap", PostPublishSessionKind::StagingRename);
+
+    // Traversal works: `.openclaw` resolves through the snapshot and the
+    // whitelisted `.openclaw/cache` directory through the grace bypass.
+    let cache_dir = fixture
+        .skill_path("single-snap")
+        .join(".openclaw")
+        .join("cache");
+    assert!(
+        std::fs::metadata(&cache_dir).is_ok(),
+        "whitelisted cache dir must be reachable during grace"
+    );
+
+    let entries = common::list_dir_names(&cache_dir);
+    assert!(
+        !entries.contains(&"private.txt".to_string()),
+        "live-only unapproved grandchild must stay out of the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"shared.txt".to_string()),
+        "snapshot-backed shared grandchild stays stat-able and must be listed: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"snapshot-only.txt".to_string()),
+        "snapshot-only grandchild is readable through the ordinary view and must be listed: {:?}",
+        entries
+    );
+
+    // Reads agree with the listing: the shared grandchild answers from the
+    // trusted snapshot, the snapshot-only name succeeds, and the private
+    // live-only grandchild fails.
+    assert_eq!(
+        std::fs::read_to_string(cache_dir.join("shared.txt")).unwrap(),
+        "trusted shared"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cache_dir.join("snapshot-only.txt")).unwrap(),
+        "trusted only"
+    );
+    assert!(
+        std::fs::read(cache_dir.join("private.txt")).is_err(),
+        "read of the live-only unapproved grandchild must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_recursive_pattern_does_not_list_deleted_live_names() {
+    skip_if_no_fuse!();
+
+    // A recursive whitelist routes matching children to the live tree for
+    // the whole grace window: reading and deleting `.openclaw/obsolete.json`
+    // both answer from live, and after the deletion the read surface says
+    // ENOENT even though the trusted snapshot still carries the name. The
+    // grace listing must not resurrect the deleted name from the snapshot
+    // merge, and must keep listing live whitelisted names.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::PrefixRecursive(
+            ".openclaw".to_string(),
+        )],
+        |src| {
+            create_skill(src, "existing");
+            let live = src.join("recursive-del");
+            std::fs::create_dir_all(live.join(".openclaw")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---
+name: recursive-del\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("obsolete.json"),
+                "live obsolete",
+            )
+            .unwrap();
+            std::fs::write(live.join(".openclaw").join("current.json"), "live current").unwrap();
+            // Trusted snapshot still carries the deletable name; `current`
+            // stays live-only.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---
+name: recursive-del\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                snap.join(".openclaw").join("obsolete.json"),
+                "stale snapshot obsolete",
+            )
+            .unwrap();
+        },
+    );
+
+    // Snapshot-resolved skill under an active grace session.
+    fixture.resolver.set(
+        "recursive-del",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("recursive-del")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    fixture
+        .post_publish_controller
+        .start_session("recursive-del", PostPublishSessionKind::StagingRename);
+
+    let openclaw = fixture.skill_path("recursive-del").join(".openclaw");
+    assert!(
+        std::fs::metadata(&openclaw).is_ok(),
+        "recursive-pattern directory must be reachable during grace"
+    );
+
+    // The whitelisted child reads live content before the deletion.
+    assert_eq!(
+        std::fs::read_to_string(openclaw.join("obsolete.json")).unwrap(),
+        "live obsolete"
+    );
+    // The recursive whitelist allows the deletion through the mount.
+    std::fs::remove_file(openclaw.join("obsolete.json")).unwrap();
+    // The read surface agrees the name is gone.
+    assert!(
+        std::fs::read(openclaw.join("obsolete.json")).is_err(),
+        "deleted whitelisted child must read as ENOENT during grace"
+    );
+
+    let entries = common::list_dir_names(&openclaw);
+    assert!(
+        entries.contains(&"current.json".to_string()),
+        "live whitelisted child must stay listed: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&"obsolete.json".to_string()),
+        "a name deleted through the mount must not be resurrected from the snapshot: {:?}",
+        entries
     );
 }
 
@@ -2848,6 +3382,77 @@ fn post_publish_grace_fallback_readdir_does_not_leak_source() {
         !entries.contains(&"extra".to_string()),
         "readdir must not expose extra/ from physical source during grace: {:?}",
         entries
+    );
+}
+
+#[test]
+fn post_publish_grace_fallback_whitelisted_dir_lists_live_source() {
+    skip_if_no_fuse!();
+
+    let fixture = FallbackGraceFixture::new(5000, |src, snapshot| {
+        // Physical source has the skill with .clawhub and a non-whitelisted dir
+        let skill = src.join("fallback-skill");
+        std::fs::create_dir_all(skill.join(".clawhub")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill.join(".clawhub/origin.json"),
+            r#"{"origin":"installer"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill.join("data")).unwrap();
+        std::fs::write(skill.join("data/secret.txt"), "secret").unwrap();
+
+        // Snapshot does NOT contain .clawhub — only SKILL.md
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+        )
+        .unwrap();
+    });
+
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    let skill_via_fuse = fixture.skill_path();
+
+    // Cross-surface agreement: the whitelisted file is stat-able and readable
+    // from the live source (lookup/getattr/open honor grace today).
+    let whitelisted = skill_via_fuse.join(".clawhub/origin.json");
+    assert!(
+        std::fs::metadata(&whitelisted).is_ok(),
+        "stat of grace-whitelisted path must serve the live source"
+    );
+    let content = std::fs::read_to_string(&whitelisted).unwrap();
+    assert_eq!(content, r#"{"origin":"installer"}"#);
+
+    // readdir/opendir of the whitelisted directory must enumerate the live
+    // source too — not the snapshot view, which has no .clawhub and reports
+    // an empty directory while stat/open succeed on its children.
+    let entries = common::list_dir_names(&skill_via_fuse.join(".clawhub"));
+    assert!(
+        entries.contains(&"origin.json".to_string()),
+        "readdir of the grace-whitelisted dir must list the live source: {:?}",
+        entries
+    );
+
+    // The skill-root listing keeps its carve-out: source-only directories
+    // stay out of the snapshot-driven root listing.
+    let root_entries = common::list_dir_names(&skill_via_fuse);
+    assert!(
+        !root_entries.contains(&".clawhub".to_string()),
+        "skill-root readdir must not leak source-only dirs during grace: {:?}",
+        root_entries
+    );
+
+    // Non-whitelisted source-only files stay hidden behind the snapshot view.
+    assert!(
+        std::fs::metadata(skill_via_fuse.join("data/secret.txt")).is_err(),
+        "non-whitelisted source-only file must stay hidden during grace"
     );
 }
 

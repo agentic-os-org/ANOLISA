@@ -321,6 +321,14 @@ failed item 导致 `success=false, exit_code=1`，但 `error_type` 为空，因�
 verdict 值域严格为 `pass/warn/deny/error`；finding severity 只为 `warn/deny`。built-in
 regex rules 当前可能只产生 pass/warn，但 deny 是 custom/LLM rule 的合法值，不能删除。
 
+regex 模式扫描 Python 时，除 Python 规则外，还从 `os.system`、`os.popen` 以及受支持的
+`subprocess` 执行 API 中提取在第一个参数位置通过位置参数或对应关键字参数传入的直接
+字符串命令，并复用 Bash 规则扫描该命令。关键字参数按 API 的 Python 签名匹配：`os.system` 使用
+`command`，`os.popen`、`subprocess.getoutput` 和 `subprocess.getstatusoutput` 使用 `cmd`，
+其余受支持的 `subprocess` API 使用 `args`。结果保留 Bash 规则原生的 `rule_id`、severity、
+描述和 evidence，顶层 `language` 仍为 `python`。变量、拼接字符串、带前缀字符串、argv
+列表、别名调用和其它动态表达式不执行 Shell 规则复用。
+
 ### 7.3 Success/error
 
 | 情况 | success | exit_code | error_type |
@@ -710,15 +718,23 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺 20 ms 中断单次匹配。
 100 条自定义发现之后首次省略命中会停止后续匹配。自定义规则直接采用 fancy-regex 原生语义；
 与 Python 不同本身不构成错误，invalid_regex 仅用于实际解析/编译/引擎限制或加载求值失败。
-检测语义版本 `scanner_version=2.0.1` 纳入规则标识，成功/失败报告及审计均保留；
+检测语义版本 `scanner_version=2.1.1` 纳入规则标识，成功/失败报告及审计均保留；
 内置 engine 为 regex_v2，自定义为 fancy_regex。2.0.0 修复空 claims JWT 的候选漏报，
 接受结构正确的大整数/深层 JSON；身份证统一 decimal 校验并支持全角 X，银行卡排除全零。
 2.0.1 与保留的 Python 检测器同步要求完整卡号表达式、支持网络的前缀/长度组合及 Luhn；
 非常规分组及不合法表达式内部的局部匹配被拒绝。格式范围和边界见
-[PII 用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md#支持的银行卡格式)。
+[PII 用户指南](../../../../docs/user-guide/zh/agent-sec-core/pii-checker.md#支持的银行卡格式)。
 其他检测类型、置信度和脱敏格式保留，变化由共享卡号语料及独立质量用例定义。
 
-差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 142 个
+2.1.1 将负向上下文 `example`、`dummy`、`test`、`sample` 改为不区分 ASCII 大小写的
+完整词匹配，避免 `latest` 等普通词使真实敏感信息降分。词边界沿用 Python 3.11 / Unicode 14
+字符表（字母、数字及下划线属于 word），在原文检查边界，64 字符窗口截断不产生新边界。
+`test-only`、`sample-data` 仍是测试标记；`.invalid` 保留子串匹配。正向连字符归一化、
+`+0.12/-0.35` 权重、低置信度阈值和 email/private-key 例外不变。冻结 V1 语料保留原始
+记录；兼容测试显式分类 `sk-test987…` 及 `LTAI5tQnKxExampleToken12` 上下文的置信度变化，
+其他预期字段继续逐项比较。
+
+差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 234 个
 V1 合成用例及单测验证。完整差异、未来 Evidence 边界和回滚见
 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。保留 V1 实现独立回滚。
 

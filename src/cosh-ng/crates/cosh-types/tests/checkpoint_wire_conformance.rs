@@ -538,6 +538,7 @@ fn rejection_cases() -> Vec<(&'static str, local::GuardedCheckpointRejectionCode
             "rejection/evidence_capacity_reached",
             Code::EvidenceCapacityReached,
         ),
+        ("rejection/insufficient_space", Code::InsufficientSpace),
     ]
 }
 
@@ -596,6 +597,10 @@ fn rollback_rejection_cases() -> Vec<(&'static str, local::GuardedRollbackReject
         (
             "rollback_rejection/unsupported_workspace_path",
             Code::UnsupportedWorkspacePath,
+        ),
+        (
+            "rollback_rejection/insufficient_space",
+            Code::InsufficientSpace,
         ),
     ]
 }

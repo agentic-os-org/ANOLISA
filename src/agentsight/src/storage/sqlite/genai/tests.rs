@@ -1406,9 +1406,60 @@ fn test_list_traces_by_session_with_time_range() {
 fn test_list_agent_names() {
     let (store, path) = create_populated_store("agent_names");
     let r = store
-        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
         .unwrap();
     assert_eq!(r, vec!["agent-a", "agent-b"]);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_list_agent_names_excludes_auxiliary_by_default() {
+    // The list feeds the dashboard's agent filter. Sessions whose only calls
+    // are auxiliary kinds are hidden by /api/sessions by default, so offering
+    // their agents in the filter produced a selectable label that matched no
+    // visible session.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_agent_names_aux_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        for (call_id, agent, kind) in [
+            ("aux-main", "main-agent", "main"),
+            ("aux-search", "search-helper", "web_search"),
+            // Recap can form a session on its own (#7271), so the session
+            // predicate keeps it; analyzer-only background sessions stay
+            // hidden.
+            ("aux-recap", "recap-agent", "recap"),
+            ("aux-analyzer", "bg-analyzer", "analyzer"),
+        ] {
+            conn.execute(
+                "INSERT INTO genai_events
+                 (event_type, status, call_id, start_timestamp_ns, end_timestamp_ns,
+                  agent_name, process_name, provider, model, call_kind, event_json)
+                 VALUES ('llm_call', 'complete', ?1, ?2, ?3, ?4, ?4, 'openai', 'gpt-4', ?5, '{}')",
+                params![call_id, BASE_NS, BASE_NS + STEP_NS, agent, kind],
+            )
+            .unwrap();
+        }
+    }
+
+    let names = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
+        .unwrap();
+    assert_eq!(names, vec!["main-agent", "recap-agent"]);
+
+    let all = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
+    assert_eq!(
+        all,
+        vec!["bg-analyzer", "main-agent", "recap-agent", "search-helper"]
+    );
     cleanup_db(&path);
 }
 
@@ -1439,7 +1490,7 @@ fn test_list_agent_names_falls_back_to_process_name() {
     }
 
     let names = store
-        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
         .unwrap();
     assert_eq!(names, vec!["fallback-agent"]);
     cleanup_db(&path);
@@ -1492,7 +1543,7 @@ fn test_list_agent_names_merges_case_variants() {
         }
     }
     let names = store
-        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
         .unwrap();
     let qoder_entries: Vec<&String> = names
         .iter()
@@ -2091,11 +2142,18 @@ fn test_complete_pending_promotion_keeps_captured_request_evidence() {
         .unwrap();
 
     let conn = store.conn.lock().unwrap();
-    let (input_messages, system_instructions, status): (Option<String>, Option<String>, String) =
-        conn.query_row(
-            "SELECT input_messages, system_instructions, status FROM genai_events",
+    let (input_messages, system_instructions, session_id, conversation_id, status): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT input_messages, system_instructions, session_id, conversation_id, status
+             FROM genai_events",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
     assert_eq!(status, "complete");
@@ -2108,6 +2166,16 @@ fn test_complete_pending_promotion_keeps_captured_request_evidence() {
         system_instructions.as_deref(),
         Some("captured system prompt"),
         "promotion must not erase the captured system prompt"
+    );
+    assert_eq!(
+        session_id.as_deref(),
+        Some("s-idle"),
+        "promotion must not erase the captured session attribution"
+    );
+    assert_eq!(
+        conversation_id.as_deref(),
+        Some("c-idle"),
+        "promotion must not erase the captured conversation attribution"
     );
     drop(conn);
     cleanup_db(&path);
@@ -2467,11 +2535,17 @@ fn test_complete_pending_keeps_captured_request_evidence() {
 
     {
         let conn = store.conn.lock().unwrap();
-        let (input, system): (Option<String>, Option<String>) = conn
+        let (input, system, session_id, conversation_id): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT input_messages, system_instructions FROM genai_events WHERE call_id = 'captured-1'",
+                "SELECT input_messages, system_instructions, session_id, conversation_id
+                 FROM genai_events WHERE call_id = 'captured-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert!(
@@ -2483,6 +2557,16 @@ fn test_complete_pending_keeps_captured_request_evidence() {
         assert!(
             system.as_deref().is_some_and(|v| v.contains("be terse")),
             "the captured system instructions must survive too, got {system:?}"
+        );
+        assert_eq!(
+            session_id.as_deref(),
+            Some("s-evidence"),
+            "the captured session attribution must survive a completion that carries none"
+        );
+        assert_eq!(
+            conversation_id.as_deref(),
+            Some("c-evidence"),
+            "the captured conversation attribution must survive a completion that carries none"
         );
     }
 

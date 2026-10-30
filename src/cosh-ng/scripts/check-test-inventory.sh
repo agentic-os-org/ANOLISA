@@ -55,13 +55,24 @@ check_overlap_ceiling() {
 check_source_floor cosh-types 24
 check_source_floor cosh-platform 279
 check_source_floor cosh-cli 75
-check_source_floor cosh-core 696
+check_source_floor cosh-core 699
 check_source_floor cosh-shell 2683
 
 ignored_count="$(rg -n '^[[:space:]]*#\[ignore' crates -g '*.rs' | wc -l | tr -d ' ')"
-echo "ignored tests: $ignored_count (ceiling 3)"
-if [[ "$ignored_count" -gt 3 ]]; then
-  fail "ignored test inventory increased above 3 to $ignored_count"
+# These four regressions require a real writable file owned by another UID.
+# Their separately provisioned execution does not consume the ordinary skip budget.
+uid_ignored_count="$(
+  rg -U --count-matches '^[ \t]*#\[ignore = "requires an explicitly provisioned writable foreign-UID fixture"\]\n[ \t]*fn foreign_uid_(expired_log_preserves_content|current_log_refuses_append)\(' \
+    crates/cosh-core/src/logging.rs crates/cosh-shell/src/runtime/logging_tests.rs |
+    awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$uid_ignored_count" -ne 4 ]]; then
+  fail "expected exactly four provisioned foreign-UID regressions, found $uid_ignored_count"
+fi
+ordinary_ignored_count=$((ignored_count - uid_ignored_count))
+echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases"
+if [[ "$ordinary_ignored_count" -gt 3 ]]; then
+  fail "ordinary ignored test inventory increased above 3 to $ordinary_ignored_count"
 fi
 
 check_overlap_ceiling cosh-core cosh-core 4

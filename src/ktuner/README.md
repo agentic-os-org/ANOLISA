@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-Agent-facing kernel parameter tuning engine for ANOLISA. Evaluates 207 rules against the running system and outputs structured JSON recommendations. Designed to be called by cosh/agent via `ktuner <command> [options]`.
+Agent-facing kernel parameter tuning engine for ANOLISA. Evaluates 208 rules against the running system and outputs structured JSON recommendations. Designed to be called by cosh/agent via `ktuner <command> [options]`.
 
 Disk `rq_affinity` advice respects `threadirqs` boot parameters and PREEMPT_RT. Quoted parameter values do not introduce flags or a `--` separator; parameters after the actual separator are arguments to init.
 

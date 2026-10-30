@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +21,7 @@ use ws_ckpt_common::{
 
 use crate::fs_watcher::WorkspaceWatcher;
 use crate::index_store;
+use crate::snapshot_mgr::ListKey;
 
 /// Outcome of the workspace quiescence check.
 ///
@@ -148,6 +149,9 @@ pub struct WorkspaceState {
     pub ws_id: String,
     pub path: PathBuf,
     pub index: SnapshotIndex,
+    // Runtime-only order for cursor range queries. Snapshot membership and
+    // created_at changes must use insert_snapshot/remove_snapshot/replace_index.
+    snapshot_order: BTreeSet<ListKey>,
     /// Per-workspace policy override; `WorkspacePolicy::default()` when no
     /// `policy.toml` exists (i.e. inherit everything from global).
     pub policy: WorkspacePolicy,
@@ -161,6 +165,80 @@ pub struct WorkspaceState {
     /// hence `tokio::sync::Mutex`. The ws write lock itself is taken only to
     /// commit the in-memory result, never across the disk op.
     pub policy_io_mu: Arc<Mutex<()>>,
+}
+
+impl WorkspaceState {
+    /// Runtime identity order used to seek within a cursor interval.
+    pub(crate) fn snapshot_keys(&self) -> &BTreeSet<ListKey> {
+        &self.snapshot_order
+    }
+
+    /// Add or replace metadata together with its chronological identity key.
+    pub(crate) fn insert_snapshot(&mut self, id: String, meta: ws_ckpt_common::SnapshotMeta) {
+        self.remove_snapshot(&id);
+        self.snapshot_order.insert(ListKey {
+            created_at: meta.created_at,
+            workspace_id: self.ws_id.clone(),
+            snapshot_id: id.clone(),
+        });
+        self.index.snapshots.insert(id, meta);
+    }
+
+    /// Remove metadata together with its chronological identity key.
+    pub(crate) fn remove_snapshot(&mut self, id: &str) -> Option<ws_ckpt_common::SnapshotMeta> {
+        let meta = self.index.snapshots.remove(id)?;
+        self.snapshot_order.remove(&ListKey {
+            created_at: meta.created_at,
+            workspace_id: self.ws_id.clone(),
+            snapshot_id: id.to_string(),
+        });
+        Some(meta)
+    }
+
+    /// Publish a durable index replacement without rebuilding unchanged keys.
+    pub(crate) fn replace_index(&mut self, index: SnapshotIndex) {
+        for (id, meta) in &self.index.snapshots {
+            if index
+                .snapshots
+                .get(id)
+                .is_none_or(|next| next.created_at != meta.created_at)
+            {
+                self.snapshot_order.remove(&ListKey {
+                    created_at: meta.created_at,
+                    workspace_id: self.ws_id.clone(),
+                    snapshot_id: id.clone(),
+                });
+            }
+        }
+        for (id, meta) in &index.snapshots {
+            if self
+                .index
+                .snapshots
+                .get(id)
+                .is_none_or(|old| old.created_at != meta.created_at)
+            {
+                self.snapshot_order.insert(ListKey {
+                    created_at: meta.created_at,
+                    workspace_id: self.ws_id.clone(),
+                    snapshot_id: id.clone(),
+                });
+            }
+        }
+        self.index = index;
+    }
+
+    fn rebuild_snapshot_order(&mut self) {
+        self.snapshot_order = self
+            .index
+            .snapshots
+            .iter()
+            .map(|(id, meta)| ListKey {
+                created_at: meta.created_at,
+                workspace_id: self.ws_id.clone(),
+                snapshot_id: id.clone(),
+            })
+            .collect();
+    }
 }
 
 impl DaemonState {
@@ -314,7 +392,18 @@ impl DaemonState {
             if let Some(ws_arc) = state.get_by_wsid(&ws_id) {
                 let mut ws = ws_arc.write().await;
                 let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
-                if index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await? {
+                let mut changed =
+                    index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await?;
+                let live_path = state.backend.data_root().join(&ws_id);
+                tracing::warn_span!("reconcile_live_head", ws_id = %ws_id).in_scope(|| {
+                    match index_store::reconcile_live_head(&live_path, &snapshot_dir, &mut ws.index)
+                    {
+                        Ok(moved) => changed |= moved,
+                        Err(e) => warn!("Skipping index head check for {ws_id}: {e:#}"),
+                    }
+                });
+                if changed {
+                    ws.rebuild_snapshot_order();
                     index_store::save(&state.index_dir(&ws_id), &ws.index)
                         .await
                         .with_context(|| format!("save reconciled index for {ws_id}"))?;
@@ -706,14 +795,17 @@ impl DaemonState {
             anyhow::bail!("workspace registration anchor {path:?} must be a user path outside backend storage");
         }
         index.workspace_path = path.clone();
-        let state = Arc::new(RwLock::new(WorkspaceState {
+        let mut workspace = WorkspaceState {
             ws_id: ws_id.clone(),
             path: path.clone(),
             index,
+            snapshot_order: BTreeSet::new(),
             policy,
             policy_failsafe: failsafe,
             policy_io_mu: Arc::new(Mutex::new(())),
-        }));
+        };
+        workspace.rebuild_snapshot_order();
+        let state = Arc::new(RwLock::new(workspace));
         {
             let mut registry = self.registry.write().unwrap_or_else(|err| err.into_inner());
             if registry.workspaces.contains_key(&ws_id) {

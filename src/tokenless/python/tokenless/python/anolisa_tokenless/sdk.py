@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib.resources import files
@@ -128,6 +129,7 @@ class AppliedOperation(StrEnum):
     TERMINAL_CLEANUP = "terminal_cleanup"
     BUILD_LOG_REDUCTION = "build_log_reduction"
     TABULAR_COMPACTION = "tabular_compaction"
+    # Historical wire value; current table compression never emits it.
     TABULAR_ROW_REDUCTION = "tabular_row_reduction"
     SEARCH_PATH_SHARING = "search_path_sharing"
     DIFF_REDUCTION = "diff_reduction"
@@ -446,7 +448,8 @@ class TokenlessSdk:
         return RetrieveResponse(hash=value["hash"], payload=value["payload"])
 
     def _resolve_rtk(self) -> Path:
-        resource = files("anolisa_tokenless").joinpath("_bin", "rtk")
+        name = "rtk.exe" if sys.platform == "win32" else "rtk"
+        resource = files("anolisa_tokenless").joinpath("_bin", name)
         if not isinstance(resource, Path):
             raise RuntimeError(
                 "anolisa-tokenless must be installed as an unpacked wheel so packaged "

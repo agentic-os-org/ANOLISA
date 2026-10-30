@@ -102,6 +102,25 @@ OpenClaw 和 Hermes 优先识别 `cannot be represented as UTF-8`，再匹配通
 此映射。应同时部署 daemon、CLI 和 cosh 以支持追加的 wire 错误码，旧 CLI 无法解码
 新错误码；两个插件也需要更新，才能提供明确的重试指引。
 
+## Backend 空间准入
+
+Btrfs backend 在 data 或 metadata 用量达到 95% 删除守护阈值，或无法读取用量时，拒绝
+创建新 subvolume。范围包括 checkpoint snapshot、rollback snapshot，以及 rollback
+preview 和回滚前复核使用的 diff 临时 snapshot。拒绝发生在创建任何 snapshot 或移动
+workspace 之前，因此 guarded checkpoint 与 rollback 返回 `InsufficientSpace`，而不是
+不确定结果；已预留的 rollback 会先持久化清除预留记录。清理释放空间后可重试同一请求。
+Legacy 请求遇到同一拒绝时返回已有的 `ErrorCode::DiskSpaceInsufficient`，而不是 `InternalError`。
+
+Cosh 将 `InsufficientSpace` 映射为 `CheckpointCreateFailed` 或
+`CheckpointRestoreFailed`，设置 `recoverable = true`，以及
+`details.guarded_rejection` / `details.guarded_rollback_rejection =
+"insufficient_space"`，并使用 cosh 自己的固定提示。daemon 诊断原文仍不透传，daemon
+日志中同样记录该原因。
+
+`InsufficientSpace` 在 ws-ckpt 和 cosh 的 bincode 枚举末尾追加，checkpoint 拒绝码
+编号为 12，rollback 拒绝码编号为 17。旧版 cosh 无法解码新拒绝码，会以不可重试的
+protocol error 安全拒绝。
+
 ## 兼容性与验证
 
 新 Request/Response variant 只追加在 bincode enum 末尾，所有 legacy discriminant 和

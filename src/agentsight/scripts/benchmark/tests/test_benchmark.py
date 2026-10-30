@@ -2248,6 +2248,7 @@ def test_report_writers_survive_malformed_artifacts(tmp_path: Path) -> None:
                     "token_accuracy": {"handled": 2},
                 },
                 "server_healthy_after": True,
+                "sse_truncation_verified": True,
                 "process_alive_after": True,
             }
         ),
@@ -2402,8 +2403,9 @@ def test_final_report_summarizes_headline_improvements(tmp_path: Path) -> None:
     assert comparison["metrics"]["rss_avg_mb"]["delta_pct"] == -20
     report = (tmp_path / "final-report.md").read_text(encoding="utf-8")
     assert "AgentSight baseline/optimized 全量测试报告" in report
-    assert "CPU 占用降低" in report
-    assert "内存占用降低" in report
+    assert "CPU 占用降低" not in report
+    assert "内存占用降低" not in report
+    assert result["optimization_claim_allowed"] is False
     assert "+50.00%" in report
     assert "-25.00%" in report
     assert "x86_64" in report
@@ -2719,6 +2721,7 @@ def test_fault_injector_main_writes_failure_safe_report(
         "inject",
         lambda *args: {
             "server_healthy_after": True,
+            "sse_truncation_verified": True,
             "process_alive_after": True,
             "outcomes": {},
         },
@@ -2977,6 +2980,7 @@ def test_full_scenario_reports_use_raw_artifacts(tmp_path: Path) -> None:
             "label": label,
             "version": "baseline",
             "repetition": 1,
+            "started_at_unix": 0,
             "summary": summary,
         }
         items.append((path, run))
@@ -2994,6 +2998,7 @@ def test_full_scenario_reports_use_raw_artifacts(tmp_path: Path) -> None:
             {
                 "outcomes": {"invalid_json": {"HTTP/1.1 200 OK": 2}},
                 "server_healthy_after": True,
+                "sse_truncation_verified": True,
                 "process_alive_after": True,
             }
         ),

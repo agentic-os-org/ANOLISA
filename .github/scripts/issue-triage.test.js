@@ -2,6 +2,9 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 
 const triage = require('./issue-triage');
 
@@ -15,6 +18,12 @@ const metadata = {
       display_name: 'AgentSight',
       label: 'component:sight',
       issue_triagers: ['chengshuyi', 'jfeng18'],
+      status: 'active',
+    },
+    {
+      id: 'sec-core',
+      display_name: 'AgentSecCore',
+      label: 'component:sec-core',
       status: 'active',
     },
     {
@@ -189,6 +198,44 @@ test('dry run performs no GitHub mutations', async () => {
   await triage.run({ ...harness, env: inputEnv({ INPUT_APPLY: 'false' }) });
   assert.deepEqual(harness.calls, []);
   assert.equal(harness.outputs.mutated, 'false');
+});
+
+test('calls component-gated analysis only for a newly applied route', async (t) => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../workflows/issue-automation.yml'), 'utf8');
+  const condition = workflow.match(/^  issue-analysis:\n[\s\S]*?^    if: >-\n((?:      .+\n)+)/m)?.[1];
+  assert.ok(condition, 'The Router must gate the SecCore workflow call');
+  const outputExpressions = [...workflow.matchAll(/^      (\w+): \$\{\{ (steps\.triage\.outputs\.\w+) \}\}$/gm)];
+  const selected = (stepOutputs, { repositoryId = '1195873793', cancelled = false, result = 'success' } = {}) => {
+    const outputs = Object.fromEntries(outputExpressions.map(([, name, expression]) =>
+      [name, vm.runInNewContext(expression, { steps: { triage: { outputs: stepOutputs } } })]));
+    return vm.runInNewContext(condition, {
+      github: { repository_id: repositoryId },
+      needs: { triage: { outputs, result } },
+      cancelled: () => cancelled,
+    });
+  };
+  for (const scenario of [
+    { name: 'new SecCore decision', expected: true },
+    { name: 'other component', env: { INPUT_COMPONENT: 'sight' }, expected: true },
+    { name: 'dry run', env: { INPUT_APPLY: 'false' } },
+    { name: 'shadow mode', env: { AUTOMATION_MODE: 'shadow' } },
+    { name: 'low confidence', env: { INPUT_CONFIDENCE: '0.60' } },
+    { name: 'manual component override', issue: { labels: ['component:sight'] } },
+    { name: 'already applied decision', issue: { comments: [{
+      id: 42, user: { login: 'github-actions[bot]' },
+      body: '<!-- anolisa-ai-triage:anolisa-2262-v1 -->',
+    }] } },
+  ]) await t.test(scenario.name, async () => {
+    const harness = makeHarness(scenario.issue);
+    await triage.run({ ...harness, env: inputEnv({ INPUT_COMPONENT: 'sec-core', ...scenario.env }) });
+    assert.equal(selected(harness.outputs), Boolean(scenario.expected));
+    if (scenario.expected) {
+      assert.equal(selected(harness.outputs, { repositoryId: '7' }), false);
+      assert.equal(selected(harness.outputs, { cancelled: true }), false);
+      assert.equal(selected(harness.outputs, { result: 'failure' }), true,
+        'A later notification failure must not block an applied route');
+    }
+  });
 });
 
 test('dry run and shadow mode do not retry a pending notification', async () => {

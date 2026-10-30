@@ -51,7 +51,7 @@ fn reason(results: &[AggregatedResult], expected: RemoveReason) {
 }
 
 #[test]
-fn lru_removal_transfers_request_and_clears_every_side_cache() {
+fn lru_removal_keeps_only_metadata_and_clears_every_side_cache() {
     let mut http = HttpConnectionAggregator::with_capacity(2);
     let old = ConnectionId::from_ssl_event(&event(1, 1, b""));
     http.process_request(request(1, b"one", 3));
@@ -61,6 +61,10 @@ fn lru_removal_transfers_request_and_clears_every_side_cache() {
     http.idle_snapshotted.put(old, ());
     http.request_chunks
         .put(old, super::super::chunk_stream::ChunkStream::default());
+    http.last_activity.put(
+        old,
+        Instant::now() - crate::aggregator::result::ACTIVE_CONNECTION_GRACE,
+    );
     http.process_request(request(3, b"new", 3));
     let results = http.take_ready();
     reason(&results, RemoveReason::LruEvicted);
@@ -75,7 +79,8 @@ fn lru_removal_transfers_request_and_clears_every_side_cache() {
         unreachable!()
     };
     assert_eq!(*connection_id, old);
-    assert_eq!(request.body(), b"one");
+    assert!(request.body().is_empty());
+    assert!(request.source_event.buf.is_empty());
     assert!(!http.connections.contains(&old));
     assert!(!http.last_activity.contains(&old));
     assert!(!http.idle_snapshotted.contains(&old));
@@ -183,11 +188,31 @@ fn fragmented_body_detaches_the_first_capture_and_reserves_once() {
     };
     assert!(request.source_event.buf.is_empty());
     assert_eq!(request.body().len(), 1024);
+    assert_eq!(request.body_len, 1024);
     assert_eq!(request.reassembled_body.as_ref().unwrap().capacity(), 1024);
 }
 
 #[test]
-fn append_limits_emit_truncated_request_immediately() {
+fn drain_of_a_partial_body_describes_the_buffer_it_keeps() {
+    let mut http = HttpConnectionAggregator::new();
+    // A declared 100-byte body that never completes: the drain keeps the six
+    // bytes it saw, so `body_len` has to describe those six bytes rather than
+    // the zero the split-request handoff left behind.
+    http.process_request(request(1, b"prompt", 100));
+    http.drain_pending(RemoveReason::PidExited);
+    let results = http.take_ready();
+    let AggregatedResult::Abandoned { partial, .. } = &results[0] else {
+        unreachable!()
+    };
+    let AggregatedResult::RequestOnly { request, .. } = partial.as_ref() else {
+        unreachable!()
+    };
+    assert_eq!(request.body(), b"prompt");
+    assert_eq!(request.body_len, request.body().len());
+}
+
+#[test]
+fn append_limits_emit_bodyless_metadata_immediately() {
     let mut http = HttpConnectionAggregator::with_limits(4, 1024, Duration::from_secs(60));
     let mut request = request(1, b"400\r\n", 0);
     request.headers = HashMap::from([("transfer-encoding".into(), "chunked".into())]);
@@ -201,13 +226,34 @@ fn append_limits_emit_truncated_request_immediately() {
     let AggregatedResult::RequestOnly { request, .. } = partial.as_ref() else {
         unreachable!()
     };
-    assert_eq!(request.body().len(), 1024);
+    assert!(request.body().is_empty());
+    assert!(request.source_event.buf.is_empty());
     assert_eq!(http.active_connections(), 0);
     assert_eq!(http.metrics().connection_cache_bytes, 0);
 }
 
+// Resource disposal must clear both body views so downstream builders cannot
+// recover discarded payload through a stale length or reassembled buffer.
 #[test]
-fn response_limit_keeps_valid_offsets_and_owned_partial_evidence() {
+fn over_budget_request_keeps_body_len_matching_the_discarded_body() {
+    let mut http = HttpConnectionAggregator::with_limits(4, 1024, Duration::from_secs(60));
+    let oversized = vec![b'x'; 2048];
+    http.process_request(request(1, &oversized, oversized.len()));
+    let results = http.take_ready();
+    reason(&results, RemoveReason::OverBudget);
+    let AggregatedResult::Abandoned { partial, .. } = &results[0] else {
+        unreachable!()
+    };
+    let AggregatedResult::RequestOnly { request, .. } = partial.as_ref() else {
+        unreachable!()
+    };
+    assert!(request.body().is_empty());
+    assert_eq!(request.body_len, request.body().len());
+    assert_eq!(http.active_connections(), 0);
+}
+
+#[test]
+fn response_limit_releases_both_bodies_before_queuing_metadata() {
     let mut http = HttpConnectionAggregator::with_limits(4, 1024, Duration::from_secs(60));
     http.process_request(request(1, b"{}", 2));
     let source = event(
@@ -228,8 +274,10 @@ fn response_limit_keeps_valid_offsets_and_owned_partial_evidence() {
     let AggregatedResult::HttpComplete(pair) = partial.as_ref() else {
         unreachable!()
     };
-    assert_eq!(pair.response.parsed.body(), b"first");
-    assert_eq!(pair.request.body(), b"{}");
+    assert!(pair.response.parsed.body().is_empty());
+    assert!(pair.request.body().is_empty());
+    assert!(pair.response.parsed.source_event.buf.is_empty());
+    assert!(pair.request.source_event.buf.is_empty());
     assert_eq!(http.metrics().connection_cache_bytes, 0);
 }
 
@@ -334,5 +382,124 @@ fn budget_abandonment_does_not_replay_consumed_sse_lines() {
         assert_eq!(events.len(), 1);
         let expected = SseParser::new().parse(event(1, 0, first.as_bytes()));
         assert_eq!(events[0].data(), expected[0].data());
+    }
+}
+
+#[test]
+fn compact_activity_promotes_the_connection_eviction_order() {
+    let mut http = HttpConnectionAggregator::with_capacity(2);
+    http.set_compact_sse(true);
+    for id in 1..=2 {
+        http.process_request(request(id, b"{}", 2));
+        http.process_response(sse_headers(id));
+    }
+    let stale = Instant::now() - crate::aggregator::result::ACTIVE_CONNECTION_GRACE;
+    for id in 1..=2 {
+        http.last_activity
+            .put(ConnectionId::from_ssl_event(&event(id, 0, b"")), stale);
+    }
+    http.process_raw_body_data(&event(
+        1,
+        0,
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"active\"}}]}\n\n",
+    ));
+    http.process_request(request(3, b"{}", 2));
+    assert!(http.is_sse_active(&ConnectionId::from_ssl_event(&event(1, 0, b""))));
+    let results = http.take_ready();
+    reason(&results, RemoveReason::LruEvicted);
+    assert!(
+        matches!(&results[0], AggregatedResult::Abandoned { partial, .. }
+        if matches!(partial.as_ref(), AggregatedResult::SseComplete(pair) if pair.connection_id.ssl_ptr == 2))
+    );
+}
+
+#[test]
+fn retired_sse_markers_are_bounded_expire_and_follow_pid_cleanup() {
+    let mut http = HttpConnectionAggregator::with_capacity(2);
+    http.set_compact_sse(true);
+    for id in 1..=3 {
+        http.process_response(sse_headers(id));
+        http.abandon(
+            &ConnectionId::from_ssl_event(&event(id, 0, b"")),
+            RemoveReason::OverBudget,
+        );
+    }
+    assert_eq!(http.retired_sse.len(), 2);
+    http.tick(Instant::now() + Duration::from_secs(301));
+    assert!(http.retired_sse.is_empty());
+    http.process_response(sse_headers(4));
+    http.abandon(
+        &ConnectionId::from_ssl_event(&event(4, 0, b"")),
+        RemoveReason::OverBudget,
+    );
+    assert_eq!(http.retired_sse.len(), 1);
+    assert!(
+        http.drain_connections_for_pid(std::process::id())
+            .is_empty()
+    );
+    assert!(http.retired_sse.is_empty());
+}
+
+#[test]
+fn incremental_http_accounting_matches_full_scans_through_stream_lifecycles() {
+    for compact in [false, true] {
+        let mut http = HttpConnectionAggregator::with_capacity(4);
+        http.set_compact_sse(compact);
+        for id in 1..=4 {
+            http.process_request(request(id, b"{}", 2));
+            http.process_response(sse_headers(id));
+        }
+        for _ in 0..20 {
+            for id in 1..=4 {
+                let source = event(id, 0, b"id: fixture\nevent: message\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"y\"}}]}\n\n");
+                if compact {
+                    http.process_raw_body_data(&source);
+                } else {
+                    let id = ConnectionId::from_ssl_event(&source);
+                    for event in SseParser::new().parse(source) {
+                        http.process_sse_event(&id, event);
+                    }
+                }
+                let pending = http
+                    .connections
+                    .iter()
+                    .map(|(_, state)| state.buffered_bytes())
+                    .sum::<usize>();
+                let total = pending
+                    + http
+                        .retained
+                        .values()
+                        .map(|retained| retained.metadata_bytes())
+                        .sum::<usize>()
+                    + http
+                        .sse_continuation_buffers
+                        .iter()
+                        .map(|(_, bytes)| bytes.capacity())
+                        .sum::<usize>()
+                    + http
+                        .sse_streams
+                        .iter()
+                        .map(|(_, stream)| stream.retained_bytes())
+                        .sum::<usize>();
+                assert_eq!(http.metrics().pending_connection_bytes, pending);
+                assert_eq!(http.metrics().connection_cache_bytes, total);
+                for (key, state) in http.connections.iter() {
+                    let sse = http.sse_streams.peek(key).map_or_else(
+                        || {
+                            state.sse_retained_bytes()
+                                + http
+                                    .sse_continuation_buffers
+                                    .peek(key)
+                                    .map_or(0, Vec::capacity)
+                        },
+                        |stream| stream.payload_retained_bytes(),
+                    );
+                    assert_eq!(http.retained[key].sse_bytes, sse);
+                }
+            }
+        }
+        http.drain_pending(RemoveReason::Shutdown);
+        assert_eq!(http.metrics().connection_cache_bytes, 0);
+        assert!(http.retained.is_empty());
     }
 }

@@ -21,6 +21,11 @@ trap cleanup EXIT
 COMPONENT_ROOT="$(cd "$1" && pwd)"
 RTK_DIR="$COMPONENT_ROOT/third_party/rtk"
 
+if [ -f "$COMPONENT_ROOT/packaging/build/setup-rtk.sh" ]; then
+    bash "$COMPONENT_ROOT/packaging/build/setup-rtk.sh" "$RTK_DIR"
+    exit 0
+fi
+# Tagged sources before the packaging move retain their historical script path.
 if [ -f "$COMPONENT_ROOT/scripts/setup-rtk.sh" ]; then
     bash "$COMPONENT_ROOT/scripts/setup-rtk.sh" "$RTK_DIR"
     exit 0

@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -58,6 +59,7 @@ const BUDGET_LOCK_FILENAME: &str = ".budget.lock";
 struct BudgetEntry {
     session_id: ProviderSessionId,
     bytes: u64,
+    is_temporary: bool,
 }
 
 /// One workspace scope directory under the per-user session root.
@@ -359,15 +361,22 @@ impl SessionStore {
         keep: &ProviderSessionId,
         incoming: u64,
     ) -> Result<(), SessionError> {
-        let scopes = self.budget_scopes()?;
-        // The commit replaces whatever `keep` already occupies, so only the
-        // other sessions plus the incoming bytes are projected against budget.
+        let mut scopes = self.budget_scopes()?;
+        for scope in scopes
+            .iter_mut()
+            .filter(|scope| scope.modern && scope.entries.iter().any(|entry| entry.is_temporary))
+        {
+            let storage = ScopedStorage::new(scope.path.clone())?;
+            if let Some(directory) = storage.directory(false)? {
+                storage.sweep_stale_temporary_files(&directory, true);
+                scope.entries = Self::budget_entries(&scope.path)?;
+            }
+        }
+        // The old envelope remains on disk until the incoming staging file is
+        // synced and renamed, so both must fit before writing starts.
         let mut accounted = 0u64;
         for scope in &scopes {
             for entry in &scope.entries {
-                if scope.path == self.base_dir && entry.session_id == *keep {
-                    continue;
-                }
                 accounted = accounted.saturating_add(entry.bytes);
             }
         }
@@ -418,7 +427,8 @@ impl SessionStore {
                 continue;
             };
             for entry in &scope.entries {
-                if scope.path == self.base_dir && entry.session_id == *keep {
+                if entry.is_temporary || (scope.path == self.base_dir && entry.session_id == *keep)
+                {
                     continue;
                 }
                 let Some((clock, evicted)) =
@@ -536,18 +546,44 @@ impl SessionStore {
         for file in files {
             let file = file.map_err(|error| io_error("list budget sessions", path, error))?;
             let name = file.file_name();
-            let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+            let Some(name) = name.to_str() else {
                 continue;
             };
-            let Ok(session_id) = ProviderSessionId::parse(stem) else {
-                continue;
+            let (session_id, is_temporary) = if let Some(stem) = name.strip_suffix(".json") {
+                let Ok(session_id) = ProviderSessionId::parse(stem) else {
+                    continue;
+                };
+                (session_id, false)
+            } else {
+                let Some((session, staging)) = name
+                    .strip_prefix('.')
+                    .and_then(|name| name.strip_suffix(".tmp"))
+                    .and_then(|name| name.split_once('.'))
+                else {
+                    continue;
+                };
+                let (Ok(session_id), Ok(_)) = (
+                    ProviderSessionId::parse(session),
+                    ProviderSessionId::parse(staging),
+                ) else {
+                    continue;
+                };
+                (session_id, true)
             };
             let metadata = fs::symlink_metadata(file.path())
                 .map_err(|error| io_error("measure budget session", &file.path(), error))?;
             if metadata.is_file() {
+                if is_temporary && metadata.uid() != nix::unistd::geteuid().as_raw() {
+                    return Err(io_error(
+                        "measure budget temporary",
+                        &file.path(),
+                        io::Error::new(io::ErrorKind::PermissionDenied, "temporary owner differs"),
+                    ));
+                }
                 entries.push(BudgetEntry {
                     session_id,
                     bytes: metadata.len(),
+                    is_temporary,
                 });
             }
         }

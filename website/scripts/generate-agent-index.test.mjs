@@ -39,8 +39,8 @@ async function createFixture(t, migrated, missing) {
         tokenless: {install: 'anolisa install tokenless', install_method: 'cli'},
       },
     }),
-    'docs/QUICKSTART.md': `# Quickstart\n\n${installCommand}\n`,
-    'docs/BUILDING.md': '# Building\n',
+    'docs/user-guide/en/getting-started/quickstart.md': `# Quickstart\n\n${installCommand}\n`,
+    'docs/user-guide/en/getting-started/building.md': '# Building\n',
     'docs/user-guide/en/intro.md': '# User guide\n',
     'docs/developer-guide/en/intro.md': '# Developer guide\n',
     'CHANGELOG.md': '# Root changelog\n\n## 9.0.0\n\nRoot release.\n',
@@ -60,6 +60,8 @@ pub enum ManagementCommands {
     [`${paths.anolisa}/manifests/components/tokenless/component.toml`]: 'os = ["linux", "macos"]\narch = ["arm64"]\n',
     [`${paths['copilot-shell']}/package.json`]: JSON.stringify({version: '2.3.4'}),
     [`${paths['copilot-shell']}/CHANGELOG.md`]: '# Shell changelog\n\n## 2.3.4\n\nShell release.\n',
+    [`${paths['copilot-shell']}/docs/user-guide/en/QUICKSTART.md`]: '# Archived Copilot Shell quickstart\n',
+    [`${paths['copilot-shell']}/docs/developer-guide/en/architecture.md`]: '# Archived Copilot Shell architecture\n',
     [`${paths.tokenless}/Cargo.toml`]: '[package]\nversion = "3.4.5"\n',
     [`${paths.tokenless}/CHANGELOG.md`]: '# Tokenless changelog\n\n## 3.4.5\n\nTokenless release.\n',
     [`${paths.tokenless}/crates/tokenless-cli/src/main.rs`]: `
@@ -84,12 +86,12 @@ enum Commands {
   return {root, paths, files};
 }
 
-function generate(root) {
+function generate(root, env = {}) {
   const result = spawnSync(process.execPath, [path.join(root, 'website/scripts/generate-agent-index.mjs')], {
     cwd: root,
     encoding: 'utf8',
     timeout: 30_000,
-    env: {...process.env, GITHUB_SHA: 'fixture-commit', SITE_URL: 'https://example.com', BASE_URL: '/'},
+    env: {...process.env, GITHUB_SHA: 'fixture-commit', SITE_URL: 'https://example.com', BASE_URL: '/', ...env},
   });
   assert.ifError(result.error);
   return result;
@@ -103,8 +105,9 @@ for (const migrated of [false, true]) {
     const output = path.join(root, 'website/.generated/static/agents');
     const index = JSON.parse(await readFile(path.join(output, 'repo-index.json'), 'utf8'));
     const components = Object.fromEntries(index.components.map((component) => [component.id, component]));
-    assert.deepEqual(Object.keys(components), Object.keys(paths));
-    for (const [id, sourcePath] of Object.entries(paths)) {
+    const currentPaths = Object.fromEntries(Object.entries(paths).filter(([, sourcePath]) => !sourcePath.startsWith('deprecated/')));
+    assert.deepEqual(Object.keys(components), Object.keys(currentPaths));
+    for (const [id, sourcePath] of Object.entries(currentPaths)) {
       assert.equal(components[id].source_path, sourcePath);
       assert.equal(components[id].documentation_path, `https://github.com/agentic-os-org/ANOLISA/tree/main/${sourcePath}`);
     }
@@ -112,20 +115,41 @@ for (const migrated of [false, true]) {
     assert.equal(index.install.cli, installCommand);
     assert.equal(components.anolisa.install, installCommand);
     assert.equal(components.anolisa.install_method, 'bootstrap');
-    assert.equal(components['copilot-shell'].install, components['copilot-shell'].documentation_path);
-    assert.equal(components['copilot-shell'].install_method, 'manual');
+    if (!migrated) {
+      assert.equal(components['copilot-shell'].install, components['copilot-shell'].documentation_path);
+      assert.equal(components['copilot-shell'].install_method, 'manual');
+      assert.equal(components['copilot-shell'].version, '2.3.4');
+      assert.deepEqual(components['copilot-shell'].platform_support, {
+        linux: true, macos: false, windows: false, architectures: ['x86_64'],
+      });
+    } else {
+      assert.ok(!JSON.stringify(index).includes('copilot-shell'));
+    }
+    assert.deepEqual(index.documentation.map(({source}) => source), [
+      'docs/user-guide/en/getting-started/building.md',
+      'docs/user-guide/en/getting-started/quickstart.md',
+      'docs/user-guide/en/intro.md',
+      'docs/developer-guide/en/intro.md',
+    ]);
+    assert.equal(
+      index.documentation.find(({source}) => source.endsWith('/quickstart.md')).url,
+      'https://example.com/docs/user-guide/getting-started/quickstart/',
+    );
+    const llmsIndex = await readFile(path.join(root, 'website/.generated/static/llms.txt'), 'utf8');
+    assert.ok(llmsIndex.includes('- Quickstart: https://example.com/docs/user-guide/getting-started/quickstart/\n'));
+    assert.ok(!llmsIndex.includes('/docs/quickstart/'));
+    const fullDocumentation = await readFile(path.join(root, 'website/.generated/static/llms-full.txt'), 'utf8');
+    assert.ok(fullDocumentation.includes('===== docs/user-guide/en/intro.md ====='));
+    assert.ok(fullDocumentation.includes('===== docs/developer-guide/en/intro.md ====='));
+    assert.ok(!fullDocumentation.includes('Archived Copilot Shell'));
     assert.equal(components.tokenless.install, 'anolisa install tokenless');
     assert.equal(components.tokenless.install_method, 'cli');
     assert.equal(components.anolisa.version, '1.2.3');
-    assert.equal(components['copilot-shell'].version, '2.3.4');
     assert.equal(components.tokenless.version, '3.4.5');
     assert.equal(components['without-changelog'].version, 'unversioned');
     assert.equal(index.platform_support.source, `${paths.anolisa}/manifests/components/*/component.toml with AGENTS.md fallback`);
     assert.deepEqual(components.anolisa.platform_support, {
       linux: true, macos: 'aarch64', windows: false, architectures: ['x86_64', 'aarch64'],
-    });
-    assert.deepEqual(components['copilot-shell'].platform_support, {
-      linux: true, macos: false, windows: false, architectures: ['x86_64'],
     });
     assert.deepEqual(components.tokenless.platform_support, {
       linux: true, macos: true, windows: false, architectures: ['aarch64'],
@@ -134,21 +158,72 @@ for (const migrated of [false, true]) {
     assert.match(cli, /\binstall\s+Install a fixture component\./);
     assert.match(cli, /\benv\s+Show the fixture environment\./);
     assert.match(cli, /\bproxy\s+Run the fixture proxy\./);
-    assert.ok(cli.includes(`Entry points from ${paths['copilot-shell']}/package.json: cosh, co, copilot`));
+    assert.ok(!cli.includes('Copilot Shell'));
+    assert.ok(!cli.includes('copilot-shell'));
     const textIndex = await readFile(path.join(output, 'repo-index.txt'), 'utf8');
-    for (const sourcePath of Object.values(paths)) assert.ok(textIndex.includes(`  source: ${sourcePath}\n`));
+    for (const sourcePath of Object.values(currentPaths)) assert.ok(textIndex.includes(`  source: ${sourcePath}\n`));
+    if (migrated) assert.ok(!textIndex.includes('copilot-shell'));
     const changelog = await readFile(path.join(output, 'changelog.txt'), 'utf8');
     const changelogSources = [
       'CHANGELOG.md',
-      ...['anolisa', 'copilot-shell', 'tokenless'].map((id) => `${paths[id]}/CHANGELOG.md`).sort(),
+      ...['anolisa', ...(migrated ? [] : ['copilot-shell']), 'tokenless'].map((id) => `${paths[id]}/CHANGELOG.md`).sort(),
     ];
     assert.equal(changelog, changelogSources.flatMap((source) => [
       `===== ${source} =====`, '', files[source], '',
     ]).join('\n'));
   });
+
+  test(`includes current English contributor guides with ${migrated ? 'migrated' : 'legacy'} component paths`, async (t) => {
+    const {root, paths} = await createFixture(t, migrated);
+    const contributorFiles = {
+      'contribute/en/aw/building.md': '# Build AW\n\nAW build instructions.\n',
+      'contribute/en/cosh-ng/testing.md': '# Test cosh-ng\n\nShell test instructions.\n',
+      'CONTRIBUTING.md': '# Contribute\n\nRepository contribution requirements.\n',
+      [`${paths.anolisa}/CONTRIBUTING.md`]: '# Distribution contributor instructions\n',
+      [`${paths.tokenless}/CONTRIBUTING.md`]: '# Contribute to Tokenless\n',
+      [`${paths['copilot-shell']}/CONTRIBUTING.md`]: '# Shell contributor instructions\n',
+    };
+    const excludedFiles = {
+      'CONTRIBUTING_zh.md': '# Chinese repository contribution requirements\n',
+      'contribute/zh/aw/building.md': '# Chinese AW build instructions\n',
+      [`${paths.tokenless}/CONTRIBUTING_zh.md`]: '# Chinese Tokenless contribution requirements\n',
+      'src/unlisted/CONTRIBUTING.md': '# Unlisted component contribution requirements\n',
+      'deprecated/unlisted/CONTRIBUTING.md': '# Archived contribution requirements\n',
+    };
+    for (const [source, content] of Object.entries({...contributorFiles, ...excludedFiles})) {
+      const target = path.join(root, source);
+      await mkdir(path.dirname(target), {recursive: true});
+      await writeFile(target, content);
+    }
+
+    const baseUrl = migrated ? '/ANOLISA/' : '/';
+    const result = generate(root, {BASE_URL: baseUrl});
+    assert.equal(result.status, 0, result.stderr);
+    const output = path.join(root, 'website/.generated/static');
+    const index = JSON.parse(await readFile(path.join(output, 'agents/repo-index.json'), 'utf8'));
+    const fullDocumentation = await readFile(path.join(output, 'llms-full.txt'), 'utf8');
+    const currentContributors = Object.entries(contributorFiles)
+      .filter(([source]) => !source.startsWith('deprecated/'));
+    const bySource = (left, right) => left.source.localeCompare(right.source);
+    assert.deepEqual(index.documentation.slice(4).sort(bySource), currentContributors.map(([source]) => ({
+      source,
+      url: `https://github.com/agentic-os-org/ANOLISA/blob/main/${source}`,
+    })).sort(bySource));
+    assert.equal(new Set(index.documentation.map(({source}) => source)).size, index.documentation.length);
+    for (const [source, content] of currentContributors) {
+      assert.ok(fullDocumentation.includes(`===== ${source} =====\n\n${content}`), source);
+    }
+    for (const source of [...Object.keys(excludedFiles),
+      ...(migrated ? [`${paths['copilot-shell']}/CONTRIBUTING.md`] : [])]) {
+      assert.ok(!index.documentation.some((document) => document.source === source), source);
+      assert.ok(!fullDocumentation.includes(`===== ${source} =====`), source);
+    }
+    const llmsIndex = await readFile(path.join(output, 'llms.txt'), 'utf8');
+    assert.ok(llmsIndex.includes(`- Contribute: https://example.com${baseUrl}docs/contribute/\n`));
+  });
 }
 
-for (const missing of ['anolisa', 'tokenless', 'copilot-shell']) {
+for (const missing of ['anolisa', 'tokenless']) {
   test(`reports a missing required ${missing} component even when its files exist`, async (t) => {
     const {root} = await createFixture(t, true, missing);
     const result = generate(root);

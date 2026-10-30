@@ -71,6 +71,85 @@ fn full_scan_indexes_existing_files() {
     assert!(hits[0].snippet.contains("rust") || hits[0].snippet.contains("Rust"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_search_tool_reports_row_decode_error() {
+    let (_tmp, mut svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    index
+        .reindex_file("notes/known.md", "deploymentmarker", 100, 16, None)
+        .unwrap();
+    assert_eq!(
+        svc.memory_search("deploymentmarker", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let conn = rusqlite::Connection::open(index.db_path()).unwrap();
+    conn.busy_timeout(Duration::from_secs(5)).unwrap();
+    // Fault injection in a private test database, not a normal write path.
+    let changed = conn
+        .execute(
+            "UPDATE files SET mtime_ms = 'invalid' WHERE path = ?1",
+            ["notes/known.md"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    let err = svc
+        .memory_search("deploymentmarker", 5, None, None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // With no embedding provider, vector mode falls back to the same scoped BM25 path.
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("vector"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // Exercise hybrid with a deterministic provider and no vector rows.
+    svc.embedding = Some(Arc::new(KeywordEmbedding { dim: 8 }));
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("hybrid"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    let log = std::fs::read_to_string(svc.mount.audit_log_path()).unwrap();
+    let failed: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|entry: &serde_json::Value| {
+            entry["tool"] == "memory_search" && entry["ok"] == false
+        })
+        .collect();
+    assert_eq!(failed.len(), 3, "one failed audit per search error");
+    for (entry, mode) in failed
+        .iter()
+        .zip(["bm25", "bm25(fallback from vector)", "hybrid"])
+    {
+        assert_eq!(
+            entry["path"],
+            format!("{mode}:len={}", "deploymentmarker".len())
+        );
+        assert!(
+            entry["error"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid column type")
+        );
+        assert!(!entry.to_string().contains("deploymentmarker"));
+    }
+}
+
 #[test]
 fn inotify_picks_up_new_file() {
     let (_tmp, svc) = setup();
@@ -413,6 +492,149 @@ fn search_category_filter_works() {
     assert!(hits.is_empty(), "expected no hits for unknown category");
 }
 
+/// Regression for GH-4366. `search_category_filter_works` above uses `top_k=10`
+/// with two files, so the SQL `LIMIT` never truncates anything and a
+/// client-side (post-LIMIT) category filter looks correct. Here the window
+/// *is* exhausted by one category: bm25 ranks the six `facts/lesson/` files
+/// that repeat every query term above the six `facts/interest/` files that
+/// mention them once, so filtering after the limit returned zero interest
+/// hits. The filter now runs in SQL, before the limit.
+#[test]
+fn search_category_filter_applies_before_limit() {
+    let (_tmp, svc) = setup();
+    let baseline = svc.index.as_ref().unwrap().count().unwrap();
+
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/lesson").unwrap();
+    for i in 0..6 {
+        svc.write(
+            &format!("facts/lesson/01JLESSON{i}QWERTYUIOP.md"),
+            &format!(
+                "---\ncategory: lesson\ntitle: quantum lattice dynamics {i}\n---\n\n\
+                 quantum lattice dynamics quantum lattice dynamics \
+                 quantum lattice dynamics variant {i}"
+            ),
+            false,
+        )
+        .unwrap();
+        svc.write(
+            &format!("facts/interest/01JINTEREST{i}QWERTY.md"),
+            &format!(
+                "---\ncategory: interest\ntitle: quantum interest {i}\n---\n\n\
+                 The agent noted a quantum lattice once ({i})."
+            ),
+            false,
+        )
+        .unwrap();
+    }
+    assert!(wait_for_index(&svc, baseline + 12));
+
+    // Premise: with no filter the top-5 window is entirely lesson facts.
+    let unfiltered = svc
+        .memory_search("quantum lattice dynamics", 5, None, None, None)
+        .unwrap();
+    assert_eq!(unfiltered.len(), 5, "expected a full top_k window");
+    assert!(
+        unfiltered
+            .iter()
+            .all(|h| h.path.starts_with("facts/lesson/")),
+        "premise broken, the unfiltered top-5 window is not all lesson facts:\n{unfiltered:#?}"
+    );
+
+    // The requested category still fills the window.
+    let hits = svc
+        .memory_search("quantum lattice dynamics", 5, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+        "category=interest returned other paths:\n{hits:#?}"
+    );
+}
+
+/// Regression for the P2 review on this PR. Moving the category filter into SQL
+/// as a `LIKE` also changed its case behaviour: SQLite folds ASCII case in
+/// `LIKE`, while the Rust-side `filter_by_category` this replaced compared the
+/// path component with a case-sensitive `==`. A store holding both
+/// `facts/interest/` and `facts/Interest/` therefore returned the mixed-case
+/// file for `category="interest"` (seven hits where base returned six), and at
+/// `top_k=5` that file occupied a slot that a requested-category fact should
+/// have filled. The filter is a case-sensitive `GLOB` now.
+#[test]
+fn search_category_filter_is_case_sensitive() {
+    let (_tmp, svc) = setup();
+    let baseline = svc.index.as_ref().unwrap().count().unwrap();
+
+    // Distinct directories on the case-sensitive filesystems CI runs on.
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/Interest").unwrap();
+    for i in 0..6 {
+        svc.write(
+            &format!("facts/interest/01JCSCASE{i}QWERTYU.md"),
+            &format!(
+                "---\ncategory: interest\ntitle: quantum interest {i}\n---\n\n\
+                 The agent noted a quantum lattice once ({i})."
+            ),
+            false,
+        )
+        .unwrap();
+    }
+    // Repeats the query terms, so bm25 ranks it above all six lowercase facts.
+    svc.write(
+        "facts/Interest/mixedcase.md",
+        "---\ncategory: Interest\ntitle: mixed case sibling\n---\n\n\
+         quantum lattice quantum lattice quantum lattice",
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_index(&svc, baseline + 7));
+
+    // Premise: the mixed-case sibling is inside the unfiltered top-5 window, so
+    // a case-insensitive filter would spend one of those five slots on it.
+    let unfiltered = svc
+        .memory_search("quantum lattice", 5, None, None, None)
+        .unwrap();
+    assert_eq!(unfiltered.len(), 5, "expected a full top_k window");
+    assert!(
+        unfiltered
+            .iter()
+            .any(|h| h.path == "facts/Interest/mixedcase.md"),
+        "premise broken, the mixed-case fact is not in the window:\n{unfiltered:#?}"
+    );
+
+    // All six lowercase matches come back and nothing else.
+    let hits = svc
+        .memory_search("quantum lattice", 10, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        6,
+        "expected the six lowercase matches:\n{hits:#?}"
+    );
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+        "category=interest returned other paths:\n{hits:#?}"
+    );
+
+    // At top_k=5 the mixed-case file no longer displaces a requested fact: the
+    // five slots are all lowercase interest facts.
+    let hits = svc
+        .memory_search("quantum lattice", 5, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+        "mixed-case file took a top_k slot:\n{hits:#?}"
+    );
+
+    // The mixed-case category is still reachable on its own terms.
+    let hits = svc
+        .memory_search("quantum lattice", 10, None, Some("Interest"), None)
+        .unwrap();
+    let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, vec!["facts/Interest/mixedcase.md"]);
+}
+
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic
@@ -567,4 +789,57 @@ async fn full_scan_backfills_vectors_for_preexisting_files() {
         "vector search found no hits after backfill"
     );
     assert_eq!(hits[0].path, "notes/a.md");
+}
+
+// ---------- agent scope on the synchronous reindex ----------
+
+/// `reindex_file` is the path `memory_observe` uses to make a fresh note
+/// searchable before the notify watcher's debounce fires. It has to tag the
+/// row with the observing agent exactly like the watcher's flush and full-scan
+/// paths do: an untagged row is invisible under `isolated:<agent>` — which
+/// defeats the immediate-recall guarantee the synchronous upsert exists for —
+/// and is shared with every *other* agent under `filter:<agent>`.
+///
+/// The note is deliberately never written to disk, so the watcher cannot
+/// re-tag it behind our back and both assertions are about this call alone.
+#[test]
+fn reindex_file_tags_the_row_with_the_observing_agent() {
+    let (_tmp, svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    let mtime_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    index
+        .reindex_file(
+            "notes/observed/virtual.md",
+            "the deploy codename is zephyr",
+            mtime_ms,
+            27,
+            Some("alpha"),
+        )
+        .unwrap();
+
+    let own: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("isolated:alpha"), None)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        own.iter().any(|p| p == "notes/observed/virtual.md"),
+        "isolated:alpha cannot see the row attributed to it: {own:?}"
+    );
+
+    let others: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("filter:beta"), None)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        !others.iter().any(|p| p == "notes/observed/virtual.md"),
+        "filter:beta must not see a row tagged for alpha: {others:?}"
+    );
 }

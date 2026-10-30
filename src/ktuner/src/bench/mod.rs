@@ -190,25 +190,47 @@ fn bench_mem_bandwidth() -> Result<BenchResult> {
     })
 }
 
-fn bench_mem_latency() -> Result<BenchResult> {
-    let size = 4 * 1024 * 1024; // 4M entries = 32MB on 64-bit
+/// A Fisher-Yates shuffle of `0..size` from a fixed seed, so the pointer
+/// chain below is random but reproducible.
+fn shuffled_order(size: usize, seed: u64) -> Vec<usize> {
     let mut chain: Vec<usize> = (0..size).collect();
-
-    // Shuffle to create random pointer chain
-    let mut seed = 42u64;
+    let mut seed = seed;
     for i in (1..size).rev() {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let j = (seed as usize) % (i + 1);
         chain.swap(i, j);
     }
+    chain
+}
+
+/// The index chain [`bench_mem_latency`] chases: the whole `chain` order as
+/// one cycle, every entry written exactly once.
+///
+/// Walking the order and linking each node to its successor
+/// (`indices[pos] = next; pos = next`, starting at 0) instead places node
+/// `chain[i]` at slot `chain[i - 1]`, so the link into slot 0 is written by
+/// whichever step follows the order's `0` — and the order's last node is never
+/// a write position at all. A `0` anywhere but the last slot therefore splits
+/// the permutation into the cycle reachable from slot 0 and the tail behind it,
+/// and the walk reports ns per access over that fragment: at the production
+/// seed the `0` lands at slot 7224, so 7224 of the 4194304 entries are never
+/// touched while the benchmark still reports the latency of a 32 MB structure.
+fn pointer_chain(chain: &[usize]) -> Vec<usize> {
+    let mut indices = vec![0usize; chain.len()];
+    let Some(last) = chain.len().checked_sub(1) else {
+        return indices;
+    };
+    for (i, &node) in chain.iter().enumerate() {
+        indices[node] = chain[if i == last { 0 } else { i + 1 }];
+    }
+    indices
+}
+
+fn bench_mem_latency() -> Result<BenchResult> {
+    let size = 4 * 1024 * 1024; // 4M entries = 32MB on 64-bit
 
     // Build linked list via index chain
-    let mut indices = vec![0usize; size];
-    let mut pos = 0;
-    for &next in &chain {
-        indices[pos] = next;
-        pos = next;
-    }
+    let indices = pointer_chain(&shuffled_order(size, 42));
 
     // Chase pointers
     let iterations = 2_000_000;
@@ -385,6 +407,71 @@ mod tests {
             assert!(path.exists(), "file must exist while the guard is live");
         }
         assert!(!path.exists(), "guard must remove the file on drop");
+    }
+
+    #[test]
+    fn the_pointer_chain_reaches_every_entry() {
+        // One cycle through the whole permutation: `bench_mem_latency` reports
+        // ns per access over the chain it walks, so a node the walk cannot
+        // reach shortens the measured footprint without changing the count.
+        let size = 16;
+        let order = shuffled_order(size, 42);
+        let zero_at = order.iter().position(|&node| node == 0).unwrap();
+        assert!(
+            zero_at != size - 1,
+            "the production seed must place the zero mid-order, or this \
+             fixture cannot exercise the split: {order:?}"
+        );
+
+        let indices = pointer_chain(&order);
+        let mut seen = vec![false; size];
+        let mut idx = 0usize;
+        for _ in 0..size {
+            assert!(!seen[idx], "the chain revisits entry {idx}: {order:?}");
+            seen[idx] = true;
+            idx = indices[idx];
+        }
+        assert_eq!(idx, 0, "the cycle must close on its start: {order:?}");
+        assert!(
+            seen.iter().all(|&visited| visited),
+            "every entry must be reachable from 0: {seen:?} order {order:?}"
+        );
+    }
+
+    #[test]
+    fn the_pointer_chain_covers_a_single_entry() {
+        // `size - 1` would underflow on the empty case's guard, so the one-node
+        // ring is pinned separately: the walk must stay on 0 rather than read
+        // an out-of-range slot.
+        assert_eq!(pointer_chain(&[0]), vec![0]);
+        assert!(pointer_chain(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_pointer_chain_reaches_every_entry_at_every_zero_position() {
+        // The split depends on where the shuffle happened to place the 0, so
+        // pin the positions rather than one seed's accident: start, middle and
+        // end of the order.
+        for zero_at in 0..6usize {
+            let mut order: Vec<usize> = (1..=6).collect();
+            order.insert(zero_at, 0);
+            let indices = pointer_chain(&order);
+            let mut seen = vec![false; order.len()];
+            let mut idx = 0usize;
+            for _ in 0..order.len() {
+                assert!(
+                    !seen[idx],
+                    "zero at {zero_at} revisits entry {idx}: {order:?}"
+                );
+                seen[idx] = true;
+                idx = indices[idx];
+            }
+            assert_eq!(idx, 0, "zero at {zero_at} does not close: {order:?}");
+            assert!(
+                seen.iter().all(|&visited| visited),
+                "zero at {zero_at} leaves entries unreachable: {seen:?}"
+            );
+        }
     }
 
     #[test]

@@ -49,7 +49,16 @@ fn idle_reader_backs_off_between_would_block_retries() {
     let reader = thread::spawn({
         let reads = reads.clone();
         let stop = stop.clone();
-        move || read_input_chunks(IdleReader { reads, stop }, sender, input_mode, None)
+        move || {
+            read_input_chunks(
+                IdleReader { reads, stop },
+                sender,
+                input_mode,
+                None,
+                None,
+                None,
+            )
+        }
     });
 
     thread::sleep(Duration::from_millis(120));
@@ -87,7 +96,7 @@ fn fd_reader_waits_for_readiness_without_backoff() {
     let (sender, receiver) = mpsc::sync_channel(1);
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let reader = thread::spawn(move || {
-        read_input_chunks(input, sender, input_mode, Some(input_fd));
+        read_input_chunks(input, sender, input_mode, Some(input_fd), None, None);
     });
 
     thread::sleep(Duration::from_millis(10));
@@ -489,4 +498,73 @@ fn delay_escape_does_not_cancel_a_later_capture() {
     master.sync_all().expect("sync test output");
     assert!(fs::read(&path).expect("read test output").is_empty());
     fs::remove_file(path).ok();
+}
+
+fn deferred_read(bytes: &[u8], pending_shell_submits: u16) -> InputRead {
+    InputRead::Bytes {
+        bytes: bytes.to_vec(),
+        received_at: Instant::now(),
+        observed_mode: RawInputMode::Passthrough,
+        ownership_changed_during_read: false,
+        pending_shell_submits,
+    }
+}
+
+fn deferred_pending(read: &InputRead) -> u16 {
+    match read {
+        InputRead::Bytes {
+            pending_shell_submits,
+            ..
+        } => *pending_shell_submits,
+        _ => panic!("bytes read expected"),
+    }
+}
+
+#[test]
+fn gateless_session_delivers_deferred_path_prompt_immediately() {
+    let mut state = RawInputRelayState {
+        deferred_input: Some(deferred_read(
+            "打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(),
+            1,
+        )),
+        ..RawInputRelayState::default()
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let input =
+        receive_input(&receiver, &mut state).expect("gateless session delivers without parking");
+    assert_eq!(deferred_pending(&input), 1);
+    drop(sender);
+
+    let mut state = RawInputRelayState::default();
+    state.main_prompt_gate.set_at_prompt(true);
+    state.main_prompt_gate.set_at_prompt(false);
+    state.deferred_input = Some(deferred_read(
+        "打开./nonexistent-cosh-2913/SKILL.md\n".as_bytes(),
+        1,
+    ));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let native =
+        receive_input(&receiver, &mut state).expect("a native consumer keeps the queued remainder");
+    assert_eq!(deferred_pending(&native), 1);
+    assert!(state.deferred_input.is_none());
+    drop(sender);
+}
+
+#[test]
+fn native_owned_deferred_path_precedes_later_multiline_input() {
+    let mut state = RawInputRelayState::default();
+    state.main_prompt_gate.set_at_prompt(true);
+    state.main_prompt_gate.set_at_prompt(false);
+    let first = "打开./nonexistent-input-owner/SKILL.md\n".as_bytes();
+    state.deferred_input = Some(deferred_read(first, 1));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender.send(deferred_read(b"second\nthird\n", 0)).unwrap();
+    let delivered = receive_input(&receiver, &mut state).unwrap();
+    assert!(
+        matches!(&delivered, InputRead::Bytes { bytes, pending_shell_submits: 1, .. } if bytes == first),
+        "the native consumer must receive its queued path line before later input"
+    );
+    assert!(state.deferred_input.is_none());
+    let later = receive_input(&receiver, &mut state).unwrap();
+    assert!(matches!(later, InputRead::Bytes { bytes, .. } if bytes == b"second\nthird\n"));
 }

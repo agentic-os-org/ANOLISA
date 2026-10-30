@@ -44,6 +44,7 @@ asc-policy-repository-sqlite.workspace = true
 asc-persistence-sqlite.workspace = true
 asc-security-events.workspace = true
 thiserror.workspace = true
+nix.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

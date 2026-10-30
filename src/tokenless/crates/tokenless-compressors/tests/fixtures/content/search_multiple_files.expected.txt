@@ -1,0 +1,28 @@
+[Search results grouped by file; all received lines retained]
+File="crates/customer_service/src/handlers/deployment_status.rs"
+1:status: check(1);
+2:status: check(2);
+3:status: check(3);
+4:status: check(4);
+5:status: check(5);
+6:status: check(6);
+7:status: check(7);
+8:status: check(8);
+File="crates/customer_service/src/handlers/database_health.rs"
+1:status: check(1);
+2:status: check(2);
+3:status: check(3);
+4:status: check(4);
+5:status: check(5);
+6:status: check(6);
+7:status: check(7);
+8:status: check(8);
+File="crates/customer_service/src/handlers/deployment_status.rs"
+1:status: check(1);
+2:status: check(2);
+3:status: check(3);
+4:status: check(4);
+5:status: check(5);
+6:status: check(6);
+7:status: check(7);
+8:status: check(8);

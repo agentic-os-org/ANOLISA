@@ -26,7 +26,7 @@ usage() {
     cat <<'EOF'
 Usage: build.sh --source-repo PATH --output-dir PATH --wheel-output-dir PATH \
   --version X.Y.Z \
-  --target-os {linux|macos} --target-arch {x86_64|aarch64} \
+  --target-os {linux|macos|windows} --target-arch {x86_64|aarch64} \
   --profile PROFILE [--tag tokenless/vX.Y.Z]
 EOF
 }
@@ -64,6 +64,12 @@ case "$TARGET_OS/$TARGET_ARCH/$PROFILE" in
         ;;
     macos/aarch64/darwin11-aarch64)
         RUST_TARGET=aarch64-apple-darwin
+        ;;
+    macos/x86_64/darwin11-x86_64)
+        RUST_TARGET=x86_64-apple-darwin
+        ;;
+    windows/x86_64/windows-msvc-x86_64)
+        RUST_TARGET=x86_64-pc-windows-msvc
         ;;
     *)
         die "profile $PROFILE does not match target $TARGET_OS/$TARGET_ARCH"
@@ -121,9 +127,11 @@ git -C "$SOURCE_REPO" worktree lock --reason 'Tokenless prebuilt package build' 
 COMPONENT_ROOT="$FIXED_WORKTREE/src/tokenless"
 (
     cd "$COMPONENT_ROOT"
-    make -B stamp-adapter-templates stamp-python-packages
+    make -B stamp-adapter-templates stamp-python-packages generate-component-contract
 )
-CONTRACT="$COMPONENT_ROOT/.anolisa/component.toml"
+CONTRACT="$COMPONENT_ROOT/target/packaging/anolisa/component.toml"
+# Historical tagged sources generated the contract at the component root.
+[ -f "$CONTRACT" ] || CONTRACT="$COMPONENT_ROOT/.anolisa/component.toml"
 SOURCE_VERSION="$(
     python3 "$COMPONENT_ROOT/packaging/raw/verify-release.py" \
         "$COMPONENT_ROOT" "$CONTRACT"
@@ -155,6 +163,11 @@ case "$SOURCE_DATE_EPOCH" in
 esac
 export RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
 export SOURCE_DATE_EPOCH
+
+if [ "$TARGET_OS" = windows ]; then
+    bash "$ACTION_DIR/windows.sh" "$COMPONENT_ROOT" "$OUTPUT_DIR" "$WHEEL_OUTPUT_DIR" "$VERSION"
+    exit 0
+fi
 
 for manifest in "$COMPONENT_ROOT/Cargo.toml" "$RTK_ROOT/Cargo.toml"; do
     cargo metadata \
@@ -244,7 +257,8 @@ install -p -m 0755 \
     "$BIN_DIR/rtk"
 for binary in tokenless rtk; do
     if [ "$TARGET_OS" = macos ]; then
-        python3 "$COMMON_DIR/verify-macho.py" --min 11.0 "$BIN_DIR/$binary"
+        python3 "$COMMON_DIR/verify-macho.py" \
+            --arch "$TARGET_ARCH" --min 11.0 "$BIN_DIR/$binary"
     else
         python3 "$COMMON_DIR/verify-glibc.py" \
             --arch "$TARGET_ARCH" --max 2.17 "$BIN_DIR/$binary"

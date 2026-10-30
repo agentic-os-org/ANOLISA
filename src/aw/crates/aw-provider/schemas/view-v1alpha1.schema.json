@@ -521,13 +521,21 @@
           "enum": [
             null,
             "report",
-            "block"
+            "block",
+            "withhold_result"
           ]
         },
         "policy_block": {
           "type": [
             "boolean",
             "null"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "provider",
+            "native",
+            "skipped"
           ]
         }
       },

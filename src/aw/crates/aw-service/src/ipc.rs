@@ -18,9 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-// A one-MiB native byte array expands to at most four MiB in JSON; one MiB
-// normalized event plus framing fits here. Per-stream limits remain independent.
-pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
+// A valid maximum-size policy can double through JSON escaping; reserve one
+// MiB for its request envelope. Native event and document limits stay separate.
+pub(crate) const MAX_FRAME: usize = 2 * aw_config::MAX_DOCUMENT_BYTES + 1024 * 1024;
 const MAX_DEPTH: usize = 40;
 
 fn invalid(message: &'static str) -> io::Error {

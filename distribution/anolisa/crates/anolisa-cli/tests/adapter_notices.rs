@@ -487,3 +487,72 @@ fn disable_dry_run_previews_notices_and_keeps_receipt() {
     assert_success(&real);
     assert!(stdout(&real).contains("Disabled notice-demo/cosh."));
 }
+
+#[test]
+#[cfg(unix)]
+fn boundary_errors_show_recovery_guidance() {
+    let fixture = NoticeFixture::new();
+    assert_success(&fixture.enable(&[]));
+    let extensions = fixture.home.join(".copilot-shell/extensions");
+    let original = fixture.home.join(".copilot-shell/original-extensions");
+    let outside = fixture._tmp.path().join("external-extensions");
+    std::fs::create_dir_all(outside.join(COMPONENT)).expect("external extension");
+    std::fs::rename(&extensions, &original).expect("preserve original extensions");
+    std::os::unix::fs::symlink(&outside, &extensions).expect("redirect extensions");
+    let state_path = FsLayout::user_with_overrides(
+        fixture.home.clone(),
+        Some(fixture.data_home.clone()),
+        Some(fixture.config_home.clone()),
+        Some(fixture.state_home.clone()),
+        Some(fixture.cache_home.clone()),
+        Some(fixture.runtime_dir.clone()),
+    )
+    .state_dir
+    .join("installed.toml");
+    let state_before = std::fs::read(&state_path).expect("receipt before rejection");
+
+    for json in [false, true] {
+        for (verb, dry_run) in [("status", false), ("disable", true), ("disable", false)] {
+            let mut flags = vec!["--no-color"];
+            if json {
+                flags.push("--json");
+            }
+            if dry_run {
+                flags.push("--dry-run");
+            }
+            let mut args = vec![verb];
+            if verb == "disable" {
+                args.extend([COMPONENT, "cosh"]);
+            }
+            let output = fixture.run_adapter(&flags, &args);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(2), "{stderr}");
+            let reason = if json {
+                let envelope: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).expect("JSON error envelope");
+                assert_eq!(envelope["ok"], false);
+                assert_eq!(envelope["error"]["code"], "INVALID_ARGUMENT");
+                envelope["error"]["reason"].as_str().unwrap().to_string()
+            } else {
+                assert!(output.stdout.is_empty(), "{}", stdout(&output));
+                stderr.into_owned()
+            };
+            assert!(reason.contains("cosh_extension_dir"), "{reason}");
+            assert!(
+                reason.contains(&extensions.join(COMPONENT).display().to_string()),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(
+                    "if a directory was redirected, restore the original directory and retry"
+                ),
+                "{reason}"
+            );
+            assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+        }
+    }
+    std::fs::remove_file(&extensions).expect("remove replacement link");
+    std::fs::rename(&original, &extensions).expect("restore original extensions");
+    assert_success(&fixture.disable(&[]));
+    assert!(outside.join(COMPONENT).is_dir());
+}

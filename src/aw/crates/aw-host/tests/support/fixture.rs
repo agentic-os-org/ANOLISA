@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs, io,
+    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     thread,
@@ -20,6 +21,15 @@ pub const LITERAL_ARGUMENT: &str = "literal $HOME ; $(printf unexpected)";
 pub struct Fixture(pub PathBuf);
 
 impl Fixture {
+    /// Create managed-runtime fixtures beneath trusted temporary ancestors.
+    pub fn private() -> Self {
+        // Package locks require trusted ancestors independently of runner checkout modes.
+        let id = fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap();
+        let path = Path::new("/tmp").join(format!("aw-host-packages-{}", id.trim()));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        Self(fs::canonicalize(path).unwrap())
+    }
+
     pub fn new() -> Self {
         let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/host-tests");
         fs::create_dir_all(&parent).unwrap();
@@ -176,6 +186,7 @@ impl Drop for Fixture {
 
 pub fn capabilities() -> AdapterCapabilities {
     AdapterCapabilities {
+        failure_actions: Default::default(),
         adapter: "qoder".into(),
         version: "fixture-version".into(),
         entrypoint: "fixture-entrypoint".into(),

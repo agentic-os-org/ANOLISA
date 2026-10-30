@@ -311,6 +311,37 @@ fn detection_is_deterministic_and_bounded() {
 }
 
 #[test]
+fn detects_plain_path_lists_without_misclassifying_numbers_or_mixed_output() {
+    for prefix in ["/workspace/project with spaces/", "./project/", "../project/", "src/"] {
+        let paths: String = (0..10).map(|i| format!("{prefix}file {i}.rs\n")).collect();
+        assert_eq!(detect(&paths), ContentType::SearchResults);
+        assert_ne!(detect(&format!("{paths}---\n755 uploads/\n")), ContentType::SearchResults);
+    }
+    assert_ne!(detect("60\n"), ContentType::SearchResults);
+    assert_ne!(detect("https://example.com/a\nhttps://example.com/b\nhttps://example.com/c\n"), ContentType::SearchResults);
+    assert_ne!(detect("// comment /a\n// comment /b\n// comment /c\n"), ContentType::SearchResults);
+    assert_eq!(detect("src/a.rs,1\nsrc/b.rs,2\nsrc/c.rs,3\n"), ContentType::Tabular);
+}
+
+#[test]
+fn path_list_detection_only_probes_complete_records_at_the_byte_limit() {
+    for (ending, boundary, remaining) in [
+        ("\n", " ", "file.json\n"),
+        ("\r\n", "\r", "\n"),
+        ("\n", "", "中文/file.json\n"),
+    ] {
+        let head = format!("/workspace/project with spaces/中文/file.json{ending}").repeat(60);
+        let prefix = "/workspace/";
+        // Put a space, the CR of CRLF, or the first byte of a Unicode scalar
+        // exactly at the byte limit without changing any full path record.
+        let padding = MAX_SCAN_BYTES - head.len() - prefix.len() - 1;
+        let input = format!("{head}{prefix}{}{boundary}{remaining}{head}", "a".repeat(padding));
+        assert!(input.len() > MAX_SCAN_BYTES);
+        assert_eq!(detect(&input), ContentType::SearchResults, "{ending:?} {boundary:?}");
+    }
+}
+
+#[test]
 fn wire_values_are_stable_and_unique() {
     let all = [
         (ContentType::Json, "json"),

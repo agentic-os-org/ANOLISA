@@ -223,6 +223,84 @@ impl SkillStore {
         }
     }
 
+    /// Post-load twin of the discovery insert for the write paths: the
+    /// skill-dir rename store sync, the mkdir placeholder, and the sync
+    /// worker's re-parse all land entries in an already-mounted store.
+    ///
+    /// The store keys skills by their directory leaf name, so a write that
+    /// lands a skill under a leaf another directory already owns must not
+    /// silently steal that key: `upsert` would replace the entry with zero
+    /// diagnostics, the shadowed skill would vanish from `/skills`, `sls
+    /// list`/`validate`, and skill-discover, and the live store would
+    /// diverge from what a fresh discovery scan of the same tree produces.
+    /// Apply the loaders' collision rule instead: the lexicographically
+    /// smaller `source_path` wins deterministically and the loser is
+    /// reported back for the caller to log. Re-inserting the same source
+    /// path stays an idempotent refresh.
+    ///
+    /// The comparison is by spelling: write-path callers must insert
+    /// under the canonical source-root spelling (an in-place mount's
+    /// `/proc/self/fd/<n>` alias is rewritten before the insert), so one
+    /// manifest's fd alias and real path can never collide with itself.
+    ///
+    /// The refresh also preserves the scanned category provenance: a
+    /// same-source re-parse keeps the category record the loaders wrote
+    /// (the staging-private view filters match that record, #8037, so
+    /// wiping it would surface a pre-seeded staging category's skill in
+    /// `/skills` and skill-discover until the next remount), while a
+    /// source replacement enters uncategorized — the new entry was never
+    /// scanned under the replaced entry's category and must not inherit
+    /// the record, mirroring `upsert`.
+    pub fn upsert_checked(&mut self, entry: SkillEntry) -> Option<LoadError> {
+        let refresh_category = match self.skills.get(&entry.metadata.name) {
+            Some(existing) if existing.source_path == entry.source_path => self
+                .skill_categories
+                .get(&entry.metadata.name)
+                .cloned()
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.insert_discovered(entry, &refresh_category)
+    }
+
+    /// The write-path insert with the staging carve-out the I2 contract
+    /// requires: `upsert_checked`'s collision rule treats every stored
+    /// entry as an equal contender for the leaf name, but a
+    /// staging-private incumbent — its adopted name or its scanned
+    /// category matching a staging pattern, per `is_staging_root` — is
+    /// installer-private residue the scan classified as a category (a
+    /// pre-seeded or crashed staging root, #8037), never a legitimate
+    /// owner of the leaf. An incoming entry from a different source
+    /// replaces it instead of losing the lexicographic tie, so a
+    /// completed ordinary install over a pre-scanned staging leaf
+    /// surfaces (the #8037 inbox control); the incumbent's category
+    /// record goes with it, keeping the rule that a replacement never
+    /// inherits the previous owner's category. A same-source refresh
+    /// behaves exactly like `upsert_checked`: the scanned category is
+    /// preserved.
+    pub fn upsert_checked_replacing_staging(
+        &mut self,
+        entry: SkillEntry,
+        is_staging_root: &dyn Fn(&str) -> bool,
+    ) -> Option<LoadError> {
+        let incumbent_staging = self
+            .skills
+            .get(&entry.metadata.name)
+            .is_some_and(|existing| {
+                existing.source_path != entry.source_path
+                    && (is_staging_root(&entry.metadata.name)
+                        || self
+                            .skill_categories
+                            .get(&entry.metadata.name)
+                            .is_some_and(|c| !c.is_empty() && is_staging_root(c)))
+            });
+        if incumbent_staging {
+            self.skills.remove(&entry.metadata.name);
+            self.skill_categories.remove(&entry.metadata.name);
+        }
+        self.upsert_checked(entry)
+    }
+
     /// Load skills from a single category directory.
     fn load_skills_from_category(
         &mut self,
@@ -308,8 +386,27 @@ impl SkillStore {
     }
 
     /// Insert or update a skill entry.
+    ///
+    /// The write path — mkdir placeholders, the sync worker's reparse
+    /// refresh, the rename refresh, the inbox install flow — keys
+    /// entries by their adopted name and carries no category of its
+    /// own. A same-source reparse refreshes the entry the loaders
+    /// scanned, so its category record stays; a changed `source_path`
+    /// means the record belongs to the entry being replaced (an
+    /// ordinary skill installed over a pre-scanned staging category's
+    /// leaf name, say), and keeping it would leave the staging-private
+    /// view filters acting on a category the new entry was never
+    /// scanned under — drop it instead.
     pub fn upsert(&mut self, entry: SkillEntry) {
-        self.skills.insert(entry.metadata.name.clone(), entry);
+        let name = entry.metadata.name.clone();
+        let source_replaced = match self.skills.get(&name) {
+            Some(existing) => existing.source_path != entry.source_path,
+            None => false,
+        };
+        if source_replaced {
+            self.skill_categories.remove(&name);
+        }
+        self.skills.insert(name, entry);
     }
 
     /// Remove a skill by name.
@@ -333,6 +430,18 @@ impl SkillStore {
         let mut names: Vec<&str> = self.skills.keys().map(|s| s.as_str()).collect();
         names.sort_unstable();
         names
+    }
+
+    /// The category a skill was discovered under, if any.
+    ///
+    /// A present record always names the category the live entry was
+    /// scanned under: the loaders insert it with the entry,
+    /// [`SkillStore::upsert`] and [`SkillStore::upsert_checked`] (the
+    /// write-path reparse and refresh surfaces) preserve it across a
+    /// same-source reparse and drop it when the entry's source changes,
+    /// and [`SkillStore::remove`] drops the record with the entry.
+    pub fn category_of(&self, name: &str) -> Option<&str> {
+        self.skill_categories.get(name).map(String::as_str)
     }
 
     /// Get the number of skills.
@@ -652,6 +761,175 @@ mod tests {
         assert_eq!(store.len(), 1);
         let retrieved = store.get("test-skill").unwrap();
         assert_eq!(retrieved.metadata.description, "Updated description");
+    }
+
+    #[test]
+    fn test_upsert_checked_keeps_the_discovery_winner() {
+        // The write paths (rename store sync, mkdir placeholder, sync
+        // re-parse) insert through upsert_checked so a same-leaf collision
+        // with a different source directory follows the loaders' rule: the
+        // lexicographically smaller source path keeps the key and the
+        // loser is reported, instead of a blind insert silently stealing
+        // the key.
+        let mut store = SkillStore::new();
+        let mut winner = create_test_entry("notes", "discovered skill", vec![]);
+        winner.source_path = std::path::PathBuf::from("/source/apple/notes/SKILL.md");
+        store.upsert(winner);
+
+        let mut renamed = create_test_entry("notes", "renamed skill", vec![]);
+        renamed.source_path = std::path::PathBuf::from("/source/banana/notes/SKILL.md");
+        let report = store.upsert_checked(renamed).expect("collision report");
+
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "discovered skill",
+            "the lexicographically smaller source path keeps the key"
+        );
+        assert!(
+            report.error.contains("duplicate skill name 'notes'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+
+        // A lexicographically smaller newcomer wins instead, still
+        // reporting the collision.
+        let mut smaller = create_test_entry("notes", "smaller path skill", vec![]);
+        smaller.source_path = std::path::PathBuf::from("/source/aardvark/notes/SKILL.md");
+        let report = store.upsert_checked(smaller).expect("collision report");
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "smaller path skill"
+        );
+        assert!(report.error.contains("duplicate skill name 'notes'"));
+
+        // Re-inserting the same source path is an idempotent refresh.
+        let mut refresh = create_test_entry("notes", "refreshed skill", vec![]);
+        refresh.source_path = std::path::PathBuf::from("/source/aardvark/notes/SKILL.md");
+        assert!(
+            store.upsert_checked(refresh).is_none(),
+            "re-inserting the same source path is an idempotent refresh"
+        );
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "refreshed skill"
+        );
+    }
+
+    #[test]
+    fn test_upsert_checked_refresh_preserves_the_scanned_category() {
+        // kongche-jbw follow-up on #7742: a same-source reparse refresh
+        // re-parses the manifest the scan discovered under its category,
+        // so the refresh must keep that provenance — the staging-private
+        // view filters match the scanned category (#8037), and wiping it
+        // surfaced a pre-seeded staging category's skill until the next
+        // remount. Replacing the source starts a new provenance: the new
+        // entry was never scanned under the replaced entry's category.
+        let mut store = SkillStore::new();
+        let mut staged = create_test_entry("web", "staged skill", vec![]);
+        staged.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        store.insert_discovered(staged, "pip-staging");
+
+        // Same-source refresh keeps the scanned category.
+        let mut refresh = create_test_entry("web", "refreshed skill", vec![]);
+        refresh.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        assert!(store.upsert_checked(refresh).is_none());
+        assert_eq!(
+            store.category_of("web"),
+            Some("pip-staging"),
+            "a same-source refresh must keep the scanned category record"
+        );
+
+        // A source replacement does not inherit the replaced entry's
+        // category (the #8037 rule, mirrored from `upsert`).
+        let mut replaced = create_test_entry("web", "replacement skill", vec![]);
+        replaced.source_path = std::path::PathBuf::from("/source/aardvark/web/SKILL.md");
+        let report = store.upsert_checked(replaced).expect("collision report");
+        assert!(
+            report.error.contains("duplicate skill name 'web'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+        assert!(
+            store.category_of("web").map(str::is_empty).unwrap_or(true),
+            "a source replacement must not inherit the previous owner's category, got {:?}",
+            store.category_of("web")
+        );
+    }
+
+    #[test]
+    fn test_upsert_checked_replacing_staging_drops_a_staging_incumbent() {
+        // The ordinary inbox replacement control (#8037): a staging
+        // half-install the scan classified as a category must not keep
+        // the leaf name against a real write-path entry — the completed
+        // ordinary skill replaces it, uncategorized, and no collision is
+        // reported because the incumbent was never a legitimate
+        // contender. A same-source refresh through the same entry point
+        // still keeps the scanned category.
+        let mut store = SkillStore::new();
+        let mut staged = create_test_entry("web", "staged skill", vec![]);
+        staged.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        store.insert_discovered(staged, "pip-staging");
+        let is_staging_root = |name: &str| name == "pip-staging";
+
+        // Same-source refresh: the staging provenance survives.
+        let mut refresh = create_test_entry("web", "refreshed staged skill", vec![]);
+        refresh.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        assert!(
+            store
+                .upsert_checked_replacing_staging(refresh, &is_staging_root)
+                .is_none()
+        );
+        assert_eq!(
+            store.category_of("web"),
+            Some("pip-staging"),
+            "a same-source refresh must keep the scanned category record"
+        );
+
+        // The ordinary replacement from a different source takes the key.
+        let mut installed = create_test_entry("web", "installed skill", vec![]);
+        installed.source_path = std::path::PathBuf::from("/source/web/SKILL.md");
+        assert!(
+            store
+                .upsert_checked_replacing_staging(installed, &is_staging_root)
+                .is_none(),
+            "replacing a staging incumbent is not a collision"
+        );
+        assert_eq!(
+            store.get("web").unwrap().metadata.description,
+            "installed skill"
+        );
+        assert!(
+            store.category_of("web").map(str::is_empty).unwrap_or(true),
+            "the replacement must not inherit the staging category, got {:?}",
+            store.category_of("web")
+        );
+    }
+
+    #[test]
+    fn test_upsert_checked_replacing_staging_keeps_a_real_incumbent() {
+        // Two real skills sharing a leaf keep the loaders' rule under the
+        // replacing entry point too: the lexicographically smaller source
+        // path wins and the loser is reported.
+        let mut store = SkillStore::new();
+        let mut winner = create_test_entry("notes", "categorized skill", vec![]);
+        winner.source_path = std::path::PathBuf::from("/source/apple/notes/SKILL.md");
+        store.upsert(winner);
+
+        let mut renamed = create_test_entry("notes", "renamed skill", vec![]);
+        renamed.source_path = std::path::PathBuf::from("/source/banana/notes/SKILL.md");
+        let is_staging_root = |name: &str| name == "pip-staging";
+        let report = store
+            .upsert_checked_replacing_staging(renamed, &is_staging_root)
+            .expect("collision report");
+        assert!(
+            report.error.contains("duplicate skill name 'notes'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "categorized skill"
+        );
     }
 
     #[test]

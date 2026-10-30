@@ -127,3 +127,21 @@ fn recent_results_require_data_only_for_success() {
             .is_err());
     }
 }
+
+#[test]
+fn recent_execution_preserves_withheld_result_failure_action() {
+    let protocol = view::Protocol::new().unwrap();
+    let mut panel: Value = serde_json::from_slice(&fixture("panel-ok")).unwrap();
+    panel["recent_execution"]["data"]["items"] = json!([{
+        "provider":"policy", "step_id":"record", "method":"invoke", "elapsed_ms":1,
+        "status":"error", "failure":"provider", "failure_action":"withhold_result",
+        "policy_block":false, "kind":"provider"
+    }]);
+    protocol
+        .check_panel(&serde_json::to_vec(&panel).unwrap())
+        .unwrap();
+    panel["recent_execution"]["data"]["items"][0]["failure_action"] = json!("ignore");
+    assert!(protocol
+        .check_panel(&serde_json::to_vec(&panel).unwrap())
+        .is_err());
+}

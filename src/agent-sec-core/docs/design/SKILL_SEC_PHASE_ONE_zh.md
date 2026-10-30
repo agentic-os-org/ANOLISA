@@ -7,6 +7,11 @@ SkillSec 在一个 `asc-capability-skill-sec` crate 内拆分 Skill 扫描、内
 及 Linux 验收边界。当前合同不支持密钥轮转，以系统 `managedSkillDirs` 配置作为唯一持久化
 发现集合。下文带日期的旧换钥与私有登记表验收仅是历史证据，不代表当前功能。
 
+当前 Rust CLI 入口为 `agent-sec-cli skillsec`，`skill-ledger` 保留为兼容别名，使用相同的
+命令树、请求参数、输出和退出码。此次命名迁移不改变 `action.skill_sec`、审计事件类型、
+能力 ID、环境变量或持久化数据，现有 Hook 调用保持兼容。CLI 合同测试覆盖两种命令名，
+核心工作流及目录发现的进程测试使用 `skillsec`。
+
 ## 交付与验收
 
 核心迁移和 Agent Hook 接入分为两个 PR。当前 PR 包含 Rust 核心、公共 Action Runtime 审计、
@@ -365,7 +370,8 @@ Service 已提供 `decide`、`clear_decision`、`show`、`activate` 和 `rollbac
 `show` 只读，分别呈现 latest/active、源目录一致性、findings 和有长度限制的审核说明。
 
 发布写入 SkillFS 使用的最小 schema-1 `activation.json` 与目录 xattr；目标是已验证快照、
-安全的待审核占位目录，或显式 block 对应的 null。`contractWritten`、
+安全的待审核占位目录，或显式 block 对应的 null。占位内容将目录名保留为 YAML 字符串，
+转义 YAML 会作为换行处理或拒绝的字面字符；description 和审核说明固定不变。`contractWritten`、
 `activationXattr.written`、`activationPending` 区分业务提交与发布完成。xattr 失败不会撤销
 已签名决策；activate 或启动 reconcile 可重试。发布成功不等于已证明真实 FUSE 暴露效果。
 
@@ -423,7 +429,7 @@ scan/certify/noop 成功处理后将路径记入 daemon 实际使用的配置文
 请求共用这一份配置发现集合。
 
 `enableDefaultSkillDirs` 默认开启，省略时也为 true。daemon 启动时从本地 `/etc/passwd` 获取
-HOME，加入系统及标准用户目录，详见 [V2 指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#系统配置与信任)。
+HOME，加入系统及标准用户目录，详见 [V2 指南](../../../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md#系统配置与信任)。
 不使用调用者环境变量或 CLI 发现。仅默认发现限制为 10,000 个目录项、1,024 个新增 Skill；
 显式模式保持完整。单目录错误保留发现结果，返回 `discoveryErrors` 和失败状态。
 账户与配置变更需重启 daemon。
@@ -547,7 +553,7 @@ V2 CI 使用 Node 22。`V2_CARGO_TARGET_DIR` 支持任务私有缓存，同时�
 不自动激活或创建密钥，以及 V1 unit 隔离。安装后的 Python V2 E2E 使用独立状态和审计目录，
 并以普通 UID 验证 root daemon 的 PAP 权限拒绝。这些检查与实际 systemd 生命周期和真实
 FUSE 证据分别记录。
-[核心指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md)
+[核心指南](../../../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md)
 提供源码/RPM 命令、共享卷要求及恢复匹配状态的升级回退步骤。
 
 历史交付验收（早于本次对齐）在 Alibaba Cloud Linux 4 x86_64 上通过。与主线系统 daemon 对齐后，源码
@@ -573,7 +579,7 @@ noexec，用例原位执行选定产物，仅在隔离测试 unit 注入非终�
 调整 daemon 初始化与命令结果校验，并将 Cosh 宿主超时设为 10 秒，覆盖顺序执行的
 3 秒初始化和 5 秒查询；不引入统一 Hook 框架或第二套策略层。
 六类适配器的行为和执行错误边界见
-[用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
+[用户指南](../../../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
 
 按四个逻辑提交交付：初始化、结果处理、真实 Rust CLI／daemon 合同、文档与验收记录。
 真实宿主验收单独推进。

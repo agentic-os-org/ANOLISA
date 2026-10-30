@@ -32,6 +32,31 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     // Turn-scope batch consent never outlives its run (issue #1773).
     state.control.trust.clear_run_batch_consent();
 
+    let failed_without_recovery = failed_run_has_no_recovery(&active_run);
+    if failed_without_recovery {
+        let remaining = &active_run.governed_events[active_run.rendered_governed_event_count..];
+        crate::approval::requests::record_approval_requests(
+            state,
+            remaining,
+            Some(&active_run.request),
+            active_run.origin,
+            adapter.capabilities().control_protocol,
+        );
+        crate::approval::runtime::cancel_pending_approvals_for_failed_run(
+            state,
+            &active_run.request.id,
+            &active_run.handle,
+            output,
+        )?;
+        crate::agent::structured_events::render_terminal_activity(
+            state,
+            remaining,
+            active_run.origin,
+            output,
+            adapter,
+        )?;
+        active_run.rendered_governed_event_count = active_run.governed_events.len();
+    }
     cleanup_question_for_terminal_owner(state, output, &active_run.request.id)?;
     active_run.status_animation.clear(output)?;
     if !active_run.held_events.is_empty() {
@@ -137,6 +162,9 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         &active_run.request.id,
         &active_run.handle,
     );
+    if failed_without_recovery {
+        crate::approval::panel::render_current_approval_request(state, output)?;
+    }
     record_selectable_recommendations(
         state,
         &active_run.governed_events,
@@ -214,6 +242,14 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     }
 
     Ok(())
+}
+
+pub(crate) fn failed_run_has_no_recovery(active_run: &ActiveAgentRun) -> bool {
+    active_run.governed_events.iter().any(|event| {
+        matches!(
+            &event.event, AgentEvent::AgentFailed { run_id, .. } if run_id == &active_run.request.id
+        )
+    }) && shell_handoff_resume_fallback_request(active_run).is_none()
 }
 
 fn drain_orphan_hook_notifications(active_run: &mut ActiveAgentRun) {
@@ -347,333 +383,5 @@ fn trim_queued_requests_after_provider_timeout(state: &mut InlineState) -> usize
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Instant;
-
-    use super::*;
-    use crate::agent::events::render_active_agent_event;
-    use crate::agent::run::{PendingAgentRequest, PendingRequestClass};
-    use crate::runtime::state::InlineState;
-    use crate::types::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
-
-    fn request(id: &str) -> AgentRequest {
-        AgentRequest {
-            id: id.to_string(),
-            session_id: "shell-session".to_string(),
-            command_block: CommandBlock {
-                id: format!("cmd-{id}"),
-                session_id: "shell-session".to_string(),
-                command: "echo hi".to_string(),
-                origin: Default::default(),
-                cwd: "/repo".to_string(),
-                end_cwd: "/repo".to_string(),
-                started_at_ms: 1,
-                ended_at_ms: 2,
-                duration_ms: 1,
-                exit_code: 0,
-                status: CommandStatus::Completed,
-                output: OutputRefs {
-                    terminal_output_ref: None,
-                    terminal_output_bytes: 0,
-                },
-                shell_environment_generation: None,
-                audit_identity: None,
-            },
-            context_blocks: Vec::new(),
-            context_hints: Vec::new(),
-            user_input: Some("queued".to_string()),
-            findings: Vec::new(),
-            mode: AgentMode::RecommendOnly,
-            user_confirmed: true,
-            hook_finding: None,
-            recommended_skill: None,
-        }
-    }
-
-    fn pending(id: &str, class: PendingRequestClass) -> PendingAgentRequest {
-        PendingAgentRequest {
-            request: request(id),
-            origin: AgentRunOrigin::Standard,
-            intent: AgentStartIntent::UserInitiated,
-            class,
-            selectable_after_event_index: None,
-            before_held_text: false,
-        }
-    }
-
-    // A provider that ends its turn while its own Bash handoff is still running
-    // produced that text without the command's result, so finishing the run must
-    // drop it instead of rendering it or moving it to the shell-wide hold. The
-    // shell-evidence continuation regenerates the answer.
-    #[test]
-    fn finish_drops_held_text_while_its_own_shell_handoff_is_still_outstanding() {
-        let (rendered, state) = finish_run_with_handoff_owned_by("run-1");
-
-        assert!(!rendered.contains("STALE ANSWER"), "{rendered}");
-        assert!(state.agent_run.held_events.is_empty());
-    }
-
-    // The drop is scoped to the run that owns the handoff: text from a run whose
-    // own work is complete must still be shown even while some other run's
-    // handoff is in flight.
-    #[test]
-    fn finish_keeps_held_text_when_another_run_owns_the_outstanding_handoff() {
-        let (rendered, _state) = finish_run_with_handoff_owned_by("unrelated-run");
-
-        assert!(rendered.contains("STALE ANSWER"), "{rendered}");
-    }
-
-    #[test]
-    fn finish_renders_orphan_hook_notification_with_fallbacks() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        let mut active_run = active_run(&adapter, "run-1", Language::ZhCn);
-        active_run
-            .pending_hook_notifications
-            .push(PendingHookNotification {
-                tool_use_id: Some("tool-1".to_string()),
-                hook_name: "  ".to_string(),
-                message: String::new(),
-                decision: Some("\n".to_string()),
-            });
-        state.agent_run.active = Some(active_run);
-        let mut output = Vec::new();
-
-        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
-
-        let rendered = String::from_utf8_lossy(&output);
-        assert!(rendered.contains("Hook: 未知 Hook"), "{rendered}");
-        assert!(rendered.contains("消息: 未提供消息"), "{rendered}");
-        assert!(rendered.contains("决策: 未指定"), "{rendered}");
-        assert!(!rendered.contains("unknown hook"), "{rendered}");
-    }
-
-    // #2197: a hook that fires on every tool call used to dump one three-line
-    // block per hit into the same Governance panel. The finish path must render
-    // the collapsed projection while `deferred_events` keeps every original.
-    #[test]
-    fn finish_collapses_repeated_allow_hook_notifications_into_one_line() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
-        for _ in 0..3 {
-            active_run
-                .pending_hook_notifications
-                .push(PendingHookNotification {
-                    tool_use_id: Some("tool-1".to_string()),
-                    hook_name: "pii-checker".to_string(),
-                    message: "[pii-checker] card hit".to_string(),
-                    decision: Some("allow".to_string()),
-                });
-        }
-        state.agent_run.active = Some(active_run);
-        let mut output = Vec::new();
-
-        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
-
-        let rendered = String::from_utf8_lossy(&output);
-        assert_eq!(rendered.matches("pii-checker").count(), 1, "{rendered}");
-        assert!(
-            rendered.contains("• pii-checker: card hit ×3"),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("Decision: allow"), "{rendered}");
-    }
-
-    #[test]
-    fn recovery_context_collapses_allow_notices_and_omits_provider_timeout() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
-        let mut ingress_output = Vec::new();
-        for _ in 0..3 {
-            render_active_agent_event(
-                &mut active_run,
-                AgentEvent::HookNotification {
-                    run_id: "run-1".to_string(),
-                    hook_name: "pii-checker".to_string(),
-                    message: "[pii-checker] card hit".to_string(),
-                    tool_use_id: Some("tool-1".to_string()),
-                    decision: Some("allow".to_string()),
-                },
-                &mut ingress_output,
-                None,
-            )
-            .expect("ingest hook notification");
-        }
-        render_active_agent_event(
-            &mut active_run,
-            AgentEvent::AgentFailed {
-                run_id: "run-1".to_string(),
-                error: "PROVIDER TIMEOUT MUST STAY HIDDEN".to_string(),
-                error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
-                max_turns: None,
-            },
-            &mut ingress_output,
-            None,
-        )
-        .expect("ingest provider timeout");
-        assert_eq!(active_run.pending_hook_notifications.len(), 3);
-        let mut output = Vec::new();
-
-        render_recovery_deferred_context(&active_run, &mut output)
-            .expect("render recovery context");
-
-        let rendered = String::from_utf8_lossy(&output);
-        assert_eq!(rendered.matches("pii-checker").count(), 1, "{rendered}");
-        assert!(
-            rendered.contains("• pii-checker: card hit ×3"),
-            "{rendered}"
-        );
-        assert!(
-            !rendered.contains("PROVIDER TIMEOUT MUST STAY HIDDEN"),
-            "{rendered}"
-        );
-    }
-
-    // Finishes an active `run-1` holding one text delta, with an approved handoff
-    // owned by `handoff_run_id` still outstanding. Returns what was rendered plus
-    // the resulting state.
-    fn finish_run_with_handoff_owned_by(handoff_run_id: &str) -> (String, InlineState) {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
-        active_run.held_events.push(GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::DisplayOnly,
-            event: AgentEvent::TextDelta {
-                run_id: "run-1".to_string(),
-                text: "STALE ANSWER".to_string(),
-            },
-            reason: "held".to_string(),
-            display_text: "STALE ANSWER".to_string(),
-            auto_execute: false,
-        });
-        state.agent_run.active = Some(active_run);
-        state.control.shell_handoff_mut().enqueue_approved_request(
-            ShellHandoffRequest::new(
-                "df -h",
-                "$ df -h",
-                "provider-tool-call",
-                "agent",
-                "req-1",
-                handoff_run_id,
-                1,
-            )
-            .expect("handoff"),
-        );
-        let mut output = Vec::new();
-
-        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
-
-        (String::from_utf8_lossy(&output).to_string(), state)
-    }
-
-    fn active_run(adapter: &AdapterInstance, id: &str, language: Language) -> ActiveAgentRun {
-        let run_request = request(id);
-        let handle = adapter.start_cancellable(run_request.clone(), CoshApprovalMode::Recommend);
-        let renderer = RatatuiInlineRenderer::for_terminal().with_language(language);
-        ActiveAgentRun {
-            request: run_request,
-            origin: AgentRunOrigin::Standard,
-            handle,
-            provider_name: "fake",
-            language,
-            renderer: renderer.clone(),
-            status_animation: renderer.status_animation(),
-            markdown_stream: renderer.stream_markdown_agent(),
-            governed_events: Vec::new(),
-            deferred_events: Vec::new(),
-            held_events: Vec::new(),
-            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
-            pending_cosh_requests: Vec::new(),
-            pending_cosh_request_audits: Vec::new(),
-            rendered_governed_event_count: 0,
-            selectable_after_event_index: None,
-            started_at: Instant::now(),
-            last_activity_at: Instant::now(),
-            last_heartbeat_at: Instant::now(),
-            current_phase: String::new(),
-            current_message: String::new(),
-            has_visible_text_delta: false,
-            completed: true,
-            host_completed_tool_ids: Vec::new(),
-            pending_hook_notifications: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn provider_timeout_trim_keeps_control_responses_and_oldest_normal_in_order() {
-        let mut state = InlineState::default();
-        for (id, class) in [
-            ("normal-a", PendingRequestClass::Normal),
-            ("control-b", PendingRequestClass::ControlResponse),
-            ("normal-c", PendingRequestClass::Normal),
-            ("control-d", PendingRequestClass::ControlResponse),
-            ("normal-e", PendingRequestClass::Normal),
-        ] {
-            state
-                .agent_run
-                .queued_requests
-                .push_back(pending(id, class));
-        }
-
-        let dropped = trim_queued_requests_after_provider_timeout(&mut state);
-
-        // Only the surplus normal requests were dropped and counted; every
-        // control response survives, and FIFO order is untouched.
-        assert_eq!(dropped, 2);
-        let ids: Vec<&str> = state
-            .agent_run
-            .queued_requests
-            .iter()
-            .map(|pending| pending.request.id.as_str())
-            .collect();
-        assert_eq!(ids, ["normal-a", "control-b", "control-d"]);
-    }
-
-    #[test]
-    fn provider_timeout_trim_drops_nothing_without_surplus_normals() {
-        let mut state = InlineState::default();
-        state
-            .agent_run
-            .queued_requests
-            .push_back(pending("control-a", PendingRequestClass::ControlResponse));
-        state
-            .agent_run
-            .queued_requests
-            .push_back(pending("normal-b", PendingRequestClass::Normal));
-
-        assert_eq!(trim_queued_requests_after_provider_timeout(&mut state), 0);
-        assert_eq!(state.agent_run.queued_requests.len(), 2);
-    }
-
-    // F2 (#2067): an orphan hook block notification must drain through
-    // governance so the deferred render carries real display text instead of
-    // an empty card.
-    #[test]
-    fn finish_drains_orphan_hook_notification_with_visible_display_text() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
-        active_run
-            .pending_hook_notifications
-            .push(crate::agent::run::PendingHookNotification {
-                tool_use_id: Some("toolu-1".to_string()),
-                hook_name: "guard".to_string(),
-                message: String::new(),
-                decision: Some("block".to_string()),
-            });
-        state.agent_run.active = Some(active_run);
-        let mut output = Vec::new();
-
-        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
-
-        let rendered = String::from_utf8(output).expect("utf8");
-        assert!(
-            rendered.contains("Hook: guard")
-                && rendered.contains("Message: no message provided")
-                && rendered.contains("Decision: block"),
-            "the orphan block must render visible governance text: {rendered}"
-        );
-    }
-}
+#[path = "finish_tests.rs"]
+mod tests;

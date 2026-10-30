@@ -30,6 +30,8 @@ use crate::sls;
 use crate::tool::SessionWorkspace;
 
 mod auth;
+#[cfg(test)]
+mod live_state_tests;
 
 use auth::request_auth;
 
@@ -125,6 +127,7 @@ pub async fn run(
             .with_shell_evidence(args.enable_shell_evidence_tool)
             .with_skill_loading(!args.bare)
             .with_tool_selection(args.tools.as_deref())
+            .with_workspace_file_tools(!workspace.openat2_unavailable())
             .build()
             .await
     };
@@ -180,6 +183,7 @@ pub async fn run(
         executable_agents = 0,
         "loaded extension runtime snapshot"
     );
+    let workspace_file_tools = !workspace.openat2_unavailable();
     let mut engine = CoshCore::new_with_snapshot_and_session_id(
         config,
         provider,
@@ -197,7 +201,8 @@ pub async fn run(
         (!args.execution_profile.is_brokered())
             .then(|| args.tools.clone())
             .flatten(),
-    );
+    )
+    .with_workspace_file_tools(workspace_file_tools);
     engine.extra_params = extra_params;
     engine.messages = session.record.messages.clone();
     engine.compaction.load_state(
@@ -740,6 +745,8 @@ where
                 engine.shell_context = Some(ctx);
             }
 
+            session.refresh_background_compaction(engine);
+
             // Reset per-turn metrics before each user message
             engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
@@ -831,6 +838,18 @@ where
                 Some(extensions.live),
             )
             .await;
+            if domain == "auth"
+                && action == "activate"
+                && matches!(
+                    &response,
+                    OutputMessage::RegistryResponse { success: true, .. }
+                )
+            {
+                let resolved = engine.config.resolve_provider();
+                engine.provider = crate::create_provider(&engine.config);
+                engine.model = resolved.model;
+                engine.extra_params = resolved.extra_params;
+            }
             engine.emit(writer, &response);
             engine.drain_retired_extension_snapshots().await;
         }
@@ -983,6 +1002,43 @@ impl SessionRuntime {
         if !self.resumed || explicit_override || self.record.model.is_empty() {
             self.record.model = resolved_model.to_string();
         }
+    }
+
+    fn refresh_background_compaction(&mut self, engine: &mut CoshCore) {
+        if !self.auto_persist
+            || !self.record.was_loaded
+            || self.record.session_id.as_str() != engine.session_id
+        {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let saved = match store.load(&self.record.session_id) {
+            Ok(saved) => saved,
+            Err(error) => {
+                tracing::warn!(error = ?error, "background compaction refresh failed");
+                return;
+            }
+        };
+        if saved.generation <= self.record.generation
+            || saved.compaction_revision <= engine.compaction.revision()
+        {
+            return;
+        }
+        // Compare the durable redaction without changing live provider context.
+        let mut persisted_messages = engine.messages.clone();
+        crate::redaction::redact_messages(&mut persisted_messages);
+        if crate::compaction::source_digest(&persisted_messages)
+            != crate::compaction::source_digest(&saved.messages)
+        {
+            tracing::warn!("background compaction transcript differs from live session");
+            return;
+        }
+        engine
+            .compaction
+            .load_state(saved.compaction.clone(), saved.compaction_revision);
+        self.record = saved;
     }
 
     fn persist(&mut self, engine: &CoshCore) -> Result<(), SessionError> {

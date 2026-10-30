@@ -24,6 +24,9 @@ pub(crate) mod lifecycle;
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+#[cfg(test)]
+#[path = "pressure_tests.rs"]
+mod pressure_tests;
 #[path = "retained.rs"]
 mod retained;
 use std::cell::RefCell;
@@ -173,7 +176,13 @@ pub struct HttpConnectionAggregator {
     compact_sse: bool,
     sse_streams: LruCache<ConnectionId, SseStream>,
     sse_errors: LruCache<ConnectionId, crate::aggregator::RemoveReason>,
+    /// Bounded markers prevent abandoned SSE tails from restarting correlation.
+    retired_sse: LruCache<ConnectionId, (Instant, crate::aggregator::RemoveReason)>,
+    /// Payload-free capacity reservations bridge requests on keep-alive connections.
+    recently_completed: LruCache<ConnectionId, Instant>,
     request_chunks: LruCache<ConnectionId, super::chunk_stream::ChunkStream>,
+    retained: std::collections::HashMap<ConnectionId, retained::RetainedConnection>,
+    retained_metrics: ConnectionMetrics,
 }
 
 /// Default per-connection body buffer cap (8 MiB).
@@ -222,7 +231,11 @@ impl HttpConnectionAggregator {
             compact_sse: false,
             sse_streams: LruCache::new(cap),
             sse_errors: LruCache::new(cap),
+            retired_sse: LruCache::new(cap),
+            recently_completed: LruCache::new(cap),
             request_chunks: LruCache::new(cap),
+            retained: std::collections::HashMap::new(),
+            retained_metrics: ConnectionMetrics::default(),
         }
     }
 
@@ -258,6 +271,7 @@ impl HttpConnectionAggregator {
 
     /// Record activity timestamp for a connection.
     fn touch(&mut self, key: &ConnectionId) {
+        self.connections.promote(key);
         self.last_activity.push(*key, Instant::now());
     }
 
@@ -534,7 +548,11 @@ impl HttpConnectionAggregator {
         if self.connections.contains(&connection_id) {
             self.abandon(&connection_id, crate::aggregator::RemoveReason::Replaced);
         }
-        self.ensure_room();
+        self.retired_sse.pop(&connection_id);
+        if !self.ensure_room(&connection_id) {
+            self.reject_capacity(connection_id, ConnectionState::RequestPending { request });
+            return;
+        }
         self.idle_snapshotted.pop(&connection_id);
 
         if matches!(
@@ -555,9 +573,7 @@ impl HttpConnectionAggregator {
         if request.body().len() > self.max_body_bytes
             || content_length.is_some_and(|len| len > self.max_body_bytes)
         {
-            request.reassembled_body =
-                Some(request.body()[..request.body().len().min(self.max_body_bytes)].to_vec());
-            request.source_event = Rc::new(request.source_event.metadata_only());
+            lifecycle::metadata_request(&mut request);
             self.insert(connection_id, ConnectionState::RequestPending { request });
             self.abandon(&connection_id, crate::aggregator::RemoveReason::OverBudget);
             return;
@@ -589,6 +605,17 @@ impl HttpConnectionAggregator {
         };
 
         if body_complete {
+            // One TLS read can carry the declared body plus the next
+            // pipelined request (or simply more bytes than Content-Length).
+            // Keeping the surplus makes `json_body` reject the whole body as
+            // trailing garbage, silently dropping the request view; the
+            // split-read path already truncates to the declared length.
+            if let Some(content_length) = content_length.filter(|length| request.body_len > *length)
+            {
+                let body = request.body()[..content_length].to_vec();
+                request.set_reassembled_body(body);
+                request.source_event = Rc::new(request.source_event.metadata_only());
+            }
             log::trace!(
                 "[HttpAggregator] State transition: -> RequestPending | conn={:?} | method={} | path={}",
                 connection_id,
@@ -653,6 +680,14 @@ impl HttpConnectionAggregator {
 
     fn process_response_inner(&mut self, mut response: ParsedResponse) -> Option<AggregatedResult> {
         let connection_id = ConnectionId::from_ssl_event(&response.source_event);
+        if self
+            .retired_sse
+            .peek(&connection_id)
+            .is_some_and(|(_, reason)| *reason == crate::aggregator::RemoveReason::CapacityRejected)
+        {
+            return None;
+        }
+        self.retired_sse.pop(&connection_id);
 
         while is_informational(response.status_code) {
             if response.body().is_empty() {
@@ -671,7 +706,21 @@ impl HttpConnectionAggregator {
             .connections
             .pop(&connection_id)
             .unwrap_or(ConnectionState::Idle);
-        self.ensure_room();
+        if !self.ensure_room(&connection_id) {
+            let end_timestamp_ns = response.source_event.timestamp_ns;
+            self.reject_capacity(
+                connection_id,
+                ConnectionState::ResponsePending {
+                    request: None,
+                    assembly: PendingResponse::Body {
+                        response,
+                        framing: pending_response::Framing::Length(0),
+                        end_timestamp_ns,
+                    },
+                },
+            );
+            return None;
+        }
         self.touch(&connection_id);
 
         match state {
@@ -690,12 +739,16 @@ impl HttpConnectionAggregator {
                     body_buffer.truncate(cl);
                 }
                 let mut completed_request = request;
-                completed_request.reassembled_body = Some(body_buffer);
+                completed_request.set_reassembled_body(body_buffer);
 
                 if response.is_sse() {
                     let mut response_headers = response;
-                    let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
-                        self.sse_entry_state_for_connection(connection_id, &response_headers);
+                    let (sse_events, compressed_buffer, content_encoding, zstd_decoder) = self
+                        .sse_entry_state_for_connection(
+                            connection_id,
+                            &response_headers,
+                            Some(&completed_request),
+                        );
                     // Seed before `body_len` is zeroed: `body()` indexes the
                     // response's own read, which no later continuation
                     // producer ever sees again.
@@ -766,8 +819,12 @@ impl HttpConnectionAggregator {
                         response.status_code,
                     );
                     let mut response_headers = response;
-                    let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
-                        self.sse_entry_state_for_connection(connection_id, &response_headers);
+                    let (sse_events, compressed_buffer, content_encoding, zstd_decoder) = self
+                        .sse_entry_state_for_connection(
+                            connection_id,
+                            &response_headers,
+                            Some(&request),
+                        );
                     // See the RequestBodyPending branch: seed the first read's
                     // body before `body_len` is zeroed.
                     if compressed_buffer.is_none() {
@@ -843,7 +900,7 @@ impl HttpConnectionAggregator {
                     );
                     let mut response_headers = response;
                     let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
-                        self.sse_entry_state_for_connection(connection_id, &response_headers);
+                        self.sse_entry_state_for_connection(connection_id, &response_headers, None);
                     // See the RequestBodyPending branch: seed the first read's
                     // body before `body_len` is zeroed.
                     if compressed_buffer.is_none() {
@@ -920,6 +977,9 @@ impl HttpConnectionAggregator {
 
     /// Process raw body data (continuation bytes for an in-progress request)
     pub fn process_raw_body_data(&mut self, ssl_event: &SslEvent) -> Option<AggregatedResult> {
+        if self.discard_retired_sse(ssl_event) {
+            return None;
+        }
         let result = self.process_raw_body_data_inner(ssl_event);
         self.record_completed(result.as_ref());
         result
@@ -1007,8 +1067,7 @@ impl HttpConnectionAggregator {
                         body_buffer.shrink_to_fit();
                     }
                     let mut completed_request = request;
-                    completed_request.body_len = body_buffer.len();
-                    completed_request.reassembled_body = Some(body_buffer);
+                    completed_request.set_reassembled_body(body_buffer);
                     self.insert(
                         connection_id,
                         ConnectionState::RequestPending {
@@ -1166,7 +1225,7 @@ impl HttpConnectionAggregator {
     fn process_sse_event_inner(
         &mut self,
         connection_id: &ConnectionId,
-        sse_event: ParsedSseEvent,
+        mut sse_event: ParsedSseEvent,
     ) -> Option<AggregatedResult> {
         let state = self.connections.pop(connection_id)?;
 
@@ -1229,7 +1288,7 @@ impl HttpConnectionAggregator {
                 // event, which we always append because its source chunk
                 // carries usage data that must not be lost to dedup.
                 const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
-                let src = sse_event.source_event();
+                let src = sse_event.capture_event();
                 let src_ptr = src as *const _ as usize;
                 let src_buf_len = src.buf_size() as usize;
                 let read_state = self
@@ -1254,6 +1313,7 @@ impl HttpConnectionAggregator {
                 }
 
                 let prefix_source = (!read_state.bom_checked).then(|| sse_event.clone());
+                sse_event.release_capture_source();
                 sse_events.push(sse_event);
                 let recovered_done = prefix_source.is_some_and(|source| {
                     self.sse_continuation_buffers
@@ -1306,46 +1366,6 @@ impl HttpConnectionAggregator {
         self.connections.len()
     }
 
-    /// Return current connection-cache gauges and cumulative evictions.
-    pub(crate) fn metrics(&self) -> ConnectionMetrics {
-        let pending_connection_count = self
-            .connections
-            .iter()
-            .filter(|(_, state)| !matches!(state, ConnectionState::Idle))
-            .count();
-        let pending_connection_bytes: usize = self
-            .connections
-            .iter()
-            .filter_map(|(_, state)| {
-                (!matches!(state, ConnectionState::Idle)).then_some(state.buffered_bytes())
-            })
-            .sum();
-        let continuation_bytes = self
-            .sse_continuation_buffers
-            .iter()
-            .map(|(_, bytes)| bytes.capacity())
-            .sum::<usize>();
-        ConnectionMetrics {
-            connection_cache_bytes: pending_connection_bytes
-                .saturating_add(continuation_bytes)
-                .saturating_add(
-                    self.sse_streams
-                        .iter()
-                        .map(|(_, stream)| stream.retained_bytes())
-                        .sum::<usize>(),
-                )
-                .saturating_add(
-                    self.request_chunks
-                        .iter()
-                        .map(|(_, chunks)| chunks.retained_bytes())
-                        .sum::<usize>(),
-                ),
-            pending_connection_count,
-            pending_connection_bytes,
-            eviction_count: self.eviction_count,
-        }
-    }
-
     /// Check if connection has pending request
     pub fn has_pending_request(&self, connection_id: &ConnectionId) -> bool {
         matches!(
@@ -1374,10 +1394,14 @@ impl HttpConnectionAggregator {
         self.sse_read_state.clear();
         self.sse_streams.clear();
         self.sse_errors.clear();
+        self.retired_sse.clear();
+        self.recently_completed.clear();
         self.request_chunks.clear();
         self.last_activity.clear();
         self.idle_snapshotted.clear();
         self.ready.clear();
+        self.retained.clear();
+        self.retained_metrics = ConnectionMetrics::default();
     }
 
     /// Complete a live-tracked pid's partially-assembled responses (#7553).
@@ -1418,10 +1442,7 @@ impl HttpConnectionAggregator {
                 // Side tables are only dropped once the connection is known
                 // completed; a put-back arm (unusable headers) must keep them
                 // so the evidence path stays intact (#7716 review).
-                self.sse_continuation_buffers.pop(&key);
-                self.sse_read_state.pop(&key);
-                self.last_activity.pop(&key);
-                self.idle_snapshotted.pop(&key);
+                self.cleanup_completed(&key);
                 log::debug!(
                     "[HttpAggregator] completed partial response on clean exit: \
                      pid={} ssl_ptr={:#x}",
@@ -1446,6 +1467,7 @@ impl HttpConnectionAggregator {
                 // the request-evidence path (crash/exit persistence).
                 self.connections
                     .put(key, ConnectionState::ResponsePending { request, assembly });
+                self.refresh_retained(&key);
             }
         }
         completed
@@ -1857,6 +1879,9 @@ mod tests {
             // Since total buffer (17) < content_length (100), truncate does nothing
             let body = pair.request.body();
             assert_eq!(body, b"partial_more_data");
+            // `body_len` describes the same body the reassembly installed; a
+            // zero here makes every `body_len`-gated reader skip the prompt.
+            assert_eq!(pair.request.body_len, body.len());
         } else {
             panic!("Expected HttpComplete result");
         }
@@ -1960,6 +1985,72 @@ mod tests {
             ssl_ptr: 0x4000,
         };
         assert!(aggregator.has_pending_request(&conn_id));
+    }
+
+    /// A single TLS read can carry the declared body and the next pipelined
+    /// request. The surplus bytes must not become part of the body: JSON
+    /// parsing rejects trailing data, so the request view (model, messages,
+    /// tools) disappeared while the split-read path kept it.
+    #[test]
+    fn test_request_body_truncated_to_content_length_in_one_read() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let full_request = b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}GET /next HTTP/1.1\r\nHost: x\r\n\r\n";
+        let event = create_mock_ssl_event_with_buf(1234, 0x4100, full_request.to_vec(), 1);
+        let header_end = full_request
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 1,
+            headers: HashMap::from([("content-length".to_string(), "2".to_string())]),
+            body_offset: header_end,
+            body_len: full_request.len() - header_end,
+            source_event: event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x4100,
+        };
+        assert!(aggregator.has_pending_request(&conn_id));
+
+        let resp_event = create_mock_ssl_event_with_buf(
+            1234,
+            0x4100,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".to_vec(),
+            0,
+        );
+        let response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: HashMap::from([("content-length".into(), "2".into())]),
+            body_offset: 38,
+            body_len: 2,
+            source_event: resp_event,
+        };
+
+        match aggregator.process_response(response) {
+            Some(AggregatedResult::HttpComplete(pair)) => {
+                assert_eq!(pair.request.body(), b"{}");
+                assert_eq!(pair.request.body_len, 2);
+                // The consumer that used to fail on the surplus bytes: a
+                // body with a trailing pipelined request is not valid JSON.
+                assert_eq!(
+                    pair.request.json_body(),
+                    Some(serde_json::json!({})),
+                    "the request view must parse after truncation"
+                );
+            }
+            other => panic!("expected a completed exchange, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3818,6 +3909,7 @@ mod tests {
         );
         agg.sse_continuation_buffers.push(conn_id, vec![b'y'; 128]);
 
+        agg.refresh_retained(&conn_id);
         let metrics = agg.metrics();
         assert_eq!(metrics.pending_connection_count, 1);
         assert!(metrics.pending_connection_bytes >= 640);
@@ -3839,6 +3931,7 @@ mod tests {
                 )),
             },
         );
+        agg.refresh_retained(&conn_id);
         assert!(agg.metrics().pending_connection_bytes >= 512);
     }
 
@@ -3857,6 +3950,12 @@ mod tests {
                 reassembled_body: None,
             };
             agg.process_request(request);
+            if ssl_ptr == 0x7300 {
+                agg.last_activity.put(
+                    ConnectionId { pid: 1234, ssl_ptr },
+                    Instant::now() - crate::aggregator::result::ACTIVE_CONNECTION_GRACE,
+                );
+            }
         }
 
         let metrics = agg.metrics();

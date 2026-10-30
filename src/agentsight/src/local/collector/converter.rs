@@ -51,6 +51,28 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Gemini CLI chats are an append-only record stream: a leading
+    // `{sessionId, projectHash}` metadata record, `id`-keyed message records
+    // and `$`-prefixed corrections. The substrings mirror `is_gemini_chat`'s
+    // record markers, so foreign content stays on the Claude/Qoder path.
+    if content.contains("projectHash")
+        || content.contains("$rewindTo")
+        || content.contains("$patch")
+        || content.contains("$set")
+    {
+        // A legacy document may contain individually parseable lines (for
+        // example a scalar in an array). Recognize the whole document first.
+        let events = agentsight_trajectory_collector::gemini::legacy_document(content)
+            .map(|document| vec![document])
+            .unwrap_or_else(|| agentsight_trajectory_collector::qoder::load_jsonl_events(content));
+        if agentsight_trajectory_collector::gemini::is_gemini_chat(&events) {
+            return agentsight_trajectory_collector::gemini::convert_gemini_events(
+                &events,
+                "gemini-cli",
+            );
+        }
+    }
+
     // Codex's shared loader already consumes its BOM; normalize only this path.
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
@@ -58,6 +80,9 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
     let mut agent_name = String::new();
+    let mut message_session_id = None;
+    let mut message_version = None;
+    let mut message_model = None;
     let mut steps: Vec<Step> = Vec::new();
     let mut step_id: usize = 0;
 
@@ -72,6 +97,30 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if matches!(event_type, "user" | "assistant") {
+            if message_session_id.is_none() {
+                message_session_id = event
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if message_version.is_none() {
+                message_version = event
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if event_type == "assistant" && message_model.is_none() {
+                message_model = event
+                    .pointer("/message/model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+        }
 
         match event_type {
             "runtime-config" => {
@@ -267,6 +316,17 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Claude Code records identity on messages without a runtime-config.
+    // Explicit runtime metadata retains precedence even when it arrives later.
+    if session_id.is_empty() {
+        session_id = message_session_id.unwrap_or_default();
+    }
+    if agent_version.is_empty() {
+        agent_version = message_version.unwrap_or_default();
+    }
+    if model_name.is_none() {
+        model_name = message_model;
+    }
     let total_steps = steps.len();
 
     let agent = Agent {
@@ -339,19 +399,6 @@ fn flatten_tool_result_content(content: &Value) -> String {
 }
 
 fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
-    let last_agent_step = steps
-        .iter_mut()
-        .rev()
-        .find(|s| s.source == StepSource::Agent);
-    let step = match last_agent_step {
-        Some(s) => s,
-        None => return,
-    };
-
-    let observation = step.observation.get_or_insert(Observation {
-        results: Vec::new(),
-    });
-
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type != "tool_result" {
@@ -361,6 +408,40 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let Some(id) = source_call_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        // Prefer the original ID across the whole history before considering
+        // a unique provider echo; intervening assistant steps do not own it.
+        let exact = steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == id))
+        });
+        let owner = exact.or_else(|| {
+            let mut matched_id: Option<&str> = None;
+            let mut owner = None;
+            for (index, step) in steps.iter().enumerate() {
+                for call in step.tool_calls.iter().flatten() {
+                    if agentsight_atif::same_call_id(&call.tool_call_id, id) {
+                        if matched_id.is_some_and(|previous| previous != call.tool_call_id) {
+                            return None;
+                        }
+                        matched_id = Some(&call.tool_call_id);
+                        owner = Some(index);
+                    }
+                }
+            }
+            owner
+        });
+        let Some(step) = owner.map(|index| &mut steps[index]) else {
+            continue;
+        };
+        let observation = step.observation.get_or_insert_with(|| Observation {
+            results: Vec::new(),
+        });
         let content = Some(Value::String(
             block
                 .get("content")
@@ -487,6 +568,58 @@ mod tests {
         // delegation would incorrectly accept a second leading mark.
         let traj = convert_jsonl_content_to_atif(&format!("\u{feff}\u{feff}{content}")).unwrap();
         assert_eq!(traj.session_id, None);
+    }
+
+    #[test]
+    fn gemini_chat_delegates_to_gemini_converter() {
+        // A Gemini chat record stream: id-keyed message records plus the
+        // leading partial-metadata record. The Claude-style path would see no
+        // `message`-wrapped events and emit zero steps.
+        let content = concat!(
+            "{\"sessionId\":\"g-1\",\"projectHash\":\"h\",\"startTime\":\"2026-08-03T09:00:00.000Z\"}\n",
+            "{\"id\":\"m1\",\"timestamp\":\"2026-08-03T09:00:01.000Z\",\"type\":\"user\",\"content\":\"hi\"}\n",
+            "{\"id\":\"m2\",\"timestamp\":\"2026-08-03T09:00:02.000Z\",\"type\":\"gemini\",\"content\":\"hello\"}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "gemini-cli");
+        assert_eq!(traj.session_id.as_deref(), Some("g-1"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "hi");
+        assert_eq!(traj.steps[1].source, StepSource::Agent);
+        assert_eq!(traj.steps[1].message, "hello");
+    }
+
+    #[test]
+    fn legacy_gemini_document_delegates_to_gemini_converter() {
+        // <= 0.38 wrote `JSON.stringify(conversation, null, 2)`: no line
+        // parses as JSONL, so the viewer needs the whole-file fallback.
+        let content = concat!(
+            "{\n",
+            "  \"sessionId\": \"g-legacy\",\n",
+            "  \"projectHash\": \"h\",\n",
+            "  \"messages\": [\n",
+            "    {\n",
+            "      \"id\": \"m1\",\n",
+            "      \"timestamp\": \"2026-08-03T09:00:01.000Z\",\n",
+            "      \"type\": \"user\",\n",
+            "      \"content\": \"hi\"\n",
+            "    },\n",
+            "    {\n",
+            "      \"id\": \"m2\",\n",
+            "      \"timestamp\": \"2026-08-03T09:00:02.000Z\",\n",
+            "      \"type\": \"gemini\",\n",
+            "      \"content\": \"hello\"\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "gemini-cli");
+        assert_eq!(traj.session_id.as_deref(), Some("g-legacy"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].message, "hi");
+        assert_eq!(traj.steps[1].message, "hello");
     }
 
     #[test]

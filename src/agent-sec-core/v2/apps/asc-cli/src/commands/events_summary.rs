@@ -874,15 +874,15 @@ fn compute_suggestions(
         const LEDGER_HINTS: [(&str, &str); 3] = [
             (
                 "tampered",
-                "agent-sec-cli skill-ledger check <dir>    Investigate tampered skills",
+                "agent-sec-cli skillsec check <dir>    Investigate tampered skills",
             ),
             (
                 "drifted",
-                "agent-sec-cli skill-ledger scan <dir>     Re-scan drifted skills",
+                "agent-sec-cli skillsec scan <dir>     Re-scan drifted skills",
             ),
             (
                 "none",
-                "agent-sec-cli skill-ledger scan <dir>     Scan unchecked skills",
+                "agent-sec-cli skillsec scan <dir>     Scan unchecked skills",
             ),
         ];
         for (status_key, hint) in LEDGER_HINTS {
@@ -953,7 +953,7 @@ mod tests {
         assert!(text.contains("Tampered (1):"), "{text}");
         assert!(text.contains("demo — signature mismatch"), "{text}");
         assert!(
-            text.contains("agent-sec-cli skill-ledger check <dir>"),
+            text.contains("agent-sec-cli skillsec check <dir>"),
             "{text}"
         );
     }

@@ -65,6 +65,8 @@ impl BindingStateRepository for SqlitePolicyRepository {
                 };
                 if let Some(next) = next {
                     save_binding(tx, &next)?;
+                    #[cfg(feature = "fault-injection")]
+                    fail::fail_point!("policy.sqlite.cas.state_saved");
                     tx.execute(
                         "UPDATE bindings SET last_write_id=?2,last_write_digest=?3,
                      last_write_result_json=?4 WHERE binding_id=?1",
@@ -77,11 +79,17 @@ impl BindingStateRepository for SqlitePolicyRepository {
                     )?;
                 } else {
                     tx.execute("DELETE FROM bindings WHERE binding_id=?1", [key.as_str()])?;
+                    #[cfg(feature = "fault-injection")]
+                    fail::fail_point!("policy.sqlite.cas.binding_deleted");
                     finalize_scope(tx, &current.binding.spec.scope.scope_id)?;
+                    #[cfg(feature = "fault-injection")]
+                    fail::fail_point!("policy.sqlite.cas.scope_finalized");
                 }
                 Ok(result)
             })
             .map_err(RepositoryError::store);
+        #[cfg(feature = "fault-injection")]
+        fail::fail_point!("policy.sqlite.cas.after_transaction");
         tracing::debug!(
             target: "asc_observability::diagnostic",
             component = "policy_repository",

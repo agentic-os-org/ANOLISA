@@ -246,6 +246,19 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         plugin._SDKS[expected] = self.sdk
         self.assertEqual(plugin._factory(ctx, agent_config=None).data_dir, expected)
 
+    def test_factory_uses_absolute_configured_data_dir(self) -> None:
+        ctx = types.SimpleNamespace(workspace=types.SimpleNamespace(workspace_dir="/testbed"))
+        with mock.patch.dict("os.environ", {"TOKENLESS_DATA_DIR": DATA_DIR}):
+            middleware = plugin._factory(ctx, agent_config=None)
+        self.assertEqual(middleware.data_dir, DATA_DIR)
+        self.assertIs(middleware.sdk, self.sdk)
+
+    def test_factory_rejects_relative_configured_data_dir(self) -> None:
+        ctx = types.SimpleNamespace(workspace=types.SimpleNamespace(workspace_dir="/testbed"))
+        with mock.patch.dict("os.environ", {"TOKENLESS_DATA_DIR": "relative/state"}):
+            with self.assertRaisesRegex(ValueError, "must be absolute"):
+                plugin._factory(ctx, agent_config=None)
+
     def test_sdk_is_configured_with_the_registered_retrieve_tool(self) -> None:
         fake_sdk = lambda config: types.SimpleNamespace(config=config)  # noqa: E731
         with mock.patch.object(core, "TokenlessSdk", side_effect=fake_sdk):
@@ -262,6 +275,111 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lacks RecoveryMethod", logs.output[0])
         self.assertEqual(api.middlewares, [])
         self.assertEqual(api.tools, [])
+
+    def test_register_refuses_a_wheel_whose_constructor_lost_a_field(self) -> None:
+        """A wheel that only lost a keyword argument must not reach the model.
+
+        `anolisa_tokenless` 0.8.4 shipped a `PostToolRequest` without `command`
+        while the deployed plugin already passed `command=`; both name guards
+        passed and the middleware raised TypeError on the first tool call.
+        """
+
+        @dataclass(frozen=True)
+        class _StalePostToolRequest:
+            result_kind: object
+            tool_name: str
+            content: str
+            status: object
+            content_origin: object
+            output_optimization: object
+            capabilities: object
+            attribution: object
+
+        api = _FakeApi()
+        with mock.patch.object(core, "PostToolRequest", _StalePostToolRequest):
+            with self.assertLogs(plugin.logger, level="ERROR") as logs:
+                plugin.plugin.register(api)
+        self.assertIn("lacks PostToolRequest.command", logs.output[0])
+        self.assertEqual(api.middlewares, [])
+        self.assertEqual(api.tools, [])
+
+    def test_register_refuses_a_field_that_only_takes_a_position(self) -> None:
+        """A positional-only parameter cannot receive the keyword we pass.
+
+        `def __init__(self, command, /, ...)` spells every required name and
+        still raises TypeError on `PostToolRequest(command=...)`, so the guard
+        must report it exactly like a wheel that dropped the field.
+        """
+
+        class _PositionalOnlyPostToolRequest:
+            def __init__(
+                self,
+                command,
+                /,
+                result_kind,
+                tool_name,
+                content,
+                status,
+                content_origin,
+                output_optimization,
+                capabilities,
+                attribution,
+            ) -> None:
+                pass
+
+        api = _FakeApi()
+        with mock.patch.object(core, "PostToolRequest", _PositionalOnlyPostToolRequest):
+            with self.assertLogs(plugin.logger, level="ERROR") as logs:
+                plugin.plugin.register(api)
+        self.assertIn("lacks PostToolRequest.command", logs.output[0])
+        self.assertEqual(api.middlewares, [])
+        self.assertEqual(api.tools, [])
+
+    def test_register_refuses_a_positional_only_field_beside_kwargs(self) -> None:
+        """`**kwargs` does not rescue a field declared positional-only.
+
+        The signature names every field and still accepts arbitrary keywords,
+        yet `PostToolRequest(command=...)` raises `TypeError: missing 1
+        required positional argument: 'command'`. Skipping the whole class on
+        `**kwargs` therefore passes an unusable wheel; each field has to be
+        judged by whether it can actually receive the keyword.
+        """
+
+        class _CombinedPostToolRequest:
+            def __init__(
+                self,
+                command,
+                /,
+                result_kind,
+                tool_name,
+                content,
+                status,
+                content_origin,
+                output_optimization,
+                capabilities,
+                attribution,
+                **_kwargs,
+            ) -> None:
+                pass
+
+        api = _FakeApi()
+        with mock.patch.object(core, "PostToolRequest", _CombinedPostToolRequest):
+            with self.assertLogs(plugin.logger, level="ERROR") as logs:
+                plugin.plugin.register(api)
+        self.assertIn("lacks PostToolRequest.command", logs.output[0])
+        self.assertEqual(api.middlewares, [])
+        self.assertEqual(api.tools, [])
+
+    def test_register_accepts_a_constructor_that_takes_arbitrary_keywords(self) -> None:
+        class _LooseConfig:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+        api = _FakeApi()
+        with mock.patch.object(core, "TokenlessConfig", _LooseConfig):
+            with self.assertNoLogs(plugin.logger, level="WARNING"):
+                plugin.plugin.register(api)
+        self.assertEqual(api.middlewares, [(plugin._factory, 100)])
 
     async def test_model_call_compresses_schemas_and_records_markers(self) -> None:
         seen = {}
@@ -352,6 +470,77 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["post"].tool_name, "execute_shell_command")
         self.assertEqual(items[0], "stream-chunk")
         self.assertEqual(items[1].content, [_TextBlock(text="small")])
+
+    async def test_post_tool_constructor_failure_preserves_original_response(self) -> None:
+        original = core.PostToolRequest
+        seen = {}
+
+        def released_request(
+            *,
+            result_kind,
+            tool_name,
+            content,
+            status,
+            content_origin,
+            output_optimization,
+            capabilities,
+            attribution,
+        ):
+            return original(
+                result_kind=result_kind,
+                tool_name=tool_name,
+                content=content,
+                status=status,
+                content_origin=content_origin,
+                output_optimization=output_optimization,
+                capabilities=capabilities,
+                attribution=attribution,
+            )
+
+        async def post_tool(request):
+            seen["request"] = request
+            return _post_response("small")
+
+        self.sdk.post_tool = post_tool
+        response = _ToolResponse(content=[_TextBlock(text="big output")])
+        with mock.patch.object(core, "PostToolRequest", released_request):
+            with self.assertLogs(plugin.logger, level="ERROR"):
+                result = await self.middleware._after_response(
+                    response,
+                    "execute_shell_command",
+                    "command_output",
+                    core.OutputOptimization.NONE,
+                    core.Attribution("qwenpaw", "session-1", "call-1"),
+                    "cat output.txt",
+                )
+        self.assertIs(result, response)
+        self.assertNotIn("request", seen)
+        self.assertEqual(self.middleware.post_tool_failures, 1)
+
+    async def test_post_tool_failure_preserves_all_original_blocks(self) -> None:
+        calls = 0
+
+        async def post_tool(_request):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise core.TokenlessError("invalid JSON")
+            return _post_response("short")
+
+        self.sdk.post_tool = post_tool
+        response = _ToolResponse(content=[_TextBlock(text="first"), _TextBlock(text="second")])
+        with self.assertLogs(plugin.logger, level="ERROR"):
+            result = await self.middleware._after_response(
+                response,
+                "execute_shell_command",
+                "command_output",
+                core.OutputOptimization.NONE,
+                core.Attribution("qwenpaw", "session-1", "call-1"),
+                "cat output.txt",
+            )
+        self.assertIs(result, response)
+        self.assertEqual(result.content, [_TextBlock(text="first"), _TextBlock(text="second")])
+        self.assertEqual(self.middleware.post_tool_failures, 1)
 
     async def test_non_object_shell_arguments_fail_open(self) -> None:
         """Non-object args are forwarded untransformed instead of raising.

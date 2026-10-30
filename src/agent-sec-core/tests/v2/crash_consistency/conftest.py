@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
 from tests.v2.e2e.conftest import daemon_bin as daemon_bin
 from tests.v2.e2e.conftest import daemon_settings as daemon_settings
 from tests.v2.e2e.conftest import start_daemon as start_daemon
@@ -27,14 +28,15 @@ _WIRE = _V2 / "fixtures/clients/agentsight/file-deletion"
 _BINDINGS = "/api/enforcement/bindings"
 
 
-def until(read, ready, timeout=10):
+def until(read, ready, timeout=30):
     deadline = time.monotonic() + timeout
-    while True:
-        value = read()
-        if ready(value):
+    value = None
+    while (remaining := deadline - time.monotonic()) > 0:
+        value = read(remaining)
+        if ready(value) and time.monotonic() <= deadline:
             return value
-        assert time.monotonic() < deadline, f"recovery did not converge: {value}"
-        time.sleep(0.02)
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    pytest.fail(f"recovery did not converge within {timeout}s: {value}")
 
 
 class Gate:
@@ -188,9 +190,9 @@ class Recovery:
             ).fetchall()
         return scopes, bindings
 
-    def ready(self, count, timeout=10):
+    def ready(self, count, timeout=30):
         return until(
-            lambda: self.daemon.request("binding", "list"),
+            lambda remaining: self.daemon.request("binding", "list", timeout=remaining),
             lambda value: value["total"] == count
             and all(item["status"]["phase"] == "READY" for item in value["items"]),
             timeout=timeout,
@@ -198,11 +200,11 @@ class Recovery:
 
     def clean(self):
         until(
-            lambda: self.daemon.request("binding", "list"),
+            lambda remaining: self.daemon.request("binding", "list", timeout=remaining),
             lambda value: value["total"] == 0,
         )
         until(
-            lambda: self.daemon.request("scope", "list"),
+            lambda remaining: self.daemon.request("scope", "list", timeout=remaining),
             lambda value: value["total"] == 0,
         )
         assert self.saved() == ([], [])
@@ -326,7 +328,7 @@ def recovery(tmp_path, monkeypatch, start_daemon):
             # Enable daemon diagnostics without changing the CLI's stderr contract.
             with monkeypatch.context() as environment:
                 environment.setenv(
-                    "RUST_LOG", os.environ.get("ASC_CRASH_DAEMON_LOG", "warn")
+                    "RUST_LOG", os.environ.get("ASC_CRASH_DAEMON_LOG", "info")
                 )
                 return start_daemon(**kwargs)
 

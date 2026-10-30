@@ -202,6 +202,7 @@ struct {
 #define INODE_GUARD_UNLINK  1
 #define INODE_GUARD_RENAME  2
 #define INODE_GUARD_WRITE   4
+#define INODE_GUARD_TREE    8
 
 /* Returns the guard entry when the inode is guarded for guard_flag in the
  * caller's domain, NULL otherwise. */
@@ -238,6 +239,418 @@ static __always_inline const struct inode_guard_val *te_inode_guarded(
 	 * from different agents do not cross-block each other. */
 	__u32 *domain = bpf_map_lookup_elem(&cap_task, &pid);
 	return domain && *domain == val->domain_id ? val : NULL;
+}
+
+/* Mount- and domain-scoped path identity shared by every structured policy map.
+ * Registration must hold O_PATH identities so the recorded (ino, dev, mnt_id)
+ * cannot drift; mnt_id = 0 is reserved for the underlying-directory form that
+ * anchors a directory independently of the mounts exposing it. The generation
+ * makes a staged topology invisible until its activation record is published. */
+struct te_path_key {
+	__u64 ino;
+	__u32 dev;
+	__u32 mnt_id;
+	__u32 domain_id;
+	__u32 generation;
+};
+
+/* Production structured-policy map ABI. Root ids are stable normalized target
+ * ids in [1,64]. Masks keep exclusions scoped to their owning directory target,
+ * so an overlapping target can still protect an entry excluded by another root. */
+#define TE_TREE_WALK_MAX 256
+#define TE_POLICY_CLASS_UNKNOWN -1
+#define TE_POLICY_CLASS_OUTSIDE 0
+#define TE_POLICY_CLASS_EXCLUDED 1
+#define TE_POLICY_CLASS_PROTECTED 2
+
+#define TE_POLICY_MAX_TARGETS 64
+#define TE_POLICY_NAME_MAX 255
+#define TE_POLICY_TARGET_DELETE 1
+#define TE_POLICY_TARGET_TREE   2
+
+struct te_policy_root_val {
+	__u64 root_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_path_key);
+	__type(value, struct te_policy_root_val);
+} te_policy_roots SEC(".maps");
+
+struct te_policy_dir_val {
+	__u64 root_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_path_key); /* mnt_id = 0 */
+	__type(value, struct te_policy_dir_val);
+} te_policy_dirs SEC(".maps");
+
+struct te_policy_stable_val {
+	__u64 target_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_path_key);
+	__type(value, struct te_policy_stable_val);
+} te_policy_stable SEC(".maps");
+
+struct te_policy_slot_key {
+	struct te_path_key parent;
+	__u32 name_len;
+	char name[TE_POLICY_NAME_MAX + 1];
+	__u32 _pad; /* Map-key tail bytes must be deterministic across languages. */
+};
+struct te_policy_slot_val {
+	__u64 direct_mask;
+	__u64 exact_exclude_mask;
+	__u64 subtree_exclude_mask;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_policy_slot_key);
+	__type(value, struct te_policy_slot_val);
+} te_policy_slots SEC(".maps");
+
+struct te_policy_target_key {
+	__u32 domain_id;
+	__u32 generation;
+	__u32 target_id;
+	__u32 _pad;
+};
+struct te_policy_target_val {
+	struct inode_guard_val guard;
+	__u32 flags;
+	__u32 target_id;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct te_policy_target_key);
+	__type(value, struct te_policy_target_val);
+} te_policy_targets SEC(".maps");
+
+struct te_policy_domain_val {
+	__u32 generation;
+	__u32 target_count;
+	__u64 tree_mask;
+	__u64 delete_mask;
+	__u64 ordinary_write_mask;
+	__u64 protection_set_id;
+	struct inode_guard_val guard;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32);
+	__type(value, struct te_policy_domain_val);
+} te_policy_domains SEC(".maps");
+
+struct te_policy_slot_scratch {
+	struct te_policy_slot_key key;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct te_policy_slot_scratch);
+} te_policy_slot_scratch SEC(".maps");
+
+static __always_inline struct mount *te_real_mount(struct vfsmount *mnt)
+{
+	if (!mnt)
+		return NULL;
+	return (struct mount *)((char *)mnt - bpf_core_field_offset(struct mount, mnt));
+}
+
+static __always_inline int te_path_identity(struct dentry *dentry,
+	struct mount *mount, __u32 domain, __u32 generation, struct te_path_key *key)
+{
+	struct inode *inode = NULL;
+	struct super_block *sb = NULL;
+	*key = (struct te_path_key){ .domain_id = domain, .generation = generation };
+	if (!dentry || !mount || BPF_CORE_READ_INTO(&inode, dentry, d_inode) || !inode ||
+	    BPF_CORE_READ_INTO(&key->ino, inode, i_ino) ||
+	    BPF_CORE_READ_INTO(&sb, inode, i_sb) || !sb ||
+	    BPF_CORE_READ_INTO(&key->dev, sb, s_dev) ||
+	    BPF_CORE_READ_INTO(&key->mnt_id, mount, mnt_id))
+		return -1;
+	return 0;
+}
+
+struct te_policy_walk {
+	struct dentry *dentry;
+	struct mount *mount;
+	__u32 domain_id;
+	__u32 generation;
+	__u64 root_mask;
+	__u64 subtree_exclude_mask;
+	int relation;
+};
+
+struct te_policy_classification {
+	struct inode_guard_val guard;
+	__u64 protected_mask;
+	__u64 excluded_mask;
+	int kind;
+	bool stable;
+};
+
+/* A file_permission check needs a parent path without using the BPF stack. */
+struct te_policy_permission_scratch {
+	struct path parent_path;
+	struct te_policy_classification classification;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct te_policy_permission_scratch);
+} te_policy_permission_scratch SEC(".maps");
+
+static __always_inline const struct te_policy_slot_val *te_policy_slot(
+	struct dentry *parent, struct mount *mount, struct dentry *child,
+	__u32 domain_id, __u32 generation)
+{
+	__u32 zero = 0;
+	struct te_policy_slot_scratch *scratch =
+		bpf_map_lookup_elem(&te_policy_slot_scratch, &zero);
+	const unsigned char *name = NULL;
+	__u32 name_len = 0;
+	if (!scratch || !parent || !mount || !child)
+		return NULL;
+	__builtin_memset(&scratch->key, 0, sizeof(scratch->key));
+	if (te_path_identity(parent, mount, domain_id, generation,
+			     &scratch->key.parent) ||
+	    BPF_CORE_READ_INTO(&name_len, child, d_name.len) ||
+	    BPF_CORE_READ_INTO(&name, child, d_name.name) || !name ||
+	    name_len == 0 || name_len > TE_POLICY_NAME_MAX)
+		return NULL;
+	/* Parent identity makes configured slots persistent across bind aliases,
+	 * while the basename keeps unrelated hardlinks outside the path unclassified. */
+	scratch->key.parent.mnt_id = 0;
+	scratch->key.name_len = name_len;
+	long copied = bpf_probe_read_kernel_str(scratch->key.name,
+					       sizeof(scratch->key.name), name);
+	if (copied != (__s64)name_len + 1)
+		return NULL;
+	return bpf_map_lookup_elem(&te_policy_slots, &scratch->key);
+}
+
+static __always_inline void te_policy_collect_identity(struct te_policy_walk *walk,
+	struct dentry *current)
+{
+	struct te_path_key key;
+	if (te_path_identity(current, walk->mount, walk->domain_id,
+			     walk->generation, &key))
+		return;
+	const struct te_policy_root_val *root =
+		bpf_map_lookup_elem(&te_policy_roots, &key);
+	if (root)
+		walk->root_mask |= root->root_mask;
+	key.mnt_id = 0;
+	const struct te_policy_dir_val *anchor =
+		bpf_map_lookup_elem(&te_policy_dirs, &key);
+	if (anchor)
+		walk->root_mask |= anchor->root_mask;
+}
+
+static long te_policy_underlying_step(__u32 index, void *data)
+{
+	struct te_policy_walk *walk = data;
+	struct dentry *current = walk->dentry, *parent = NULL;
+	te_policy_collect_identity(walk, current);
+	if (BPF_CORE_READ_INTO(&parent, current, d_parent) || !parent)
+		return 1;
+	if (parent == current) {
+		struct dentry *sb_root = BPF_CORE_READ(current, d_inode, i_sb, s_root);
+		if (sb_root == current)
+			walk->relation = TE_POLICY_CLASS_OUTSIDE;
+		return 1;
+	}
+	walk->dentry = parent;
+	return 0;
+}
+
+static long te_policy_namespace_step(__u32 index, void *data)
+{
+	struct te_policy_walk *walk = data;
+	struct dentry *current = walk->dentry;
+	struct mount *mount = walk->mount;
+	struct dentry *root = NULL, *parent = NULL;
+	struct mount *parent_mount = NULL;
+	te_policy_collect_identity(walk, current);
+	if (BPF_CORE_READ_INTO(&root, mount, mnt.mnt_root) || !root)
+		return 1;
+	if (current == root) {
+		if (BPF_CORE_READ_INTO(&parent_mount, mount, mnt_parent) || !parent_mount)
+			return 1;
+		if (parent_mount == mount) {
+			struct mnt_namespace *ns = NULL;
+			struct mount *ns_root = NULL;
+			if (BPF_CORE_READ_INTO(&ns, mount, mnt_ns) || !ns ||
+			    BPF_CORE_READ_INTO(&ns_root, ns, root) || ns_root != mount)
+				return 1;
+			walk->relation = TE_POLICY_CLASS_OUTSIDE;
+			return 1;
+		}
+		if (BPF_CORE_READ_INTO(&parent, mount, mnt_mountpoint) || !parent)
+			return 1;
+		walk->mount = parent_mount;
+		walk->dentry = parent;
+		return 0;
+	}
+	if (BPF_CORE_READ_INTO(&parent, current, d_parent) || !parent || parent == current)
+		return 1;
+	const struct te_policy_slot_val *slot = te_policy_slot(parent, mount, current,
+		walk->domain_id, walk->generation);
+	if (slot)
+		walk->subtree_exclude_mask |= slot->subtree_exclude_mask;
+	walk->dentry = parent;
+	return 0;
+}
+
+static __always_inline void te_policy_relation(const struct path *dir,
+	struct dentry *dentry, bool existing, const struct te_policy_domain_val *domain,
+	struct te_policy_walk *result)
+{
+	struct vfsmount *vfsmount = NULL;
+	struct dentry *start = dentry;
+	*result = (struct te_policy_walk){
+		.domain_id = domain->guard.domain_id,
+		.generation = domain->generation,
+		.relation = TE_POLICY_CLASS_UNKNOWN,
+	};
+	if (!dir || BPF_CORE_READ_INTO(&vfsmount, dir, mnt) || !vfsmount)
+		return;
+	result->mount = te_real_mount(vfsmount);
+	if (!existing)
+		start = BPF_CORE_READ(dir, dentry);
+	if (!start)
+		return;
+	result->dentry = start;
+	struct te_policy_walk underlying = *result;
+	bpf_loop(TE_TREE_WALK_MAX, te_policy_underlying_step, &underlying, 0);
+	result->dentry = start;
+	bpf_loop(TE_TREE_WALK_MAX, te_policy_namespace_step, result, 0);
+	result->root_mask |= underlying.root_mask;
+	/* Finding a root cannot prove walks completed for other operation masks. */
+	if (underlying.relation != TE_POLICY_CLASS_OUTSIDE ||
+	    result->relation != TE_POLICY_CLASS_OUTSIDE)
+		result->relation = TE_POLICY_CLASS_UNKNOWN;
+}
+
+static __always_inline __u32 te_policy_first_target(__u64 mask)
+{
+	__u32 target = 1;
+	if (!(mask & 0xffffffffULL)) { target += 32; mask >>= 32; }
+	if (!(mask & 0xffffULL)) { target += 16; mask >>= 16; }
+	if (!(mask & 0xffULL)) { target += 8; mask >>= 8; }
+	if (!(mask & 0xfULL)) { target += 4; mask >>= 4; }
+	if (!(mask & 0x3ULL)) { target += 2; mask >>= 2; }
+	if (!(mask & 0x1ULL)) target += 1;
+	return target;
+}
+
+static __always_inline struct inode_guard_val te_policy_guard_for_mask(
+	const struct te_policy_domain_val *domain, __u64 mask)
+{
+	struct inode_guard_val guard = domain->guard;
+	if (!mask)
+		return guard;
+	struct te_policy_target_key key = {
+		.domain_id = domain->guard.domain_id,
+		.generation = domain->generation,
+		.target_id = te_policy_first_target(mask),
+	};
+	const struct te_policy_target_val *target =
+		bpf_map_lookup_elem(&te_policy_targets, &key);
+	if (target)
+		guard = target->guard;
+	else
+		guard.rule_id = key.target_id;
+	return guard;
+}
+
+static __always_inline void te_policy_classify(const struct path *dir,
+	struct dentry *dentry, bool existing, __u64 protection_mask,
+	const struct te_policy_domain_val *domain,
+	struct te_policy_classification *classification)
+{
+	*classification = (struct te_policy_classification){
+		.guard = domain->guard,
+		.kind = TE_POLICY_CLASS_UNKNOWN,
+	};
+	struct vfsmount *vfsmount = NULL;
+	struct dentry *parent = NULL;
+	const struct te_policy_slot_val *slot = NULL;
+	if (dir && !BPF_CORE_READ_INTO(&vfsmount, dir, mnt) && vfsmount &&
+	    !BPF_CORE_READ_INTO(&parent, dir, dentry) && parent)
+		slot = te_policy_slot(parent, te_real_mount(vfsmount), dentry,
+			domain->guard.domain_id, domain->generation);
+	__u64 direct = slot ? slot->direct_mask & protection_mask : 0;
+	__u64 excluded = slot ? slot->exact_exclude_mask |
+				      slot->subtree_exclude_mask : 0;
+
+	if (existing && vfsmount) {
+		struct te_path_key key;
+		if (!te_path_identity(dentry, te_real_mount(vfsmount),
+				domain->guard.domain_id, domain->generation, &key)) {
+			const struct te_policy_stable_val *stable = NULL;
+			struct inode *inode = BPF_CORE_READ(dentry, d_inode);
+			if (inode && (BPF_CORE_READ(inode, i_mode) & 0170000) == 0040000) {
+				key.mnt_id = 0;
+				stable = bpf_map_lookup_elem(&te_policy_stable, &key);
+			}
+			if (stable) {
+				direct |= stable->target_mask & protection_mask;
+			}
+		}
+	}
+	if (direct) {
+		classification->protected_mask = direct;
+		classification->guard = te_policy_guard_for_mask(domain, direct);
+		classification->kind = TE_POLICY_CLASS_PROTECTED;
+		classification->stable = true;
+		return;
+	}
+
+	struct te_policy_walk walk;
+	te_policy_relation(dir, dentry, existing, domain, &walk);
+	__u64 roots = walk.root_mask & domain->tree_mask;
+	excluded |= walk.subtree_exclude_mask;
+	classification->protected_mask = roots & protection_mask & ~excluded;
+	classification->excluded_mask = roots & excluded;
+	if (classification->protected_mask) {
+		classification->guard = te_policy_guard_for_mask(domain,
+			classification->protected_mask);
+		classification->kind = TE_POLICY_CLASS_PROTECTED;
+	} else if (walk.relation == TE_POLICY_CLASS_UNKNOWN) {
+		classification->kind = TE_POLICY_CLASS_UNKNOWN;
+	} else if (classification->excluded_mask) {
+		classification->kind = TE_POLICY_CLASS_EXCLUDED;
+	} else {
+		classification->kind = TE_POLICY_CLASS_OUTSIDE;
+	}
+}
+
+static __always_inline const struct te_policy_domain_val *te_policy_domain(pid_t pid)
+{
+	__u32 *domain_id = bpf_map_lookup_elem(&cap_task, &pid);
+	if (!domain_id)
+		return NULL;
+	return bpf_map_lookup_elem(&te_policy_domains, domain_id);
+}
+
+static __always_inline bool te_policy_denied(
+	const struct te_policy_classification *classification)
+{
+	return classification->kind == TE_POLICY_CLASS_PROTECTED ||
+		classification->kind == TE_POLICY_CLASS_UNKNOWN;
 }
 
 static __always_inline int te_pid_protected(pid_t pid)
@@ -2448,12 +2861,6 @@ int BPF_PROG(enforce_file_open, struct file *file)
 #endif
 }
 
-SEC("lsm/file_permission")
-int BPF_PROG(enforce_file_permission, struct file *file, int mask)
-{
-	return te_handle_file_permission(file, te_access_from_perm_mask(mask),
-					 TE_MODE_BLOCK);
-}
 
 SEC("lsm/file_truncate")
 int BPF_PROG(enforce_file_truncate, struct file *file)
@@ -2533,9 +2940,59 @@ static __always_inline void te_inode_guard_violation(
 		      op, /*blocked=*/1, /*killed=*/0, TEFFECT_BLOCK);
 }
 
-SEC("lsm/path_unlink")
-int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
+static __always_inline int te_policy_handle_file_permission(struct file *file, int mask)
 {
+	if (!enforce_mode || !(mask & MAY_WRITE) || !file)
+		return 0;
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	if (!te_pid_active(pid))
+		return 0;
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (!domain || !domain->ordinary_write_mask)
+		return 0;
+	__u32 zero = 0;
+	struct te_policy_permission_scratch *scratch =
+		bpf_map_lookup_elem(&te_policy_permission_scratch, &zero);
+	struct dentry *dentry = NULL, *parent = NULL;
+	struct vfsmount *vfsmount = NULL;
+	struct inode *inode = NULL;
+	if (!scratch || BPF_CORE_READ_INTO(&dentry, file, f_path.dentry) || !dentry ||
+	    BPF_CORE_READ_INTO(&vfsmount, file, f_path.mnt) || !vfsmount ||
+	    BPF_CORE_READ_INTO(&parent, dentry, d_parent) || !parent ||
+	    BPF_CORE_READ_INTO(&inode, dentry, d_inode) || !inode ||
+	    (BPF_CORE_READ(inode, i_mode) & 0170000) != 0100000)
+		return 0;
+	__builtin_memset(scratch, 0, sizeof(*scratch));
+	scratch->parent_path.mnt = vfsmount;
+	scratch->parent_path.dentry = parent;
+	te_policy_classify(&scratch->parent_path, dentry, true,
+			   domain->ordinary_write_mask, domain,
+			   &scratch->classification);
+	/* UNKNOWN remains fail-open for phase-one ordinary writes. */
+	if (scratch->classification.kind != TE_POLICY_CLASS_PROTECTED)
+		return 0;
+	te_inode_guard_violation(pid, dentry, &scratch->classification.guard,
+				 TE_EVENT_OP_ORDINARY_WRITE);
+	return -EPERM;
+}
+
+SEC("lsm/file_permission")
+int BPF_PROG(enforce_file_permission, struct file *file, int mask, int ret)
+{
+	if (ret)
+		return ret;
+	int rc = te_policy_handle_file_permission(file, mask);
+	if (rc)
+		return rc;
+	return te_handle_file_permission(file, te_access_from_perm_mask(mask),
+					 TE_MODE_BLOCK);
+}
+
+SEC("lsm/path_unlink")
+int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry, int ret)
+{
+	if (ret)
+		return ret;
 	/* Inode guard fast path: O(1) hash lookup, no bpf_d_path needed */
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	const struct inode_guard_val *guard = NULL;
@@ -2547,6 +3004,16 @@ int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
 		return -EPERM;
 	}
 
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (enforce_mode && domain && domain->delete_mask) {
+		struct te_policy_classification classification;
+		te_policy_classify(dir, dentry, true, domain->delete_mask, domain, &classification);
+		if (te_policy_denied(&classification)) {
+			te_inode_guard_violation(pid, dentry, &classification.guard, TE_EVENT_OP_UNLINK);
+			return -EPERM;
+		}
+	}
+
 	/* Existing path-based rule evaluation (fallthrough on 7.1.x) */
 #ifndef INODE_GUARD_ONLY
 	return te_handle_file(TE_REF_PATH_DENTRY, dir, dentry, TE_ACCESS_WRITE,
@@ -2556,22 +3023,152 @@ int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
 #endif
 }
 
-SEC("lsm/path_rename")
-int BPF_PROG(enforce_path_rename, const struct path *old_dir,
-	     struct dentry *old_dentry, const struct path *new_dir,
-	     struct dentry *new_dentry, unsigned int flags)
+SEC("lsm/path_rmdir")
+int BPF_PROG(enforce_path_rmdir, const struct path *dir, struct dentry *dentry, int ret)
 {
-	(void)flags;
-
-	/* Inode guard fast path for the source (renamed-from) file */
+	if (ret)
+		return ret;
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	const struct inode_guard_val *guard = NULL;
 	if (enforce_mode && te_pid_active(pid))
-		guard = te_inode_guarded(old_dir, old_dentry, TE_REF_PATH_DENTRY,
-					 INODE_GUARD_RENAME, pid);
+		guard = te_inode_guarded(dir, dentry, TE_REF_PATH_DENTRY, INODE_GUARD_UNLINK, pid);
 	if (guard) {
-		te_inode_guard_violation(pid, old_dentry, guard, TE_EVENT_OP_RENAME);
+		te_inode_guard_violation(pid, dentry, guard, TE_EVENT_OP_RMDIR);
 		return -EPERM;
+	}
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (enforce_mode && domain && domain->delete_mask) {
+		struct te_policy_classification classification;
+		te_policy_classify(dir, dentry, true, domain->delete_mask, domain, &classification);
+		if (te_policy_denied(&classification)) {
+			te_inode_guard_violation(pid, dentry, &classification.guard, TE_EVENT_OP_RMDIR);
+			return -EPERM;
+		}
+	}
+	return 0;
+}
+
+/* Old path_rename hooks omit flags. Keep syscall context per thread, never
+ * interpret the chained LSM return slot as a fifth hook argument. Every syscall
+ * entry invalidates old context, including non-rename syscalls and compat ABIs.
+ * Missing/expired context cannot authorize a tree-affecting rename. */
+struct te_rename_context {
+	__u64 entered_ns;
+	__u32 flags;
+	__u32 _pad;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u64);
+	__type(value, struct te_rename_context);
+} te_rename_context SEC(".maps");
+
+SEC("tracepoint/raw_syscalls/sys_enter")
+int guard_rename_enter(struct trace_event_raw_sys_enter *ctx)
+{
+	__u64 tid = bpf_get_current_pid_tgid();
+	bpf_map_delete_elem(&te_rename_context, &tid);
+	pid_t pid = tid >> 32;
+	if (!enforce_mode || !te_pid_active(pid))
+		return 0;
+	struct te_rename_context value = { .entered_ns = bpf_ktime_get_ns() };
+#if defined(__TARGET_ARCH_x86)
+	/* Native x86-64 only; compat/x32 numbers deliberately fail closed. */
+	if (ctx->id == 316)
+		value.flags = ctx->args[4];
+	else if (ctx->id != 82 && ctx->id != 264)
+		return 0;
+#elif defined(__TARGET_ARCH_arm64)
+	if (ctx->id == 276)
+		value.flags = ctx->args[4];
+	else if (ctx->id != 38)
+		return 0;
+#else
+	return 0;
+#endif
+	bpf_map_update_elem(&te_rename_context, &tid, &value, BPF_ANY);
+	return 0;
+}
+
+SEC("tracepoint/raw_syscalls/sys_exit")
+int guard_rename_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	__u64 tid = bpf_get_current_pid_tgid();
+	bpf_map_delete_elem(&te_rename_context, &tid);
+	return 0;
+}
+
+SEC("tracepoint/sched/sched_process_exit")
+int guard_rename_task_exit(void *ctx)
+{
+	__u64 tid = bpf_get_current_pid_tgid();
+	bpf_map_delete_elem(&te_rename_context, &tid);
+	return 0;
+}
+
+static __always_inline int te_guard_rename(const struct path *old_dir,
+	struct dentry *old_dentry, const struct path *new_dir,
+	struct dentry *new_dentry, unsigned int flags, bool flags_valid)
+{
+	/* Inode guard fast path for both rename endpoints. */
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	if (enforce_mode && te_pid_active(pid)) {
+		const struct inode_guard_val *guard = te_inode_guarded(old_dir, old_dentry,
+			TE_REF_PATH_DENTRY, INODE_GUARD_RENAME, pid);
+		if (guard) {
+			te_inode_guard_violation(pid, old_dentry, guard, TE_EVENT_OP_RENAME);
+			return -EPERM;
+		}
+		guard = te_inode_guarded(new_dir, new_dentry, TE_REF_PATH_DENTRY,
+			INODE_GUARD_RENAME, pid);
+		if (guard) {
+			te_inode_guard_violation(pid, new_dentry, guard, TE_EVENT_OP_RENAME);
+			return -EPERM;
+		}
+		const struct te_policy_domain_val *policy_domain = te_policy_domain(pid);
+		if (policy_domain && policy_domain->delete_mask) {
+			struct inode *new_inode = NULL;
+			struct te_policy_classification old_class, new_class;
+			if (BPF_CORE_READ_INTO(&new_inode, new_dentry, d_inode)) {
+				te_inode_guard_violation(pid, new_dentry, &policy_domain->guard,
+							 TE_EVENT_OP_RENAME);
+				return -EPERM;
+			}
+			te_policy_classify(old_dir, old_dentry, true,
+					policy_domain->delete_mask, policy_domain, &old_class);
+			te_policy_classify(new_dir, new_dentry, new_inode != NULL,
+				policy_domain->delete_mask, policy_domain, &new_class);
+			bool old_protected = old_class.kind == TE_POLICY_CLASS_PROTECTED;
+			bool new_protected = new_class.kind == TE_POLICY_CLASS_PROTECTED;
+			if (old_class.kind == TE_POLICY_CLASS_UNKNOWN ||
+			    new_class.kind == TE_POLICY_CLASS_UNKNOWN ||
+			    (!flags_valid && (old_protected || new_protected))) {
+				te_inode_guard_violation(pid, old_dentry, &policy_domain->guard,
+							 TE_EVENT_OP_RENAME);
+				return -EPERM;
+			}
+			if (flags & RENAME_EXCHANGE) {
+				if (old_class.stable || new_class.stable ||
+				    old_protected != new_protected) {
+					const struct inode_guard_val *violation_guard = old_protected ?
+						&old_class.guard : &new_class.guard;
+					te_inode_guard_violation(pid,
+						old_protected ? old_dentry : new_dentry,
+						violation_guard, TE_EVENT_OP_RENAME);
+					return -EPERM;
+				}
+			} else if (old_class.stable ||
+				   (new_inode && (new_class.stable || new_protected)) ||
+				   (old_protected && !new_protected)) {
+				const struct inode_guard_val *violation_guard = old_protected ?
+					&old_class.guard : &new_class.guard;
+				te_inode_guard_violation(pid,
+					old_protected ? old_dentry : new_dentry,
+					violation_guard, TE_EVENT_OP_RENAME);
+				return -EPERM;
+			}
+		}
 	}
 
 	/* Existing path-based rule evaluation */
@@ -2585,6 +3182,30 @@ int BPF_PROG(enforce_path_rename, const struct path *old_dir,
 #else
 	return 0;
 #endif
+}
+
+SEC("lsm/path_rename")
+int BPF_PROG(enforce_path_rename, const struct path *old_dir,
+	     struct dentry *old_dentry, const struct path *new_dir,
+	     struct dentry *new_dentry, unsigned int flags, int ret)
+{
+	if (ret)
+		return ret;
+	return te_guard_rename(old_dir, old_dentry, new_dir, new_dentry, flags, true);
+}
+
+SEC("lsm/path_rename")
+int BPF_PROG(enforce_path_rename_legacy, const struct path *old_dir,
+	     struct dentry *old_dentry, const struct path *new_dir,
+	     struct dentry *new_dentry, int ret)
+{
+	if (ret)
+		return ret;
+	__u64 tid = bpf_get_current_pid_tgid();
+	struct te_rename_context *value = bpf_map_lookup_elem(&te_rename_context, &tid);
+	bool valid = value && bpf_ktime_get_ns() - value->entered_ns < 30000000000ULL;
+	unsigned int flags = valid ? value->flags : 0;
+	return te_guard_rename(old_dir, old_dentry, new_dir, new_dentry, flags, valid);
 }
 
 SEC("lsm/socket_connect")

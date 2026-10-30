@@ -8,6 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::time::Instant;
 
 /// `SkillFS` reads the same contract from activation.json and this directory xattr.
@@ -277,8 +278,22 @@ fn write_pending(
     let temporary = nonce(".pending-")?;
     let staging = ledger.versions.fresh_child(&temporary)?;
     let name = serde_json::to_string(root.identity.name())?;
+    let mut yaml_name = String::with_capacity(name.len());
+    for character in name.chars() {
+        // YAML treats these literals as line breaks or rejects them, unlike JSON.
+        if matches!(
+            character,
+            '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}'
+        ) {
+            // String's writer and integer formatters are infallible.
+            write!(yaml_name, "\\u{:04x}", u32::from(character))
+                .unwrap_or_else(|_| unreachable!("formatting integers into a String cannot fail"));
+        } else {
+            yaml_name.push(character);
+        }
+    }
     let text = format!(
-        "---\nname: {name}\ndescription: Skill requires manual review before use\n---\n# Pending Skill Ledger Review\n\nThis is a safe placeholder. The real skill version is not exposed because it is not currently eligible for exposure and no trusted fallback version is available.\n\nRun `agent-sec-cli skill-ledger show <skill_dir>` to inspect the status. Use `scan` or `certify` to establish trust, or `skill-ledger decide` to approve or block a trusted version.\n"
+        "---\nname: {yaml_name}\ndescription: Skill requires manual review before use\n---\n# Pending Skill Ledger Review\n\nThis is a safe placeholder. The real skill version is not exposed because it is not currently eligible for exposure and no trusted fallback version is available.\n\nRun `agent-sec-cli skill-ledger show <skill_dir>` to inspect the status. Use `scan` or `certify` to establish trust, or `skill-ledger decide` to approve or block a trusted version.\n"
     );
     let result = (|| {
         staging.write_new("SKILL.md", text.as_bytes(), 0o644)?;

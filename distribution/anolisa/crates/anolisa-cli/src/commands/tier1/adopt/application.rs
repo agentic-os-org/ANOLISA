@@ -24,8 +24,8 @@ use anolisa_platform::privilege;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::{
-    installed_version_label, now_iso8601, rpm_package_candidates_with_index,
-    snapshot_datadir_contract,
+    installed_component_packages, installed_version_label, now_iso8601,
+    rpm_package_candidates_with_index, snapshot_datadir_contract,
 };
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
@@ -377,6 +377,26 @@ fn resolve_fresh_adopt(
                 "no RPM package is mapped for component '{component}'; add an rpm backend entry to the repo-side component index or publish Provides: anolisa-component({component})"
             ),
         }),
+        [single] if cli_override.is_none() => {
+            let installed = installed_component_packages(
+                query,
+                component,
+                Some(&single.package),
+                component_index.as_ref(),
+            )
+            .map_err(|err| pkg_query_err(err, command))?;
+            match installed.as_slice() {
+                [] => Ok(single.package.clone()),
+                [package] => Ok(package.clone()),
+                many => Err(CliError::InvalidArgument {
+                    command: command.to_string(),
+                    reason: format!(
+                        "multiple installed RPM packages provide '{component}': {}; cannot adopt unambiguously — pin one with `--package <name>`",
+                        many.join(", ")
+                    ),
+                }),
+            }
+        }
         [single] => Ok(single.package.clone()),
         many => Err(CliError::InvalidArgument {
             command: command.to_string(),

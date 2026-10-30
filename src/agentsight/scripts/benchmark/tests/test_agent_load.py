@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import http.client
+import importlib.util
 import json
 import ssl
 import subprocess
@@ -22,7 +24,18 @@ import validate_results
 
 
 @pytest.fixture
-def https_server(tmp_path: Path) -> Iterator[mock_llm_server.BenchmarkHTTPServer]:
+def https_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[mock_llm_server.BenchmarkHTTPServer]:
+    original = mock_llm_server.request_id_from
+
+    def check_marker(body: bytes, headers: dict[str, str]) -> str:
+        request = json.loads(body)
+        request_id = request["request_id"]
+        assert request["messages"][0]["content"].startswith(f"[agentsight-benchmark:{request_id}]")
+        return original(body, headers)
+
+    monkeypatch.setattr(mock_llm_server, "request_id_from", check_marker)
     certificate_command = (
         "openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost".split()
     )
@@ -79,6 +92,21 @@ def command(
             "--run-id": "test",
         },
     )
+
+
+def test_preflight_carries_its_id_in_semantic_user_content(
+    https_server: mock_llm_server.BenchmarkHTTPServer,
+) -> None:
+    spec = importlib.util.spec_from_file_location("benchmark_agents", SINGLE_RUN / "load/agents.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    connection = http.client.HTTPSConnection(
+        "127.0.0.1", https_server.server_port, context=ssl._create_unverified_context()
+    )
+    try:
+        assert module.capture_preflight(connection, "test", 0) == "preflight-test-0"
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize("agent_count,rate", [(2, 50), (3, 100)])

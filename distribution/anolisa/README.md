@@ -67,10 +67,10 @@ or authorize an unsafe-install bypass.
 
 Enable the Tokenless local plugin with `anolisa adapter enable tokenless opencode`.
 ANOLISA manages its plugin link; restart OpenCode after enabling or disabling it.
-See the [adapter reference](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md#adapter)
+See the [adapter reference](../../docs/user-guide/en/getting-started/anolisa-cli.md#adapter)
 for custom configuration directories and existing-installation ownership.
 
-Enable Tokenless in QwenWorkCN macOS local mode with
+Enable Tokenless in QwenWorkCN native Bash and macOS workspace Shell sessions with
 `anolisa adapter enable tokenless qwenwork`. Restart the desktop application and
 check activation there; CLI status verifies files but reports activation as
 `unknown`. Existing script installations must be uninstalled before CLI enable.
@@ -100,11 +100,16 @@ installation even when the same component is already installed system-wide.
 | `-q, --quiet` | Suppress non-error output |
 | `--no-color` | Disable colored output |
 
-See the [full CLI guide](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md)
+See the [full CLI guide](../../docs/user-guide/en/getting-started/anolisa-cli.md)
 for command forms, scope behavior, and recovery workflows.
 
 RPM installs support Yum 3 and DNF 4. Use `sudo` with RPM `--dry-run`
 to check dependencies and conflicts before installing.
+
+For raw installs, `anolisa install <component> --backend raw --no-deps`
+skips runtime dependency checks and installation. It also works with `--all`;
+ensure the required dependencies are available before use. Successful installs
+print a reminder to stderr unless `--quiet` is set. RPM rejects this option.
 
 ## Architecture
 
@@ -122,6 +127,18 @@ Supports dual backends: **raw** (OSS tar.gz) and **RPM** (yum/dnf transactions).
 The lifecycle planner separates ANOLISA-owned files from native-package
 authority and records crash-recovery intent before side effects. Component
 metadata is declared through `component.toml`.
+
+ANOLISA ships the RPM integration contracts in `share/anolisa/components/`.
+Component RPMs supply their runtime, plugins and skills independently; they do
+not need to install ANOLISA metadata. RPM install/adopt saves the distribution
+contract as a state snapshot for adapter management, while raw artifacts keep
+their own release-specific contract. `bash scripts/package-manifests.sh /absolute/manifests.tar.gz`
+assembles the data bundle consumed by `scripts/install-anolisa.sh`.
+Prebuilt archives and native npm packages include the same registry beside
+`bin/anolisa`; keep their `bin/` and `share/` trees together. A manually copied
+single binary needs the installer data bundle for RPM adapter management.
+The installer refuses to overwrite registry contracts still owned by older
+component RPMs; upgrade those packages first.
 
 The raw backend re-fetches the distribution index on every resolve and fails
 when the repository is unreachable. Legacy `cache_ttl_secs` and

@@ -19,6 +19,14 @@ use super::fact::{ConsolidatedFact, FactCategory};
 pub struct OwnedAuditEntry {
     pub ts: String,
     pub tool: String,
+    /// `AuditEntry` skips the `path` key entirely whenever it is empty, and
+    /// several tools log exactly that on every successful call
+    /// (`memory_get_context`, `session_context`, `mem_log`,
+    /// `mem_snapshot_list`, `session_log`) plus every error branch that
+    /// fails before a path is known. The field must default to the empty
+    /// string or those lines fail to deserialize with "missing field
+    /// `path`" and the consolidation parser silently drops them.
+    #[serde(default)]
     pub path: String,
     pub ok: bool,
     pub bytes: Option<u64>,
@@ -186,9 +194,11 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
     let mut facts = Vec::new();
 
     for e in entries {
-        if e.tool == "memory_search" || e.tool == "mem_grep" {
-            // Extract the query from the path field (format: "mode:query" or "bm25:query")
-            let query = extract_search_query(&e.path);
+        if e.ok && (e.tool == "memory_search" || e.tool == "mem_grep") {
+            // Sanitized length markers contain no query text.
+            let Some(query) = extract_search_query(&e.path) else {
+                continue;
+            };
             if query.len() > 3 {
                 let title = format!("搜索: {query}");
                 let content = format!("Agent 通过 `{}` 搜索了 `{}`。", e.tool, query);
@@ -212,12 +222,25 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
 
 /// Extract the actual search query from the path field.
 /// Path format is like "bm25:hello world" or "hybrid:rust ownership".
-fn extract_search_query(path: &str) -> String {
-    if let Some(pos) = path.find(':') {
-        path[pos + 1..].trim().to_string()
-    } else {
-        path.trim().to_string()
+///
+/// Returns `None` for the sanitized markers `memory_search` writes today
+/// (`bm25:len=14`, `bm25(fallback from hybrid):len=14`, `embed:len=9`, ...):
+/// the query text never reached the log, so there is nothing to extract, and
+/// feeding the marker itself downstream persists `搜索: len=14` interest facts
+/// that `memory_search`/`memory_about` then serve back forever.
+///
+/// Everything else is split on the *first* colon, so a recorded query that
+/// itself contains colons survives intact: the legacy row `bm25:packet:len=14`
+/// recorded the query `packet:len=14`, and only a mode-prefixed marker (see
+/// `audit::is_sanitized_query_path`) is dropped.
+fn extract_search_query(path: &str) -> Option<String> {
+    if crate::audit::is_sanitized_query_path(path) {
+        return None;
     }
+    Some(match path.find(':') {
+        Some(pos) => path[pos + 1..].trim().to_string(),
+        None => path.trim().to_string(),
+    })
 }
 
 // ── Rule 3: Change ──────────────────────────────────────────────
@@ -287,13 +310,16 @@ fn rule_change(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
 }
 
 // ── Rule 4: Lesson ──────────────────────────────────────────────
-// Trigger: Any tool call that failed (ok=false).
-// Extracts: "Error <type> in <tool> on <path>"
+// Trigger: Failed tool calls, except sanitized searches with no actionable query or path.
 
 fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<ConsolidatedFact> {
     entries
         .iter()
-        .filter(|e| !e.ok && e.error.is_some())
+        .filter(|e| {
+            !e.ok
+                && e.error.is_some()
+                && !(e.tool == "memory_search" && crate::audit::is_sanitized_query_path(&e.path))
+        })
         .map(|e| {
             let error = e.error.as_deref().unwrap_or("(unknown error)");
             let path = if e.path.is_empty() {
@@ -326,7 +352,10 @@ fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
 /// Classify an error message into a human-readable category.
 fn classify_error(error: &str) -> &str {
     let lower = error.to_lowercase();
-    if lower.contains("not found") || lower.contains("不存在") || lower.contains("no such") {
+    if lower.starts_with("sqlite:") {
+        "数据库故障"
+    } else if lower.contains("not found") || lower.contains("不存在") || lower.contains("no such")
+    {
         "文件不存在"
     } else if lower.contains("permission") || lower.contains("权限") || lower.contains("denied") {
         "权限不足"
@@ -495,6 +524,22 @@ mod tests {
     }
 
     #[test]
+    fn rule2_ignores_failed_search() {
+        let entries = vec![
+            make_entry(
+                "memory_search",
+                "bm25:len=16",
+                false,
+                Some("sqlite: Invalid column type Text at index: 4, name: mtime_ms"),
+            ),
+            make_entry("memory_search", "bm25:rust ownership", true, None),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].title.contains("rust ownership"));
+    }
+
+    #[test]
     fn rule3_detects_repeated_edit() {
         let entries = vec![
             make_entry("mem_edit", "src/main.rs", true, None),
@@ -529,6 +574,21 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].category, FactCategory::Lesson);
         assert!(facts[0].content.contains("文件不存在"));
+    }
+
+    #[test]
+    fn rule4_skips_repeated_failed_search_markers() {
+        let error = "sqlite: Invalid column type Text at index: 4, name: mtime_ms";
+        let mut entries = vec![make_entry("memory_search", "bm25:len=16", false, Some(error)); 5];
+        entries.push(make_entry(
+            "mem_read",
+            "notes/missing.md",
+            false,
+            Some("file not found"),
+        ));
+        let facts = rule_lesson(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].related_paths, ["notes/missing.md"]);
     }
 
     #[test]
@@ -613,9 +673,39 @@ mod tests {
         assert_eq!(classify_error("file not found: /x"), "文件不存在");
         assert_eq!(classify_error("Permission denied"), "权限不足");
         assert_eq!(classify_error("Already exists"), "文件已存在");
+        assert_eq!(
+            classify_error("sqlite: Invalid column type Text"),
+            "数据库故障"
+        );
         assert_eq!(classify_error("Invalid argument"), "无效参数");
         assert_eq!(classify_error("Not implemented"), "功能未启用");
         assert_eq!(classify_error("something weird"), "其他");
+    }
+
+    #[test]
+    fn episodic_facts_are_written_once_per_span() {
+        // search → read → edit → read satisfies both the edit-verify cycle
+        // and the general 4-tool task chain. Each episode becomes its own
+        // Episodic fact, so without overlap deduplication the same memory is
+        // double-written and spends `max_facts` budget other facts should get.
+        let config = default_config();
+        let entries = vec![
+            make_entry("memory_search", "bm25:rust config", true, None),
+            make_entry("mem_read", "src/config.rs", true, None),
+            make_entry("mem_edit", "src/config.rs", true, None),
+            make_entry("mem_read", "src/config.rs", true, None),
+        ];
+        let facts = run_consolidation_owned(&entries, "ep-sid", &config);
+        let episodic: Vec<&str> = facts
+            .iter()
+            .filter(|f| f.category == FactCategory::Episodic)
+            .map(|f| f.title.as_str())
+            .collect();
+        assert_eq!(
+            episodic.len(),
+            1,
+            "one span of entries must yield one episodic fact, got {episodic:?}"
+        );
     }
 
     #[test]
@@ -639,5 +729,183 @@ mod tests {
                 f.content
             );
         }
+    }
+
+    #[test]
+    fn interest_rule_skips_sanitized_search_markers() {
+        // `memory_search` logs `<mode>:len=<bytes>` instead of the raw query,
+        // so the marker itself must never be persisted as an interest.
+        let entries = vec![
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path("bm25", "quantum lattice"),
+                true,
+                None,
+            ),
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path("bm25(fallback from hybrid)", "kernel"),
+                true,
+                None,
+            ),
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path("vector", "lifecycle hooks"),
+                true,
+                None,
+            ),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
+        assert!(
+            facts.is_empty(),
+            "sanitized search markers must not become interest facts: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn interest_rule_keeps_recorded_queries() {
+        // Legacy rows that still carry the raw query, and mem_grep rows whose
+        // path is a directory, keep producing facts exactly as before.
+        let entries = vec![
+            make_entry("memory_search", "bm25:rust ownership", true, None),
+            make_entry("mem_grep", "notes/", true, None),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["搜索: rust ownership", "搜索: notes/"]);
+    }
+
+    #[test]
+    fn extract_search_query_splits_on_the_first_colon_only() {
+        // Recorded queries may contain colons, and a query ending in
+        // `len=<digits>` is still a query: only a mode-prefixed marker is
+        // unrecoverable.
+        assert_eq!(
+            extract_search_query("bm25:packet:len=14").as_deref(),
+            Some("packet:len=14")
+        );
+        assert_eq!(
+            extract_search_query("hybrid:ns:net:len=9").as_deref(),
+            Some("ns:net:len=9")
+        );
+        assert_eq!(
+            extract_search_query("bm25:rust ownership").as_deref(),
+            Some("rust ownership")
+        );
+        assert_eq!(extract_search_query("bm25:len=14"), None);
+        assert_eq!(extract_search_query("embed:len=9"), None);
+        assert_eq!(
+            extract_search_query(&crate::audit::sanitized_query_path(
+                &crate::audit::fallback_query_mode("vector"),
+                "kernel config"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn interest_rule_keeps_legacy_queries_that_end_in_a_length_marker() {
+        // Regression: `bm25:packet:len=14` recorded the query `packet:len=14`.
+        // It used to be classified as a sanitized marker and dropped, losing
+        // the evidence; a real marker next to it must still be skipped.
+        let entries = vec![
+            make_entry("memory_search", "bm25:packet:len=14", true, None),
+            make_entry("memory_search", "bm25:len=14", true, None),
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path(
+                    &crate::audit::fallback_query_mode("hybrid"),
+                    "kernel",
+                ),
+                true,
+                None,
+            ),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["搜索: packet:len=14"]);
+    }
+
+    // ── JSONL round-trip: audit lines without a path ──────────────
+
+    #[test]
+    fn owned_entry_parses_a_pathless_audit_line() {
+        // AuditEntry omits the `path` key when it is empty, so every tool
+        // that logs without a path (memory_get_context, session_context,
+        // mem_log, mem_snapshot_list, session_log — plus error branches
+        // that fail before a path is known) serializes to a line
+        // OwnedAuditEntry used to reject with "missing field `path`".
+        let line =
+            serde_json::to_string(&crate::audit::AuditEntry::new("memory_get_context").bytes(120))
+                .unwrap();
+        assert!(
+            !line.contains("\"path\""),
+            "expected the serialized line to omit the path key: {line}"
+        );
+
+        let entry: OwnedAuditEntry =
+            serde_json::from_str(&line).expect("pathless audit lines must stay parseable");
+        assert_eq!(entry.tool, "memory_get_context");
+        assert_eq!(entry.path, "");
+        assert_eq!(entry.bytes, Some(120));
+        assert!(entry.ok);
+    }
+
+    #[test]
+    fn consolidation_parse_loop_keeps_pathless_lines() {
+        // Mirror of the filter_map MemoryService::consolidate runs over the
+        // session log: a mixed log must survive it line for line.
+        let with_path =
+            serde_json::to_string(&crate::audit::AuditEntry::new("mem_read").path("notes/a.md"))
+                .unwrap();
+        let pathless_ok =
+            serde_json::to_string(&crate::audit::AuditEntry::new("memory_get_context").bytes(900))
+                .unwrap();
+        let pathless_err = serde_json::to_string(
+            &crate::audit::AuditEntry::new("memory_search").error("empty search query"),
+        )
+        .unwrap();
+        let log = format!("{with_path}\n{pathless_ok}\n{pathless_err}\n");
+
+        let entries: Vec<OwnedAuditEntry> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<OwnedAuditEntry>(line).ok())
+            .collect();
+
+        assert_eq!(
+            entries.len(),
+            3,
+            "every audit line must parse; got {} of 3",
+            entries.len()
+        );
+        assert_eq!(entries[2].tool, "memory_search");
+        assert_eq!(entries[2].error.as_deref(), Some("empty search query"));
+    }
+
+    #[test]
+    fn min_tool_calls_gate_counts_pathless_calls() {
+        // A session whose calls are mostly pathless (context retrieval, log
+        // reads) must not fall under the min_tool_calls threshold just
+        // because the parser dropped those lines.
+        let lines = [
+            serde_json::to_string(&crate::audit::AuditEntry::new("mem_write").path("notes/a.md"))
+                .unwrap(),
+            serde_json::to_string(&crate::audit::AuditEntry::new("memory_get_context").bytes(10))
+                .unwrap(),
+            serde_json::to_string(&crate::audit::AuditEntry::new("session_log").bytes(4)).unwrap(),
+        ];
+        let entries: Vec<OwnedAuditEntry> = lines
+            .iter()
+            .filter_map(|l| serde_json::from_str::<OwnedAuditEntry>(l).ok())
+            .collect();
+        assert_eq!(entries.len(), 3);
+
+        let facts = run_consolidation_owned(&entries, "sid-pathless", &default_config());
+        assert!(
+            facts.iter().any(|f| f.content.contains("3 次工具调用")),
+            "the session summary must see all three calls; got {} facts",
+            facts.len()
+        );
     }
 }

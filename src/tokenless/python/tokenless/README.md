@@ -6,11 +6,11 @@ lifecycle operations.
 The package is built from the ANOLISA monorepo and supports CPython 3.11 or later on the platform
 targeted by its wheel. The pinned RTK executable is included in the wheel; no Tokenless binary is
 required on `PATH`. See the
-[Tokenless Python SDK guide](https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/token-saving/tokenless/sdk.md)
+[Tokenless Python SDK guide](https://github.com/alibaba/anolisa/blob/main/docs/developer-guide/en/sdk/tokenless/index.md)
 for source-build prerequisites, lifecycle contracts, configuration, and runnable examples. This
 package is the framework-neutral SDK layer. The same-version `anolisa-tokenless-agentscope` package
 builds the AgentScope-specific layer on top; its detailed attachment steps are in the
-[AgentScope SDK integration guide](https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/token-saving/tokenless/sdk/agentscope.md).
+[AgentScope SDK integration guide](https://github.com/alibaba/anolisa/blob/main/docs/developer-guide/en/sdk/tokenless/agentscope.md).
 The [Tokenless component README](https://github.com/alibaba/anolisa/blob/main/src/tokenless/README.md)
 provides the CLI, adapter, and source-build overview.
 

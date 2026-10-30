@@ -20,8 +20,8 @@ use super::{
     finish_input_relay, flush_deferred_zsh_tab_typeahead, flush_pending_prompt_ghost_escape,
     flush_pending_replaced_prompt_ghost_suffix, is_pending_shell_submission,
     relay_input_bytes_with_read_ahead, relay_input_for_mode, should_split_passthrough_batch,
-    RawInputEventSink, RawInputRelayState, RawInputShellRoute, RelayReadContext,
-    WakingRawInputEventSender,
+    wait_for_pending_capture_replay, RawInputEventSink, RawInputRelayState, RawInputShellRoute,
+    RelayReadContext, WakingRawInputEventSender,
 };
 
 pub(super) struct PendingDelayEscape {
@@ -267,6 +267,7 @@ pub(crate) fn spawn_raw_action_relay_with_wake(
     wake: Option<UnixStream>,
 ) -> JoinHandle<io::Result<()>> {
     thread::spawn(move || {
+        let replay_wake = wake.as_ref().map(UnixStream::try_clone).transpose()?;
         let input_events = WakingRawInputEventSender::new(input_events, wake);
         let mut state = RawInputRelayState::with_shell_route(input_generation, shell_route);
         for action in actions {
@@ -330,6 +331,15 @@ pub(crate) fn spawn_raw_action_relay_with_wake(
                     &mut state,
                 )?,
             }
+            wait_for_pending_capture_replay(
+                &mut master,
+                &input_classifier,
+                &input_events,
+                &input_mode,
+                &mut state,
+                replay_wake.as_ref(),
+                None,
+            )?;
             input_events.notify_relay();
         }
         let result = finish_input_relay(

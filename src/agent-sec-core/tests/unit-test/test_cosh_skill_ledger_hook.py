@@ -15,3 +15,5 @@ def test_supported_skill_bases_include_rpm_and_raw_system_roots() -> None:
 
     assert Path("/usr/share/anolisa/skills") in bases
     assert Path("/usr/local/share/anolisa/skills") in bases
+    assert Path("/usr/share/agent-sec-core/skills") in bases
+    assert Path("/usr/local/share/agent-sec-core/skills") in bases

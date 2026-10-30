@@ -1,4 +1,4 @@
-//! QwenWorkCN local-mode sideloading with receipt-owned file copies.
+//! QwenWorkCN macOS sideloading with receipt-owned file copies.
 //!
 //! Desktop activation is deliberately unknown: copying files cannot prove that
 //! the running application loaded or enabled a plugin.
@@ -27,7 +27,7 @@ use crate::manifest::{AdapterNotice, NoticeLevel, NoticeWhen};
 use crate::path_safety::canonicalize_nearest_existing;
 
 const RES_PLUGIN: &str = "qwenwork_plugin";
-const RESTART: &str = "Restart QwenWorkCN and open a new local session; check plugin activation in the application. Loading and activation are not verified.";
+const RESTART: &str = "Restart QwenWorkCN and open a new session; check plugin activation in the application. Loading and activation are not verified.";
 const RUNTIME_FILES: &[&str] = &[
     ".qoder-plugin/plugin.json",
     "hooks/hooks.json",
@@ -64,7 +64,7 @@ impl FrameworkDriver for QwenWorkDriver {
             Ok((path, version)) => DetectResult {
                 detected: true,
                 reason: format!(
-                    "QwenWorkCN {version} at {}; macOS local mode only",
+                    "QwenWorkCN {version} at {}; macOS native Bash and workspace Shell",
                     path.display()
                 ),
             },
@@ -473,7 +473,9 @@ fn data_home(home: Option<&Path>) -> Option<PathBuf> {
 
 fn application(home: Option<&Path>) -> Result<(PathBuf, String), String> {
     if !cfg!(target_os = "macos") {
-        return Err("QwenWorkCN sideloading supports macOS local mode only".to_string());
+        return Err(
+            "QwenWorkCN sideloading supports macOS native Bash and workspace Shell".to_string(),
+        );
     }
     let candidates = match std::env::var_os("TOKENLESS_QWENWORK_APP") {
         Some(value) => vec![
@@ -537,8 +539,8 @@ fn preflight(ctx: &DriverCtx) -> Result<Vec<String>, AdapterError> {
     let (_, version) =
         application(ctx.user_home.as_deref()).map_err(|e| invalid(&ctx.resource_root, e))?;
     let mut warnings = Vec::new();
-    if version != "1.2.5" {
-        warnings.push(format!("QwenWorkCN {version} is outside the validated 1.2.5 macOS local-mode scope; compatibility is unverified."));
+    if !matches!(version.as_str(), "1.2.5" | "1.3.2") {
+        warnings.push(format!("QwenWorkCN {version} is outside the 1.2.5 native Bash / 1.3.2 workspace Shell baselines; compatibility is unverified."));
     }
     for name in ["bash", "tokenless"] {
         if binary(name, ctx).is_none() {

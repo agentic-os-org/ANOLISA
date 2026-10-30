@@ -116,17 +116,8 @@ impl AuditCommand {
     /// exit, the same way the open and `--type` failures above do.
     fn run(&self, store: &AuditStore, event_type: Option<AuditEventType>) -> anyhow::Result<()> {
         if self.summary {
-            if self.pid.is_some() {
-                // The summary aggregates the whole window and has no pid
-                // filter; saying so beats returning unfiltered totals that
-                // look like they came from `--pid`. Mirrors the `--exclude`
-                // note below.
-                eprintln!("Note: --pid is not applied to --summary.");
-            }
-            if !self.exclude.is_empty() {
-                eprintln!(
-                    "Note: --exclude is not applied to --summary (summary always reflects the full dataset)."
-                );
+            for note in self.summary_notes(event_type) {
+                eprintln!("{note}");
             }
             return self.print_summary(store);
         }
@@ -261,6 +252,31 @@ impl AuditCommand {
                 println!("{}", serde_json::to_string(&json_record).unwrap());
             }
         }
+    }
+
+    /// Filters that `--summary` cannot honour, one note each.
+    ///
+    /// The summary aggregates the whole window and always covers both event
+    /// kinds, so a filter given beside it is silently dropped and the totals
+    /// read as if they came from that filter. `--pid` and `--exclude` already
+    /// said so; `--type` did not, so `audit --summary --type llm` printed a
+    /// number that looked like the LLM half while counting process actions
+    /// too.
+    fn summary_notes(&self, event_type: Option<AuditEventType>) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.pid.is_some() {
+            notes.push("Note: --pid is not applied to --summary.".to_string());
+        }
+        if event_type.is_some() {
+            notes.push("Note: --type is not applied to --summary.".to_string());
+        }
+        if !self.exclude.is_empty() {
+            notes.push(
+                "Note: --exclude is not applied to --summary (summary always reflects the full dataset)."
+                    .to_string(),
+            );
+        }
+        notes
     }
 
     fn print_summary(&self, store: &AuditStore) -> anyhow::Result<()> {
@@ -525,6 +541,35 @@ mod tests {
         assert!(
             result.is_err(),
             "a failed audit query must be reported as an error"
+        );
+    }
+
+    /// Every filter the summary drops is named, and only those.
+    ///
+    /// `--type` was the one filter given beside `--summary` that produced no
+    /// note, so `audit --summary --type llm` printed totals that read as the
+    /// LLM half of the window while counting process actions as well.
+    #[test]
+    fn summary_names_every_filter_it_cannot_honour() {
+        let mut c = cmd(vec![], false);
+        assert!(c.summary_notes(None).is_empty(), "no filter, no note");
+
+        c.pid = Some(42);
+        c.exclude = vec!["grepconf".into()];
+        assert_eq!(
+            c.summary_notes(Some(AuditEventType::LlmCall)),
+            [
+                "Note: --pid is not applied to --summary.",
+                "Note: --type is not applied to --summary.",
+                "Note: --exclude is not applied to --summary (summary always reflects the full dataset).",
+            ]
+        );
+
+        // A filter on its own still produces its own note.
+        let only_type = cmd(vec![], false);
+        assert_eq!(
+            only_type.summary_notes(Some(AuditEventType::LlmCall)),
+            ["Note: --type is not applied to --summary."]
         );
     }
 

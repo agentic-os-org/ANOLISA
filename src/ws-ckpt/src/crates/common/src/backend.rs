@@ -60,6 +60,14 @@ pub enum DiffError {
     },
 }
 
+/// A backend refused to create a subvolume before any side effect (#7234).
+///
+/// Guarded callers downcast to this to report a known-no-effect rejection
+/// instead of an uncertain backend failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CreateAdmissionRefused(pub String);
+
 /// GC result (generation cleanup)
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GcResult {

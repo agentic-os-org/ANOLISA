@@ -181,7 +181,7 @@ impl Core {
             });
             if cancelled {
                 entry["reason"] = json!("cancellation_requested");
-                decision = "cancelled";
+                decision = if rejected { "deny" } else { "cancelled" };
             } else {
                 if gap {
                     entry["reason"] = json!("provider_result_unavailable");

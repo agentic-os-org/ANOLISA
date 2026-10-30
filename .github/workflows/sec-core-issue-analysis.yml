@@ -1,0 +1,54 @@
+name: AI / SecCore Issue Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number in agentic-os-org/ANOLISA, without the URL or hash prefix
+        required: true
+        type: number
+      target_ref:
+        description: Branch, tag, or full SHA in this repository; frozen once per run
+        required: true
+        default: main
+        type: string
+      publish:
+        description: Post the reviewed report and add its priority in this repository
+        required: true
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: number
+      target_ref:
+        default: main
+        type: string
+      publish:
+        default: false
+        type: boolean
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN:
+        required: true
+      DINGTALK_WEBHOOK:
+        required: false
+      DINGTALK_SECRET:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  analyze:
+    uses: ./.github/workflows/issue-analysis.yml
+    with:
+      issue_number: ${{ inputs.issue_number }}
+      target_ref: ${{ inputs.target_ref }}
+      publish: ${{ inputs.publish }}
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}

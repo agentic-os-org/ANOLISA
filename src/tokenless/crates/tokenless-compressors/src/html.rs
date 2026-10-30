@@ -1026,6 +1026,7 @@ impl Renderer<'_> {
         let mut caption = None;
         // Rows still covered by a `rowspan` above, per column.
         let mut pending: Vec<usize> = Vec::new();
+        let mut remaining_rows = 0;
         let mut stack: Vec<usize> = self.nodes[id].children.iter().rev().copied().collect();
         while let Some(child) = stack.pop() {
             let node = &self.nodes[child];
@@ -1040,9 +1041,17 @@ impl Renderer<'_> {
                     caption = Some(collapse(&text));
                 }
                 "thead" | "tbody" | "tfoot" => {
+                    // Zero rowspans grow to the group's end; no span crosses groups.
+                    pending.clear();
+                    remaining_rows = node
+                        .children
+                        .iter()
+                        .filter(|&&row| self.nodes[row].is_element("tr"))
+                        .count();
                     stack.extend(node.children.iter().rev());
                 }
                 "tr" => {
+                    remaining_rows = remaining_rows.saturating_sub(1);
                     // Only an all-`th` row is a header: `th scope=row` labels data rows.
                     // Spanned cells insert empty cells so later cells stay in their
                     // columns; trailing empties are dropped, since GFM pads short rows
@@ -1073,7 +1082,12 @@ impl Renderer<'_> {
                         let columns = span(cell_node, "colspan")
                             .min(MAX_TABLE_COLUMNS.saturating_sub(column))
                             .max(1);
-                        let rows_below = span(cell_node, "rowspan") - 1;
+                        let rowspan = span(cell_node, "rowspan");
+                        let rows_below = if rowspan == 0 {
+                            remaining_rows
+                        } else {
+                            rowspan - 1
+                        };
                         let end = (column + columns).min(MAX_TABLE_COLUMNS);
                         if pending.len() < end {
                             pending.resize(end, 0);
@@ -1478,11 +1492,10 @@ fn brackets_balanced(text: &str) -> bool {
     depth == 0
 }
 
-/// A `colspan`/`rowspan` value; missing, unparsable and zero mean 1.
+/// A `colspan`/`rowspan` value; missing or unparsable values mean 1.
 fn span(node: &Node, attr: &str) -> usize {
     node.attr(attr)
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
         .unwrap_or(1)
 }
 

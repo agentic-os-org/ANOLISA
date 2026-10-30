@@ -322,6 +322,10 @@
       "hex": "0b000000"
     },
     {
+      "name": "rejection/insufficient_space",
+      "hex": "0c000000"
+    },
+    {
       "name": "rollback_rejection/daemon_not_ready",
       "hex": "00000000"
     },
@@ -388,6 +392,10 @@
     {
       "name": "rollback_rejection/unsupported_workspace_path",
       "hex": "10000000"
+    },
+    {
+      "name": "rollback_rejection/insufficient_space",
+      "hex": "11000000"
     }
   ]
 }

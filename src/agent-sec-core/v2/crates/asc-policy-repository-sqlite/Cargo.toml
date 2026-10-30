@@ -10,6 +10,7 @@ publish.workspace = true
 
 [features]
 test-support = ["dep:tempfile"]
+fault-injection = ["dep:fail", "fail/failpoints"]
 
 [dependencies]
 asc-foundation-types.workspace = true
@@ -17,6 +18,7 @@ asc-pap.workspace = true
 asc-policy-repository.workspace = true
 asc-policy-types.workspace = true
 asc-sqlite-kernel.workspace = true
+fail = { workspace = true, optional = true }
 rusqlite.workspace = true
 rustix.workspace = true
 serde.workspace = true

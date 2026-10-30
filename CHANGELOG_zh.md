@@ -6,6 +6,58 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [1.6] - 2026-10-16
+
+### 组件版本
+
+| 组件 | 版本 |
+|------|------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 1.0.1 |
+| agentsight | 0.14.2 |
+| tokenless | 0.8.7 |
+| agent-memory | 0.2.10 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.18 |
+| skillfs | 0.5.2 |
+| ws-ckpt | 0.5.0 |
+| cosh-ng | 0.27.0 |
+
+> **发布组成：** 上表版本以 Agentic OS 1.6 稳定正式版实际交付为准，
+> 可能与 `main` 上滚动更新或 Nightly 的组件 manifest 不同。
+
+> **说明：** copilot-shell、os-skills 和 ws-ckpt 自 v1.5 起未发生版本变化；
+> 此处列出它们以展示完整技术栈组成。
+
+### 重点特性
+
+- **cosh-ng**：更新到 v0.27.0，新增受管理安装的升级提示与适配 IMDSv2 的地域 Telemetry，并提供安全的登录回退，用户可在空闲提示符发现新版本，且 Enhanced 启动失败时仍能进入 Shell（#3465、#3406、#3395）
+- **agent-sec-core**：更新到 v1.0.1，在 Agentic OS 1.6 的 RPM 和 Raw 正式包中，将 root 管理的 V2 daemon 设为 Policy、扫描、Observability 和 Skill Ledger 的默认 Runtime，并强化 daemon、Storage 与 SkillFS 集成，管理员可通过统一的系统级安全控制面执行策略，同时获得明确的迁移边界（#3257、#6551、#7563、#3295、#6826、#6931、#7122、#7629）
+- **agentsight**：更新到 v0.14.2，以可热加载的总容量预算统一管理 SQLite Storage，并改进 Provider 解析、Token 统计、Trajectory 分析、Dashboard 与 Enforcement 可靠性，运维人员可在支持的 Runtime 中获得更完整、准确的 Agent 可观测数据（#7478、#7329、#7193、#7398、#6562）
+- **tokenless**：更新到 v0.8.7，新增 QwenWorkCN 本地模式集成与 OpenClaw 同轮压缩，默认启用完整 HTML 渲染，并确保数值、Schema 与归档对话语义不失真，Agent 可压缩更多实时上下文而不静默改变 Tool Result（#7257、#7124、#3473、#7069、#7048、#7042）
+- **anolisa**：更新到 v0.3.18，新增 Intel Mac 交付、sec-core Raw Backend 与 QwenWorkCN Tokenless 管理，并强化安装、更新、日志、Telemetry 与回滚记录，管理员可在更多平台上更安全地部署 1.6 技术栈（#3448、#6551、#7368、#7635、#6450、#7197）
+- **agent-memory**：更新到 v0.2.10，新增经过校验的 Linux x86_64/ARM64 Raw 包、可发现的延迟 Tool 与完整 MCP 子进程清理，用户无需源码构建即可安装，并可在重载 OpenClaw Plugin 时避免残留 Memory 进程（#7648、#7649、#7645、#7482、#7661）
+- **skillfs**：更新到 v0.5.2，将认证通知与 Live Source 解析接入 Rust sec-core daemon，并强化隐藏 Skill 写入边界、Watcher、Mount 恢复、解析及大通知处理，运维人员在变更和关闭流程中可获得更安全、一致的 Skill View（#3295、#5382、#4530、#6202、#7297、#7189）
+
+### 组件更新
+
+- **cosh-ng**：更新到 v0.27.0，仅对受管理安装在安全的空闲提示符显示可用升级命令，在仅支持 IMDSv2 的实例上发现地域 SLS Endpoint 并兼容旧 Metadata Service，同时仅在 Enhanced 尚未产生副作用就启动失败时回退原生 Login Shell，用户可获得可执行的升级指引，且不会出现重复登录 Session 或干扰未受管理安装（#3465、#3406、#3395）
+- **agent-sec-core**：更新到 v1.0.1，在 Agentic OS 1.6 的 RPM 和 Raw 正式包中，将 PII、Prompt 与 Code 扫描、Security Events、Observability 查询、Policy/Scope/Binding Reconciliation 和 Skill Ledger Trust 迁移至 root 管理的 V2 daemon；新增按 Owner 隔离的查询、本地模型扫描、系统级签名与默认 Skill 目录、可复现 V2 RPM 构建与 V2 Raw 包、root daemon 校验、连接限额、Retention、SQLite 路径检查和受限 SkillFS 通知响应；从 V2 CLI 中移除旧版本地执行、部分 V1 命令及 SkillSec 密钥轮换，管理员可运行加固后的共享安全服务，并遵循清晰的所有权与吊销规则（#3257、#6551、#7563、#3286、#3384、#6596、#6679、#6745、#6826、#3295、#6931、#7099、#7419、#7188、#7122、#7103、#7295、#7296、#7629）
+- **agentsight**：更新到 v0.14.2，为全部 SQLite Store 应用默认 2200 MB 的可配置总预算，并优先清理占用最大的 Store；在 Agent 退出时仍记录没有响应体的调用；强化 Anthropic、Gemini、Codex、Responses、Legacy Completion、HTTP/2、SSE、Tool Call、Finish Reason、Tokenizer 与 Token Usage 处理；查询命令支持 `--db`，并改进 Agent Discovery、Trajectory Filter、Batch Analysis、Reuse Label、Semantic Search、Dashboard 分页与指标、Interruption 聚合、Storage Maintenance、Audit Validation、Enforcement、OOM 检测和旧 Kernel 兼容，用户可查询和分析更长期的 Agent Workload，并减少事件缺失或错误归因（#7478、#7329、#7193、#7398、#6562、#7385、#7451、#7032、#7403、#7413、#6781、#7326、#7467）
+- **tokenless**：更新到 v0.8.7，在写入时回收过期 Stash 记录，默认启用完整页面 HTML 提取，新增随包交付的 QwenWorkCN 本地模式 Adapter，并在同轮 Model Request 前压缩受支持的 OpenClaw Tool Result；正确保留只读 `sed` 与 Inline Code，将异常 Tool 参数交回 AgentScope/QwenPaw Host，去重 Selective-Claw Recall，保护 JSON 数值精度和 OpenCode Runtime Validator，支持通过 `ANOLISA_DRY_RUN=1` 预览 Qwen Code/OpenCode 卸载，并在 Statistics Storage 不可用时继续压缩，Agent 可获得覆盖面更广且更安全的无损压缩（#3565、#3473、#7257、#7124、#4963、#6393、#5288、#5299、#4859、#7040、#7069、#7048、#7348、#7395）
+- **anolisa**：更新到 v0.3.18，交付 Intel macOS x86_64 CLI 产物并识别兼容的 cosh-ng Release，新增 sec-core Raw Backend、OpenClaw Capability Consent 关闭选项及 Tokenless QwenWorkCN 本地模式 Plugin 管理；校验 RPM Backend、Repository、Kernel Requirement、Archive Path、Raw Conflict、Registration Schema、Adapter State 与 Post-uninstall Hook，修复 npm Launcher，脱敏 Repository Error，改进 RFC3339 日志查询和 Telemetry 重试/关闭行为，并识别 Linux ARM64 SkillFS/ws-ckpt Package，用户可获得更安全的多平台生命周期管理和更易恢复的失败操作（#3448、#3554、#6551、#7368、#7635、#6450、#7197、#7294）
+- **agent-memory**：更新到 v0.2.10，要求 OpenClaw Adapter Binary 具备可执行属性，发布包含 Memory Server 与内置 Adapter 的 Linux x86_64/ARM64 校验归档，引导 Agent 通过 Tool Search 或直接调用发现延迟加载的 Memory Tool，并在 Plugin 释放时等待 MCP 子进程退出，用户可更早发现配置错误、更轻松地安装、稳定调用 Tool，并干净地关闭或重载（#4855、#7648、#7649、#7645、#7482、#7661）
+- **skillfs**：更新到 v0.5.2，与 Rust sec-core SkillSec daemon 互操作以完成认证扫描和 Activation，阻止通过已打开 Handle 或嵌套文件系统操作修改隐藏 Skill，在 Flat/Hermes 变更中保持 Listing 与 Inode Identity，限制 Watcher 和 Activation 等待时间，保留既有 View 并报告跳过或冲突的 Skill，强化 Managed Mount 复用与关闭，兼容更多 Skill 文本格式，并在通知接近 64 KiB Frame 限制时回退为 Whole-Skill Rescan，Agent 可读取稳定的 Skill 内容，运维人员也能保留 Source Data 并获得可操作的 Mount 状态（#3295、#5382、#4530、#6202、#7297、#7189）
+
+### 兼容性
+
+- **agent-sec-core V2 RPM/Raw 迁移**：通过 Agentic OS 1.6 V2 RPM 或 Raw 正式包升级时，安全操作要求使用 root 管理的 `agent-sec-core.service`，默认 Socket 为 `/run/agent-sec-core/daemon.sock`。请将 `AGENT_SEC_DATA_DIR` 和 Model Service 配置迁移至 daemon 环境，将 PII Rule 移至 `/etc/agent-sec/pii-checker/rules.yaml`，更新仍使用 `harden`、`verify` 或 `log-sandbox` 的脚本，并保留 V1 Security Events 与 Observability 数据，因为这些数据不会自动导入。通过 `make build-all` 和 `make install` 完成的源码安装目前仍交付 V1 Python CLI 和 User Service（#3257、#6551、#7563、#3217、#7283、#3286、#6605）。
+- **agent-sec-core Skill Ledger Trust**：V2 使用单一系统签名密钥，不导入 V1 密钥或 Trust History；升级后需要重新扫描 Skill。v1.0.1 会拒绝 `rotate-keys` 和 `init --force-keys`。如需吊销已认证 Skill，必须确保其路径不再被已启用的默认目录、其他精确或通配 `managedSkillDirs` 条目，或已认证 SkillFS mount 覆盖；移除或停用所有适用的授权来源后重启 daemon，并使用 `check` 或 `show` 验证该 Skill 已不再受信（#3295、#7629）。
+- **Tokenless OpenClaw 要求**：OpenClaw Adapter 要求 OpenClaw 2026.6.6 或更新版本，并在同轮 Model Request 前压缩受支持的实时 Tool Result。Host 在 Middleware 执行前截断的文本无法由 Tokenless 恢复；适用时应使用包含上游修复 `2f620b970a04` 的 Host Build（#7124）。
+- **Tokenless HTML 默认行为**：CLI、Runtime 与 Python SDK 现在默认启用完整 HTML 页面提取。如需保留原先的显式开启行为，请设置 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False`；Git diff 裁剪仍需显式开启（#3473）。
+- **QwenWorkCN 本地模式**：Tokenless 与 ANOLISA 支持 macOS 本地桌面模式，不支持 Security Workspace 或 Linux VM 执行。由脚本安装的旧版本必须先卸载，才能交由 ANOLISA 接管 Plugin；完成后需重启 QwenWorkCN 并在应用内确认 Activation，因为 CLI Status 无法确认 Runtime 是否已加载（#7257、#7368）。
+- **SkillFS 与 sec-core 配套**：需同步升级 SkillFS 与 agent-sec-core，才能使用 Rust daemon 的认证扫描与 Activation。通知属于 Best-effort 而非 Exactly-once；过大的 Path List 会在 daemon Frame 限制内转换为 Whole-Skill Rescan（#3295、#7188、#7189）。
+
 ## [1.5] - 2026-09-24
 
 ### 组件版本

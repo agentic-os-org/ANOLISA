@@ -15,6 +15,7 @@ use super::terminal::CrLfWriter;
 mod bootstrap;
 mod failopen;
 mod input_wait;
+mod startup_auth;
 
 use input_wait::input_wait_timeout_recovery_action;
 
@@ -50,6 +51,13 @@ fn render_raw_inline_event_view<W: Write>(
         &mut terminal_output,
     )?;
     RuntimeDispatcher::apply_actions(actions, inline_state);
+    if let Some(id) = inline_state
+        .approvals
+        .pending_capture_invalidations
+        .pop_front()
+    {
+        return Ok(RawObserverAction::InvalidateApprovalCapture(id));
+    }
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()

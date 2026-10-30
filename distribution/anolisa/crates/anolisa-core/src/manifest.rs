@@ -24,6 +24,9 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// so contract authors, the install resolver, and docs cannot drift.
 pub const RENDER_ANOLISA_PATHS_V1: &str = "anolisa-paths-v1";
 
+/// Render layout placeholders in the command field of a JSON document.
+pub const RENDER_ANOLISA_JSON_COMMAND_V1: &str = "anolisa-json-command-v1";
+
 // ---------------------------------------------------------------------------
 // ComponentManifest
 // ---------------------------------------------------------------------------
@@ -468,6 +471,13 @@ pub struct ManifestHookSpec {
     /// Failure handling. When false (default), a failure warns and the verb
     /// continues; when true, it aborts and the installer rolls back. ws-ckpt's
     /// pre-uninstall recover stays false to match the RPM `recover || warn`.
+    ///
+    /// The same flag is the explicit contract for hook *phases* the
+    /// running CLI cannot execute: a strict declaration of such a phase
+    /// refuses the install/update (the author requires the hook to run and
+    /// this CLI cannot run it), while a non-strict declaration proceeds
+    /// with a warning naming the phase. Phases every CLI executes are
+    /// unaffected by this rule.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strict: bool,
 }

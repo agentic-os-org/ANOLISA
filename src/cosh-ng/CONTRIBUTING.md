@@ -58,7 +58,7 @@ cargo build --workspace --release --locked
 crates/cosh-shell/scripts/check-layout.sh
 ```
 
-See the [developer getting-started guide](../../docs/developer-guide/en/cosh-ng/getting-started.md)
+See the [developer getting-started guide](../../contribute/en/cosh-ng/getting-started.md)
 for code ownership and test-target selection.
 
 ## Workspace Structure

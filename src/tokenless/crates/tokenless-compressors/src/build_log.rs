@@ -287,6 +287,7 @@ fn detect_format(input: &str) -> Option<BuildLogFormat> {
     let formats = [
         BuildLogFormat::Cargo,
         BuildLogFormat::Pytest,
+        BuildLogFormat::Unittest,
         BuildLogFormat::Npm,
         BuildLogFormat::Jest,
         BuildLogFormat::Go,

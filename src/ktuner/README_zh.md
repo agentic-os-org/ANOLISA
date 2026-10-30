@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-面向 AI agent 的内核参数调优引擎，属于 ANOLISA 的一部分。ktuner 针对运行中的系统评估 207 条规则，输出结构化 JSON 调优建议。设计上由 cosh/agent 通过 `ktuner <command> [options]` 调用。
+面向 AI agent 的内核参数调优引擎，属于 ANOLISA 的一部分。ktuner 针对运行中的系统评估 208 条规则，输出结构化 JSON 调优建议。设计上由 cosh/agent 通过 `ktuner <command> [options]` 调用。
 
 磁盘 `rq_affinity` 建议会考虑 `threadirqs` 启动参数和 PREEMPT_RT。引号内的参数值不会引入独立 flag 或 `--` 分隔符；实际分隔符后的参数属于 init。
 

@@ -352,6 +352,8 @@ pub enum GuardedCheckpointRejectionCodeV2 {
     WriteLockConflict,
     CallerMismatch,
     EvidenceCapacityReached,
+    /// Backend space or metadata pressure refused the snapshot; retry after cleanup.
+    InsufficientSpace,
 }
 
 /// Outcome durably bound to one guarded rollback operation.
@@ -402,6 +404,8 @@ pub enum GuardedRollbackRejectionCodeV2 {
     CwdScanFailed,
     /// A diff path cannot be represented as UTF-8; unchanged input must not be retried.
     UnsupportedWorkspacePath,
+    /// Backend space or metadata pressure refused the rollback; retry after cleanup.
+    InsufficientSpace,
 }
 
 /// Stable registered-workspace identity used to bind guarded requests.

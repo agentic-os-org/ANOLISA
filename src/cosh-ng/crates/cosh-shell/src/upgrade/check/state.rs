@@ -29,9 +29,14 @@ impl Drop for ProbeOwner {
 
 impl StartupUpgradeState {
     /// Starts the fail-quiet background probe; the state owns its external commands.
-    pub(crate) fn start_probe(&mut self, running_version: &'static str) {
+    pub(crate) fn start_probe(
+        &mut self,
+        running_version: &'static str,
+        startup_path: Option<mpsc::Receiver<Option<String>>>,
+    ) {
         let processes = Arc::new(ProbeProcesses::default());
-        let pending = spawn_startup_upgrade_probe(running_version, Arc::clone(&processes));
+        let pending =
+            spawn_startup_upgrade_probe(running_version, Arc::clone(&processes), startup_path);
         self.pending = Some(pending);
         self.probe = Some(ProbeOwner(processes));
     }
@@ -88,13 +93,32 @@ impl StartupUpgradeState {
 fn spawn_startup_upgrade_probe(
     running_version: &'static str,
     processes: Arc<ProbeProcesses>,
+    startup_path: Option<mpsc::Receiver<Option<String>>>,
 ) -> mpsc::Receiver<Option<UpgradeNotice>> {
     let (sender, receiver) = mpsc::sync_channel(1);
     let _ = thread::Builder::new()
         .name("cosh-startup-upgrade-probe".to_string())
         .spawn(move || {
-            let result = current_executable()
-                .and_then(|executable| detect_upgrade(&processes, running_version, &executable));
+            let startup_path = if let Some(receiver) = startup_path {
+                match receiver.recv_timeout(Duration::from_secs(5)) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        // An unresolved login must not probe with a stale inherited PATH.
+                        let _ = sender.send(None);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let result = current_executable().and_then(|executable| {
+                detect_upgrade(
+                    &processes,
+                    running_version,
+                    &executable,
+                    startup_path.as_deref(),
+                )
+            });
             let notice = match &result {
                 Some(DetectionResult {
                     verdict: UpgradeVerdict::Upgrade(notice),

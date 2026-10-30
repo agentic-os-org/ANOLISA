@@ -757,6 +757,72 @@ fn unbalanced_brackets_in_link_text_drop_the_link() {
 }
 
 #[test]
+fn zero_rowspan_preserves_columns_in_its_row_group() {
+    for rowspan in ["0", "00", " 0 ", "3"] {
+        let html = page(&format!(
+            "<p>{PARAGRAPH}</p><table>\
+             <thead><tr><th>Region</th><th>Service</th><th>Count</th></tr></thead>\
+             <tbody><tr><td rowspan=\"{rowspan}\">EU</td><td>api</td><td>10</td></tr>\
+             <tr><td>worker</td><td>20</td></tr><tr><td>database</td><td>30</td></tr>\
+             </tbody></table>"
+        ));
+        assert_eq!(
+            body_of(&HtmlExtractor.render(&html).unwrap()),
+            format!(
+                "{PARAGRAPH}\n\n| Region | Service | Count |\n| --- | --- | --- |\n\
+                 | EU | api | 10 |\n|  | worker | 20 |\n|  | database | 30 |"
+            ),
+            "rowspan={rowspan:?}"
+        );
+    }
+}
+
+#[test]
+fn zero_rowspans_stop_at_each_row_group() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table>\
+         <thead><tr><th rowspan=\"0\">Region</th><th>Service</th><th>Count</th></tr>\
+         <tr><th>Name</th><th>Instances</th></tr></thead>\
+         <tbody><tr><td rowspan=\"0\">EU</td><td>api</td><td>10</td></tr>\
+         <tr><td>worker</td><td>20</td></tr></tbody>\
+         <tbody><tr><td rowspan=\"0\">US</td><td>web</td><td>30</td></tr>\
+         <tr><td>batch</td><td>40</td></tr></tbody>\
+         <tfoot><tr><td rowspan=\"0\">All</td><td>total</td><td>100</td></tr>\
+         <tr><td>expected</td><td>100</td></tr></tfoot></table>"
+    ));
+    assert_eq!(
+        body_of(&HtmlExtractor.render(&html).unwrap()),
+        format!(
+            "{PARAGRAPH}\n\n| Region | Service | Count |\n| --- | --- | --- |\n\
+             |  | Name | Instances |\n| EU | api | 10 |\n|  | worker | 20 |\n\
+             | US | web | 30 |\n|  | batch | 40 |\n| All | total | 100 |\n\
+             |  | expected | 100 |"
+        )
+    );
+}
+
+#[test]
+fn zero_rowspan_combines_with_colspan_after_the_first_row() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table>\
+         <thead><tr><th>Region</th><th>Zone</th><th>Service</th><th>Count</th></tr></thead>\
+         <tbody><tr><td>US</td><td>east</td><td>web</td><td>5</td></tr>\
+         <tr><td rowspan=\"0\" colspan=\"2\">EU</td><td>api</td><td>10</td></tr>\
+         <tr></tr><tr><td>worker</td><td>20</td></tr>\
+         <tr><td>database</td><td>30</td></tr></tbody>\
+         <tbody><tr><td>AU</td><td>west</td><td>batch</td><td>40</td></tr></tbody></table>"
+    ));
+    assert_eq!(
+        body_of(&HtmlExtractor.render(&html).unwrap()),
+        format!(
+            "{PARAGRAPH}\n\n| Region | Zone | Service | Count |\n| --- | --- | --- | --- |\n\
+             | US | east | web | 5 |\n| EU |  | api | 10 |\n|  |\n\
+             |  |  | worker | 20 |\n|  |  | database | 30 |\n| AU | west | batch | 40 |"
+        )
+    );
+}
+
+#[test]
 fn spanned_table_cells_leave_placeholders_and_are_clipped() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><table><tr><th colspan=\"2\">Pair</th><th>C</th></tr>\

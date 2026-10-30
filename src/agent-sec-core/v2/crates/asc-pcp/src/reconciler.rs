@@ -80,7 +80,7 @@ impl BindingReconciler {
         schedule: &mut crate::AttemptSchedule,
     ) -> Result<Disposition, StoreError> {
         let mut slot = std::mem::take(&mut schedule.slot);
-        // Keep call-local completion data available for panic bookkeeping.
+        // Keep retained completion evidence available for panic bookkeeping.
         // The caller retains the Running entry throughout this unwind boundary.
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.reconcile_attempt(id, &mut slot, schedule)
@@ -108,7 +108,7 @@ impl BindingReconciler {
                     }
                     if let Some(outcome) = slot.pending.clone() {
                         slot.actual_outcome = true;
-                        self.commit(&outcome, &mut slot.completion)?;
+                        self.commit(&outcome, &mut slot.completion, schedule)?;
                         slot.pending = None;
                     }
                     Ok::<_, StoreError>(())
@@ -130,8 +130,7 @@ impl BindingReconciler {
             self.state.resolve(&mut slot.unconfirmed)?;
         }
         if let Some(outcome) = slot.pending.clone() {
-            let disposition = self.commit(&outcome, &mut slot.completion)?;
-            schedule.status_version = outcome.expected.status_version.checked_add(1);
+            let disposition = self.commit(&outcome, &mut slot.completion, schedule)?;
             slot.pending = None;
             return Ok(disposition);
         }
@@ -218,9 +217,9 @@ impl BindingReconciler {
         let disposition = self.commit(
             slot.pending.as_ref().ok_or(StoreError::Invalid)?,
             &mut slot.completion,
+            schedule,
         )?;
         slot.pending = None;
-        schedule.status_version = claimed.status_version.checked_add(1);
         Ok(disposition)
     }
 
@@ -438,10 +437,14 @@ impl BindingReconciler {
         &self,
         outcome: &AttemptOutcome,
         completion: &mut Option<crate::model::PendingWrite>,
+        schedule: &mut crate::AttemptSchedule,
     ) -> Result<Disposition, StoreError> {
-        if !self.state.finish(outcome, completion)? {
+        let Some(receipt) = self.state.finish(outcome, completion)? else {
+            schedule.status_version = Some(outcome.expected.status_version);
+            schedule.next_attempt_at = None;
             return Ok(Disposition::Superseded);
-        }
+        };
+        schedule.status_version = receipt.status_version;
         if let Some(at) = outcome.next_attempt_at {
             Ok(Disposition::RetryAt { at })
         } else if let Some(error) = &outcome.error {

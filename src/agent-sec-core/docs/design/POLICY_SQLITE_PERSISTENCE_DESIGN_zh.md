@@ -29,7 +29,7 @@ Policy、Scope、Binding 意图，以及仍需确认或清理的远端目标；�
 | Scope 删除 | 停止 discovery 并完成全部 Binding 清理后删除 Scope；最后一条 Binding 与 Scope 同事务删除 |
 | Discovery | 保存恢复所必需的 pin 和停止屏障；线程、扫描缓存不落库 |
 | 重试 | WorkQueue 的次数、单调时钟 deadline 不落库，重启重置自动重试预算 |
-| CAS | status 单独计数；Deployment 观察合并不能被 status 冲突抹掉 |
+| CAS | status 单独计数；旧结果遇到版本冲突时整笔拒绝，保留已有 UNKNOWN 清理责任 |
 | 存储故障 | Repository 分类并核实提交，Runtime 暂停/恢复调度；存储重试不消耗远端重试预算 |
 | route | 保留单个 `agentsight` route；cleanup 保存非敏感 endpoint，调用前与当前配置校验 |
 
@@ -78,11 +78,22 @@ DB/WAL/SHM，schema converger 遇到更新的版本会告警后返回，连接�
 
 ### 3.1 路径、安全与独占
 
-使用既有 daemon 数据根 `AGENT_SEC_DATA_DIR`，未设置时为 `/var/log/agent-sec`，数据库名
-`policy-state.db`；不引入 HOME 或临时目录 fallback。沿用 system daemon 身份和授权，
+显式非空 `AGENT_SEC_DATA_DIR` 是固定数据根，不参与默认路径发现或回退。未设置时，
+Policy 数据库候选 A 为 `/var/log/agent-sec/policy-state.db`，B 为
+`/var/lib/agent-sec/policy/policy-state.db`；安全事件和可观测存储仍沿用既有数据根。
+先只读检查 A/B 是否已有数据库，再逐级验证祖先，将 daemon 自己拥有的已有叶目录修复为 `0700`。
+优先选择 A；仅 A 的祖先不安全时检查 B，叶目录属主错误或权限修复失败均直接报错。
+两处都有数据库，或选址会绕过另一处已有数据库时拒绝启动，不静默换库；A 权限恢复后也不绕过 B。
+仅在没有冲突时打开所选库或初始化新库。检查不可读取不能当成不存在，仅有 WAL/SHM 残留也报错。
+目录检查与最终打开复用同一套逐级验证，预检查不创建文件、不修改祖先权限；数据库损坏、锁占用、
+schema 或 I/O 失败不会回退。不引入 HOME 或临时目录 fallback。沿用 system daemon 身份和授权，
 CLI 通过 PAP 访问，不能直接打开数据库。数据库及其辅助文件包含完整策略和 cleanup 数据，
 必须限制为服务身份可访问：数据库/锁文件 0600，数据库所在私有目录 0700。
-已有共享数据根如不满足私有目录要求，启动报错并明确指出配置问题，不擅自 chmod 共享目录。
+显式数据根或最终所选目录不满足私有目录要求时，启动报错并明确指出配置问题，不擅自 chmod 共享目录。
+
+诊断须包含实际选址/已有库路径，目录失败包含违规路径、UID/GID/mode 和预期权限；
+冲突须明确说明拒绝创建空库及恢复配置或显式离线迁移的处理方向。DPROC-023 的路径选择 fixture
+位于 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs`，不代表目标主机安装或 systemd 验收。
 
 安全打开按目录描述符逐级检查所有者与权限，拒绝 symlink、非普通文件、硬链接别名及不可信父目录。
 受控 sticky 临时根只用于隔离测试。整个运行期固定路径/文件身份，不支持运行中替换 DB。
@@ -357,21 +368,23 @@ RETURNING status_version;
 version 不加入 CLI 输入或公共 JSON；通知队列仍只把 Binding ID 当 wakeup，执行前重读。
 内部 PAP 返回回执是为了失败收尾，不让队列中的版本代替 Repository 当前事实。
 
-### 5.3 独立合并观察与状态
+### 5.3 观察与状态整笔条件提交
 
-条件写接口需区分以下三类事务，不能继续把“status 没变”作为整个结果事务的成功前提：
+以下事务均检查原 revision、status_version 和生命周期；结果过期时不允许单独更新 Deployment：
 
 | 操作 | 条件与结果 |
 |---|---|
 | claim / 状态推进 | ID、binding revision、expected status_version 和合法 phase 匹配才推进；返回新版本 |
 | 新目标 UNKNOWN 登记 | 检查认领仍有效，并将完整 TargetRef/cleanup 合并入最新 deployments，提交后才允许 mutating I/O |
-| 执行结果提交 | 验证目标来自已登记责任，合并此执行者的观察；status 仅在原 claim 仍匹配时更新，返回两个独立结果 |
-| 最终清理删除 | Delete claim 的版本匹配且本次有效观察证明全部目标 ABSENT，原子删除整个 Binding；有冲突则保留/合并责任 |
+| 执行结果提交 | 原 claim 仍匹配时，原子保存状态与已登记目标的观察；否则整笔返回 Conflict，取消旧结果写入重试 |
+| 最终清理删除 | Delete claim 的版本匹配且本次有效观察证明全部目标 ABSENT，原子删除整个 Binding；有冲突则保留原有责任 |
 
 结果事务由 Repository 在写锁内读取最新行；PCP 提供可验证的目标观察和状态建议。
 它不是无条件覆盖整个旧 Snapshot，也不能让任意观察更新未登记目标。
 部署观察必须保留对应 target 和 binding revision 的来源，不能把旧 revision 的 PRESENT
-归给新 spec。修改状态失败时，合法的部署观察仍能提交，返回 `status_applied=false`。
+归给新 spec。版本不匹配时，status 与 Deployment 均不更新；下发前已登记的 UNKNOWN
+继续承担清理责任。成功写入使用实际回执版本，不推算“旧版本 + 1”。存储错误保留原写入，
+生命周期冲突则取消旧 attempt；新删除意图拥有独立的业务和队列重试预算，即使通知丢失。
 
 最终删除可以把最后的 ABSENT 观察与行删除放在同一个事务：不能要求数据库里在进入事务前
 就已是空 deployments，否则最后一次 cleanup 永远无法提交。反之，仅“收到删除意图”不允许删行。
@@ -648,7 +661,7 @@ SQLite、procfs、Adapter 和 Client 贯穿同一用例；Scope 建立后先更�
 
 | 覆盖 | 可执行证据及范围 |
 |---|---|
-| PSQL-01～05 | [Repository 契约](../../v2/crates/asc-policy-repository-sqlite/tests/contracts.rs) 使用 SQLite 验证 ABA、迟到入队失败、旧 Apply 观察合并、no-op 版本、去重/排序/分页、并发模板更新/删除与 Scope 准入、32 Scope 上限；PAP/PCP 的既有完整 fixtures 同步版本并回归 |
+| PSQL-01～05 | [Repository 契约](../../v2/crates/asc-policy-repository-sqlite/tests/contracts.rs) 使用 SQLite 验证 ABA、迟到入队失败、旧 Apply 结果整笔拒绝、no-op 版本、去重/排序/分页、并发模板更新/删除与 Scope 准入、32 Scope 上限；PAP/PCP 的既有完整 fixtures 同步版本并回归 |
 | PSQL-06～08 | 同一契约覆盖版本溢出事务回滚、部署数量/字节限制、坏 JSON/投影/外键/回执、未知 schema、关闭重开和 write_id 重放/碰撞；[存储故障测试](../../v2/crates/asc-policy-repository-sqlite/src/tests.rs) 使用 query_only、max_page_count 产生真实 READONLY/FULL，另用独立 SQL 写锁产生 BUSY；IOERR/提交回执丢失在写边界注入，没有定制 VFS 或硬件掉盘实验 |
 | PSQL-09～11 | 私有权限、symlink/hardlink、独占 lease、lease 比 repository 活得更久；keyset 扫描中删行、停止屏障、最后 Binding/Scope 回收、Active 空 Scope、PID pin 关闭重开；[discovery seed](../../v2/crates/asc-daemon-core/src/scope_discovery.rs) 覆盖部分扫描不误退休和 PID reuse。外层 drain 持锁由 daemon 所有权结构保证，未新增卡死内核 I/O 的宿主演练 |
 | PSQL-12/17 | [Runtime 测试](../../v2/crates/asc-policy-runtime/src/reconciliation/tests.rs) 注入 BUSY/FULL/READONLY/IOERR/OutcomeUnknown，分别覆盖远端前及实际结果已返回后的写入；连续失败超过自动预算，仍保留原 write_id/结果，释放 worker 给其他 Binding，恢复后不重复已完成调用。原有终态、补扫、panic 和预算测试均回归 |
@@ -727,7 +740,7 @@ cleanup 编码的二进制。不能删除 policy-state.db 或把 WAL 当缓存�
 审视后明确约束了以下容易漏掉的问题：
 
 1. 单 reconcile 执行者不排除 PAP/异常收尾写 status；所有入口必须传播真实 expected_version。
-2. stale completion 的 status CAS 失败不能回滚合法 Deployment 观察；最后 ABSENT 与删除可同事务。
+2. stale completion 的 CAS 冲突整笔拒绝旧结果，保留原有 UNKNOWN；最后 ABSENT 与删除同事务。
 3. PID pin 不能只存在 worker 或 Binding 中；Scope 还活着时必须保留，避免重启后换绑。
 4. 恢复时边删 Scope 边 OFFSET 分页会漏项，必须用稳定 ID cursor。
 5. socket singleton 不能保护同库不同 socket，需单独 DB lease，且覆盖退出 drain。

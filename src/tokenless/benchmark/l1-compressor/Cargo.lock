@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.8.7"
+version = "0.9.2"
 dependencies = [
  "blake3",
  "rusqlite",
@@ -893,10 +893,11 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.8.7"
+version = "0.9.2"
 dependencies = [
  "csv",
  "html5ever",
+ "indexmap",
  "serde_json",
  "thiserror",
  "tokenless-ccr",
@@ -906,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.8.7"
+version = "0.9.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -915,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.8.7"
+version = "0.9.2"
 dependencies = [
  "regex",
  "serde_json",
@@ -924,9 +925,9 @@ dependencies = [
 
 [[package]]
 name = "toon-format"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f89570c1a68d73941f728cca32a4345b2ffca36667ad921af336c60309a3e7e"
+checksum = "ee91127810858e0dbcecb2947a0074a7d18bd191d56bcb581f5962374aed9fb8"
 dependencies = [
  "indexmap",
  "serde",

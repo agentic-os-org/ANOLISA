@@ -1,13 +1,13 @@
 # AgentSight runtime image.
 #
-# Consumes the release RPM produced by `src/agentsight/scripts/rpm-build.sh`;
+# Consumes the release RPM produced by `src/agentsight/packaging/rpm/rpm-build.sh`;
 # the binary (with the embedded Dashboard) is not rebuilt here. Build from the
 # repository root after a release build:
 #
 #   docker build -f src/agentsight/packaging/docker/Dockerfile \
 #     --build-arg VERSION=$(git describe --tags --always) -t agentsight:dev .
 #
-# The build context must contain `rpms/<arch>/agentsight-*.rpm`.
+# The build context must contain `rpms/<arch>/agentsight-core-*.rpm`.
 FROM alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
 
 ARG VERSION=unknown
@@ -29,11 +29,11 @@ RUN case "${TARGETARCH}" in \
       arm64) rpm_arch=aarch64 ;; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}"; exit 1 ;; \
     esac && \
-    dnf install -y /tmp/rpms/"${rpm_arch}"/agentsight-*.rpm && dnf clean all && rm -rf /tmp/rpms
+    dnf install -y /tmp/rpms/"${rpm_arch}"/agentsight-core-*.rpm && dnf clean all && rm -rf /tmp/rpms
 
 # Dashboard API + UI. Keep it inside the cluster; reach it via port-forward.
 EXPOSE 7396
 
 # agentsight-start supervises `trace` and `serve` and forwards SIGTERM/SIGHUP,
 # so the pod lifecycle (stop, ConfigMap reload via restart) maps onto it.
-ENTRYPOINT ["/usr/local/bin/agentsight-start"]
+ENTRYPOINT ["/usr/bin/agentsight-start"]

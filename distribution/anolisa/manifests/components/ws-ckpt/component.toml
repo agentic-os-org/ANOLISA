@@ -1,6 +1,6 @@
 [component]
 name = "ws-ckpt"
-version = "0.5.0"
+version = "0.6.1"
 layer = "runtime"
 domain = "state"
 display_name = "Workspace Checkpoint"
@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.3.15"
 
 [backends.rpm]
 package = "ws-ckpt"
@@ -54,10 +54,6 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "share/anolisa/runtime/skills/ws-ckpt/"
-target = "{datadir}/runtime/skills/ws-ckpt"
-
-[[component.layout.files]]
 source = "share/anolisa/skills/ws-ckpt/"
 target = "{datadir}/skills/ws-ckpt"
 
@@ -65,6 +61,7 @@ target = "{datadir}/skills/ws-ckpt"
 source = "share/anolisa/ws-ckpt/ws-ckpt.service"
 target = "{unitdir}/ws-ckpt.service"
 mode = "0644"
+render = "anolisa-paths-v1"
 
 [[component.layout.files]]
 source = "share/anolisa/ws-ckpt/config.toml.sample"
@@ -115,8 +112,8 @@ display_name = "ws-ckpt for OpenClaw"
 adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
-source = "share/anolisa/runtime/ws-ckpt/plugins/openclaw"
-dest = "{datadir}/runtime/ws-ckpt/plugins/openclaw/"
+source = "share/anolisa/plugins/ws-ckpt/openclaw"
+dest = "{datadir}/plugins/ws-ckpt/openclaw/"
 detect = { binary = "openclaw" }
 
 [adapters.compat]
@@ -130,6 +127,10 @@ entry = "openclaw.plugin.json"
 schema = 1
 entry = "openclaw.plugin.json"
 
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/plugins/ws-ckpt/openclaw/"
+managed_packages = ["ws-ckpt-plugins"]
+
 [[adapters]]
 framework = "hermes"
 name = "ws-ckpt-hermes"
@@ -137,8 +138,8 @@ display_name = "ws-ckpt for Hermes"
 adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
-source = "share/anolisa/runtime/ws-ckpt/plugins/hermes"
-dest = "{datadir}/runtime/ws-ckpt/plugins/hermes/"
+source = "share/anolisa/plugins/ws-ckpt/hermes"
+dest = "{datadir}/plugins/ws-ckpt/hermes/"
 detect = { binary = "hermes" }
 
 [adapters.bundle]
@@ -148,3 +149,7 @@ entry = "plugin.yaml"
 [adapters.hermes.bundle]
 schema = 1
 entry = "plugin.yaml"
+
+[adapters.backends.rpm]
+resource_root = "/usr/share/anolisa/plugins/ws-ckpt/hermes/"
+managed_packages = ["ws-ckpt-plugins"]

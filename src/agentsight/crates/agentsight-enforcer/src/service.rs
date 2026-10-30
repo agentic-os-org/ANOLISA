@@ -756,7 +756,9 @@ mod tests {
 
     use agentsight_enforcement_protocol::{
         ApplyCredentialPolicy, ApplyPolicy, Binding, CredentialExfiltrationPolicy,
-        DestinationScope, HealthStatus, PolicyMode, ReplacePolicy, ReplacementPolicy,
+        DestinationScope, FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy,
+        FileProtectionTarget, FileProtectionTargetKind, FileProtectionTopologyMode,
+        FileProtections, HealthStatus, PolicyMode, ReplacePolicy, ReplacementPolicy,
         ReplacementSource, SecurityEvent, ViolationEvent,
     };
 
@@ -821,6 +823,7 @@ mod tests {
             policy_revision: "1".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: Some(PolicyMode::Audit),
+            file_protection_policy: None,
         };
         let mut target = source.clone();
         target.binding_id = Uuid::new_v4();
@@ -1042,6 +1045,55 @@ mod tests {
         ));
         assert_eq!(detach_result, Ok(ResponseBody::Detached));
         assert!(!active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn leased_structured_apply_returns_compile_failure_without_a_binding() {
+        let backend = crate::MockBackend::new();
+        let subscriptions = RequiredSubscriptions::default();
+        let subscription_id = Uuid::new_v4();
+        let (service_stream, _peer_stream) =
+            UnixStream::pair().expect("fixture socket pair should open");
+        subscriptions
+            .install(subscription_id, &service_stream)
+            .expect("required subscription should install");
+        let mut request = replacement_policy().expected.request;
+        request.policy_dsl.clear();
+        request.file_protection_policy = Some(FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![FileProtectionTarget {
+                path: "/fixture/protected".into(),
+                kind: FileProtectionTargetKind::ExactFile,
+                protections: FileProtections {
+                    delete: true,
+                    ordinary_write: false,
+                },
+                exclusions: Vec::new(),
+            }],
+        });
+
+        let result = dispatch(
+            &backend,
+            &subscriptions,
+            Command::ApplyPolicyLeased {
+                request,
+                required_subscription_id: subscription_id,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.code == "compile_failure"
+                    && error.message.contains("structured file protection policies")
+        ));
+        assert!(
+            backend
+                .bindings()
+                .expect("bindings should remain queryable")
+                .is_empty()
+        );
     }
 
     #[test]

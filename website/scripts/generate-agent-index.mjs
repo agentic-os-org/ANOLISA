@@ -1,7 +1,7 @@
 import {execFileSync} from 'node:child_process';
 import {mkdir, readFile, rm, writeFile} from 'node:fs/promises';
 import path from 'node:path';
-import {exists, kebabCase, repoRoot, toPosix, walkFiles, writeGenerated} from './lib.mjs';
+import {exists, kebabCase, repoRoot, stripCopilotShellNavigation, toPosix, walkFiles, writeGenerated} from './lib.mjs';
 
 const overrides = JSON.parse(await readFile(path.join(repoRoot, 'website/agent-index/overrides.json'), 'utf8'));
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
@@ -204,17 +204,17 @@ function installWorkflow(method, installName) {
   };
 }
 
-const quickstart = await readFile(path.join(repoRoot, 'docs/QUICKSTART.md'), 'utf8');
+const quickstart = await readFile(path.join(repoRoot, 'docs/user-guide/en/getting-started/quickstart.md'), 'utf8');
 const installCommand = quickstart.match(
   /curl\s+-fsSL\s+https:\/\/get\.agentic-os\.sh\s+\|\s+bash/,
 )?.[0];
-if (!installCommand) throw new Error('Could not derive the canonical install command from docs/QUICKSTART.md');
+if (!installCommand) throw new Error('Could not derive the canonical install command from docs/user-guide/en/getting-started/quickstart.md');
 
 const agentsMarkdown = await readFile(path.join(repoRoot, 'AGENTS.md'), 'utf8');
-const componentRows = parseOverview(agentsMarkdown);
+const componentRows = parseOverview(agentsMarkdown)
+  .filter((component) => !component.source_path.startsWith('deprecated/'));
 const anolisaSourcePath = componentSourcePath('anolisa');
 const tokenlessSourcePath = componentSourcePath('tokenless');
-const copilotShellSourcePath = componentSourcePath('copilot-shell');
 const components = [];
 for (const row of componentRows) {
   const id = path.posix.basename(row.source_path);
@@ -265,18 +265,25 @@ for (const row of componentRows) {
 }
 
 const documentationSources = [
-  'docs/QUICKSTART.md',
-  'docs/BUILDING.md',
   ...(await walkFiles(path.join(repoRoot, 'docs/user-guide/en'), (file) => file.endsWith('.md'))).map((file) => toPosix(path.relative(repoRoot, file))),
   ...(await walkFiles(path.join(repoRoot, 'docs/developer-guide/en'), (file) => file.endsWith('.md'))).map((file) => toPosix(path.relative(repoRoot, file))),
 ];
+const contributorRoot = path.join(repoRoot, 'contribute/en');
+if (await exists(contributorRoot)) {
+  documentationSources.push(...(await walkFiles(contributorRoot, (file) => file.endsWith('.md')))
+    .map((file) => toPosix(path.relative(repoRoot, file))));
+}
+for (const source of ['CONTRIBUTING.md',
+  ...componentRows.map((component) => `${component.source_path}/CONTRIBUTING.md`)]) {
+  if (await exists(path.join(repoRoot, source))) documentationSources.push(source);
+}
 
 const sourceCommit = process.env.GITHUB_SHA || git('rev-parse', 'HEAD');
 const index = {
   schema_version: '1.3.0',
   project: {
     name: 'ANOLISA',
-    description: 'A server-side operating layer for AI agent workloads.',
+    description: 'A multi-component system software stack for AI Agent workloads.',
   },
   repository: repositoryUrl(),
   default_branch: 'main',
@@ -301,8 +308,8 @@ const index = {
   },
   documentation: documentationSources.map((source) => ({
     source,
-    url: source === 'docs/QUICKSTART.md'
-      ? siteHref('docs/quickstart/')
+    url: source === 'docs/user-guide/en/getting-started/quickstart.md'
+      ? siteHref('docs/user-guide/getting-started/quickstart/')
       : `https://github.com/agentic-os-org/ANOLISA/blob/main/${source}`,
   })),
   components,
@@ -425,10 +432,6 @@ const cliReference = [
   '',
   ...enumCommands(tokenlessCommandsSource, 'Commands').map((command) => `  ${command.name.padEnd(20)} ${command.description}`),
   '',
-  '## Copilot Shell',
-  '',
-  `Entry points from ${copilotShellSourcePath}/package.json: cosh, co, copilot`,
-  '',
 ].join('\n');
 await writeFile(path.join(agentsOutput, 'cli-reference.txt'), cliReference);
 
@@ -439,18 +442,18 @@ const changelogSources = [
 const changelogText = [];
 for (const source of changelogSources) {
   if (source !== 'CHANGELOG.md' && !(await exists(path.join(repoRoot, source)))) continue;
-  changelogText.push(`===== ${source} =====`, '', await readFile(path.join(repoRoot, source), 'utf8'), '');
+  changelogText.push(`===== ${source} =====`, '', stripCopilotShellNavigation(await readFile(path.join(repoRoot, source), 'utf8')), '');
 }
 await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n'));
 
 await writeGenerated(
   'static/llms.txt',
-  `# ANOLISA\n\n> A server-side operating layer for AI agent workloads.\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
+  `# ANOLISA\n\n> ${index.project.description}\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Contribute: ${siteHref('docs/contribute/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
 );
 
 const fullDocumentation = [];
 for (const source of documentationSources) {
-  fullDocumentation.push(`===== ${source} =====`, '', await readFile(path.join(repoRoot, source), 'utf8'), '');
+  fullDocumentation.push(`===== ${source} =====`, '', stripCopilotShellNavigation(await readFile(path.join(repoRoot, source), 'utf8')), '');
 }
 await writeGenerated(
   'static/llms-full.txt',

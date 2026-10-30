@@ -577,6 +577,108 @@ fn installation_id_path() -> PathBuf {
         .join("installation_id")
 }
 
+/// Process-invariant OS distro identifier for the SLS `os.distro` field:
+/// `<ID> <VERSION_ID>` from os-release(5) on Linux (`/etc/os-release` first,
+/// `/usr/lib/os-release` as the os-release(5) fallback) and the bare platform
+/// name `macos` on macOS — version granularity adds nothing there, as
+/// cosh-ng is limited-functionality on that platform. Empty when the platform
+/// exposes no source, matching the zero/empty placeholder convention of this
+/// schema.
+///
+/// Cached because the value cannot change within a process lifetime — unlike
+/// `installation_id()`, which must re-read its rewritable file on every call.
+fn os_distro() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(detect_os_distro).clone()
+}
+
+/// Probe the live platform for the distro identifier. Separated from
+/// `os_distro()` so tests exercise detection directly instead of racing the
+/// process-level `OnceLock` cache.
+fn detect_os_distro() -> String {
+    // Test-only override so detection is verifiable without depending on the
+    // host's real os-release. Mirrors `system_telemetry_disabled_path()`:
+    // production builds never read this variable, so a caller's environment
+    // cannot distort shipped telemetry.
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("COSH_OS_RELEASE_PATH") {
+        return std::fs::read_to_string(path)
+            .map(|content| parse_os_distro(&content))
+            .unwrap_or_default();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // No version granularity on macOS: telemetry analysis targets Linux
+        // server distros, and os.type already carries the platform name.
+        "macos".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        os_distro_from_release_files(
+            Path::new("/etc/os-release"),
+            Path::new("/usr/lib/os-release"),
+        )
+    }
+}
+
+/// Distill the distro from an os-release(5) file pair. The primary is used
+/// exclusively whenever it is readable — a keyless file yields an empty
+/// value, never the vendor's answer — and the vendor copy is consulted only
+/// when the primary is absent, per the os-release(5) lookup order. Any other
+/// primary read error also stays empty: an unreadable host configuration is
+/// not a reason to label the machine with the vendor distro.
+fn os_distro_from_release_files(primary: &Path, vendor: &Path) -> String {
+    match std::fs::read_to_string(primary) {
+        Ok(content) => parse_os_distro(&content),
+        Err(e) if e.kind() == ErrorKind::NotFound => std::fs::read_to_string(vendor)
+            .map(|content| parse_os_distro(&content))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Extract `<ID> <VERSION_ID>` from os-release(5) content. ID + VERSION_ID is
+/// preferred over PRETTY_NAME on purpose: PRETTY_NAME embeds marketing
+/// suffixes ("Alibaba Cloud Linux 3 (Soaring Falcon)") that defeat group-by
+/// analytics, while `ID VERSION_ID` is stable and machine-comparable. Either
+/// component is omitted when absent; empty when the file carries neither key.
+fn parse_os_distro(content: &str) -> String {
+    let mut id = None;
+    let mut version = None;
+    for line in content.lines() {
+        match line.split_once('=') {
+            Some(("ID", raw)) if id.is_none() => id = Some(os_release_value(raw)),
+            Some(("VERSION_ID", raw)) if version.is_none() => {
+                version = Some(os_release_value(raw));
+            }
+            _ => {}
+        }
+    }
+    let id = id.filter(|v| !v.is_empty());
+    let version = version.filter(|v| !v.is_empty());
+    match (id, version) {
+        (Some(id), Some(version)) => format!("{id} {version}"),
+        (Some(id), None) => id,
+        (None, Some(version)) => version,
+        (None, None) => String::new(),
+    }
+}
+
+/// Unquote one os-release(5) value the way the spec writes them: an optional
+/// pair of double or single quotes around the payload.
+fn os_release_value(raw: &str) -> String {
+    let value = raw.trim();
+    let bytes = value.as_bytes();
+    let quoted = bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''));
+    if quoted {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 impl CoshCore {
     /// Build the SLS JSONL record from the accumulated turn metrics.
     /// Field names are kept identical to the copilot-shell SLS schema
@@ -645,12 +747,13 @@ impl CoshCore {
             // Environment info
             "os.type": std::env::consts::OS,
             "os.arch": std::env::consts::ARCH,
+            "os.distro": os_distro(),
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Read;
 
@@ -689,7 +792,7 @@ mod tests {
         CoshCore::new_legacy(config, provider, tools)
     }
 
-    /// All 28 SLS fields must be present with correct types.
+    /// All 33 SLS fields must be present with correct types.
     #[test]
     fn build_sls_record_has_all_fields() {
         let _guard = ENV_TEST_MUTEX.lock().unwrap();
@@ -749,6 +852,85 @@ mod tests {
         // Environment
         assert!(record["os.type"].is_string());
         assert!(record["os.arch"].is_string());
+        assert!(record["os.distro"].is_string());
+    }
+
+    /// The detected distro must thread through to the serialized record as
+    /// its real value (not a hardcoded placeholder), and detection itself
+    /// must compose the exact `ID VERSION_ID` pair from a synthetic
+    /// os-release file.
+    #[test]
+    fn os_distro_threads_through_sls_record() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        let record = test_engine().build_sls_record(Duration::from_millis(1));
+        // Consistency with the cache entry proves the field references the
+        // detected value rather than a placeholder constant.
+        assert_eq!(record["os.distro"], os_distro().as_str());
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let release = dir.path().join("os-release");
+        std::fs::write(
+            &release,
+            concat!(
+                "# https://www.alinux.com\n",
+                "NAME=\"Alibaba Cloud Linux\"\n",
+                "ID=alinux\n",
+                "VERSION_ID=\"3\"\n",
+                "HOME_URL=\"https://www.alinux.com\"\n",
+            ),
+        )
+        .unwrap();
+        let _env = EnvVarGuard::set("COSH_OS_RELEASE_PATH", release.to_str().unwrap());
+        assert_eq!(detect_os_distro(), "alinux 3");
+    }
+
+    /// parse_os_distro composes ID + VERSION_ID, unquotes both quote styles,
+    /// ignores unrelated keys, and degrades gracefully on partial data.
+    #[test]
+    fn parse_os_distro_composes_id_and_version() {
+        let alinux = concat!(
+            "# https://www.alinux.com\n",
+            "NAME=\"Alibaba Cloud Linux\"\n",
+            "PRETTY_NAME=\"Alibaba Cloud Linux 3 (Soaring Falcon)\"\n",
+            "ID=alinux\n",
+            "VERSION_ID=\"3\"\n",
+        );
+        assert_eq!(parse_os_distro(alinux), "alinux 3");
+        assert_eq!(
+            parse_os_distro("ID='ubuntu'\nVERSION_ID=24.04\n"),
+            "ubuntu 24.04"
+        );
+        assert_eq!(parse_os_distro("ID=fedora\n"), "fedora");
+        assert_eq!(parse_os_distro("VERSION_ID=\"7\"\n"), "7");
+        assert_eq!(parse_os_distro("PRETTY_NAME=\"Anolis OS 23\"\n"), "");
+        assert_eq!(parse_os_distro(""), "");
+    }
+
+    /// os-release(5) exclusivity: the vendor file answers only when the
+    /// primary is missing — never when the primary is keyless or unreadable.
+    #[test]
+    fn os_release_vendor_fallback_requires_missing_primary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let primary = dir.path().join("primary");
+        let vendor = dir.path().join("vendor");
+        std::fs::write(&vendor, "ID=debian\nVERSION_ID=\"12\"\n").unwrap();
+
+        // Missing primary: the vendor file answers.
+        assert_eq!(os_distro_from_release_files(&primary, &vendor), "debian 12");
+
+        // Keyless primary: exclusive use, stays empty.
+        std::fs::write(&primary, "PRETTY_NAME=\"Custom OS\"\n").unwrap();
+        assert_eq!(os_distro_from_release_files(&primary, &vendor), "");
+
+        // Unreadable primary (a directory reads back EISDIR, not NotFound):
+        // stays empty instead of adopting the vendor distro.
+        let unreadable = dir.path().join("unreadable");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert_eq!(os_distro_from_release_files(&unreadable, &vendor), "");
+
+        // Populated primary: exclusive use, vendor ignored.
+        std::fs::write(&primary, "ID=alinux\nVERSION_ID=\"3\"\n").unwrap();
+        assert_eq!(os_distro_from_release_files(&primary, &vendor), "alinux 3");
     }
 
     /// Metrics accumulation is reflected in the SLS record.
@@ -823,18 +1005,18 @@ mod tests {
     }
 
     /// Serialize env-var-dependent tests to avoid cross-test interference.
-    static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// RAII guard that saves an env var's original value on creation and
     /// restores it on drop so tests never leak state even if the test body
     /// panics.
-    struct EnvVarGuard {
+    pub(crate) struct EnvVarGuard {
         key: &'static str,
         old_value: Option<String>,
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let old_value = std::env::var(key).ok();
             std::env::set_var(key, value);
             Self { key, old_value }

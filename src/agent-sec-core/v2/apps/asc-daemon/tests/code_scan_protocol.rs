@@ -279,6 +279,35 @@ async fn a_local_user_scans_dangerous_bash_and_receives_the_verdict() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn python_keyword_command_arguments_reuse_bash_findings() {
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let bash = support::request_json(
+        &daemon.socket_path,
+        &json!({
+            "method": "action.code_scan",
+            "params": {"code": "rm -rf /tmp/test", "language": "bash"}
+        }),
+    )
+    .await;
+    let python = support::request_json(
+        &daemon.socket_path,
+        &json!({
+            "method": "action.code_scan",
+            "params": {
+                "code": r#"subprocess.Popen(args="rm -rf /tmp/test", shell=True)"#,
+                "language": "python"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(python["result"]["verdict"], bash["result"]["verdict"]);
+    assert_eq!(python["result"]["findings"], bash["result"]["findings"]);
+    assert_eq!(python["result"]["language"], json!("python"));
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dotted_action_alias_is_not_registered() {
     let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
     let response = support::request_json(

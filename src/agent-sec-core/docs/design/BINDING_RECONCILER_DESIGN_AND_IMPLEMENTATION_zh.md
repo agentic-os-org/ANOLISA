@@ -19,8 +19,9 @@ Assignment，保存所选 Policy revision 的完整快照；Binding 由 Scope �
 [调度、存储与恢复设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
 是后续 Runtime 集成的当前目标。其 CR-010～CR-015 替代本文中“整体聚合写入作为 SQL
 接口”“prepared 跨重启持久化”“队列去重/容量/补扫仅留 TODO”的旧提案：部署独立局部更新，
-每次 reconcile 重新读取 Binding 并从头执行，plan/prepared/返回结果仅在本次调用内使用，
-不跨调用缓存或落库；旧的 prepared 复用及跨调用结果补写机制均被替代。dirty 仅负责再次排队。
+每次新远端尝试重新读取 Binding 并从头执行，plan/prepared 仅在本次远端尝试内使用，
+不跨调用缓存或落库；未确认 write 和实际 outcome 在 AttemptSchedule 中保留至确认或被取代，
+后续调用先处理存储确认，不重复已完成的远端调用。临时结果不跨进程保留。dirty 仅负责再次排队。
 调度实现归 `asc-policy-runtime`，daemon 负责装配。具体流程见新设计第 7 节。
 本文的已有源码说明与历史测试证据保留，不代表新设计已实现；spec-only revision、删除及
 目标清理责任等未被替代的语义继续有效。
@@ -309,8 +310,9 @@ Runtime/WorkQueue 负责同 Binding 串行。这些职责不因某个 PEP 恰好
 |---|---|---|
 | Binding | 当前 spec 与 status | PAP 修改 spec/意图；Reconciler 条件推进 status |
 | deployments | Client 提供的 target 引用、来源 revision、presence、last_confirmed | Reconciler 管理；PAP 修改 spec 时保留 |
-| runtime | attempts_started、next_attempt_at、retry_policy、last_error | 新意图重置；幂等通知和自动重试不重置预算 |
-| 本次临时数据 | Adapter plan、Client prepared、调用结果、待写回凭据 | 仅存活于单次 reconcile；不进入 Repository schema |
+| 调用方 schedule | attempts_started、next_attempt_at、当前意图与存储续写进度 | 仅在进程内保留；新意图重置预算，幂等通知和自动重试不重置 |
+| 本次远端尝试数据 | Adapter plan、Client prepared | 仅存活于单次远端尝试；不进入 Repository schema |
+| 存储续写数据 | 实际调用结果、精确写入及待确认凭据 | 在 AttemptSchedule 中保留至确认或被取代；进程退出后丢失 |
 
 Reconciler 不解析 Client 的 DSL、HTTP body 或进程身份。只有 Client 提供的 target 引用和
 cleanup 随 deployment 保存，用于在当前 spec/PID 不可用时清理旧目标。
@@ -320,7 +322,8 @@ presence 为 UNKNOWN、PRESENT、ABSENT。PRESENT 表示最近确认的事实，
 UNKNOWN 并保留 last_confirmed；确认 Absent 后移除部署记录。route 必须仍解析到原目标，
 无法定位时保留清理责任，不能把配置缺失解释成目标不存在。
 
-每次重试重新翻译和准备；spec 更新保留旧 deployment，不保留旧 plan、prepared 或结果。
+每次新远端尝试重新翻译和准备；存储重试仅确认原写入。spec 更新保留旧 deployment，
+不保留旧 plan/prepared，原 claim 过期后丢弃旧结果。
 删除后重新 CREATE 使用新 Binding ID、revision 1；不复用已删除 Binding 的目标身份。
 
 ### 6.2 请求准入事务
@@ -341,12 +344,12 @@ UNKNOWN 并保留 last_confirmed；确认 Absent 后移除部署记录。route �
 
 ### 6.3 Worker 内部操作与数据库接口
 
-当前 `asc-policy-repository::BindingStateRepository` 只有两个接口：
+`asc-policy-repository::BindingStateRepository` 的核心读写接口如下：
 
 | 存储接口 | 原子语义 |
 |---|---|
-| `get_binding_state(id)` | 一致读取完整 `BindingStateSnapshot { binding, runtime, deployments }`，缺失与存储故障分开返回 |
-| `compare_exchange_binding_state(expected, write)` | 局部条件写；`write` 包含 write ID 及 `Option<ReconciliationPatch>`，补丁只有 status/runtime/deployments；None 删除整个聚合；返回 Applied / AlreadyApplied / Conflict |
+| `get_binding_state(id)` | 一致读取完整 `BindingStateSnapshot { binding, status_version, deployments }`，缺失与存储故障分开返回 |
+| `compare_exchange_binding_state(expected, write)` | 局部条件写；`write` 包含 write ID 及 `Option<ReconciliationPatch>`，补丁只有 status/deployments；None 删除整个聚合；返回 Applied / AlreadyApplied / Conflict |
 
 共享记录及接口位于核心下层，SQLite adapter 与 Reconciler 都依赖它；SQLite adapter 的运行时实现不
 依赖 `asc-pcp`。PAP 和 aggregate CAS 使用同一份权威 SQLite Binding 状态；Reconciler 构造
@@ -358,24 +361,27 @@ UNKNOWN 并保留 last_confirmed；确认 Absent 后移除部署记录。route �
 |---|---|
 | `claim` | 检查 pending、到期时间和预算；计算 running、attempts +1、固定 retry policy，条件写回运行状态 |
 | `register` | 校验本次 prepared/目标身份，仅写 deployments 登记 UNKNOWN，成功后才调用 Client |
-| `finish` | 验证并合并观察；原 revision/status 匹配才计算生命周期；删除成功构造 None，其它结果构造字段补丁；过期结果只更新 deployments |
+| `finish` | 原 revision/status_version/status 匹配才提交完整结果；删除成功构造 None；过期结果整笔取消，保留原部署责任 |
 
-条件写比较 revision/status 及补丁实际修改的 runtime/deployments；删除比较全部协调字段。完成 CAS 冲突后，
-核心重读并重新合并；新意图保留，旧任务的有效观察仍可记账并返回 Superseded。
-登记和完成的 CAS 竞争最多在一次调用内重试 16 次，耗尽返回存储不可用，由调用方
-调度后续尝试；本次调用内只重试写回，调用退出后丢弃结果，下次从头执行。
+条件写比较 revision/status_version/完整生命周期；写 deployments 时另比较原部署集合，删除比较全部协调字段。完成 CAS 冲突后，
+核心重读原 claim；已过期则取消整个旧结果并返回 Superseded，不更新 Deployment。
+成功提交以实际写回执确定版本；新删除意图不继承旧 Apply 的重试预算。
+登记和完成的 CAS 竞争最多在一次调用内重试 16 次，耗尽返回 Contended，由调用方
+调度后续尝试。存储失败时保留未确认 write，结果写回失败或竞争耗尽时保留实际 outcome；
+下一次调用先处理存储续写，不重复已完成的远端调用。
+原 claim 过期则整笔取消旧结果，保留已登记的清理责任。
 
 核心在调用完成 CAS 前缓存精确 write ID、expected 和 write。存储保存最近一次 CAS
 写回执，PAP 更新不清除它；提交后 unwind 的相同写入返回 AlreadyApplied，避免再次
 处理已经删除的 Absent 行。回执只保证最近写入的重放。调用方由同一个 WorkQueue 调度，前次调用及异常收尾
-实际退出后才能再次执行同一 Binding；跨调用不复用结果或写入对象。
+实际退出后才能再次执行同一 Binding；存储确认期间跨调用保留原结果及写入对象，不重复远端调用。
 整个聚合删除时同时移除回执；缺失 ID 的删除重放返回 AlreadyApplied，替换返回 Conflict。
 此幂等性依赖 ID 永不复用，不引入无限保留的 tombstone。删除也比较全部协调字段，不能
-因旧任务 revision/status 匹配就抹掉新 runtime 或 deployment。判定清理完成仍在核心。
+因旧任务 revision/status 匹配就抹掉新状态或 deployment。判定清理完成仍在核心。
 
 数据库负责一致读、原子条件写、身份校验和写回执；READY/DELETED 判定、观察归属、
-退避计算及本次调用的 slot 不属于存储职责。SQLite 后续实现同一短事务契约，网络
-调用始终在事务之外。补扫和 orphan 恢复仍属于后续调度/持久化工作包。
+退避计算及 Runtime 持有的 slot 不属于存储职责。SQLite 实现同一短事务契约，网络
+调用始终在事务之外。补扫和恢复设计见 Runtime 与 Policy SQLite 持久化文档。
 
 ### 6.4 调度串行与同 revision 的竞争
 
@@ -384,15 +390,16 @@ Runtime/WorkQueue 的 Running entry 覆盖“重读 -> claim -> prepare/登记�
 只设置 dirty，不会让另一个 worker 领取同一 Binding。核心不再维护执行锁表。
 PAP 准入不受 Running 阻塞，只使用短 repository 事务。
 
-例：worker 认领 `(revision=2, APPLYING)`；PAP Delete 写入 `(2, PENDING_DELETE)`。
-旧 worker 即使成功创建目标，也只能保存目标事实，其 READY/重试/失败状态 CAS 必须
-失败。随后 Delete worker 从队列领取，重读并清理包含该新目标在内的全部记录。
+例：worker 认领 `(revision=2, status_version=5, APPLYING)`；PAP Delete 写入
+`(2, 6, PENDING_DELETE)`。旧 worker 即使成功创建目标，其观察与 READY/重试/失败
+结果也必须整笔拒绝；已登记的 UNKNOWN 保持不变。随后 Delete worker 从队列领取，
+重读并清理包含该新目标在内的全部责任记录。
 
 `APPLYING -> PENDING_DELETE` 后的所有 UPDATE 均拒绝，不存在转回 Apply 的路径。
 同 spec ApplyFailed 重试虽然 revision 不变，仍须等旧结果确认后再 claim，避免同一
 Binding 的新旧尝试重叠。“Running 覆盖全部结果写回”由 Runtime 竞争测试保证。
 
-本提案不新增公开 operation revision。同 revision/status CAS 的有效性依赖单 daemon、
+本提案不新增公开 operation revision。内部 revision/status_version/status CAS 仍依赖单 daemon、
 本地串行执行与完整 task ownership；未来多 worker 进程、租约抢占或异步晚到写入
 需要另外定义内部 fencing，不能沿用本方案并宣称已经安全。
 
@@ -616,7 +623,7 @@ Adapter 语义拒绝、Client 明确拒绝不重试；暂时不可用或结果�
 | B 创建成功、结果事务前退出 | B 仍 UNKNOWN；同一请求重放/确认，不能重新生成目标身份或改变进程信息 |
 | 结果事务中失败 | 事务整体回滚；已有 UNKNOWN/旧记录保留，不能报告完成 |
 | 目标观察与终态事务已提交、通知/响应前退出 | 恢复见终态，不无条件重新执行 |
-| Apply 执行时 PAP Delete 已提交 | 旧 task 目标结果可记账，旧 lifecycle CAS 失败；下一次执行最新 Delete |
+| Apply 执行时 PAP Delete 已提交 | 旧 task 观察及生命周期结果整笔拒绝，保留 UNKNOWN；下一次执行最新 Delete |
 | 永久失败或耗尽后重启 | 保持 FAILED，不自动恢复预算；等待新的用户请求 |
 
 启动恢复在获取 host singleton 后运行，拒绝不兼容 schema，并建立 worker 所有权。
@@ -656,19 +663,20 @@ Policy/Scope 写操作只依赖自身校验、编译及 Repository；具体写�
 当前同步核心的 panic 收尾契约：在 WorkQueue 仍保持 Running 期间捕获 unwind；有实际完成
 结果则优先提交，否则以 `RECONCILE_WORKER_PANICKED` 对原 claim 做失败 CAS。
 失败不代表目标不存在，UNKNOWN 与清理责任均保留，prepared 随本次调用退出丢弃；新意图不能被覆盖。
-本次收尾存储失败则丢弃临时结果；Runtime 尝试对原意图条件写 Failed，
-仅终止仍无法确认时保留 Exhausted 阻止自动重放；
-后续显式新通知触发时按 Repository 事实处理最新意图。
-同一次调用内，SQLite adapter 的最近 CAS 回执支持提交后 unwind 的精确写入重放；
+本次收尾存储失败时保留未确认写入及已有结果；Runtime 释放 worker 并安排存储重试，
+下一次调度先确认原写入。没有待确认存储操作时，Runtime 才对仍属原意图的失败条件写 Failed；
+仅终止仍无法确认时保留 Exhausted 阻止自动重放。
+SQLite adapter 的最近 CAS 回执支持提交后 unwind 或存储重试中的精确写入重放；
 整个聚合删除后的重放以缺失 ID 确认，不在 panic 收尾中重复 Client 调用。
 完成本次收尾后恢复原 panic，由 worker 捕获并记录本次失败，不直接关闭服务；不能把
 panic payload 投影为公开错误。此机制不捕获 abort，不修复已中毒的 backend，不替代
 后续 daemon failed-join/DJOB/DPROC fixtures 或 durable startup recovery。
 
-核心仅保留每次调用新建的 `ExecutionSlot`，保存待提交结果和本次写入凭据；没有共享锁表、
-槽位分配或回收。未知 ID 读取缺失后直接返回。slot 随调用退出而丢弃，不能在进程崩溃后写回。
+`ExecutionSlot` 由调用方的 AttemptSchedule 持有，保存待提交结果和精确写入凭据；
+核心没有共享锁表、槽位分配或回收。slot 在存储确认期间跨调用保留，确认或结果被取代后释放；
+进程退出时丢失，不能在进程崩溃后写回。无待确认操作且 ID 读取缺失时直接返回。
 Runtime 在同步调用及 unwind 收尾、结果查询结束前保持 Running。结果已终结或记录缺失时
-移除条目；原意图仍 pending/running 时条件写 Failed，确认成功后移除；查询/写入失败或 panic
+移除条目；没有待确认存储操作且原意图仍 pending/running 时条件写 Failed，确认成功后移除；查询/写入失败或 panic
 导致终止无法确认时保留 Exhausted。Skipped 调度查询同样纳入单 Binding panic 隔离。dirty 优先于旧结果，
 转为 Queued；新调用不得在前次收尾结束前进入。
 
@@ -732,7 +740,7 @@ Markdown ID；允许符号 UUID 引用，但不得删掉 spec 或关键请求字
 
 trace 至少区分 read、claim commit、prepare、identity commit、Client request/response、
 observation commit、status CAS 成功/冲突、retry schedule、notification/recovery。
-真实事务中的观察与 status 可以同一 commit；trace 仍须证明先有目标依据才允许完成。
+目标观察与 status 必须同一条件事务提交；trace 仍须证明先有目标依据才允许完成。
 所有 fixture 记录 expected 与 actual，对未知步骤、未消费注入、额外目标调用均失败。
 
 ### 11.2 API 与状态验收矩阵
@@ -761,7 +769,7 @@ Reconciler 核心职责。独立核心门禁以本节前述 ACCEPTANCE.md 为准
 |---|---|---|
 | REC-001 | 初次 Apply | 完整翻译输入输出；identity commit 先于目标请求；观察与 READY 条件正确 |
 | REC-002 | A 已生效，提交 B 后立即 Delete，B 尚未执行 | Delete 清理 A；不只删除 B 推导身份；不调用 Adapter |
-| REC-003 | A 已生效，B 在执行时 Delete | 保留 A/B；旧 task 结果只更新目标事实；旧 READY/失败/重试 CAS 均失败 |
+| REC-003 | A 已生效，B 在执行时 Delete | 保留 A/B 的预登记责任；旧 task 的观察与 READY/失败/重试结果整笔拒绝 |
 | REC-004 | Apply -> Delete -> 同 spec CREATE | Delete 不增版且不可撤销；清理后记录不存在；新 ID/revision 1，不复用旧目标 |
 | REC-005 | PAP 预读后 worker 抢先 claim | repository 重新检查完整准入，不受 service TOCTOU 影响 |
 | REC-006 | identity 持久化失败 | 零目标修改调用，保留已有记录和预算 |

@@ -3,6 +3,14 @@
 use super::{AgentsightConfig, DEFAULT_CONNECTION_CAPACITY};
 
 #[test]
+fn new_and_bundled_configs_default_to_128_connections() {
+    assert_eq!(AgentsightConfig::new().connection_capacity, 128);
+    let bundled: serde_json::Value =
+        serde_json::from_str(include_str!("../../agentsight.json")).unwrap();
+    assert_eq!(bundled["runtime_limits"]["connection_capacity"], 128);
+}
+
+#[test]
 fn json_connection_capacity_overrides_default() {
     for capacity in [1, 32, 64] {
         let mut config = AgentsightConfig::new();

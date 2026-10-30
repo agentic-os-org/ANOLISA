@@ -85,6 +85,39 @@ pub fn same_call_id(a: &str, b: &str) -> bool {
     normalized(a) == normalized(b)
 }
 
+/// Resolve an echoed tool-call ID against the original IDs in its scope.
+///
+/// An exact ID takes precedence over tolerant echoes. Without an exact match,
+/// return an owner only when all matching candidates name the same original ID.
+/// Repeated occurrences of that ID are allowed; distinct aliases are ambiguous.
+/// Empty echoes and empty candidate IDs do not identify a call.
+pub fn resolve_call_id<'a>(
+    echo: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    if echo.is_empty() {
+        return None;
+    }
+    let mut owner = None;
+    let mut ambiguous = false;
+    for candidate in candidates {
+        if candidate == echo {
+            return Some(candidate);
+        }
+        if !candidate.is_empty() && same_call_id(candidate, echo) {
+            if owner.is_some_and(|previous| previous != candidate) {
+                ambiguous = true;
+            }
+            owner = Some(candidate);
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        owner
+    }
+}
+
 /// A single observation result from a tool call or action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservationResult {
@@ -770,5 +803,27 @@ mod tests {
             let json = serde_json::to_string(&source).unwrap();
             assert_eq!(json, format!("\"{}\"", source.as_str()));
         }
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::resolve_call_id;
+    #[test]
+    fn exact_ids_win_in_either_iteration_order() {
+        for ids in [["call_x", "callx"], ["callx", "call_x"]] {
+            assert_eq!(resolve_call_id("callx", ids), Some("callx"));
+        }
+        assert_eq!(resolve_call_id("CALL", ["call", "CALL"]), Some("CALL"));
+    }
+    #[test]
+    fn only_unique_nonempty_aliases_can_resolve() {
+        assert_eq!(resolve_call_id("callx", ["call_x", "call-x"]), None);
+        assert_eq!(
+            resolve_call_id("callx", ["call_x", "call_x"]),
+            Some("call_x")
+        );
+        assert_eq!(resolve_call_id("", [""]), None);
+        assert_eq!(resolve_call_id("unknown", ["call_x"]), None);
     }
 }

@@ -57,7 +57,7 @@ pub fn apply_binding_write(
             }),
         ));
     };
-    if !matched && !patch.preserve_observations_on_conflict {
+    if !matched {
         return Ok(conflict());
     }
     let mut next = current.clone();
@@ -82,14 +82,6 @@ pub fn apply_binding_write(
             {
                 return Err(StoreError::Invalid);
             }
-            if patch.preserve_observations_on_conflict
-                && !current
-                    .deployments
-                    .iter()
-                    .any(|d| d.target == deployment.target && d.revision == deployment.revision)
-            {
-                return Err(StoreError::Invalid);
-            }
         }
         next.deployments.clone_from(deployments);
     }
@@ -97,7 +89,7 @@ pub fn apply_binding_write(
         if status.phase == BindingStatus::Deleted {
             return Err(StoreError::Invalid);
         }
-        if matched && *status != current.binding.status {
+        if *status != current.binding.status {
             next.status_version = current
                 .status_version
                 .checked_add(1)
@@ -107,7 +99,7 @@ pub fn apply_binding_write(
     }
     let receipt = WriteReceipt {
         status_version: Some(next.status_version),
-        status_applied: matched,
+        status_applied: true,
     };
     Ok((Some(next), WriteResult::Applied(receipt)))
 }

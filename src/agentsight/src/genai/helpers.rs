@@ -262,6 +262,11 @@ impl GenAIBuilder {
     /// - Plain string: `"content": "text"`.
     /// - Array of content blocks with type `text` / `input_text` / `output_text`:
     ///   `"content": [{"type":"input_text","text":"..."}]`.
+    /// - The DashScope/Bailian native multimodal shape, whose blocks carry no
+    ///   `type` at all: `"content": [{"text":"..."},{"image":"..."}]`. The
+    ///   native response path and `parse_request_body` already accept any
+    ///   block with a `text` field, so the drain path must too; a typed
+    ///   non-text block (`{"type":"image","text":...}`) is still ignored.
     pub(super) fn extract_message_text(message: &serde_json::Value) -> Option<String> {
         let c = message.get("content")?;
         if let Some(s) = c.as_str() {
@@ -272,13 +277,11 @@ impl GenAIBuilder {
         if let Some(arr) = c.as_array() {
             let text: String = arr
                 .iter()
-                .filter_map(|item| {
-                    let ty = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if matches!(ty, "text" | "input_text" | "output_text") {
+                .filter_map(|item| match item.get("type").and_then(|t| t.as_str()) {
+                    None | Some("text" | "input_text" | "output_text") => {
                         item.get("text").and_then(|t| t.as_str())
-                    } else {
-                        None
                     }
+                    Some(_) => None,
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -300,10 +303,18 @@ impl GenAIBuilder {
     /// as provider `unknown` — while the audit labels the same path `gemini`
     /// through `MessageParser::detect_provider`, so one call had two
     /// identities.
+    ///
+    /// The bare spacings the row gate admits (`/chat/completions`,
+    /// `/completions`, which is what a gateway whose base URL carries no
+    /// `/v1` requests) are admitted here for the same reason: the deep parse
+    /// accepts them, so a bare-path call whose body never parsed must not fall
+    /// through to the token record and end up `unknown`.
     pub(super) fn extract_provider_from_path(&self, path: &str) -> Option<String> {
         if path.contains("anthropic") || path.contains("/v1/messages") {
             Some("anthropic".to_string())
-        } else if path.contains("/v1/chat/completions")
+        } else if path.contains("/chat/completions")
+            || path.contains("/completions")
+            || path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
             || path.contains("/v1/responses")
         {
@@ -869,6 +880,33 @@ mod tests {
             Some("sysom".to_string())
         );
         assert_eq!(builder.extract_provider_from_path("/unknown"), None);
+    }
+
+    /// The row gate (`parser::llm::is_llm_api_path`) and the deep parse
+    /// (`MessageParser::detect_provider`) both admit the bare spellings a
+    /// gateway whose base URL carries no `/v1` requests. This map did not, so
+    /// a bare-path call whose body never parsed — a truncated capture — had no
+    /// provider left except the token record, and fell through to `unknown`
+    /// while the audit row for the same call said openai.
+    #[test]
+    fn test_extract_provider_from_path_bare_spellings() {
+        let builder = GenAIBuilder::new();
+        for path in [
+            "/chat/completions",
+            "/completions",
+            "https://gw.internal/chat/completions",
+        ] {
+            assert_eq!(
+                crate::analyzer::message::MessageParser::detect_provider(path),
+                Some("openai"),
+                "{path} is a detected provider"
+            );
+            assert_eq!(
+                builder.extract_provider_from_path(path),
+                Some("openai".to_string()),
+                "{path} is detected as openai but the genai row labels it otherwise"
+            );
+        }
     }
 
     /// Native protocol calls used to fall through to `"unknown"` (streaming) or
@@ -1646,6 +1684,24 @@ mod tests {
     fn test_extract_message_text_empty() {
         let msg = serde_json::json!({"role": "user", "content": ""});
         assert_eq!(GenAIBuilder::extract_message_text(&msg), None);
+    }
+
+    /// DashScope/Bailian native multimodal blocks carry no `type`:
+    /// `[{"text": "…"}, {"image": "https://…"}]`. The native response path
+    /// reads any block with a `text` field, and `parse_request_body` does the
+    /// same for requests, but the drain extractor required an explicit text
+    /// type — so a drained native call lost its `user_query` and was keyed
+    /// apart from its own turn.
+    #[test]
+    fn test_extract_message_text_dashscope_native_type_less_blocks() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [{"text": "描述这张图"}, {"image": "https://x/y.png"}]
+        });
+        assert_eq!(
+            GenAIBuilder::extract_message_text(&msg),
+            Some("描述这张图".to_string())
+        );
     }
 
     #[test]

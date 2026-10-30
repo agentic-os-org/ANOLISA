@@ -215,6 +215,7 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         request_id = request_id_from(body, headers)
         run_id = header_value(headers, "X-Benchmark-Run-ID")
         preflight = header_value(headers, "X-Benchmark-Preflight") == "1"
+        truncate_sse = header_value(headers, "X-Benchmark-Fault") == "truncated-sse"
         settings = self.server.settings  # type: ignore[attr-defined]
         token_rate = getattr(settings, "tokens_per_second", None)
         if token_rate is not None and self.path != "/v1/chat/completions":
@@ -228,7 +229,7 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             if token_rate is not None
             else response_events(self.path, request_id, settings.chunks, settings.chunk_bytes)
         )
-        if settings.sse and not preflight:
+        if (settings.sse or truncate_sse) and not preflight:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -242,6 +243,11 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                     # Absolute deadlines avoid accumulating serialization/write latency.
                     time.sleep(max(0, started + (index + 1) / token_rate - time.monotonic()))
                 self.chunked_write(f"data: {json.dumps(event, separators=(',', ':'))}\n\n".encode())
+                if truncate_sse:
+                    # Make the response incomplete on the wire even when the
+                    # normal mock stream has no pacing delay.
+                    self.close_connection = True
+                    return
                 if token_rate is None and settings.chunk_delay:
                     time.sleep(settings.chunk_delay)
             self.chunked_write(b"data: [DONE]\n\n")
@@ -297,24 +303,26 @@ class BenchmarkHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 128
 
-    def process_request(self, request: socket.socket, client_address: Any) -> None:
-        """Route ALPN-negotiated HTTP/2 connections to the h2 event loop."""
-        if request.selected_alpn_protocol() == "h2":
-            thread = threading.Thread(
-                target=serve_h2,
-                args=(request, self.settings, self.verbose),  # type: ignore[attr-defined]
-                daemon=True,
-            )
-            thread.start()
-        else:
-            super().process_request(request, client_address)
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+        """Keep slow handshakes off the accept loop and dispatch after ALPN."""
+        try:
+            if isinstance(request, ssl.SSLSocket):
+                request.do_handshake()
+            if request.selected_alpn_protocol() == "h2":
+                serve_h2(request, self.settings, self.verbose)
+                return
+        except OSError:
+            self.shutdown_request(request)
+            return
+        super().process_request_thread(request, client_address)
 
 
 def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
     """Serve HTTP/2 streams using python-h2, which keeps h2load real end-to-end."""
     from h2.config import H2Configuration
     from h2.connection import H2Connection
-    from h2.events import DataReceived, RequestReceived, StreamEnded
+    from h2.events import DataReceived, RequestReceived, StreamEnded, StreamReset
+    from h2.exceptions import StreamClosedError
 
     connection = H2Connection(config=H2Configuration(client_side=False, header_encoding="utf-8"))
     connection.initiate_connection()
@@ -361,50 +369,63 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
                 bodies.setdefault(event.stream_id, bytearray()).extend(event.data)
                 connection.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
             elif isinstance(event, StreamEnded):
-                path = paths.pop(event.stream_id, "")
-                run_id = run_ids.pop(event.stream_id, None)
-                body = bytes(bodies.pop(event.stream_id, b""))
-                if path == "/healthz":
-                    send_h2_body(connection, event.stream_id, b"OK", "text/plain")
-                elif path in ENDPOINTS:
-                    rid = request_id_from(body, {})
-                    record_request(settings, run_id, rid, HTTPStatus.OK)
-                    response = response_events(path, rid, settings.chunks, settings.chunk_bytes)
-                    if settings.sse:
-                        connection.send_headers(
-                            event.stream_id,
-                            [
-                                (":status", "200"),
-                                ("content-type", "text/event-stream"),
-                            ],
-                        )
-                        # python-h2 buffers frames until data_to_send() is
-                        # called; flush after headers and after every chunk
-                        # so --chunk-delay-ms paces delivery instead of
-                        # delaying one final burst (the HTTP/1.1 path
-                        # already flushes per chunk via chunked_write).
-                        sock.sendall(connection.data_to_send())
-                        for item in response:
-                            frame = f"data: {json.dumps(item, separators=(',', ':'))}\n\n".encode()
-                            send_stream_data(event.stream_id, frame)
-                            if settings.chunk_delay:
-                                time.sleep(settings.chunk_delay)
-                        send_stream_data(event.stream_id, b"data: [DONE]\n\n", end_stream=True)
-                    else:
-                        payload = json.dumps(
-                            {
-                                "request_id": rid,
-                                "usage": {
-                                    "input_tokens": INPUT_TOKENS,
-                                    "output_tokens": OUTPUT_TOKENS,
-                                    "total_tokens": TOTAL_TOKENS,
+                try:
+                    path = paths.pop(event.stream_id, "")
+                    run_id = run_ids.pop(event.stream_id, None)
+                    body = bytes(bodies.pop(event.stream_id, b""))
+                    if path == "/healthz":
+                        send_h2_body(connection, event.stream_id, b"OK", "text/plain")
+                    elif path in ENDPOINTS:
+                        rid = request_id_from(body, {})
+                        record_request(settings, run_id, rid, HTTPStatus.OK)
+                        response = response_events(path, rid, settings.chunks, settings.chunk_bytes)
+                        if settings.sse:
+                            connection.send_headers(
+                                event.stream_id,
+                                [
+                                    (":status", "200"),
+                                    ("content-type", "text/event-stream"),
+                                ],
+                            )
+                            # python-h2 buffers frames until data_to_send() is
+                            # called; flush after headers and after every chunk
+                            # so --chunk-delay-ms paces delivery instead of
+                            # delaying one final burst (the HTTP/1.1 path
+                            # already flushes per chunk via chunked_write).
+                            sock.sendall(connection.data_to_send())
+                            for item in response:
+                                frame = (
+                                    f"data: {json.dumps(item, separators=(',', ':'))}\n\n".encode()
+                                )
+                                send_stream_data(event.stream_id, frame)
+                                if settings.chunk_delay:
+                                    time.sleep(settings.chunk_delay)
+                            send_stream_data(event.stream_id, b"data: [DONE]\n\n", end_stream=True)
+                        else:
+                            payload = json.dumps(
+                                {
+                                    "request_id": rid,
+                                    "usage": {
+                                        "input_tokens": INPUT_TOKENS,
+                                        "output_tokens": OUTPUT_TOKENS,
+                                        "total_tokens": TOTAL_TOKENS,
+                                    },
                                 },
-                            },
-                            separators=(",", ":"),
-                        ).encode()
-                        send_h2_body(connection, event.stream_id, payload, "application/json")
-                else:
-                    connection.send_headers(event.stream_id, [(":status", "404")], end_stream=True)
+                                separators=(",", ":"),
+                            ).encode()
+                            send_h2_body(connection, event.stream_id, payload, "application/json")
+                    else:
+                        connection.send_headers(
+                            event.stream_id, [(":status", "404")], end_stream=True
+                        )
+
+                except StreamClosedError:
+                    # A peer may cancel this response while flow control is blocked.
+                    continue
+            elif isinstance(event, StreamReset):
+                paths.pop(event.stream_id, None)
+                run_ids.pop(event.stream_id, None)
+                bodies.pop(event.stream_id, None)
 
     try:
         while True:
@@ -461,10 +482,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    if args.chunks < 1 or args.chunk_bytes < 1 or args.chunk_delay_ms < 0:
+    parser = build_parser()
+    args = parser.parse_args()
+    if (
+        args.chunks < 1
+        or args.chunk_bytes < 1
+        or not math.isfinite(args.chunk_delay_ms)
+        or args.chunk_delay_ms < 0
+    ):
         raise SystemExit(
-            "chunks, chunk-bytes, and chunk-delay-ms must be non-negative (chunks/bytes > 0)"
+            "chunks, chunk-bytes, and chunk-delay-ms must be non-negative "
+            "(chunks/bytes > 0); chunk-delay-ms must be finite"
         )
     if args.tokens_per_second is not None or args.output_tokens is not None:
         if (
@@ -502,7 +530,9 @@ def main() -> int:
         context.set_alpn_protocols(["h2", "http/1.1"])
     else:
         context.set_alpn_protocols(["http/1.1"])
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.socket = context.wrap_socket(
+        server.socket, server_side=True, do_handshake_on_connect=False
+    )
     print(f"mock LLM server listening on https://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()

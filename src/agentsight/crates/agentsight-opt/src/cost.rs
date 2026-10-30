@@ -383,7 +383,8 @@ pub(crate) fn is_content_degraded(traj: &AtifTrajectory) -> bool {
 
 /// Per-turn metadata kept aside to compute `removable_turn` in a second pass.
 struct TurnMeta {
-    primary_sig: String, // "name|cmd_sig" of the first tool call in the step
+    actions: Vec<(String, serde_json::Value)>,
+    user_turn: usize,
     all_calls_errored: bool,
     has_tool: bool,
 }
@@ -495,6 +496,7 @@ impl CallBuilder {
 fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall> {
     let origin = traj.origin_ts().unwrap_or_default();
     let mut b = CallBuilder::new(origin, static_region);
+    let mut user_turn = 0usize;
 
     for step in &traj.steps {
         match step.source.as_str() {
@@ -507,20 +509,14 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     turn_output += estimate_tokens(m);
                 }
                 let mut label: Option<String> = None;
-                let mut primary_sig = String::new();
+                let mut actions = Vec::new();
                 for call in step.calls() {
                     // Tool-call args are model-generated output, replayed as history.
                     turn_output += estimate_tokens(&call.arguments.to_string());
                     if label.is_none() {
                         label = Some(call.function_name.clone());
                     }
-                    if primary_sig.is_empty() {
-                        primary_sig = format!(
-                            "{}|{}",
-                            call.function_name,
-                            call.command_summary(usize::MAX)
-                        );
-                    }
+                    actions.push((call.function_name.clone(), call.arguments.clone()));
                 }
                 let has_tool = !step.calls().is_empty();
                 let all_calls_errored = has_tool
@@ -529,7 +525,10 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     && step.calls().iter().enumerate().all(|(index, call)| {
                         step.results().iter().any(|result| {
                             result.source_call_id.as_deref().is_some_and(|id| {
-                                agentsight_atif::same_call_id(id, &call.tool_call_id)
+                                agentsight_atif::resolve_call_id(
+                                    id,
+                                    step.calls().iter().map(|call| call.tool_call_id.as_str()),
+                                ) == Some(call.tool_call_id.as_str())
                             })
                         }) || (step
                             .results()
@@ -544,7 +543,8 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     turn_output,
                     label,
                     TurnMeta {
-                        primary_sig,
+                        actions,
+                        user_turn,
                         all_calls_errored,
                         has_tool,
                     },
@@ -561,6 +561,7 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                 }
             }
             "user" => {
+                user_turn += 1;
                 b.hist_user += estimate_tokens(step.message.as_deref().unwrap_or(""));
             }
             _ => {} // system steps feed the static region, already injected
@@ -568,11 +569,16 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
     }
 
     // Second pass: orchestration-layer heuristic for removable_turn.
-    // A turn is flagged when it duplicates the previous turn's primary action
-    // (spinning) or every tool call in it errored (failed retry).
+    // Repeating one action does not make the whole parallel batch redundant.
+    // A new user turn can explicitly request a repeat, so compare complete
+    // action batches only within the same user turn. Failed-call handling is
+    // independent of this duplicate-action heuristic.
     for i in 0..b.calls.len() {
         let m = &b.metas[i];
-        let dup = i > 0 && !m.primary_sig.is_empty() && b.metas[i - 1].primary_sig == m.primary_sig;
+        let dup = i > 0
+            && !m.actions.is_empty()
+            && b.metas[i - 1].user_turn == m.user_turn
+            && b.metas[i - 1].actions == m.actions;
         b.calls[i].removable_turn = dup || (m.has_tool && m.all_calls_errored);
     }
 
@@ -938,19 +944,26 @@ fn looks_like_path(token: &str) -> bool {
 /// path arguments masked, digits masked. `rg foo src/a.rs` and `rg foo src/b.rs`
 /// collapse to one signature, while `cargo test` stays distinct from `cargo build`.
 fn normalize_cmd(cmd: &str) -> String {
-    let head = cmd
+    let segments: Vec<&str> = cmd
         .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split('|'))
+        .flat_map(|s| s.split(';'))
+        .collect();
+    // A leading `cd <dir>` only locates the working tree; the action identity
+    // lives in the command after it. Taking the first segment verbatim merged
+    // every `cd /repo && …` call into one `cd <path>` signature — exactly the
+    // collapse of distinct actions the axis is documented to avoid.
+    let mut index = 0;
+    while segments[index]
+        .split_whitespace()
         .next()
-        .unwrap_or(cmd)
-        .split("||")
-        .next()
-        .unwrap_or(cmd)
-        .split('|')
-        .next()
-        .unwrap_or(cmd)
-        .split(';')
-        .next()
-        .unwrap_or(cmd);
+        .is_some_and(|token| token.eq_ignore_ascii_case("cd"))
+        && index + 1 < segments.len()
+    {
+        index += 1;
+    }
+    let head = segments[index];
     let masked: Vec<String> = head
         .split_whitespace()
         .take(6)
@@ -1200,10 +1213,14 @@ pub(crate) fn extract_waste_candidates_from(
                             .source_call_id
                             .as_deref()
                             .and_then(|id| {
+                                let owner = agentsight_atif::resolve_call_id(
+                                    id,
+                                    step.calls().iter().map(|call| call.tool_call_id.as_str()),
+                                )?;
                                 step.calls()
                                     .iter()
-                                    .find(|c| agentsight_atif::same_call_id(&c.tool_call_id, id))
-                                    .map(|c| c.function_name.clone())
+                                    .find(|call| call.tool_call_id == owner)
+                                    .map(|call| call.function_name.clone())
                             })
                             .or_else(|| {
                                 // Positional pairing is only for documents whose
@@ -1866,6 +1883,43 @@ mod tests {
         // Only the first pipeline segment matters for the action's identity.
         let piped = normalize_action_sig(&call("Bash", json!({"command": "cargo test | tail -5"})));
         assert_eq!(test, piped);
+    }
+
+    /// A leading `cd <dir>` only locates the working tree. The first segment
+    /// used to become the whole signature, so `cd /repo && cargo test` and
+    /// `cd /repo && cargo build` collapsed into the same `cd <path>` axis —
+    /// the exact merge the signature is documented to avoid, and the one that
+    /// hid most real recurrence in agent traces where cd-prefixed compounds
+    /// are the norm.
+    #[test]
+    fn action_sig_skips_leading_cd_segments() {
+        let test =
+            normalize_action_sig(&call("Bash", json!({"command": "cd /repo && cargo test"})));
+        let build =
+            normalize_action_sig(&call("Bash", json!({"command": "cd /repo && cargo build"})));
+        assert_ne!(
+            test, build,
+            "commands after a leading cd must stay distinct"
+        );
+        assert_eq!(test, "Bash:cargo test");
+        assert_eq!(build, "Bash:cargo build");
+
+        // The directory itself is not part of the action's identity.
+        let elsewhere =
+            normalize_action_sig(&call("Bash", json!({"command": "cd /other && cargo test"})));
+        assert_eq!(test, elsewhere);
+
+        // A bare cd remains its own action.
+        let lone = normalize_action_sig(&call("Bash", json!({"command": "cd /repo"})));
+        assert_eq!(lone, "Bash:cd <path>");
+
+        // Chained cds still reach the real command, and pipelines keep their
+        // first non-cd segment.
+        let chained = normalize_action_sig(&call(
+            "Bash",
+            json!({"command": "cd /a && cd /b && cargo test | tail"}),
+        ));
+        assert_eq!(chained, test);
     }
 
     #[test]

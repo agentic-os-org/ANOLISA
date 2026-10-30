@@ -10,7 +10,58 @@ use std::sync::OnceLock;
 
 use fancy_regex::Regex;
 
+use crate::errors::CodeScanError;
 use crate::rules::Language;
+
+const PYTHON_SHELL_COMMAND_ARGUMENTS: &[(&str, &str)] = &[
+    ("os.system", "command"),
+    ("os.popen", "cmd"),
+    ("subprocess.run", "args"),
+    ("subprocess.call", "args"),
+    ("subprocess.check_call", "args"),
+    ("subprocess.check_output", "args"),
+    ("subprocess.Popen", "args"),
+    ("subprocess.getoutput", "cmd"),
+    ("subprocess.getstatusoutput", "cmd"),
+];
+
+pub(crate) fn extract_python_shell_commands(code: &str) -> Result<Vec<&str>, CodeScanError> {
+    static COMMANDS: OnceLock<Regex> = OnceLock::new();
+    // Consume literals in atomic runs to avoid false call sites and per-character backtracking.
+    let pattern = COMMANDS.get_or_init(|| {
+        let trivia = r"(?:\s|\#[^\n]*)*";
+        let calls = PYTHON_SHELL_COMMAND_ARGUMENTS
+            .iter()
+            .map(|(callee, keyword)| {
+                let callee = callee.replace('.', r"\.");
+                format!(r"{callee}(?:[ \t\f]|\\\r?\n)*\({trivia}(?:{keyword}{trivia}={trivia})?")
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let pattern = format!(
+            concat!(
+                r"(?s)(?<![\w.])(?:{calls})",
+                r#"(?:"(?P<double>[^"\\\r\n]*)"|'(?P<single>[^'\\\r\n]*)')"#,
+                r"{trivia}(?=[,)])",
+                r"|\#[^\n]*",
+                r#"|(?i:[rubf]{{0,2}})(?:"""(?>[^"\\]+|\\.|"(?!""))*(?:"""|\z)"#,
+                r"|'''(?>[^'\\]+|\\.|'(?!''))*(?:'''|\z)",
+                r#"|"(?>[^"\\]+|\\.)*(?:"|\z)|'(?>[^'\\]+|\\.)*(?:'|\z))"#,
+            ),
+            calls = calls,
+            trivia = trivia,
+        );
+        Regex::new(&pattern).expect("Python command extraction pattern is a valid regex")
+    });
+    let mut commands = Vec::new();
+    for captures in pattern.captures_iter(code) {
+        let captures = captures.map_err(|_| CodeScanError::EngineResource)?;
+        if let Some(command) = captures.name("double").or_else(|| captures.name("single")) {
+            commands.push(command.as_str());
+        }
+    }
+    Ok(commands)
+}
 
 /// Interpreters whose inline code is Bash.
 const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "zsh"];
@@ -58,6 +109,27 @@ pub fn extract_inline_code(command: &str) -> Option<(String, Language)> {
     if SHELL_INTERPRETERS.contains(&interpreter) {
         Some((code, Language::Bash))
     } else if PYTHON_INTERPRETERS.contains(&interpreter) {
+        // Shell double quotes consume these escapes before Python receives the source.
+        let code = if captures.get(2)?.as_str() == "\"" {
+            let mut decoded = String::with_capacity(code.len());
+            let mut chars = code.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '\\'
+                    && let Some(&escaped) = chars.peek()
+                    && matches!(escaped, '"' | '\\' | '$' | '`' | '\n')
+                {
+                    chars.next();
+                    if escaped != '\n' {
+                        decoded.push(escaped);
+                    }
+                } else {
+                    decoded.push(ch);
+                }
+            }
+            decoded
+        } else {
+            code
+        };
         Some((code, Language::Python))
     } else {
         None
@@ -67,6 +139,48 @@ pub fn extract_inline_code(command: &str) -> Option<(String, Language)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_command_arguments_are_extracted() {
+        for (code, expected) in [
+            (r#"os.system(command="rm -rf /")"#, "rm -rf /"),
+            (r#"os.popen(cmd = "cat /etc/shadow")"#, "cat /etc/shadow"),
+            (r#"subprocess.run(args="rm -rf /")"#, "rm -rf /"),
+            (r#"subprocess.call(args = "rm -rf /")"#, "rm -rf /"),
+            (r#"subprocess.check_call(args="rm -rf /")"#, "rm -rf /"),
+            (r#"subprocess.check_output(args="rm -rf /")"#, "rm -rf /"),
+            (r#"subprocess.Popen(args="rm -rf /")"#, "rm -rf /"),
+            (r#"subprocess.getoutput(cmd="rm -rf /")"#, "rm -rf /"),
+            ("os.system \\\n  (command='rm -rf /')", "rm -rf /"),
+            (
+                "subprocess.getstatusoutput(\n cmd # command\n = # value\n 'rm -rf /')",
+                "rm -rf /",
+            ),
+        ] {
+            assert_eq!(
+                extract_python_shell_commands(code).unwrap(),
+                vec![expected],
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_keywords_are_specific_to_each_api() {
+        for code in [
+            r#"os.system(args="rm -rf /")"#,
+            r#"os.popen(command="rm -rf /")"#,
+            r#"subprocess.Popen(command="rm -rf /")"#,
+            r#"subprocess.getoutput(args="rm -rf /")"#,
+            "handler = os.system  # retain reference\n(\"rm -rf /\")",
+            "handler = os.system\n(\"rm -rf /\")",
+        ] {
+            assert!(
+                extract_python_shell_commands(code).unwrap().is_empty(),
+                "{code}"
+            );
+        }
+    }
 
     #[test]
     fn bash_dash_c_reports_bash() {
@@ -113,13 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn escaped_quote_inside_code_is_kept() {
-        // The escape-aware body keeps `\"` from ending the snippet early, so the
-        // whole `json.dumps({"a": 1})` call survives as one unit.
+    fn shell_escaped_quotes_are_decoded_before_python_scanning() {
         assert_eq!(
             extract_inline_code(r#"python3 -c "import json; json.dumps({\"a\": 1})""#),
             Some((
-                r#"import json; json.dumps({\"a\": 1})"#.to_owned(),
+                r#"import json; json.dumps({"a": 1})"#.to_owned(),
                 Language::Python
             ))
         );

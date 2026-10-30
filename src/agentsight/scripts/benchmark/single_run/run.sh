@@ -24,6 +24,7 @@ AGENTSIGHT_PID=""
 PREPARE_CAPTURE=0
 METRICS_FILE=""
 DB=""
+FFI_EVENTS=""
 KEEP_ARTIFACTS=0
 USERSPACE=0
 EXTERNAL_SERVER=0
@@ -42,6 +43,7 @@ RUN_ID="${BENCHMARK_RUN_ID:-$(date -u +%Y%m%dT%H%M%S)-$$-$(date +%N)}"
 usage() {
     echo "usage: $0 [--userspace] [--external-server] [--protocol sse|json|h2] [--host HOST] [--port PORT] [--qps N] [--duration SEC] [--payload-kb N] [--chunks N] [--chunk-bytes N] [--chunk-delay-ms N] [--agentsight-pid PID] [--metrics-file PATH] [--db PATH] [--request-log-dir DIR] [--validation-wait-seconds SEC] [--fault-count N] [--fault-oversized-bytes N] [--output-dir DIR] [--results-root DIR] [--max-results-gb N] [--min-free-disk-gb N] [--min-available-memory-mb N] [--max-agentsight-rss-mb N] [--max-k6-vus N] [--keep-artifacts]"
     echo "agent load: --agents N --tokens-per-second RATE [--tokens-per-response N] [--startup-delay SEC] [--rate-tolerance FRACTION]; defaults: 32 agents, 100 output tokens/s, 1000 tokens/response, 5s discovery delay, 5% rate tolerance"
+    echo "capture source: --db PATH or --ffi-events PATH (mutually exclusive)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --prepare-capture) PREPARE_CAPTURE=1; shift ;;
         --metrics-file) METRICS_FILE="$2"; shift 2 ;;
         --db) DB="$2"; shift 2 ;;
+        --ffi-events) FFI_EVENTS="$2"; shift 2 ;;
         --request-log-dir) REQUEST_LOG_DIR="$2"; shift 2 ;;
         --validation-wait-seconds) VALIDATION_WAIT_SECONDS="$2"; shift 2 ;;
         --fault-count) FAULT_COUNT="$2"; shift 2 ;;
@@ -101,8 +104,12 @@ if [[ -n "$AGENTS" || -n "$TOKENS_PER_SECOND" ]]; then
     EXPECTED_TOTAL_TOKENS="$("$PYTHON_BIN" -c 'import sys; print(12 + int(sys.argv[1]))' "$TOKENS_PER_RESPONSE")"
     QPS="$("$PYTHON_BIN" -c 'import sys; print(int(sys.argv[1]) * float(sys.argv[2]) / int(sys.argv[3]))' "$AGENTS" "$TOKENS_PER_SECOND" "$TOKENS_PER_RESPONSE")"
 fi
-if [[ "$PREPARE_CAPTURE" -eq 1 && ( -z "$AGENTS" || -z "$DB" || -n "$AGENTSIGHT_PID" ) ]]; then
-    echo "capture preparation requires Agent mode, --db, and a deferred collector PID" >&2
+if [[ -n "$DB" && -n "$FFI_EVENTS" ]]; then
+    echo "--db and --ffi-events are mutually exclusive" >&2
+    exit 2
+fi
+if [[ "$PREPARE_CAPTURE" -eq 1 && ( -z "$AGENTS" || ( -z "$DB" && -z "$FFI_EVENTS" ) || -n "$AGENTSIGHT_PID" ) ]]; then
+    echo "capture preparation requires Agent mode, --db or --ffi-events, and a deferred collector PID" >&2
     exit 2
 fi
 if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -201,9 +208,11 @@ if [[ "$PROTOCOL" != "h2" ]]; then
     fi
 fi
 start_validator() {
-    [[ "$PROTOCOL" != "h2" && -n "$DB" ]] || return 0
+    [[ "$PROTOCOL" != "h2" && ( -n "$DB" || -n "$FFI_EVENTS" ) ]] || return 0
+    local source_args=(--db "$DB")
+    [[ -n "$FFI_EVENTS" ]] && source_args=(--ffi-events "$FFI_EVENTS")
     "$PYTHON_BIN" "$SCRIPT_DIR/validate_results.py" \
-        --load-results "$LOAD_RESULTS" --db "$DB" \
+        --load-results "$LOAD_RESULTS" "${source_args[@]}" \
         --prefix "bench-$RUN_ID-" --since-ns "$VALIDATION_SINCE_NS" \
         --expected-total-tokens "$EXPECTED_TOTAL_TOKENS" --wait-seconds "$VALIDATION_WAIT_SECONDS" \
         --completion-marker "$VALIDATION_MARKER" \
@@ -215,7 +224,7 @@ start_validator() {
 [[ "$PREPARE_CAPTURE" -eq 1 ]] || start_validator
 if [[ -n "$AGENTS" ]]; then
     AGENT_CAPTURE_ARGS=()
-    if [[ -n "$DB" ]]; then
+    if [[ -n "$DB" || -n "$FFI_EVENTS" ]]; then
         AGENT_CAPTURE_ARGS=(--capture-marker "$VALIDATION_MARKER" \
             --capture-timeout "$VALIDATION_WAIT_SECONDS")
     fi

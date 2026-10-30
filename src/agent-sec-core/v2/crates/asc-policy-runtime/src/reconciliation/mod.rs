@@ -256,6 +256,17 @@ fn run_attempt(
             })
         } else {
             original = repository.get_binding_state(&id)?;
+            if !schedule.has_pending_storage()
+                && let Some(current) = &original
+                && schedule
+                    .status_version
+                    .is_some_and(|v| v != current.status_version)
+            {
+                // A persisted newer intent starts a fresh queue budget even
+                // when its post-commit notification was lost.
+                let _ = queue.enqueue(&id);
+                schedule.status_version = Some(current.status_version);
+            }
             tracing::debug!(
                 target: "asc_observability::diagnostic", component = "policy_runtime",
                 binding_id = %id,
@@ -376,7 +387,6 @@ fn finish_failed(
         let write = BindingStateWrite::patch(ReconciliationPatch {
             status: Some(status),
             deployments: None,
-            ..Default::default()
         });
         queue
             .state

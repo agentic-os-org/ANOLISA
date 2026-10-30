@@ -1,14 +1,13 @@
 use super::event::{ParsedSseEvent, SSEEvent, SSEEvents};
 use crate::probes::sslsniff::SslEvent;
+use std::borrow::Cow;
 use std::rc::Rc;
 
 // Treat CRLF as one terminator and preserve lengths in the original buffer.
 // A final unterminated segment is left to the caller's continuation buffer.
 fn complete_lines(mut buffer: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
     std::iter::from_fn(move || {
-        let end = buffer
-            .iter()
-            .position(|byte| matches!(byte, b'\r' | b'\n'))?;
+        let end = memchr::memchr2(b'\r', b'\n', buffer)?;
         let terminator_len = if buffer[end] == b'\r' && buffer.get(end + 1) == Some(&b'\n') {
             2
         } else {
@@ -19,6 +18,100 @@ fn complete_lines(mut buffer: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
         buffer = remaining;
         Some((raw, line))
     })
+}
+
+/// Borrow a complete SSE frame until the reducer decides what must survive the read.
+#[derive(Debug, Default)]
+pub(crate) struct SseFrame<'a> {
+    /// Last event ID field in this frame.
+    pub(crate) id: Option<Cow<'a, str>>,
+    /// Last event type field in this frame.
+    pub(crate) event: Option<Cow<'a, str>>,
+    /// Last valid reconnection delay.
+    pub(crate) retry: Option<u64>,
+    /// Single data lines borrow the framing buffer; multiline payloads are joined once.
+    pub(crate) data: Cow<'a, [u8]>,
+}
+
+impl<'a> SseFrame<'a> {
+    /// Parse one frame whose terminating blank line has already been validated.
+    pub(crate) fn parse(mut bytes: &'a [u8], at_start: bool) -> Option<Self> {
+        if at_start {
+            bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+        }
+        // Some OpenAI-compatible streams omit the SSE data field entirely.
+        let payload = bytes.trim_ascii();
+        if payload.first() == Some(&b'{')
+            && serde_json::from_slice::<serde_json::Value>(payload)
+                .is_ok_and(|value| value.is_object())
+        {
+            return Some(Self {
+                data: Cow::Borrowed(payload),
+                ..Self::default()
+            });
+        }
+        let mut frame = Self::default();
+        let mut has_data = false;
+        for (_, line) in complete_lines(bytes) {
+            if line.is_empty() {
+                break;
+            }
+            let (field, value, colon) = match memchr::memchr(b':', line) {
+                Some(index) => {
+                    let value = &line[index + 1..];
+                    (
+                        &line[..index],
+                        value.strip_prefix(b" ").unwrap_or(value),
+                        true,
+                    )
+                }
+                None => (line, &b""[..], false),
+            };
+            match field {
+                b"id" => frame.id = Some(String::from_utf8_lossy(value)),
+                b"event" => frame.event = Some(String::from_utf8_lossy(value)),
+                b"retry" => {
+                    frame.retry = if colon {
+                        std::str::from_utf8(value)
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                    } else {
+                        Some(0)
+                    };
+                }
+                b"data" => {
+                    if has_data {
+                        let data = frame.data.to_mut();
+                        data.push(b'\n');
+                        data.extend_from_slice(value);
+                    } else {
+                        frame.data = Cow::Borrowed(value);
+                        has_data = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        (has_data || frame.id.is_some() || frame.event.is_some() || frame.retry.is_some())
+            .then_some(frame)
+    }
+
+    /// Materialize only evidence that remains after reduction.
+    pub(crate) fn into_event(
+        self,
+        source: &SslEvent,
+        json: Option<serde_json::Value>,
+    ) -> ParsedSseEvent {
+        let id = self.id.map(Cow::into_owned);
+        let event = self.event.map(Cow::into_owned);
+        let mut source = source.metadata_only();
+        if let Some(value) = json {
+            return ParsedSseEvent::from_json(id, event, self.retry, value, source);
+        }
+        source.buf = self.data.into_owned();
+        source.len = source.buf.len() as u32;
+        ParsedSseEvent::new(id, event, self.retry, 0, source.buf.len(), Rc::new(source))
+    }
 }
 
 /// SSE Parser - parses SSE stream data into events (legacy version)
@@ -277,6 +370,7 @@ impl SseParser {
         }
         owned.len = owned.buf.len() as u32;
         ParsedSseEvent::new(id, event, retry, 0, owned.buf.len(), Rc::new(owned))
+            .with_capture_source(Rc::clone(source))
     }
 }
 
@@ -301,6 +395,79 @@ mod tests {
             is_handshake: false,
             ssl_ptr: 0x1000,
         })
+    }
+
+    #[test]
+    fn borrowed_frames_match_the_existing_parser_for_complete_frames() {
+        for ending in ["\n", "\r", "\r\n"] {
+            for body in [
+                ": comment\nid: old\nid: 汉字\nevent: update\nretry: 15\ndata: one",
+                "data: one\n: comment\ndata: two\ndata:",
+                "data\nid\nevent\nretry",
+                "retry: 20\nretry: invalid\ndata: {}",
+                ": comments only\nunknown: value",
+                "id: metadata-only",
+                "\u{feff}data: start",
+                "\u{feff}\u{feff}data: ignored",
+                "data: mid\u{feff}dle",
+            ] {
+                let bytes = format!("{}{ending}{ending}", body.replace('\n', ending)).into_bytes();
+                for at_start in [false, true] {
+                    let source = create_test_event(bytes.clone());
+                    let expected = if at_start {
+                        SseParser::new().parse_at_stream_start(Rc::clone(&source))
+                    } else {
+                        SseParser::new().parse(Rc::clone(&source))
+                    };
+                    let actual = SseFrame::parse(&bytes, at_start);
+                    assert_eq!(usize::from(actual.is_some()), expected.len(), "{body:?}");
+                    if let Some(frame) = actual {
+                        let event = frame.into_event(&source, None);
+                        assert_eq!(event.id, expected[0].id);
+                        assert_eq!(event.event, expected[0].event);
+                        assert_eq!(event.retry, expected[0].retry);
+                        assert_eq!(event.data(), expected[0].data());
+                    }
+                }
+            }
+        }
+        for data in [b"data: \xff\n\n".as_slice(), b"event: \xff\ndata: x\n\n"] {
+            let source = create_test_event(data.to_vec());
+            let frame = SseFrame::parse(data, false)
+                .unwrap()
+                .into_event(&source, None);
+            let expected = SseParser::new().parse(source);
+            assert_eq!(frame.event, expected[0].event);
+            assert_eq!(frame.data(), expected[0].data());
+        }
+    }
+
+    #[test]
+    fn single_data_line_borrows_and_multiline_data_only_joins_the_payload() {
+        let frame = SseFrame::parse(b"id: abc\nevent: update\ndata: payload\n\n", false).unwrap();
+        assert!(matches!(frame.data, Cow::Borrowed(b"payload")));
+        assert!(matches!(frame.id, Some(Cow::Borrowed("abc"))));
+        assert!(matches!(frame.event, Some(Cow::Borrowed("update"))));
+        let frame = SseFrame::parse(b"data: first\ndata: second\n\n", false).unwrap();
+        assert!(matches!(frame.data, Cow::Owned(_)));
+        assert_eq!(frame.data.as_ref(), b"first\nsecond");
+    }
+
+    #[test]
+    fn bare_json_object_is_data_but_other_fieldless_frames_stay_ignored() {
+        let payload = br#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":3}}"#;
+        let bytes = [b" \t".as_slice(), payload, b"\r\n\r\n"].concat();
+        let frame = SseFrame::parse(&bytes, false).unwrap();
+        assert!(matches!(frame.data, Cow::Borrowed(_)));
+        assert_eq!(frame.data.as_ref(), payload);
+
+        for bytes in [
+            b"unknown: value\n\n".as_slice(),
+            b"{\"unterminated\":\n\n",
+            b"[DONE]\n\n",
+        ] {
+            assert!(SseFrame::parse(bytes, false).is_none());
+        }
     }
 
     #[test]

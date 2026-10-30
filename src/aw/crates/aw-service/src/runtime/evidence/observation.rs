@@ -245,6 +245,9 @@ impl Runtime {
                     json!({"audit_key":null,"source_state":"disabled","query_state":"disabled","coverage":"unknown"}),
                 );
             };
+            if !self.scope_allows_observation(instance_id)? {
+                return Err(rejected("scope_observation_unsupported"));
+            }
             let key = self.identifier()?;
             let (sender, receiver) = mpsc::sync_channel(2);
             self.audit.claim(
@@ -409,9 +412,9 @@ impl Runtime {
             }
             state.claims.insert(correlation, digest);
         }
-        let seed = self.contexts.seed(json!({"generation":self.identity.generation,"config_revision":self.identity.config_revision,
+        let seed = self.contexts.seed(json!({"generation":self.identity.generation,"config_revision":host.revision(),
             "binding_id":host.target(),"instance_id":instance_id,"event_id":self.identifier()?,"adapter":host.capabilities().adapter}),
-            &event, association, deadline)?;
+            &event, association, deadline, host.configuration().as_value())?;
         observation.enqueue(self, &seed)?;
         Ok(json!({"observed":true,"duplicate":false}))
     }

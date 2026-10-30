@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -193,7 +193,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
             message: "starting claude-code stream-json backend".to_string(),
         })?;
 
-        let mut child = Command::new(&prepared.program)
+        let mut command = super::command_with_trusted_startup_path(&prepared.program);
+        let mut child = command
             .args(&prepared.args)
             .arg(&prepared.prompt)
             .stdout(Stdio::piped())

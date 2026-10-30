@@ -47,8 +47,9 @@ impl SkillManager {
                 dirs::home_dir(),
                 std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
             ),
-            system_paths: crate::paths::system_data_dirs()
+            system_paths: crate::paths::component_data_dirs()
                 .into_iter()
+                .chain(crate::paths::system_data_dirs())
                 .map(|dir| dir.join(SKILLS_DIR))
                 .collect(),
         })
@@ -232,7 +233,11 @@ fn user_skill_dirs(home: Option<PathBuf>, data_home: Option<PathBuf>) -> Vec<Pat
         .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
     home.into_iter()
         .map(|home| home.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
-        .chain(data_home.map(|data| data.join("anolisa/skills")))
+        .chain(
+            data_home
+                .into_iter()
+                .flat_map(|data| [data.join("cosh-ng/skills"), data.join("anolisa/skills")]),
+        )
         .collect()
 }
 
@@ -418,6 +423,28 @@ mod tests {
         assert_eq!(skill.level, SkillLevel::System);
     }
 
+    #[test]
+    fn standalone_skills_follow_the_selected_xdg_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("xdg-data");
+        let skill = data.join("cosh-ng/skills/standalone");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: standalone\ndescription: Installed independently\n---\nUse this skill.\n",
+        )
+        .unwrap();
+        let directories = user_skill_dirs(Some(root.path().join("home")), Some(data));
+        let loaded: Vec<_> = directories
+            .iter()
+            .flat_map(|path| loader::load_skills_from_dir(path, SkillLevel::User))
+            .collect();
+        assert!(loaded.iter().any(|skill| skill.name == "standalone"));
+        assert!(!directories
+            .iter()
+            .any(|path| path.starts_with(root.path().join("home/.local/share"))));
+    }
+
     #[tokio::test]
     async fn ordered_directories_agree_for_list_load_and_watch() {
         let root = tempfile::tempdir().unwrap();
@@ -433,6 +460,8 @@ mod tests {
         assert_eq!(
             inner.system_paths,
             vec![
+                PathBuf::from("/usr/local/share/cosh-ng/skills"),
+                PathBuf::from("/usr/share/cosh-ng/skills"),
                 PathBuf::from("/usr/local/share/anolisa/skills"),
                 PathBuf::from("/usr/share/anolisa/skills"),
             ]
@@ -442,6 +471,7 @@ mod tests {
             inner.user_paths,
             vec![
                 root.path().join("home/.copilot-shell/skills"),
+                root.path().join("home/.local/share/cosh-ng/skills"),
                 root.path().join("home/.local/share/anolisa/skills"),
             ]
         );
@@ -451,7 +481,7 @@ mod tests {
             .map(|path| root.path().join(path.strip_prefix("/").unwrap()))
             .collect();
         let dirs = mgr.watch_dirs();
-        assert_eq!(dirs.len(), 9);
+        assert_eq!(dirs.len(), 12);
         for (i, dir) in dirs.iter().enumerate() {
             std::fs::create_dir_all(dir).unwrap();
             for name in ["shared".to_string(), format!("only-{i}")] {

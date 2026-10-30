@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sideload the macOS local-mode plugin without changing desktop settings."""
+"""Sideload the desktop plugin without changing desktop settings."""
 
 from __future__ import annotations
 
@@ -17,8 +17,10 @@ import platform
 import plistlib
 import shutil
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 MARKER = ".tokenless-qwenwork-owned.json"
@@ -85,6 +87,27 @@ def _paths() -> tuple[Path, Path, Path]:
 
 def _application(home: Path) -> tuple[Path, str]:
     override = os.environ.get("TOKENLESS_QWENWORK_APP")
+    if platform.system() == "Windows":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if override is None and not local_app_data:
+            raise LifecycleError("LOCALAPPDATA is unavailable; set TOKENLESS_QWENWORK_APP")
+        base = (
+            _absolute(override) if override is not None
+            else Path(local_app_data) / "Programs/QwenWorkCN"
+        )
+        candidates = [base] if (base / "QwenWorkCN.exe").is_file() else list(base.glob("*"))
+        apps = [path for path in candidates if (path / "QwenWorkCN.exe").is_file()]
+        if not apps:
+            raise LifecycleError(f"QwenWorkCN.exe not found under {base}; set TOKENLESS_QWENWORK_APP")
+        app = max(apps, key=lambda path: (path / "QwenWorkCN.exe").stat().st_mtime_ns)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             "$ErrorActionPreference='Stop'; "
+             "(Get-Item -LiteralPath $env:TOKENLESS_QWENWORK_EXE).VersionInfo.ProductVersion"],
+            env={**os.environ, "TOKENLESS_QWENWORK_EXE": str(app / "QwenWorkCN.exe")},
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        return app, result.stdout.strip()
     candidates = (
         [_absolute(override)]
         if override is not None
@@ -185,6 +208,32 @@ def _dependencies(root: Path) -> None:
             "(response hooks remain available).",
             file=sys.stderr,
         )
+    _data_directory_notice(utils.resolve_data_directory)
+
+
+def _data_directory_notice(resolve_directory: Callable[[], str]) -> None:
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    source = "TOKENLESS_DATA_DIR" if configured else "default"
+    try:
+        directory = resolve_directory()
+    except (OSError, ValueError, RuntimeError) as error:
+        directory = f"unavailable; configured value: {configured!r}"
+        print(
+            f"WARNING: {error}; workspace Shell "
+            "hooks pass through without creating a data directory.",
+            file=sys.stderr,
+        )
+    print(f"Tokenless data directory (current process): {directory} ({source})")
+    print(
+        "This reports the current process configuration only; it does not test "
+        "sandbox write access or verify the desktop process environment."
+    )
+    print(
+        "If the Shell sandbox cannot write to the data directory, RTK statistics "
+        "and execution receipts may be missing while commands can still run. "
+        "Hook-side compression statistics use the Hook process permissions."
+    )
+    print("RTK's native database uses its own path configuration, independently of Tokenless.")
 
 
 def _inventory(root: Path) -> dict:
@@ -257,6 +306,21 @@ def _install(data: Path, target: Path, previous: dict | None) -> None:
     backup = stage / "previous"
     try:
         shutil.copytree(PLUGIN_ROOT, new, symlinks=False, ignore=_ignored)
+        if platform.system() == "Windows":
+            hooks = _read_json(new / "hooks/hooks.json")
+            for event, groups in hooks["hooks"].items():
+                for group in groups:
+                    if event == "PreToolUse":
+                        group["matcher"] = f"{group['matcher']}|PowerShell"
+                    script = "rewrite_hook.py" if event == "PreToolUse" else "compress_response_hook.py"
+                    python = sys.executable.replace("'", "''")
+                    for hook in group["hooks"]:
+                        hook["shell"] = "powershell"
+                        hook["command"] = (
+                            f"& '{python}' -X utf8 -B "
+                            f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/{script}" --agent-id qwenwork'
+                        )
+            (new / "hooks/hooks.json").write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
         _validate_runtime(new)
         entries = _inventory(new)
         marker = new / MARKER
@@ -302,7 +366,12 @@ def main(argv: list[str] | None = None) -> int:
     """Run a read-only probe, explicit sideload, or ownership-checked removal."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("detect", "install", "uninstall"))
-    parser.add_argument("--dry-run", action="store_true", help="validate without writing any files")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=os.environ.get("ANOLISA_DRY_RUN") == "1",
+        help="validate without writing any files (also the default under ANOLISA_DRY_RUN=1)",
+    )
     args = parser.parse_args(argv)
     try:
         home, data, target = _paths()
@@ -315,20 +384,23 @@ def main(argv: list[str] | None = None) -> int:
                 shutil.rmtree(target)
                 print(
                     f"Removed sideloaded plugin: {target}. "
-                    "Restart QwenWorkCN and open a new local session."
+                    "Restart QwenWorkCN and open a new session."
                 )
             return 0
-        if platform.system() != "Darwin":
-            raise LifecycleError("QwenWorkCN sideloading supports macOS (Darwin) local mode only")
+        if platform.system() not in ("Darwin", "Windows"):
+            raise LifecycleError("QwenWorkCN sideloading supports macOS and Windows only")
         app, version = _application(home)
         print(f"QwenWorkCN: {app} (version {version})")
-        print(
-            "Validated target: QwenWorkCN 1.2.5 only (macOS local mode); "
-            "check plugin activation in the UI."
-        )
-        if version != "1.2.5":
+        if platform.system() == "Windows":
+            versions = {"1.3.2", "1.3.2.0"}
+            baseline = "1.3.2 Windows local mode"
+        else:
+            versions = {"1.2.5", "1.3.2"}
+            baseline = "1.2.5 native Bash and 1.3.2 workspace Shell"
+        print(f"Compatibility baselines: QwenWorkCN {baseline}; check plugin activation in the UI.")
+        if version not in versions:
             print(
-                f"WARNING: version {version} is outside the validated 1.2.5 scope; "
+                f"WARNING: version {version} is outside the {baseline} baselines; "
                 "compatibility is unverified.",
                 file=sys.stderr,
             )
@@ -347,11 +419,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _install(data, target, previous)
             print(
-                f"Sideloaded: {target}. Restart QwenWorkCN, open a new local session, "
+                f"Sideloaded: {target}. Restart QwenWorkCN, open a new session, "
                 "and enable the plugin in the UI if needed. Enablement is not checked."
             )
         return 0
-    except (LifecycleError, OSError, ValueError, ImportError, SyntaxError) as error:
+    except (LifecycleError, OSError, ValueError, ImportError, SyntaxError, subprocess.CalledProcessError) as error:
         print(f"[tokenless] ERROR: {error}", file=sys.stderr)
         return 1
 

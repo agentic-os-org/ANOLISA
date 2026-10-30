@@ -1187,6 +1187,11 @@ fn guarded_rollback_rejection_to_cosh(code: GuardedRollbackRejectionCodeV2) -> C
             "ws-ckpt rejected the guarded rollback binding",
             false,
         ),
+        GuardedRollbackRejectionCodeV2::InsufficientSpace => (
+            ErrorCode::CheckpointRestoreFailed,
+            "ws-ckpt backend space or metadata usage reached the guard threshold; delete old checkpoints and retry",
+            true,
+        ),
     };
 
     CoshError::new(error_code, message, "checkpoint")
@@ -1217,6 +1222,7 @@ fn guarded_rollback_rejection_name(code: GuardedRollbackRejectionCodeV2) -> &'st
         GuardedRollbackRejectionCodeV2::CwdOccupied => "cwd_occupied",
         GuardedRollbackRejectionCodeV2::CwdScanFailed => "cwd_scan_failed",
         GuardedRollbackRejectionCodeV2::UnsupportedWorkspacePath => "unsupported_workspace_path",
+        GuardedRollbackRejectionCodeV2::InsufficientSpace => "insufficient_space",
     }
 }
 
@@ -1258,6 +1264,11 @@ fn guarded_rejection_to_cosh(code: GuardedCheckpointRejectionCodeV2) -> CoshErro
             "ws-ckpt rejected the guarded checkpoint binding",
             false,
         ),
+        GuardedCheckpointRejectionCodeV2::InsufficientSpace => (
+            ErrorCode::CheckpointCreateFailed,
+            "ws-ckpt backend space or metadata usage reached the guard threshold; delete old checkpoints and retry",
+            true,
+        ),
     };
 
     CoshError::new(error_code, message, "checkpoint")
@@ -1283,6 +1294,7 @@ fn guarded_rejection_name(code: GuardedCheckpointRejectionCodeV2) -> &'static st
         GuardedCheckpointRejectionCodeV2::WriteLockConflict => "write_lock_conflict",
         GuardedCheckpointRejectionCodeV2::CallerMismatch => "caller_mismatch",
         GuardedCheckpointRejectionCodeV2::EvidenceCapacityReached => "evidence_capacity_reached",
+        GuardedCheckpointRejectionCodeV2::InsufficientSpace => "insufficient_space",
     }
 }
 
@@ -1621,6 +1633,7 @@ mod tests {
             GuardedCheckpointRejectionCodeV2::WriteLockConflict,
             GuardedCheckpointRejectionCodeV2::CallerMismatch,
             GuardedCheckpointRejectionCodeV2::EvidenceCapacityReached,
+            GuardedCheckpointRejectionCodeV2::InsufficientSpace,
         ] {
             let (_dir, socket_path, daemon) =
                 spawn_one_shot_daemon(WsCkptResponse::GuardedCheckpointV2Rejected {
@@ -1708,6 +1721,12 @@ mod tests {
                 ErrorCode::CheckpointDaemonUnavailable,
                 true,
                 "daemon_not_ready",
+            ),
+            (
+                GuardedRollbackRejectionCodeV2::InsufficientSpace,
+                ErrorCode::CheckpointRestoreFailed,
+                true,
+                "insufficient_space",
             ),
         ] {
             for execute in [false, true] {

@@ -82,8 +82,14 @@ impl QueryClient {
         if !path.try_exists()? {
             return Ok(None);
         }
-        let config: Value =
-            serde_json::from_slice(&std::fs::read(path)?).map_err(|_| QueryError::Invalid)?;
+        // The same one-leading-BOM rule the other JSON config boundaries
+        // apply (see [`crate::config::strip_leading_bom`]): a config saved
+        // as UTF-8-with-BOM must parse exactly like its unmarked twin here
+        // too, or the server crash-loops on a file the rest of the process
+        // loads happily.
+        let raw = String::from_utf8(std::fs::read(path)?).map_err(|_| QueryError::Invalid)?;
+        let config: Value = serde_json::from_str(crate::config::strip_leading_bom(&raw))
+            .map_err(|_| QueryError::Invalid)?;
         let Some(config) = config.get("tokenless_api").filter(|value| !value.is_null()) else {
             return Ok(None);
         };
@@ -382,7 +388,10 @@ async fn get_record(
         return HttpResponse::BadRequest().finish();
     }
     let result = web::block(move || {
-        let Some(mut saved) = store.tokenless_record(*id).map_err(|_| 503u16)? else {
+        let Some(mut saved) = store
+            .tokenless_record(*id)
+            .map_err(|error| detail_store_error_status(&error))?
+        else {
             return Err(404u16);
         };
         if query.include_content && saved.record["content_included"] != true {
@@ -433,12 +442,17 @@ async fn get_record(
 
 /// Refresh source statistics before exposing applied savings through existing views.
 ///
+/// Records are bounded to `[start_ns, end_ns]` so the savings numerator spans
+/// the same window as the denominator that consumes it.
+///
 /// # Errors
 /// Returns an HTTP error on refresh/storage failure instead of substituting stale totals.
 pub(super) async fn savings_rows(
     data: &AppState,
     client: Option<web::Data<QueryClient>>,
     ids: &[&str],
+    start_ns: i64,
+    end_ns: i64,
 ) -> Result<
     (
         bool,
@@ -458,7 +472,7 @@ pub(super) async fn savings_rows(
                 .save_tokenless_records(&client.endpoint, &records)
                 .map_err(|_| QueryError::Endpoint)?;
             store
-                .tokenless_applied_stats(&client.endpoint, &ids, 0, i64::MAX, Some(&records))
+                .tokenless_applied_stats(&client.endpoint, &ids, start_ns, end_ns, Some(&records))
                 .map_err(|_| QueryError::Endpoint)
         })
         .await;
@@ -477,7 +491,7 @@ pub(super) async fn savings_rows(
     Ok((
         store.is_some(),
         store
-            .map(|store| store.get_stats_by_tool_use_ids(ids))
+            .map(|store| store.get_stats_by_tool_use_ids_in_window(ids, start_ns, end_ns))
             .unwrap_or_default(),
     ))
 }
@@ -488,6 +502,17 @@ pub(super) fn capabilities(client: Option<&QueryClient>) -> Vec<&'static str> {
         capabilities.push("token_savings");
     }
     capabilities
+}
+
+/// HTTP status for a failed detail-store read.
+///
+/// A stored record that violates the record contract is a client-visible 400,
+/// like the list endpoint; a lock or database failure stays a 503.
+fn detail_store_error_status(error: &crate::storage::sqlite::genai::TokenlessRecordError) -> u16 {
+    match error {
+        crate::storage::sqlite::genai::TokenlessRecordError::Invalid(_) => 400,
+        _ => 503,
+    }
 }
 
 #[cfg(test)]

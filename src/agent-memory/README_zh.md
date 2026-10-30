@@ -6,13 +6,17 @@
 
 ## 特性
 
-- **文件形态记忆** — 通过 37 个 MCP 工具以文件系统语义读写记忆；命名空间隔离与路径沙箱（openat2 RESOLVE_BENEATH）
+- **文件形态记忆** — 通过 38 个 MCP 工具以文件系统语义读写记忆；命名空间隔离与路径沙箱（openat2 RESOLVE_BENEATH）
 - **混合语义检索** — BM25 关键词 + 稠密向量嵌入，通过倒数排名融合（RRF）组合；时间衰减排序
 - **自动捕获与召回** — 对话结束时自动提取观察，下一次 prompt 构建前注入相关记忆
 - **记忆聚合** — 从会话审计日志中自动提取原子事实
 - **版本控制与快照** — 可选 git 自动提交 + tar.gz 快照，支持文件级和挂载级回滚
 - **安全** — 注入内容的 prompt 注入检测与密钥/PII 脱敏
 - **跨会话任务** — 跨会话保存/恢复/关闭任务及完整上下文
+
+关键词搜索支持 `config.toml`、`example.com` 和 `v1.2.3` 等搜索词。
+`AND`、`NOT`、`OR` 等词按普通文本搜索。多个搜索词用空格分隔；
+没有全部匹配的结果时，回退返回部分词匹配的结果。
 
 ## 快速开始
 
@@ -31,7 +35,7 @@ sudo yum install agent-memory
 随包附带的插件（`memory-anolisa`）由
 `/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh` 部署，默认授予插件声明的能力。设置
 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主上安装将失败，直至交互式授予。设置
-`AGENT_MEMORY_SAFE_INSTALL=1` 可在仍会传递 unsafe-install 覆盖参数的宿主上拒绝它。完整说明见[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。
+`AGENT_MEMORY_SAFE_INSTALL=1` 可在仍会传递 unsafe-install 覆盖参数的宿主上拒绝它。完整说明见[用户指南](../../docs/user-guide/zh/agent-memory/index.md)。
 
 ```bash
 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
@@ -59,20 +63,52 @@ openclaw gateway restart
 }
 ```
 
+### 核心操作
+
+```bash
+# 初始化命名空间
+agent-memory init
+
+# 打印解析后的配置
+agent-memory info
+```
+
+作为 MCP server 运行后，agent 通过以下工具交互：
+
+| 操作 | MCP 工具 |
+|------|----------|
+| 写入记忆 | `mem_write(path, content)` |
+| 读取记忆 | `mem_read(path)` |
+| 搜索 | `memory_search(query, mode="hybrid")` |
+| 观察 | `memory_observe(content, type)` |
+| 获取上下文 | `memory_get_context(max_tokens)` |
+| 快照 | `mem_snapshot(name)` |
+
 OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 ANOLISA
 记忆，另提供 `memory_observe` 和 `memory_get_context`。升级时请更新提示词和白名单
 中的旧工具名，重启 gateway 并开始新会话；内部 MCP 方法名和数据保持不变。
 旧安装脚本曾禁用 `memory-core` 的迁移说明见
-[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。manifest 声明会让全部四个插件工具
+[用户指南](../../docs/user-guide/zh/agent-memory/index.md)。manifest 声明会让全部四个插件工具
 保留在 OpenClaw 2026.9.2 的 `coding` 会话 profile 中。自定义白名单、sandbox 策略及
 不采用该元数据的宿主需要显式添加新名称；指南说明了如何追加而不覆盖已有策略。
 
+OpenClaw 自动记录通过 `memory_capture` 在写入前检查当前采集授权，并将来源标记为
+`auto-capture`。关闭自动采集后，显式调用 `memory_observe` 仍可记录记忆。
+请同时升级服务端和适配器；旧服务端会拒绝自动采集请求，不会回退为手动写入。
+
+对于单行列表条目，`memory_summary` 的概念和文件排名在 `mem_export` / `mem_import`
+往返后仍然可用，包括名称中含逗号的条目。导入时会将 frontmatter 中的换行等 ASCII 控制字符替换为空格。
+
+在 TOML 中选择 embedding provider 后，无需重复设置后端环境变量，也可使用对应的
+`MEMORY_OPENAI_*` 或 `MEMORY_OLLAMA_*` 字段覆盖。密钥优先级和模型变更时的索引限制
+见[配置指南](../../docs/user-guide/zh/agent-memory/index.md)。
+
 ## 架构
 
-单进程 Tokio 异步运行时，通过 stdio JSON-RPC 2.0 暴露 37 个 MCP 工具：
+单进程 Tokio 异步运行时，通过 stdio JSON-RPC 2.0 暴露 38 个 MCP 工具：
 
 - **Tier A**（11 工具）：文件操作
-- **Tier B**（6 工具）：结构化检索
+- **Tier B**（7 工具）：结构化检索
 - **Tier C**（7 工具）：治理（快照、版本控制、聚合）
 - **主权**（13 工具）：关于、遗忘、同意、导入导出、任务、梦境合成
 
@@ -105,9 +141,13 @@ Linux x86_64 和 ARM64 包包含主程序、配置、用户服务及已打包的
 `python3 packaging/raw/package.py --help` 列出必须显式传入的二进制目录、插件输出目录、
 目标架构、时间戳和 TOML 构建元数据。元数据以 `version`、`target_os`、`target_arch`、
 `binaries.agent-memory`（SHA256）和 `plugin.sha256` 绑定输入文件。
-打包器不构建或执行二进制；raw 安装契约由 `.anolisa/component.raw.toml.in` 和 Cargo.toml
+打包器不构建或执行二进制；raw 安装契约由 `packaging/anolisa/raw/component.toml.in` 和 Cargo.toml
 渲染，RPM 契约保持独立。两种安装模式均不会启动用户服务。
 通过 `python3 tests/test_raw_packaging.py` 运行打包回归测试。
+
+## Smoke 验证
+
+使用 Python 3.8+ 运行 `make smoke`，在临时命名空间验证 release MCP 服务。`make smoke SMOKE_TIMEOUT=10` 可修改默认 30 秒的协议检查期限；进程清理另有 2 秒上限。详见[测试指南](../../docs/user-guide/zh/getting-started/testing.md)。
 
 ## 许可证
 

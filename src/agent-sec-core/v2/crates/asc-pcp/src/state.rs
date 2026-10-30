@@ -5,6 +5,7 @@ use crate::{
     PreparedAttempt, Presence, ReconcileRecord, RetryPolicy, StoreError, TargetRef, WriteResult,
 };
 use asc_foundation_types::ResourceId;
+use asc_policy_repository::WriteReceipt;
 use asc_policy_types::binding::BindingStatus;
 use std::sync::Arc;
 
@@ -29,7 +30,6 @@ impl ReconcileState {
         *pending = Some(PendingWrite {
             expected: expected.clone(),
             write,
-            matched: true,
         });
         self.resolve(pending)
     }
@@ -130,30 +130,28 @@ impl ReconcileState {
         &self,
         outcome: &AttemptOutcome,
         completion: &mut Option<PendingWrite>,
-    ) -> Result<bool, StoreError> {
-        // A conflict is recomputed against the latest aggregate. Bound contention
-        // work per call; the caller retains the original write across storage failure.
+    ) -> Result<Option<WriteReceipt>, StoreError> {
+        // Retain the exact write through storage failure. A newer lifecycle
+        // cancels the entire old result, including its target observations.
         for _ in 0..16 {
             if completion.is_none() {
                 let Some(record) = self.read(&outcome.expected.id)? else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 let (next, matched) = finish(record.clone(), outcome)?;
-                let mut expected = record;
-                expected.status_version = outcome.expected.status_version;
-                expected.binding.status.phase = outcome.expected.status;
+                if !matched {
+                    return Ok(None);
+                }
                 *completion = Some(PendingWrite {
-                    expected,
-                    write: if matched && outcome.next_status == BindingStatus::Deleted {
+                    expected: record,
+                    write: if outcome.next_status == BindingStatus::Deleted {
                         BindingStateWrite::delete()
                     } else {
                         BindingStateWrite::patch(asc_policy_repository::ReconciliationPatch {
-                            status: matched.then_some(next.binding.status),
+                            status: Some(next.binding.status),
                             deployments: Some(next.deployments),
-                            preserve_observations_on_conflict: true,
                         })
                     },
-                    matched,
                 });
             }
             let pending = completion.as_ref().ok_or(StoreError::Invalid)?;
@@ -162,9 +160,8 @@ impl ReconcileState {
                 .compare_exchange_binding_state(&pending.expected, &pending.write)?
             {
                 WriteResult::Applied(receipt) | WriteResult::AlreadyApplied(receipt) => {
-                    let matched = pending.matched && receipt.status_applied;
                     *completion = None;
-                    return Ok(matched);
+                    return Ok(receipt.status_applied.then_some(receipt));
                 }
                 WriteResult::Conflict => *completion = None,
             }
@@ -256,6 +253,9 @@ fn finish(
     mut record: ReconcileRecord,
     outcome: &AttemptOutcome,
 ) -> Result<(ReconcileRecord, bool), StoreError> {
+    if !outcome.expected.matches(&record) {
+        return Ok((record, false));
+    }
     if !outcome.expected.status.is_reconciling() {
         return Err(StoreError::Invalid);
     }
@@ -278,8 +278,7 @@ fn finish(
     {
         return Err(StoreError::Invalid);
     }
-    // Validate all evidence before touching the live state. Even a stale
-    // lifecycle may only report registered, not newer, target identities.
+    // Validate every observation before changing any part of the aggregate.
     for (index, observation) in outcome.observations.iter().enumerate() {
         if outcome.observations[..index]
             .iter()
@@ -308,27 +307,24 @@ fn finish(
             }
         }
     }
-    let matches = outcome.expected.matches(&record);
-    if matches {
-        if outcome.next_status == BindingStatus::Deleted {
-            if !record.deployments.is_empty() {
-                return Err(StoreError::Invalid);
-            }
-            // The caller atomically removes the aggregate. There is no Deleted
-            // snapshot to persist, but all evidence must still be validated.
-            return Ok((record, true));
-        }
-        if outcome.next_status == BindingStatus::Ready
-            && !(record.deployments.len() == 1
-                && record.deployments[0].revision == outcome.expected.revision
-                && record.deployments[0].presence == Presence::Present)
-        {
+    if outcome.next_status == BindingStatus::Deleted {
+        if !record.deployments.is_empty() {
             return Err(StoreError::Invalid);
         }
-        record.binding.status.phase = outcome.next_status;
-        record.binding.status.error.clone_from(&outcome.error);
+        // The caller atomically removes the aggregate. There is no Deleted
+        // snapshot to persist, but all evidence must still be validated.
+        return Ok((record, true));
     }
-    Ok((record, matches))
+    if outcome.next_status == BindingStatus::Ready
+        && !(record.deployments.len() == 1
+            && record.deployments[0].revision == outcome.expected.revision
+            && record.deployments[0].presence == Presence::Present)
+    {
+        return Err(StoreError::Invalid);
+    }
+    record.binding.status.phase = outcome.next_status;
+    record.binding.status.error.clone_from(&outcome.error);
+    Ok((record, true))
 }
 
 #[cfg(test)]

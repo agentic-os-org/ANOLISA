@@ -85,12 +85,8 @@ pub fn args_for(request: &Value, directory: &Path, socket: &Path) -> Vec<OsStrin
                     args.extend([flag.into(), input.as_str().unwrap().into()]);
                     continue;
                 }
-                let (option, number) = if value["kind"] == "pid" {
-                    ("--pid", &value["pid"])
-                } else {
-                    ("--cgroup-id", &value["cgroupId"])
-                };
-                args.extend([option.into(), number.to_string().into()]);
+                assert_eq!(value["kind"], "pid", "unsupported CLI selector: {value}");
+                args.extend(["--pid".into(), value["pid"].to_string().into()]);
             }
             _ => {
                 let option = match field.as_str() {

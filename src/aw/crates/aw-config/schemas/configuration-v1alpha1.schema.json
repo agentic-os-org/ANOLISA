@@ -195,6 +195,42 @@
         },
         "state_dir": {
           "$ref": "#/$defs/text"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bindings": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 64
+            },
+            "events": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 128
+            },
+            "calls": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 64
+            },
+            "connections": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 128
+            },
+            "invocations_per_binding": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "default": 256
+            }
+          }
         }
       }
     },
@@ -246,11 +282,19 @@
             "qoder",
             "openclaw",
             "hermes",
-            "claude-sdk"
+            "claude-sdk",
+            "qoder-sdk"
           ]
         },
         "argv": {
           "$ref": "#/$defs/argv"
+        },
+        "shutdown_grace_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000,
+          "default": 2000,
+          "description": "Grace before forced Agent-group cleanup, starting when aw run first forwards an external termination signal."
         },
         "qoder": {
           "type": "object",
@@ -326,6 +370,45 @@
               ]
             }
           }
+        },
+        "qoder_sdk": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sites": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "global",
+                  "cn"
+                ]
+              }
+            },
+            "command_wrappers": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "$ref": "#/$defs/qoderSdkAsset"
+              }
+            },
+            "runtime_preloads": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "$ref": "#/$defs/qoderSdkAsset"
+              }
+            },
+            "declarative_plugins": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "native_config": {
+          "$ref": "#/$defs/nativeConfiguration"
         }
       }
     },
@@ -477,24 +560,7 @@
           "maxItems": 128
         },
         "match": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "tools"
-          ],
-          "properties": {
-            "tools": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 256
-              },
-              "minItems": 1,
-              "maxItems": 128,
-              "uniqueItems": true
-            }
-          }
+          "$ref": "#/$defs/toolMatch"
         }
       }
     },
@@ -525,24 +591,7 @@
           "maxItems": 128
         },
         "match": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "tools"
-          ],
-          "properties": {
-            "tools": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 256
-              },
-              "minItems": 1,
-              "maxItems": 128,
-              "uniqueItems": true
-            }
-          }
+          "$ref": "#/$defs/toolMatch"
         },
         "guard": {
           "const": "security.violation"
@@ -606,6 +655,9 @@
           "not": {
             "pattern": "[^A-Za-z0-9_.-]"
           }
+        },
+        "match": {
+          "$ref": "#/$defs/toolMatch"
         }
       },
       "oneOf": [
@@ -639,6 +691,99 @@
           }
         }
       ]
+    },
+    "toolMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tools"
+      ],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      }
+    },
+    "qoderSdkAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^/",
+          "not": {
+            "pattern": "\\u0000"
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "nativeConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sources"
+      ],
+      "properties": {
+        "sources": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/nativeSource"
+          }
+        }
+      },
+      "description": "References consumed by an embedding Adapter native loader; never a copy of native configuration or proof of activation."
+    },
+    "nativeSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "scope",
+        "reference"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/name"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "environment",
+            "argument",
+            "discovery"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/name"
+        },
+        "reference": {
+          "$ref": "#/$defs/text"
+        },
+        "base_dir": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "description": "Ordered native source reference. The Adapter owns interpretation, precedence, path resolution and update semantics. Never put credentials or literal option values in references."
     }
   }
 }

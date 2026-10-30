@@ -1,0 +1,115 @@
+# 配置与启动
+
+[English](../../en/aw/configuration.md)
+
+`aw.yaml` 保存 Agent 入口、Provider 和工具规则。先完成[安装与首次运行](installation.md)，下文沿用其中的 `AW_HOME`、`AW_PREFIX` 和 `AW_QODER`。
+
+## 选择能力
+
+先安装对应 Provider，将 `AW_TEMPLATE_DIR` 设为其解压归档中 `templates/`
+目录的绝对路径，再为 `aw config init` 选择模板。
+
+| 目标 | 参数 | 完整步骤 |
+| --- | --- | --- |
+| 启动 Agent | 不加模板 | [安装](installation.md) |
+| 压缩工具输出 | `--template "$AW_TEMPLATE_DIR/tokenless.json"` | [Tokenless](tokenless.md) |
+| 检查工具命令 | `--template "$AW_TEMPLATE_DIR/sec-core.json"` | [安全检查](security.md) |
+| 同时启用两者 | `--template "$AW_TEMPLATE_DIR/sec-core-tokenless.json"` | [Tokenless](tokenless.md)和[安全检查](security.md) |
+
+生成 Provider 配置时，`--prefix` 使用其实际安装前缀。按上述指南中的
+`--template-var` 参数提供后端路径、socket 和 RTK 校验和；`PROVIDERS_DIR` 选择
+实际安装的 Provider 程序，与 AW CLI 前缀独立。`--provider` 仅接受 `none` 或
+`command`。生成器目前支持 Qoder 和 OpenClaw；SDK 应用及其他 Agent
+见[接入指南](../../../developer-guide/zh/aw/native-agents.md)。
+
+## 修改配置
+
+先退出使用这份配置的 Agent，再停止服务并备份。
+
+```bash
+aw stop --config "$AW_HOME/aw.yaml"
+cp "$AW_HOME/aw.yaml" "$AW_HOME/aw.yaml.bak"
+aw config show --config "$AW_HOME/aw.yaml"
+```
+
+直接编辑 YAML。路径写成真实绝对路径，AW 不展开 `$HOME` 等变量。文件和父目录归当前用户所有，避免其他用户写入。`show` 会显示私有配置值，分享前检查内容。
+
+修改后校验并重新启动。
+
+```bash
+aw validate --config "$AW_HOME/aw.yaml"
+cd "$AW_HOME/workspace"
+aw run --config "$AW_HOME/aw.yaml" --agent qoder
+```
+
+校验应输出 `configuration valid`，启动后进入 Qoder。用一次实际工具调用确认规则生效。回退时退出 Agent、停止服务，再恢复 `.bak` 文件并启动。
+
+## 为 Hook 步骤选择工具
+
+在已有 `tool.before.steps` 或 `tool.after.steps` 的某一步添加 `match`，只处理选中的工具。例如，配置已声明 Qoder 和 OpenClaw 时，可选择它们的 Shell 工具。
+
+```yaml
+match:
+  tools: ["native:qoder:Bash", "native:openclaw:exec"]
+```
+
+事件和步骤的选择条件须同时匹配。省略 `match` 表示全部工具。原生名称区分大小写；扫描新工具时，还需配置 Provider 的[输入映射](../../../developer-guide/zh/aw/providers/sec-core.md#配置-provider)。完整选择器语法见[配置参考](../../../developer-guide/zh/aw/configuration.md)。
+
+## 选择 Agent
+
+`--agent` 取 `spec.agents` 中的目标名称。Qoder 从当前工作目录启动，`--` 后的参数传给原生程序。
+
+```bash
+aw run --config "$AW_HOME/aw.yaml" --agent qoder -- -p 'Read the current directory with a tool.'
+```
+
+### OpenClaw
+
+需要 OpenClaw 和已初始化的 profile；2026.9.6 为已验证基线，其他版本需提供相同的原生插件接口。先停止使用同一 profile 的 Gateway，将以下占位路径换成已有安装与配置的绝对路径。
+
+```bash
+export AW_NODE=/absolute/path/to/node
+export AW_OPENCLAW=/absolute/path/to/openclaw.mjs
+export AW_OPENCLAW_CONFIG=/absolute/path/to/openclaw.json
+export AW_OPENCLAW_STATE=/absolute/path/to/openclaw-state
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/openclaw.yaml" --state-dir "$AW_HOME/openclaw-aw-state" \
+  --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
+aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
+  --native-settings "$AW_OPENCLAW_CONFIG" --native-state-dir "$AW_OPENCLAW_STATE"
+```
+
+等待 `AW openclaw native hooks ready` 后，通过连接该 Gateway 的客户端使用。`agent --local` 会绕过它。启用安全或压缩时，选择上表中的对应模板。
+
+## 自定义规则与服务部署
+
+自定义规则可读取工具事件并返回 JSON 布尔值，见[Hook 教程](../../../developer-guide/zh/aw/providers/hooks.md)。
+常驻应用的[策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)、[外部进程接入](../../../developer-guide/zh/aw/deployment/process-attach.md)和[退出、并发设置](../../../developer-guide/zh/aw/deployment/lifecycle.md)由应用部署方配置。
+
+## 记录原生配置来源
+
+接入通用 native-loader API 的应用可以在 AW 策略旁记录来源引用。原生配置继续保存在
+原文件中。内置 `aw run` Adapter 仍通过既有选项选择来源，来源声明本身不会改变加载行为
+或激活覆盖范围。
+
+沿用安装步骤中的私有 `AW_HOME` 和 `qoder` 目标，为已经选定的原生项目来源建立记录：
+
+```bash
+cat > "$AW_HOME/native-source.json" <<'JSON'
+{"id":"project","kind":"file","scope":"project","reference":"./native.yaml"}
+JSON
+chmod 600 "$AW_HOME/native-source.json"
+aw config add-native-source --config "$AW_HOME/aw.yaml" --agent qoder \
+  --definition "$AW_HOME/native-source.json"
+aw config native-sources --config "$AW_HOME/aw.yaml" --agent qoder
+```
+
+预期输出 `declared_not_loaded` / `not_admitted` 以及来源序号和类别，不打印原生内容或
+凭据。Adapter 负责相对路径解析和实际来源优先级。移除引用使用：
+
+```bash
+aw config remove-native-source --config "$AW_HOME/aw.yaml" --agent qoder --id project
+```
+
+原生文件继续保留。来源字段、原子编辑、加载与准入状态及当前接入范围见
+[编辑器与 loader 参考](../../../developer-guide/zh/aw/reference/configuration-editor.md#原生配置来源)。

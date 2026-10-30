@@ -1203,67 +1203,74 @@ mod tests {
     #[test]
     fn test_run_once_reprobes_region_after_a_failed_round() {
         crate::telemetry::metadata::with_cloud_init_disabled(|| {
-            crate::telemetry::metadata::with_metadata_script(
-                // Round 1: exactly ONE connection is dropped — the region
-                // probe, which runs on a clone of the uploader's client.
-                // The transfer failure latches the shared flag, so the
-                // product-type desktop-id / instance-type probes (on the
-                // uploader's own client) short-circuit without connecting;
-                // the strict scripted server below fails if any second
-                // connection arrives before the next round clears the
-                // latch. Round 2 re-probes all keys: the scripted
-                // responses are consumed in order.
-                &["region-id"],
-                &[
-                    ("region-id", 200, "cn-beijing\n"),
-                    ("desktop-id", 404, "missing\n"),
-                    ("instance/instance-type", 404, "missing\n"),
-                ],
-                |base| {
-                    let dir = TempDir::new().unwrap();
-                    let up = test_uploader_with_metadata(&dir, &format!("{base}/region-id"));
-                    write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+            // Pin the container probe to a bare-metal answer: on a container
+            // test host the real probe would short-circuit the product-type
+            // chain before the scripted server's expected desktop-id and
+            // instance/instance-type keys, and the strict server would fail
+            // on the connections that then never arrive.
+            crate::telemetry::common::with_container_flavor(None, || {
+                crate::telemetry::metadata::with_metadata_script(
+                    // Round 1: exactly ONE connection is dropped — the region
+                    // probe, which runs on a clone of the uploader's client.
+                    // The transfer failure latches the shared flag, so the
+                    // product-type desktop-id / instance-type probes (on the
+                    // uploader's own client) short-circuit without connecting;
+                    // the strict scripted server below fails if any second
+                    // connection arrives before the next round clears the
+                    // latch. Round 2 re-probes all keys: the scripted
+                    // responses are consumed in order.
+                    &["region-id"],
+                    &[
+                        ("region-id", 200, "cn-beijing\n"),
+                        ("desktop-id", 404, "missing\n"),
+                        ("instance/instance-type", 404, "missing\n"),
+                    ],
+                    |base| {
+                        let dir = TempDir::new().unwrap();
+                        let up = test_uploader_with_metadata(&dir, &format!("{base}/region-id"));
+                        write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
 
-                    let mut urls: Vec<String> = Vec::new();
-                    up.run_once_with_post(|url, _| {
-                        urls.push(url.to_string());
-                        Ok(())
-                    })
-                    .unwrap();
+                        let mut urls: Vec<String> = Vec::new();
+                        up.run_once_with_post(|url, _| {
+                            urls.push(url.to_string());
+                            Ok(())
+                        })
+                        .unwrap();
 
-                    write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n{\"b\":2}\n");
-                    up.run_once_with_post(|url, body| {
-                        urls.push(url.to_string());
+                        write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n{\"b\":2}\n");
+                        up.run_once_with_post(|url, body| {
+                            urls.push(url.to_string());
+                            assert!(
+                                body.contains("\"region\":\"cn-beijing\""),
+                                "round 2 must carry the detected region: {body}"
+                            );
+                            Ok(())
+                        })
+                        .unwrap();
+
+                        assert_eq!(urls.len(), 2);
+                        // Round 1 hit metadata transfer failures: the fallback
+                        // public host in cn-hangzhou is correct for that round.
                         assert!(
-                            body.contains("\"region\":\"cn-beijing\""),
-                            "round 2 must carry the detected region: {body}"
+                            urls[0].starts_with(
+                                "https://anon-proj-cn-hangzhou.cn-hangzhou.log.aliyuncs.com"
+                            ),
+                            "round 1 (transfer failure) uses the fallback public host: {}",
+                            urls[0]
                         );
-                        Ok(())
-                    })
-                    .unwrap();
-
-                    assert_eq!(urls.len(), 2);
-                    // Round 1 hit metadata transfer failures: the fallback
-                    // public host in cn-hangzhou is correct for that round.
-                    assert!(
-                        urls[0].starts_with(
-                            "https://anon-proj-cn-hangzhou.cn-hangzhou.log.aliyuncs.com"
-                        ),
-                        "round 1 (transfer failure) uses the fallback public host: {}",
-                        urls[0]
-                    );
-                    // Round 2 re-probes and recovers: without the per-round
-                    // latch reset, the latched client kept every later round
-                    // on the cn-hangzhou public host for the daemon's life.
-                    assert!(
-                        urls[1].starts_with(
-                            "https://anon-proj-cn-beijing.cn-beijing-internal.log.aliyuncs.com"
-                        ),
-                        "round 2 must use the detected internal host: {}",
-                        urls[1]
-                    );
-                },
-            );
+                        // Round 2 re-probes and recovers: without the per-round
+                        // latch reset, the latched client kept every later round
+                        // on the cn-hangzhou public host for the daemon's life.
+                        assert!(
+                            urls[1].starts_with(
+                                "https://anon-proj-cn-beijing.cn-beijing-internal.log.aliyuncs.com"
+                            ),
+                            "round 2 must use the detected internal host: {}",
+                            urls[1]
+                        );
+                    },
+                );
+            });
         });
     }
 

@@ -21,9 +21,32 @@ pub(crate) struct Audit {
     directory: PathBuf,
     failed: AtomicBool,
     recent: Mutex<VecDeque<Value>>,
+    #[cfg(test)]
+    started_appends: std::sync::atomic::AtomicUsize,
+    /// Test-only boundary after the idle check and before the durable activation write.
+    #[cfg(test)]
+    pub(crate) activation_gate: Mutex<()>,
+    /// Test-only proof that activation reached the blocked durable-write boundary.
+    #[cfg(test)]
+    pub(crate) activation_appends: std::sync::atomic::AtomicUsize,
+    /// Test-only terminal-write failure: 1 before writing, 2 after writing.
+    #[cfg(test)]
+    pub(crate) activation_failure: std::sync::atomic::AtomicUsize,
 }
 
 impl Audit {
+    /// Hold durable mutation while testing admission across delayed writes.
+    #[cfg(test)]
+    pub(crate) fn hold_journal(&self) -> std::sync::MutexGuard<'_, FileJournal> {
+        self.journal.lock().unwrap()
+    }
+
+    /// Count start-record attempts before taking the durable-write lock.
+    #[cfg(test)]
+    pub(crate) fn started_appends(&self) -> usize {
+        self.started_appends.load(Ordering::Acquire)
+    }
+
     pub(crate) fn new(directory: &Path) -> Result<Self> {
         if let Ok(metadata) = fs::symlink_metadata(directory) {
             // SAFETY: geteuid has no pointer arguments or preconditions.
@@ -40,6 +63,14 @@ impl Audit {
             directory: directory.into(),
             failed: AtomicBool::new(false),
             recent: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            started_appends: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            activation_gate: Mutex::new(()),
+            #[cfg(test)]
+            activation_appends: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            activation_failure: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -71,15 +102,40 @@ impl Audit {
     }
 
     pub(crate) fn append(&self, key: &str, record: Value) -> Result<Value> {
+        #[cfg(test)]
+        if record["phase"] == "started" {
+            self.started_appends.fetch_add(1, Ordering::Release);
+        }
+        #[cfg(test)]
+        let _activation = if record["phase"] == "activating" {
+            self.activation_appends.fetch_add(1, Ordering::Release);
+            Some(self.activation_gate.lock().unwrap())
+        } else {
+            None
+        };
         self.mutate(|journal| {
+            #[cfg(test)]
+            let failure = if record["phase"] == "closed" && record["status"] == "active" {
+                self.activation_failure.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            #[cfg(test)]
+            if failure == 1 {
+                return Err(std::io::Error::other("terminal audit write failed").into());
+            }
             let written = journal.append(key, &record)?;
+            #[cfg(test)]
+            if failure == 2 {
+                return Err(std::io::Error::other("terminal audit acknowledgement failed").into());
+            }
             if record["phase"] == "completed" {
                 // Presentation is best effort and cannot turn a durable successful
                 // write into an event failure. Keep the journal lock until publication
                 // so concurrent completions retain durable order; readers clone 20 items.
                 if let Ok(mut recent) = self.recent.lock() {
                     let call = &record["call"];
-                    recent.push_front(json!({"provider":call["provider"],"step_id":call["step_id"],
+                    recent.push_front(json!({"kind":record["kind"],"provider":call["provider"],"step_id":call["step_id"],
                         "method":call["method"],"elapsed_ms":call["elapsed_ms"],
                         "status":record["status"],"failure":record["failure"],
                         "failure_action":record["failure_action"],"policy_block":record["policy_block"]}));
@@ -156,9 +212,11 @@ pub(crate) fn call(record: &CallRecord) -> Value {
 
 pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let metadata = call(&value.record);
-    let native = value.record.method == Method::NativeHook;
+    let skipped = matches!(value.result, Ok(StepOutput::Skipped));
+    let native = !skipped && value.record.method == Method::NativeHook;
     let mut native_output = Value::Null;
     let (status, effects, failure) = match value.result {
+        Ok(StepOutput::Skipped) => ("ok", json!([]), None),
         Ok(StepOutput::Provider(outcome)) => ("ok", outcome.as_value()["effects"].clone(), None),
         Ok(StepOutput::Native(output)) => {
             use std::os::unix::process::ExitStatusExt;
@@ -182,11 +240,18 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let action = value.failure_action.map(|action| match action {
         FailureAction::Report => "report",
         FailureAction::Block => "block",
+        FailureAction::WithholdResult => "withhold_result",
     });
     let blocked = effects
         .as_array()
         .is_some_and(|effects| effects.iter().any(|effect| effect["type"] == "block"));
-    let kind = if native { "native" } else { "provider" };
+    let kind = if skipped {
+        "skipped"
+    } else if native {
+        "native"
+    } else {
+        "provider"
+    };
     let record = json!({"kind": kind, "phase": "completed", "call": metadata, "status": status, "failure": failure,
         "failure_action": action, "policy_block": if native { None } else { Some(blocked) }});
     let mut result = json!({"kind": kind, "status": status, "failure": failure,
@@ -209,6 +274,10 @@ pub(crate) fn preparation(error: &aw_host::Error) -> Value {
         _ => Value::Null,
     }
 }
+
+#[cfg(test)]
+#[path = "audit/tool_matching.rs"]
+mod tool_matching;
 
 #[cfg(test)]
 mod tests {
@@ -266,6 +335,7 @@ mod tests {
             Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),

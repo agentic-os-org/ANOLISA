@@ -352,10 +352,11 @@ fn load_trajectory(
     trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
-    let store = genai_store.ok_or_else(|| {
-        HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": "GenAI store unavailable"}))
-    })?;
+    // An unavailable GenAI store means "no captured events", the same state as
+    // an empty session: the collected trajectory is still a usable source.
+    let Some(store) = genai_store else {
+        return load_collected_trajectory(trajectory_store, session_id);
+    };
     let events = store.get_events_by_session(session_id).map_err(|e| {
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;
@@ -1649,6 +1650,25 @@ mod tests {
     }
 
     #[test]
+    fn load_trajectory_falls_back_when_the_genai_store_is_unavailable() {
+        // The startup path logs and continues with `genai_store = None` when
+        // genai_events.db cannot be opened. That is "no captured events", so
+        // the collected trajectory must still serve the session instead of
+        // the endpoint answering 500.
+        let dir = tmp_dir("no-genai");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+        let atif = r#"{"schema_version":"ATIF-v1.7","session_id":"log-2","steps":[]}"#;
+        tstore
+            .upsert_trajectory(&collected_record("log-2", atif))
+            .unwrap();
+
+        let trajectory = load_trajectory(None, Some(Arc::new(tstore)), "log-2").unwrap();
+        assert_eq!(trajectory.session_id, "log-2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_trajectory_returns_not_found_when_both_sources_miss() {
         let dir = tmp_dir("miss");
         let db_path = dir.join("genai.db");
@@ -1665,6 +1685,16 @@ mod tests {
 
         // No collected store at all → 404 as well.
         let resp = load_trajectory(Some(&genai_store), None, "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        // No GenAI store either: both sources are absent, which is a 404 (the
+        // session exists nowhere), never the old 500.
+        let resp = load_trajectory(None, None, "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        // No GenAI store, collected store present but the session is absent.
+        let empty = TrajectoryStore::new_with_path(&dir.join("trajectories-empty.db")).unwrap();
+        let resp = load_trajectory(None, Some(Arc::new(empty)), "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
         let _ = std::fs::remove_dir_all(&dir);

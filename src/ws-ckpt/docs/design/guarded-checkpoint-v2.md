@@ -136,6 +136,28 @@ handlers apply the mapping before returning errors to the model. Deploy the
 daemon, CLI, and cosh together for the appended wire code; older CLI binaries
 cannot decode it. Update both plugins to receive the explicit retry guidance.
 
+## Backend space admission
+
+Btrfs backends refuse a new subvolume when backend data or metadata usage is
+at/above the 95% deletion guard, or when usage cannot be read. This covers the
+checkpoint snapshot, the rollback snapshot, and the diff temp snapshot used by
+rollback preview and revalidation. The refusal happens before any snapshot is
+created or the workspace is moved, so guarded checkpoint and rollback return
+`InsufficientSpace` instead of an uncertain outcome; a reserved rollback is
+cleared durably first. Retry the same request after cleanup reclaims space.
+Legacy requests return the existing `ErrorCode::DiskSpaceInsufficient` for the
+same refusal instead of `InternalError`.
+
+Cosh maps `InsufficientSpace` to `CheckpointCreateFailed` or
+`CheckpointRestoreFailed` with `recoverable = true` and
+`details.guarded_rejection` / `details.guarded_rollback_rejection =
+"insufficient_space"`, using its own fixed message. The daemon diagnostic stays
+private and is also logged by the daemon.
+
+`InsufficientSpace` is appended at bincode discriminant 12 for checkpoint
+rejections and 17 for rollback rejections in both ws-ckpt and cosh. Older cosh
+clients cannot decode it and fail closed with a non-recoverable protocol error.
+
 ## Compatibility and validation
 
 New request and response variants are appended to the bincode enums. All legacy

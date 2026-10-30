@@ -26,20 +26,9 @@ use super::failopen::maybe_inject_failopen_panic;
 use super::failopen::{FailOpenFailure, FreshLoginFailOpen};
 use super::render_raw_inline_event_view;
 
-fn build_adapter(kind: AdapterKind) -> AdapterInstance {
-    match adapter_for_kind(kind) {
-        AdapterInstance::ClaudeCode(adapter) => {
-            AdapterInstance::ClaudeCode(adapter.with_model_call(true))
-        }
-        AdapterInstance::QwenCli(adapter) => {
-            AdapterInstance::QwenCli(adapter.with_model_call(true))
-        }
-        AdapterInstance::CoshCore(adapter) => {
-            AdapterInstance::CoshCore(adapter.with_model_call(true))
-        }
-        other => other,
-    }
-}
+mod adapter_factory;
+
+use adapter_factory::build_adapter;
 
 pub(crate) fn run_demo() -> i32 {
     let events = demo_events();
@@ -102,6 +91,8 @@ pub(crate) fn run_raw(
         eprintln!("unknown adapter: {adapter_name}");
         return 2;
     };
+
+    let adapter = build_adapter(kind);
 
     let work_dir =
         std::env::temp_dir().join(format!("cosh-shell-raw-session-{}", std::process::id()));
@@ -190,12 +181,18 @@ pub(crate) fn run_raw(
     config.integration =
         integration_for_launch(launch_options.resume.is_some(), configured_integration);
     let enhanced_integration = config.integration.uses_markers();
+    let startup_path_enabled = std::env::var("COSH_SHELL_BOOTSTRAP_PATH").as_deref() != Ok("0");
     if config.native_mode && enhanced_integration {
-        bootstrap_process_path_from_shell(&shell_kind, login, &config.winsize, &effects);
+        bootstrap_process_path_from_shell(
+            &shell_kind,
+            login,
+            startup_path_enabled,
+            &config.winsize,
+            &effects,
+        );
     }
-    // #R2: PATH bootstrap may change which bare `bash` would be launched. Only
-    // probe when every other R2 leg holds, resolve after PATH is final, and
-    // freeze the same absolute executable for both probe and spawn.
+    // #R2: only probe when every other R2 leg holds, and freeze the same
+    // absolute executable for both probe and spawn.
     if config.login_identity
         && config.login_shell
         && config.native_mode
@@ -233,7 +230,6 @@ pub(crate) fn run_raw(
         config.set_assistance_control(control);
     }
 
-    let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     inline_state.assistance_control = assistance_control;
     inline_state.shell_session_id = Some(config.session_id.clone());
@@ -265,6 +261,7 @@ pub(crate) fn run_raw(
     }
     inline_state.personalization.bash_history = cosh_config.recommendations.bash_history;
     inline_state.personalization.ai_disabled = !cosh_config.ai_enabled;
+    let mut startup_path_receiver = None;
     if enhanced_integration {
         inline_state.personalization.analyzer_cancellation = Some(AnalyzerCancellation::new());
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -311,29 +308,24 @@ pub(crate) fn run_raw(
             inline_state.startup_health.pending =
                 Some(spawn_startup_health_scan(cosh_config.health.clone()));
         }
-        // The credential probe only feeds startup-banner surfaces; without a
-        // banner it would just cost an extra cosh-core process per launch.
-        if cosh_config.ai_enabled && crate::runtime::startup::startup_banner_enabled() {
-            if let AdapterInstance::CoshCore(core) = &adapter {
-                let core = core.clone();
-                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-                inline_state.startup_auth.pending = Some(receiver);
-                let _ = std::thread::Builder::new()
-                    .name("cosh-startup-auth-probe".to_string())
-                    .spawn(move || {
-                        let _ = sender.send(core.ai_configured().ok());
-                    });
-            }
-        }
+        let startup_auth_core = super::startup_auth::probe_core(&adapter, cosh_config.ai_enabled);
+        let managed_bash_login = startup_path_enabled
+            && config.native_mode
+            && login
+            && matches!(&shell_kind, RawShellKind::Bash);
+        (inline_state.startup_auth.pending, startup_path_receiver) =
+            super::startup_auth::arm(&mut config, startup_auth_core, managed_bash_login);
     }
     if startup_upgrade_check_enabled_for_env() && crate::runtime::startup::startup_banner_enabled()
     {
         if let Some(notice) = read_cached_notice(env!("CARGO_PKG_VERSION")) {
             inline_state.startup_upgrade.resolved = Some(Some(notice));
         }
-        inline_state
-            .startup_upgrade
-            .start_probe(env!("CARGO_PKG_VERSION"));
+        if cosh_config.ai_enabled {
+            inline_state
+                .startup_upgrade
+                .start_probe(env!("CARGO_PKG_VERSION"), startup_path_receiver);
+        }
     }
     let hook_feedback = load_hook_feedback_preferences();
     inline_state.hooks.feedback = hook_feedback.feedback;

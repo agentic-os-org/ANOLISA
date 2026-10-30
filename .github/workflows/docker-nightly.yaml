@@ -397,6 +397,7 @@ jobs:
       version: ${{ needs.versions.outputs.sec-core-version }}
       arch: ${{ matrix.arch }}
       source-artifact: "agent-sec-core-${{ needs.versions.outputs.sec-core-version }}.nightly"
+      sec-core-nightly-online: true
       artifact-suffix: ".nightly"
 
   rpm-tokenless:
@@ -563,7 +564,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./docker/Dockerfile.alinux
+          file: ./distribution/docker/Dockerfile.alinux
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'schedule' || inputs.dry-run != true }}
           tags: ${{ steps.meta.outputs.tags }}

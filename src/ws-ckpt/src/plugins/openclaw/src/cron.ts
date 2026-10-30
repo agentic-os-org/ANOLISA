@@ -29,16 +29,23 @@ function buildCronLine(workspace: string, schedule: string): string {
   );
 }
 
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
+async function withLock(fn: () => Promise<boolean>): Promise<boolean> {
   const maxWait = 5000;
   const interval = 50;
   let waited = 0;
-  while (true) {
+  let acquired = false;
+  while (!acquired) {
     try {
       mkdirSync(LOCK_DIR);
-      break;
-    } catch {
-      if (waited >= maxWait) break; // proceed unlocked rather than fail
+      acquired = true;
+    } catch (error) {
+      // A read-modify-write without ownership can overwrite another caller.
+      if (
+        (error as NodeJS.ErrnoException).code !== "EEXIST" ||
+        waited >= maxWait
+      ) {
+        return false;
+      }
       await new Promise((r) => setTimeout(r, interval));
       waited += interval;
     }
@@ -46,7 +53,14 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
-    try { rmdirSync(LOCK_DIR); } catch { /* already removed */ }
+    // Acquisition failures return before entering the operation or its cleanup.
+    if (acquired) {
+      try {
+        rmdirSync(LOCK_DIR);
+      } catch {
+        /* already removed */
+      }
+    }
   }
 }
 

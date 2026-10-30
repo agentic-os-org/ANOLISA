@@ -5,10 +5,13 @@ use serde::de::{self, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqA
 use serde_json::{Map, Number, Value};
 use std::fmt;
 
+mod scalar;
+
 #[derive(Default)]
 struct Budget {
     expanded: usize,
     reason: Option<&'static str>,
+    has_float: bool,
 }
 
 impl Budget {
@@ -89,6 +92,7 @@ impl<'de> Visitor<'de> for Checked<'_> {
 
     fn visit_f64<E: de::Error>(mut self, value: f64) -> Result<Value, E> {
         self.value_only()?;
+        self.budget.has_float = true;
         Number::from_f64(value)
             .map(Value::Number)
             .ok_or_else(|| self.budget.fail("non-finite numbers are not JSON values"))
@@ -167,6 +171,13 @@ pub(super) fn parse(input: &[u8]) -> Result<Value, Error> {
     })?;
     if documents.next().is_some() {
         return Err(invalid("expected exactly one document"));
+    }
+    if budget.has_float {
+        scalar::check(input, &value).map_err(|error| Error::Document {
+            reason: "integer is outside the supported range",
+            line: error.location().map(|location| location.line()),
+            column: error.location().map(|location| location.column()),
+        })?;
     }
     // Alias expansion has an incremental budget above. Also bound the exact
     // serialized size, including escaping, punctuation and numeric spellings.

@@ -28,24 +28,38 @@ pub struct TokenCommand {
     /// Custom data file path
     #[structopt(long)]
     pub data_file: Option<String>,
+
+    /// Override the database path
+    ///
+    /// The name every other query command uses for the same thing; it means
+    /// exactly what `--data-file` does here. `--data-file` stays because it is
+    /// already documented, and the two are declared mutually exclusive so a
+    /// caller cannot pass both and wonder which won.
+    #[structopt(long, conflicts_with = "data-file")]
+    pub db: Option<String>,
 }
 
 impl TokenCommand {
-    pub fn execute(&self) {
-        // Determine data file path
-        // Use the unified database path (agentsight.db) as default,
-        // which is where Storage writes all tables.
-        let data_path = self
-            .data_file
-            .as_ref()
+    /// Resolve the database path: `--db` and `--data-file` are the same
+    /// override under two names (see [`TokenCommand::db`]); without either the
+    /// unified `agentsight.db` is used, which is where Storage writes all
+    /// tables.
+    fn db_path(&self) -> std::path::PathBuf {
+        self.db
+            .as_deref()
+            .or(self.data_file.as_deref())
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| SqliteConfig::default().db_path());
+            .unwrap_or_else(|| SqliteConfig::default().db_path())
+    }
+
+    pub fn execute(&self) {
+        let data_path = self.db_path();
 
         self.execute_summary(&data_path);
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {
-        if self.data_file.is_some()
+        if (self.data_file.is_some() || self.db.is_some())
             && let Err(error) = agentsight::check_data_file(data_path)
         {
             eprintln!("{error}");
@@ -167,5 +181,49 @@ mod tests {
         assert!(compared.compare);
         let reversed = TokenCommand::from_iter_safe(["token", "--hours", "24", "--period", "week"]);
         assert!(reversed.is_err(), "the order of the flags must not matter");
+    }
+
+    /// Every other query command spells the database override `--db`
+    /// (`metrics`, `audit`, `summary`, `interruption`, `skill-metrics`,
+    /// `dashboard`, `serve`), and the CLI reference's Conventions table says
+    /// so. `token` alone called it `--data-file`, so `token --db <copy>` — the
+    /// spelling a reader carries over from the sibling commands — was rejected
+    /// with an unknown-argument error.
+    #[test]
+    fn db_is_accepted_as_the_database_override() {
+        let plain = TokenCommand::from_iter_safe(["token"]).expect("a plain invocation parses");
+        assert_eq!(plain.db_path(), SqliteConfig::default().db_path());
+
+        let with_db = TokenCommand::from_iter_safe(["token", "--db", "/tmp/token_copy.db"])
+            .expect("--db must be accepted, like the sibling query commands");
+        assert_eq!(
+            with_db.db_path(),
+            std::path::PathBuf::from("/tmp/token_copy.db")
+        );
+
+        // The published name keeps working and means the same thing.
+        let with_data_file =
+            TokenCommand::from_iter_safe(["token", "--data-file", "/tmp/token_copy.db"])
+                .expect("--data-file stays supported");
+        assert_eq!(
+            with_data_file.db_path(),
+            std::path::PathBuf::from("/tmp/token_copy.db")
+        );
+
+        // Two spellings of one override: passing both is a usage error rather
+        // than a silent pick, the same way `--hours`/`--period` are declared.
+        let both = TokenCommand::from_iter_safe([
+            "token",
+            "--db",
+            "/tmp/a.db",
+            "--data-file",
+            "/tmp/b.db",
+        ]);
+        let err = both.expect_err("the two spellings must not be silently reduced to one");
+        let message = err.to_string();
+        assert!(
+            message.contains("--db") && message.contains("--data-file"),
+            "the error must name both flags: {message}"
+        );
     }
 }

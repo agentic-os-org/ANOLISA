@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 """Fail when component metadata drifts from its authoritative version."""
 
 import json
@@ -15,39 +16,84 @@ except ImportError:
 
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION_RE = re.compile(
-    r'^\s*(?:"version"|version)\s*[:=]\s*"([^"]+)"\s*,?\s*$', re.MULTILINE
-)
+VERSION_RE = re.compile(r'^\s*(?:"version"|version)\s*[:=]\s*"([^"]+)"\s*,?\s*$', re.MULTILINE)
 TOML_CONTRACTS = (
-    ("src/agent-memory/Cargo.toml", "distribution/anolisa/manifests/components/agent-memory/component.toml"),
-    ("src/agent-sec-core/openclaw-plugin/package.json", "src/agent-sec-core/.anolisa/component.toml"),
-    ("src/agentsight/Cargo.toml", "src/agentsight/component.toml"),
-    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.toml"),
-    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.macos.toml"),
+    (
+        "src/agent-memory/Cargo.toml",
+        "distribution/anolisa/manifests/components/agent-memory/component.toml",
+    ),
+    (
+        "src/agent-sec-core/openclaw-plugin/package.json",
+        "src/agent-sec-core/packaging/anolisa/component.toml",
+    ),
+    (
+        "src/agent-sec-core/v2/Cargo.toml",
+        "distribution/anolisa/manifests/components/sec-core/component.toml",
+    ),
+    ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/rpm/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/raw/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/packaging/anolisa/raw/component.macos.toml"),
+    (
+        "src/agentsight/Cargo.toml",
+        "distribution/anolisa/manifests/components/agentsight/component.toml",
+    ),
     ("deprecated/copilot-shell/package.json", "deprecated/copilot-shell/component.toml"),
-    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/component.toml"),
-    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.toml"),
-    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.macos.toml"),
-    ("src/skillfs/Cargo.toml", "src/skillfs/component.toml"),
-    ("src/skillfs/Cargo.toml", "src/skillfs/.anolisa/component.toml"),
-    ("src/tokenless/Cargo.toml", "distribution/anolisa/manifests/components/tokenless/component.toml"),
-    ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/component.toml"),
-    ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/.anolisa/component.toml"),
+    (
+        "deprecated/copilot-shell/package.json",
+        "distribution/anolisa/manifests/components/cosh/component.toml",
+    ),
+    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/packaging/anolisa/rpm/component.toml"),
+    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/packaging/anolisa/raw/component.toml"),
+    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/packaging/anolisa/raw/component.macos.toml"),
+    ("src/cosh-ng/Cargo.toml", "distribution/anolisa/manifests/components/cosh-ng/component.toml"),
+    ("src/skillfs/Cargo.toml", "src/skillfs/packaging/anolisa/rpm/component.toml"),
+    ("src/skillfs/Cargo.toml", "src/skillfs/packaging/anolisa/raw/component.toml"),
+    ("src/skillfs/Cargo.toml", "distribution/anolisa/manifests/components/skillfs/component.toml"),
+    (
+        "src/os-skills/component.toml",
+        "distribution/anolisa/manifests/components/os-skills/component.toml",
+    ),
+    ("src/os-skills/component.toml", "src/os-skills/cosh-extension.json"),
+    (
+        "src/tokenless/Cargo.toml",
+        "distribution/anolisa/manifests/components/tokenless/component.toml",
+    ),
+    ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/packaging/anolisa/rpm/component.toml"),
+    ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/packaging/anolisa/raw/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/src/plugins/openclaw/package.json"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/src/plugins/openclaw/package-lock.json"),
-    ("src/ws-ckpt/src/Cargo.toml", "distribution/anolisa/manifests/components/ws-ckpt/component.toml"),
+    (
+        "src/ws-ckpt/src/Cargo.toml",
+        "distribution/anolisa/manifests/components/ws-ckpt/component.toml",
+    ),
 )
 VERSION_TEMPLATES = (
-    ("src/agent-memory/Cargo.toml", "src/agent-memory/.anolisa/component.toml.in"),
-    ("src/tokenless/Cargo.toml", "src/tokenless/.anolisa/component.toml.in"),
+    ("src/agent-memory/Cargo.toml", "src/agent-memory/packaging/anolisa/rpm/component.toml.in"),
+    ("src/agent-memory/Cargo.toml", "src/agent-memory/packaging/anolisa/raw/component.toml.in"),
+    ("src/tokenless/Cargo.toml", "src/tokenless/packaging/anolisa/component.toml.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/manifest.json.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/openclaw/package.json.in"),
-    ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/openclaw/openclaw.plugin.json.in"),
+    (
+        "src/tokenless/Cargo.toml",
+        "src/tokenless/adapters/tokenless/openclaw/openclaw.plugin.json.in",
+    ),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/hermes/plugin.yaml.in"),
-    ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/qoder/.qoder-plugin/plugin.json.in"),
-    ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/claude-code/.claude-plugin/plugin.json.in"),
-    ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/codex/.codex-plugin/plugin.json.in"),
-    ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/qwencode/qwen-extension.json.in"),
+    (
+        "src/tokenless/Cargo.toml",
+        "src/tokenless/adapters/tokenless/qoder/.qoder-plugin/plugin.json.in",
+    ),
+    (
+        "src/tokenless/Cargo.toml",
+        "src/tokenless/adapters/tokenless/claude-code/.claude-plugin/plugin.json.in",
+    ),
+    (
+        "src/tokenless/Cargo.toml",
+        "src/tokenless/adapters/tokenless/codex/.codex-plugin/plugin.json.in",
+    ),
+    (
+        "src/tokenless/Cargo.toml",
+        "src/tokenless/adapters/tokenless/qwencode/qwen-extension.json.in",
+    ),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/qwenpaw/plugin.json.in"),
 )
 AGENT_MEMORY_JSON = (
@@ -57,8 +103,8 @@ AGENT_MEMORY_JSON = (
     "src/agent-memory/config/mcp-server.json",
 )
 GENERATED_CONTRACTS = (
-    "src/agent-memory/.anolisa/component.toml",
-    "src/tokenless/.anolisa/component.toml",
+    "src/agent-memory/target/packaging/anolisa/rpm/component.toml",
+    "src/tokenless/target/packaging/anolisa/component.toml",
 )
 
 
@@ -142,7 +188,9 @@ def check_generated_contracts_untracked(errors: list[str]) -> None:
                 check=False,
             )
         except OSError:
-            print("warning: skipping untracked-contracts check (git not available)", file=sys.stderr)
+            print(
+                "warning: skipping untracked-contracts check (git not available)", file=sys.stderr
+            )
             return
         if result.returncode == 0:
             errors.append(f"{path}: generated component contract must not be tracked")

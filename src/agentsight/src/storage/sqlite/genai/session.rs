@@ -635,10 +635,15 @@ impl GenAISqliteStore {
     /// consumers pass to every other agent-scoped query, which all match
     /// case-insensitively). The reported spelling is the group's `MIN`, the
     /// same stable-spelling rule `get_agent_token_summary` uses.
+    ///
+    /// `include_auxiliary` mirrors the session-formation predicate: with
+    /// `false`, an agent whose calls are all auxiliary (web_search, analyzer)
+    /// is omitted, because `/api/sessions` does not show its sessions.
     pub fn list_agent_names(
         &self,
         start_ns: i64,
         end_ns: i64,
+        include_auxiliary: bool,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
@@ -646,15 +651,20 @@ impl GenAISqliteStore {
             // (`COALESCE(agent_name, process_name)`): a call recorded without
             // an agent name would otherwise be missing from the filter list
             // while the dashboard shows its sessions under that label.
+            // The auxiliary guard is bound as a parameter rather than
+            // concatenated into the statement.
             "SELECT MIN(COALESCE(agent_name, process_name)) AS agent_name
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND COALESCE(agent_name, process_name) IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
+               AND (?3 = 1 OR call_kind = 'main' OR call_kind IS NULL OR call_kind = 'recap')
              GROUP BY COALESCE(agent_name, process_name) COLLATE NOCASE
              ORDER BY agent_name ASC",
         )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![start_ns, end_ns, include_auxiliary as i32], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);

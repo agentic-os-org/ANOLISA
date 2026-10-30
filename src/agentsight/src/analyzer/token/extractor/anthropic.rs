@@ -80,7 +80,7 @@ pub fn extract_token_data(
                         }
                     }
                     // Extended thinking arrives as a `thinking` block whose
-                    // text sits in the `thinking` field (a `redacting_thinking`
+                    // text sits in the `thinking` field (a `redacted_thinking`
                     // block carries no plaintext and stays unextracted). The
                     // shared SSE extractor already maps thinking deltas to
                     // reasoning_content; without this arm a non-streaming
@@ -96,16 +96,14 @@ pub fn extract_token_data(
                             }
                         }
                     }
-                    Some("tool_use") => {
-                        let name = block
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("unknown");
-                        if let Some(input) = block.get("input") {
-                            if let Ok(input_str) = serde_json::to_string(input) {
-                                token_data.tool_calls.push(format!("{name}: {input_str}"));
-                                has_content = true;
-                            }
+                    // `server_tool_use` and `mcp_tool_use` are the same call
+                    // made by a tool the provider runs on its side; the
+                    // message parser reads both spellings as `tool_use`, so
+                    // this reader must not drop them and lose the record.
+                    Some("tool_use" | "server_tool_use" | "mcp_tool_use") => {
+                        if let Some(call) = tool_use_text(block) {
+                            token_data.tool_calls.push(call);
+                            has_content = true;
                         }
                     }
                     _ => {}
@@ -151,7 +149,21 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
                     // A tool-result turn carries the tool's output in a
                     // `tool_result` block, so without this arm the payload
                     // the API actually counts vanishes from the message.
-                    Some("tool_result") => tool_result_text(b.get("content")),
+                    Some(
+                        "tool_result"
+                        | "web_search_tool_result"
+                        | "web_fetch_tool_result"
+                        | "code_execution_tool_result"
+                        | "bash_code_execution_tool_result"
+                        | "text_editor_code_execution_tool_result"
+                        | "tool_search_tool_result"
+                        | "mcp_tool_result",
+                    ) => tool_result_text(b.get("content")),
+                    // A replayed conversation keeps the assistant's own
+                    // `tool_use` blocks; without this arm the turn that asked
+                    // for the tool extracted to nothing, dropping the tool
+                    // name and its JSON arguments from the request.
+                    Some("tool_use" | "server_tool_use" | "mcp_tool_use") => tool_use_text(b),
                     _ => None,
                 })
                 .collect::<Vec<String>>()
@@ -186,6 +198,19 @@ fn tool_result_text(content: Option<&Value>) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Text of an Anthropic `tool_use` block: the tool name and its input as
+/// JSON, the same `name: input` rendering the response reader emits. `None`
+/// for a block with no serializable input.
+fn tool_use_text(block: &Value) -> Option<String> {
+    let name = block
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("unknown");
+    let input = block.get("input")?;
+    let input_str = serde_json::to_string(input).ok()?;
+    Some(format!("{name}: {input_str}"))
 }
 
 #[cfg(test)]
@@ -326,6 +351,42 @@ mod tests {
         );
     }
 
+    /// A replayed conversation contains the assistant's own `tool_use`
+    /// blocks: the turn that asked for the tool, followed by the user turn
+    /// carrying the matching `tool_result`. The request reader already counts
+    /// the result half, but not the call that asked for it, so the assistant
+    /// turn extracted to nothing and was dropped from `request_messages` —
+    /// losing the tool name and the JSON arguments, which are a sizeable part
+    /// of an agentic prompt. The response reader in this same file reads the
+    /// block; the request arm was the copy missing it.
+    #[test]
+    fn test_extract_request_keeps_a_replayed_tool_use() {
+        let request = serde_json::json!({
+            "model": "claude-3-7-sonnet",
+            "messages": [
+                {"role": "user", "content": "list /tmp"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "Bash",
+                     "input": {"command": "ls /tmp"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_01", "content": "a.txt"}
+                ]}
+            ]
+        });
+
+        let token_data = extract_token_data(Some(&request), None).expect("request yields data");
+        assert_eq!(
+            token_data.request_messages.len(),
+            3,
+            "the replayed assistant tool call must be counted"
+        );
+        let call = &token_data.request_messages[1];
+        assert_eq!(call.role, "assistant");
+        assert!(call.content.contains("Bash"), "got {:?}", call.content);
+        assert!(call.content.contains("ls /tmp"), "got {:?}", call.content);
+    }
+
     /// Extended thinking arrives as a `thinking` content block. The shared
     /// SSE extractor already maps thinking deltas to reasoning_content, so
     /// the non-streaming arm must too — a thinking-only response otherwise
@@ -372,7 +433,7 @@ mod tests {
         let response = serde_json::json!({
             "model": "claude-3-7-sonnet",
             "content": [
-                {"type": "redacting_thinking", "data": "encrypted"},
+                {"type": "redacted_thinking", "data": "encrypted"},
                 {"type": "text", "text": "Answer"}
             ]
         });
@@ -381,6 +442,82 @@ mod tests {
         let data = token_data.unwrap();
         assert!(data.reasoning_content.is_none());
         assert_eq!(data.response_content.len(), 1);
+    }
+
+    /// Server-tool answers are built from the provider-side block spellings
+    /// the message parser already models: `server_tool_use` / `mcp_tool_use`
+    /// carry the same `name` / `input` payload as `tool_use`. This extractor
+    /// matched only the plain spelling, so an answer that only searched
+    /// extracted to no content at all and its whole token record was dropped
+    /// — while the same JSON parsed into messages without error.
+    #[test]
+    fn test_extract_server_tool_use_blocks() {
+        let response = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                 "input": {"query": "rust 2026"}}
+            ]
+        });
+        let token_data = extract_token_data(None, Some(&response))
+            .expect("a search-only answer must not lose its token record");
+        assert_eq!(token_data.tool_calls.len(), 1);
+        assert_eq!(
+            token_data.tool_calls[0],
+            "web_search: {\"query\":\"rust 2026\"}"
+        );
+
+        let response = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "content": [
+                {"type": "mcp_tool_use", "id": "mcptoolu_1", "name": "github_search",
+                 "input": {"q": "repo:anolisa"}}
+            ]
+        });
+        let token_data = extract_token_data(None, Some(&response))
+            .expect("an MCP connector call must not lose its token record");
+        assert_eq!(
+            token_data.tool_calls[0],
+            "github_search: {\"q\":\"repo:anolisa\"}"
+        );
+    }
+
+    /// The request arm has the same blind spot: a replayed assistant turn
+    /// that asked for a server-side tool was dropped from
+    /// `request_messages`, and an `mcp_tool_result` carrying the connector's
+    /// text output was dropped too.
+    #[test]
+    fn test_extract_request_server_tool_blocks() {
+        let request = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "search for rust 2026"},
+                {"role": "assistant", "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                     "input": {"query": "rust 2026"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "mcp_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                        {"type": "text", "text": "Rust 2026 edition"}
+                    ]}
+                ]}
+            ]
+        });
+        let token_data = extract_token_data(Some(&request), None).expect("the request yields data");
+        assert_eq!(
+            token_data.request_messages.len(),
+            3,
+            "the replayed server call and its result must be counted"
+        );
+        assert!(
+            token_data.request_messages[1]
+                .content
+                .contains("web_search"),
+            "got {:?}",
+            token_data.request_messages[1].content
+        );
+        assert_eq!(token_data.request_messages[2].content, "Rust 2026 edition");
     }
 
     #[test]

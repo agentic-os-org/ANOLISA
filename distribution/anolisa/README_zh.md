@@ -66,9 +66,9 @@ unsafe-install 覆盖权限。
 通过 `anolisa adapter enable tokenless opencode` 启用 Tokenless 本地插件。
 ANOLISA 管理插件链接；启用或禁用后需重启 OpenCode。
 自定义配置目录及已有安装的接管规则见
-[adapter 参考](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md#adapter)。
+[adapter 参考](../../docs/user-guide/zh/getting-started/anolisa-cli.md#adapter)。
 
-千问办公 QwenWorkCN 的 macOS 本地模式使用
+千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell 会话使用
 `anolisa adapter enable tokenless qwenwork` 接入 Tokenless。完成后重启应用并在应用内
 检查激活状态；CLI 验证文件，但激活状态为 `unknown`。已有脚本安装需先卸载再通过 CLI 启用。
 
@@ -97,10 +97,15 @@ scope。因此，即使 system scope 已安装同名组件，
 | `--no-color` | 禁用彩色输出 |
 
 完整的命令形式、scope 行为与恢复流程见
-[CLI 用户指南](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md)。
+[CLI 用户指南](../../docs/user-guide/zh/getting-started/anolisa-cli.md)。
 
 RPM 安装支持 Yum 3 和 DNF 4。使用 `sudo` 执行 RPM `--dry-run`，
 可在安装前检查依赖和冲突。
+
+raw 安装可使用 `anolisa install <component> --backend raw --no-deps`
+跳过运行依赖检查和安装，也支持与 `--all` 组合。使用组件前需自行确保
+所需依赖可用。安装成功后会向 stderr 输出提醒，`--quiet` 可隐藏提醒。
+RPM 后端不支持此选项，会明确报错。
 
 ## 架构
 
@@ -117,6 +122,16 @@ RPM 安装支持 Yum 3 和 DNF 4。使用 `sudo` 执行 RPM `--dry-run`，
 支持双后端：**raw**（OSS tar.gz）和 **RPM**（yum/dnf 事务）。生命周期
 planner 区分 ANOLISA 自有文件与 native package authority，并在副作用前
 记录崩溃恢复意图。组件元数据通过 `component.toml` 声明。
+
+ANOLISA 在 `share/anolisa/components/` 中交付 RPM 集成合同。组件 RPM 独立
+交付运行时、plugins 和 skills，无须安装 ANOLISA 元数据。RPM install/adopt
+将发行合同保存为状态快照，供适配器管理使用；raw 产物保留各自发布版本的合同。
+`bash scripts/package-manifests.sh /absolute/manifests.tar.gz` 可生成
+`scripts/install-anolisa.sh` 使用的数据包。
+预构建归档和 native npm 包在 `bin/anolisa` 旁交付同一套 registry；请一起
+保留 `bin/` 和 `share/` 目录。手工只复制一个二进制文件时，需要另用安装器
+部署数据包，才能管理 RPM 适配器。若 registry 合同仍由旧组件 RPM 所有，
+安装器会拒绝覆盖；请先升级这些组件包。
 
 raw backend 每次解析都会重新拉取 distribution index，仓库不可达时命令直接
 失败。`repo.toml` 中旧的 `cache_ttl_secs` 和 `offline_fallback` 字段仍可正常

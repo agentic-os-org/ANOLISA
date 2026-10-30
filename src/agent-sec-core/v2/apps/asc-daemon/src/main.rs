@@ -6,7 +6,7 @@ use runtime_path::RuntimeLease;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod sinks;
 
@@ -19,7 +19,7 @@ use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder, QueryHandler};
 use asc_daemon_service::ShutdownToken;
 use asc_event_sink::ConfiguredSecurityEventSinks;
 use asc_pap::{PapRepository, PapService, ScopeDiscovery};
-use asc_policy_repository_sqlite::SqlitePolicyRepository;
+use asc_policy_repository_sqlite::{SqlitePolicyRepository, select_policy_database_path};
 use asc_policy_runtime::reconciliation::ReconciliationRuntime;
 use asc_policy_types::scope::ScopeStatus;
 use asc_security_events::config::daemon_security_event_paths;
@@ -50,8 +50,10 @@ const FINAL_PASS_BUDGET: Duration = Duration::from_secs(5);
 /// The telemetry runtime's own shutdown grace, reserved at the end of the
 /// unit stop budget.
 const TELEMETRY_SHUTDOWN: Duration = Duration::from_secs(2);
+const FALLBACK_POLICY_DATABASE: &str = "/var/lib/agent-sec/policy/policy-state.db";
 
 fn main() -> ExitCode {
+    let startup_started = Instant::now();
     install_panic_hook();
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
     let outcome = match Cli::parse_from(std::env::args_os()) {
@@ -76,6 +78,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    report_startup("telemetry_ready", startup_started);
+    report_startup("runtime_directory", startup_started);
     let lease = match RuntimeLease::acquire(&cli.bootstrap.socket_path) {
         Ok(lease) => lease,
         Err(problem) => {
@@ -84,9 +88,23 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    report_startup("policy_storage", startup_started);
     let paths = asc_security_events::config::DaemonDataDirEnv::from_process();
     let data_dir = paths.override_dir.as_ref().unwrap_or(&paths.system_dir);
-    let repository = match SqlitePolicyRepository::open(&data_dir.join("policy-state.db")) {
+    let fallback = paths
+        .override_dir
+        .is_none()
+        .then(|| Path::new(FALLBACK_POLICY_DATABASE));
+    let repository = select_policy_database_path(&data_dir.join("policy-state.db"), fallback)
+        .map_err(std::io::Error::other)
+        .and_then(|path| {
+            tracing::info!(target: "asc_process_diagnostic", path = %path.display(), "Policy database selected");
+            SqlitePolicyRepository::open(&path).map_err(|error| std::io::Error::other(format!(
+                "cannot open Policy database '{}': {error}; refusing to switch databases; existing Policy state must be preserved",
+                path.display()
+            )))
+        });
+    let repository = match repository {
         Ok(repository) => Arc::new(repository),
         Err(problem) => {
             report_error(&telemetry, &problem);
@@ -96,9 +114,10 @@ fn main() -> ExitCode {
     };
     // Keep database ownership even if the outer Tokio drain times out.
     let _database_lease = repository.lease();
+    report_startup("tokio_runtime", startup_started);
     // Retain the singleton through the outer Tokio blocking-task shutdown window.
     let outcome = match run_with_shutdown_timeout(
-        run(*cli, &lease, &telemetry, repository),
+        run(*cli, &lease, &telemetry, repository, startup_started),
         RUNTIME_SHUTDOWN_TIMEOUT,
     ) {
         Ok((exit_code, shutdown_plan)) => {
@@ -116,6 +135,15 @@ fn main() -> ExitCode {
     outcome
 }
 
+fn report_startup(stage: &'static str, started: Instant) {
+    tracing::info!(
+        target: "asc_observability::diagnostic",
+        reason = "startup_stage",
+        stage,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
 // Keep startup admission and shutdown ordering visible together in the composition root.
 #[allow(clippy::too_many_lines)]
 async fn run(
@@ -123,11 +151,14 @@ async fn run(
     lease: &RuntimeLease,
     telemetry: &asc_observability::TelemetryRuntime,
     repository: Arc<SqlitePolicyRepository>,
+    startup_started: Instant,
 ) -> (ExitCode, Option<sinks::ShutdownPlan>) {
+    report_startup("socket_cleanup", startup_started);
     if let Err(problem) = lease.prepare_socket().await {
         report_error(telemetry, &problem);
         return (ExitCode::FAILURE, None);
     }
+    report_startup("signals", startup_started);
     let signals = match ProcessSignals::install() {
         Ok(signals) => signals,
         Err(problem) => {
@@ -135,6 +166,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("skillsec", startup_started);
     let (skill_sec, skillfs_config) = match skill_sec::start(cli.skillsec_config.as_deref()) {
         Ok(service) => service,
         Err(error) => {
@@ -142,6 +174,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("pii_rules", startup_started);
     let pii_rules = match load_pii_rules(cli.pii_rules.as_deref(), telemetry) {
         Ok(rules) => Arc::new(rules),
         Err(error) => {
@@ -149,6 +182,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("event_storage", startup_started);
     let (finalizer, durable_sinks, queries) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
         Err(error) => {
@@ -158,6 +192,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("skillfs", startup_started);
     let skill_worker = Arc::new(asc_daemon::SkillWorker::default());
     let skillfs = match prepare_skillfs(skillfs_config, &skill_worker) {
         Ok(bridge) => bridge,
@@ -169,6 +204,7 @@ async fn run(
             );
         }
     };
+    report_startup("skill_worker", startup_started);
     let mut executor = asc_capability_skill_sec::executor::SkillSecExecutor::new(skill_sec.clone());
     if let Some(bridge) = &skillfs {
         executor = executor.with_environment(bridge.environment());
@@ -181,6 +217,7 @@ async fn run(
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
+    report_startup("deleting_scope_recovery", startup_started);
     // Exclusive DB ownership proves no pre-crash discovery worker can still write.
     if let Err(error) = recover_deleting_scopes(repository.as_ref()) {
         report_error(telemetry, &error);
@@ -190,6 +227,7 @@ async fn run(
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
+    report_startup("policy_runtime", startup_started);
     let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -201,6 +239,7 @@ async fn run(
             );
         }
     };
+    report_startup("active_scope_recovery", startup_started);
     let pap =
         PapService::new(repository.clone()).with_reconcile_enqueuer(policy_runtime.enqueuer());
     // The sink clone has no registry, avoiding a worker/service ownership cycle.
@@ -246,6 +285,7 @@ async fn run(
     // prune a large historical backlog, and request audit writes share the
     // same connection mutex (see `retention` module docs and
     // `DAEMON_JOB_CONTRACT_zh.md` section 11.5).
+    report_startup("retention_catchup", startup_started);
     let (retention_task, admitted) = start_retention(
         &durable_sinks.security,
         &durable_sinks.observability,
@@ -254,6 +294,7 @@ async fn run(
     )
     .await;
     let result = if admitted {
+        report_startup("transport", startup_started);
         Some(
             serve(
                 cli.bootstrap,
@@ -341,8 +382,20 @@ async fn start_retention(
             // Both gated passes run under one task: each store keeps its own
             // marker and lock, and the combined outcome schedules the failure
             // retry when either store needs it.
+            let started = Instant::now();
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "security", phase = "started");
             let security_outcome = security.run_sqlite_retention(now);
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "security", phase = "completed",
+                duration_ms = started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "observability", phase = "started");
             let observability_outcome = observability.run_sqlite_retention(now);
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "observability", phase = "completed",
+                duration_ms = started.elapsed().as_secs_f64() * 1000.0);
             asc_daemon::retention::combine_outcomes(security_outcome, observability_outcome)
         })
     };

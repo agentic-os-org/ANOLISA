@@ -17,8 +17,10 @@ Runtime 集成、完整 E2E 和持久化恢复按各自工作包验收。
 核心测试使用隔离临时落盘库验证原子操作，磁盘耐久性和进程崩溃恢复仍需独立验收。
 
 Runtime 集成采用[调度、存储与恢复设计](../../../docs/design/BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
-的 CR-010～CR-021 和 RRT-001～RRT-018 分阶段门禁。核心 fixtures 按局部写和每次重算契约维护：
-每次读取 Binding、翻译和准备，不保留跨调用 prepared 或待补写结果，不传递 restart。
+的 CR-010～CR-021 和 RRT-001～RRT-018 分阶段门禁。核心 fixtures 按局部条件写契约维护：
+每次新远端尝试读取 Binding、翻译和准备，不保留跨调用 prepared，不传递 restart。
+存储失败时在 AttemptSchedule 中保留未确认 write 和已有实际 outcome；后续调用先确认原写入，
+原 claim 过期则整笔取消旧结果，不重复已完成的远端调用。进程退出后不保留临时结果。
 dirty 仅负责再次排队。deployment 清理责任及重试控制继续保留；结果未提交时不能假定
 远端未执行。运行结果由 CI/验收报告记录，旧缓存行为的历史报告不作为新语义的证据。
 
@@ -52,19 +54,19 @@ SQLite 中的部署记录不代表远端目标已清理；恢复与目标清理�
 1. Reconciler 重读最新 Binding；不按通知中缓存的旧 spec/命令执行。
 2. Runtime/WorkQueue 的 Running entry 覆盖读库认领、Client 调用、结果记账及收尾。没有两个本地目标
    操作重叠；上一任务未结束或 join 前不能让下一任务开始目标调用。
-3. 认领和生命周期更新原子检查 Binding ID、expected revision 与 expected status。
+3. 认领和生命周期更新原子检查 Binding ID、expected revision、status_version 与完整 status。
    用户 Delete 不增版；旧 Apply 不能覆盖新的 `PENDING_DELETE`。
 4. 创建/更新前先保存 Client 返回的目标身份和 UNKNOWN 记录；
    保存失败则零目标修改调用。prepared 只作为本次调用临时输入原样交给 Client。
-5. Client 返回后，先保存目标观察，再按 CAS 推进生命周期；可以使用一个原子结果
-   操作完成。旧任务仍可保存自己产生的目标事实，但不能覆盖新意图及其重试/错误。
+5. Client 返回后，仅在原 revision/status_version/status 匹配时原子提交目标观察与生命周期。
+   旧结果整笔拒绝，保留预登记的 UNKNOWN 清理责任，不覆盖新意图及其重试/错误。
 6. 只有明确确认 Absent 才回收记录。失败、超时、无明确确认和预算耗尽都保留
    清理责任；`UNKNOWN` 不等同于“没有部署”。
 7. READY 要求 Client 确认本次期望及旧目标清理完成。Delete 只有在所有目标确认
    Absent 且原意图仍匹配时，才原子移除整个 Binding 聚合；不保留 DELETED 行。
 8. revision 只随 spec 变化。删除不可撤销；删除后重新部署由 PAP CREATE 新 ID、
    revision 1，核心不自行分配版本或 PEP ID。
-9. 每次重试重新 translate/prepare，并校验本次准备的身份；重复通知不绕过退避或预算。重试耗尽进入对应
+9. 每次新远端尝试重新 translate/prepare，并校验本次准备的身份；重复通知不绕过退避或预算。重试耗尽进入对应
    FAILED，记录仍保留；FAILED 不因重复触发自动开始新预算。
 10. 新 Delete 不继承旧 Apply 的预算或退避。PAP 对新意图的预算初始化由 repository
     契约测试覆盖；核心根据已接受的最新状态执行。
@@ -107,12 +109,12 @@ PEP 身份都是 UUID。prepared 内容以字节或等价的无损编码比较�
 | `policy.prevent-file-deletion`、`scope.pid-4242.rev-3` | 共享的完整 Policy 和 Scope |
 | `binding.rev-7`、`binding.rev-8` | 引用 Policy/Scope 的完整 Binding spec；数字表示真实 revision |
 | `target.old-a`、`target.new-b` | A 是旧部署，B 是本次 Apply 的候选部署；不是 policy 类型 |
-| `plan.opaque`、`prepared.new-b`、`saved.create-new-b.rev-7` | Adapter plan、Client 固定请求、带来源 revision/更新模式的保存记录 |
+| `plan.opaque`、`prepared.new-b` | Adapter plan、Client 固定请求；prepared 不保存到 Repository |
 | `prepare.new-b.ok`、`request.new-b.no-previous`、`report.new-b.present` | Client 准备结果、调用输入、目标观察报告；无 previous 的输入也可用于部分清理后的 update 重试 |
-| `record.create.pending`、`record.replace.partial-retry` | 完整运行状态快照，以操作和状态描述用途 |
+| `record.create.pending`、`record.replace.partial-retry.status-3` | 完整运行状态快照，以操作、状态和 status_version 描述用途 |
 | `record.skip.ready`、`record.skip.applying` | 专门验证跳过逻辑的既有状态输入，不代表完整执行成功后的输出 |
 
-record 中的 status、attempts、deadline、error、deployment presence 保持显式可见；
+record 中的 status、status_version、error、deployment presence 及调用方 schedule 中的 attempts/deadline 保持显式可见；
 共享稳定 spec 和请求不需要为每种运行状态复制 PolicyTemplate 快照。expected 独立声明，
 不得从运行结果生成或由 Reconciler 的状态转换函数推导。新增 policy 的翻译样例
 归属 Adapter；核心矩阵仅在增加执行/记账语义时扩展，不按 policy 类型复制。
@@ -121,10 +123,10 @@ trace 至少记录 read、claim 成功/冲突、Adapter、prepare、目标登记
 调用/返回、目标结果提交、生命周期 CAS 结果及重试决定。应验证的顺序例如：
 
 ```text
-claim → Adapter → prepare → 保存目标成功 → create/update → 保存结果 → 完成状态
+claim → Adapter → prepare → 保存目标成功 → create/update → 原子提交观察与状态
 ```
 
-观察与状态同事务提交时，记录事务结果及 CAS 判定即可，不强制实现两次事务。
+观察与状态必须同事务提交；trace 记录事务结果及 CAS 判定，不拆成两次事务。
 核心 trace 只记录 `Client.update`，不要求它记录或编排 Client 内部 DELETE/POST。
 竞争测试用 barrier/channel 等可控同步点，比较同 Binding 顺序和必要的先后关系，
 不依赖不同 Binding 的全局线程调度顺序。测试超时可用作死锁保护，不用作竞争证明。
@@ -145,12 +147,12 @@ runner 必须在以下情况失败：缺失/重复 case、缺失预期变体、f
 | REC-CORE-002 | 已有部署更新成功；不同目标 ID / 复用目标 ID 两个 fake Client 变体 | 调用 update，传入正确记录和 prepared；不直接拆成 delete+create；本次目标不被误列为旧清理对象；READY 与 Client 确认一致 |
 | REC-CORE-003 | A 已生效，B 意图随后被 Delete 覆盖且 B 未执行 | 清理保留的 A；不只根据当前 revision 猜目标；不调用 Adapter/prepare/create/update |
 | REC-CORE-004 | 正常多目标 Delete；空目标 Delete | 非空清理全部未确认 Absent 的记录；全部确认后聚合不存在；空集合仅在无旧本地执行且登记不变量成立时直接完成 |
-| REC-CORE-005 | Apply 执行中同 revision 接受 Delete；旧任务成功/可重试失败/永久失败三变体 | 旧结果可记账，生命周期 CAS 失败；PENDING_DELETE 及新预算/错误不被覆盖；旧调用退出后再次调用核心能完成 Delete |
+| REC-CORE-005 | Apply 执行中同 revision 接受 Delete；旧任务成功/可重试失败/永久失败三变体 | 旧结果整笔拒绝，UNKNOWN 清理责任保持不变；PENDING_DELETE 及新预算/错误不被覆盖；旧调用退出后再次调用核心能完成 Delete |
 | REC-CORE-006 | 同 Binding 首次结果写回被阻塞；调用方等待其结束再发起下一次调用 | 至多一次认领及目标调用在执行；Running 直到结果处理完成（Runtime 测试验证）；后续重读最新状态，无重复副作用 |
-| REC-CORE-007 | 认领后 revision 改变 / 仅 status 改变 | 两种 CAS 均拒绝旧生命周期写入；只合并已登记目标的事实；不写回整份旧 BindingState |
+| REC-CORE-007 | 认领后 revision 改变 / 仅 status 改变 | 两种 CAS 均拒绝整个旧结果，包括目标观察；保留已有 UNKNOWN，不写回旧 BindingState |
 | REC-CORE-008 | 首次读取失败 / claim 存储失败 / claim 冲突 | 零目标修改调用；未成功 claim 不消耗预算；冲突与存储错误可区分 |
 | REC-CORE-009 | 目标登记保存失败 | create/update 均未调用；旧目标保留；返回存储错误，不虚报 READY |
-| REC-CORE-010 | Client 成功后结果保存失败及随后恢复写入 | 原子结果未部分提交；不报告完成、不丢预登记目标；同进程保留原 write_id/结果和逻辑 slot，先确认或补交原写入，不重复已完成远端调用、不消耗存储等待预算；真正进程崩溃后依持久 UNKNOWN 责任安全恢复 |
+| REC-CORE-010 | Client 成功后结果保存失败及随后恢复写入 | 原子结果未部分提交；不报告完成、不丢预登记目标；同进程保留原 write_id/结果和逻辑 slot，先确认或补交原写入，不重复 Adapter/prepare/Client 调用、不消耗存储等待预算；真正进程崩溃后依持久 UNKNOWN 责任安全恢复 |
 | REC-CORE-011 | Adapter 语义拒绝 | 不调用 prepare 或目标修改接口；APPLY_FAILED 与安全拒绝 code 正确；旧目标保留 |
 | REC-CORE-012 | AdapterFault | 不调用目标修改接口；安全内部 code；按有界预算退避/耗尽，不当成成功或策略拒绝 |
 | REC-CORE-013 | prepare 可重试错误 / 明确拒绝 | 零目标修改调用；对应退避或 APPLY_FAILED；不虚构新目标存在或删除旧记录 |
@@ -172,8 +174,8 @@ Apply。fixture 中的旧观察是最后确认事实，不是远端实时状态�
 ### Review 后补充的必过边界
 
 当前 22 项/48 变体；REC-CORE-019/missing 的 trace 为一次 read：核心确认缺失
-后跳过，不分配共享槽位。每次调用直接读取当前状态；登记/完成在 CAS 前读取完整
-快照，完成 CAS 冲突会重读并合并。trace 中 claim/register/finish 是 wrapper 按写入
+后跳过，不分配共享槽位。没有待确认存储操作时读取当前状态；登记/完成在 CAS 前读取完整
+快照，完成 CAS 冲突会重读；原 claim 仍匹配才重新构造写入，过期则整笔拒绝。trace 中 claim/register/finish 是 wrapper 按写入
 前后状态标注的 CAS 阶段，不是 repository 方法；matched 表示 CAS 成功，旧任务的
 最终 Disposition 仍可为 Superseded。
 
@@ -209,8 +211,8 @@ AgentSight Client 自身负责测试 UUIDv5、prepare 无修改请求、固定�
    HEAD、命令、case 数量及 pass/fail 结果，不把拟定包名或命令写成已验证。
 3. 相关 crate 及直接消费者测试通过；workspace Clippy、format、lockfile 和
    `git diff --check` 通过。发生失败必须说明影响，不能用文档检查代替运行结果。
-4. 验收记录附完整输出/trace 的位置及差异报告；每次重新准备、目标登记先于请求、
-   同 Binding 串行、revision/status CAS 和失败保留记录均有可执行证据。
+4. 验收记录附完整输出/trace 的位置及差异报告；每次新远端尝试重新准备、目标登记先于请求、
+   同 Binding 串行、revision/status_version/status CAS 和失败保留记录均有可执行证据。
 5. 报告明确写明：临时 SQLite、mock wire、未验证真实 PEP/kernel；跨重启恢复须有独立证据。
    PAP API/交互块及所有延期项单独标记，不能以核心通过宣称全链路完成。
 

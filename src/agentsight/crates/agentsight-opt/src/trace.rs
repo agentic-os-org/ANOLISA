@@ -5,7 +5,7 @@
 
 use crate::atif::{observation_result_is_error, AtifTrajectory};
 use crate::types::ToolCallRecord;
-use agentsight_atif::same_call_id;
+use agentsight_atif::resolve_call_id;
 
 // ── Public types ──
 
@@ -199,9 +199,12 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
                 .results()
                 .iter()
                 .find(|r| {
-                    r.source_call_id
-                        .as_deref()
-                        .is_some_and(|id| same_call_id(id, &call.tool_call_id))
+                    r.source_call_id.as_deref().is_some_and(|id| {
+                        resolve_call_id(
+                            id,
+                            step.calls().iter().map(|call| call.tool_call_id.as_str()),
+                        ) == Some(call.tool_call_id.as_str())
+                    })
                 })
                 .or_else(|| {
                     step.results()

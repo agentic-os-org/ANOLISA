@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 async def check_callback_timeouts(output: Path) -> None:
     """Exercise real callback deadlines, failure actions and child cleanup on Python 3.10+."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "adapters/claude-sdk"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "crates/aw-adapter/native/claude-sdk"))
     from aw_claude import Bridge
 
     case = Path(tempfile.mkdtemp(prefix="callback-timeouts-", dir=output))

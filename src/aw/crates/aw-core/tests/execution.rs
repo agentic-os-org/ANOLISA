@@ -16,7 +16,10 @@ use std::{
 };
 
 fn fixtures() -> Value {
-    canonical::parse(include_bytes!("../../../tests/fixtures/contracts.json")).unwrap()
+    canonical::parse(include_bytes!(
+        "../../aw-contracts/tests/fixtures/contracts.json"
+    ))
+    .unwrap()
 }
 
 struct FixedClock(u64);

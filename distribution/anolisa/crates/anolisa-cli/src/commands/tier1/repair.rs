@@ -98,7 +98,7 @@ struct RepairResultPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<String>,
     /// Manifest-only reconciliation planned or completed alongside the state
-    /// repair (`component manifest drift` when the package-owned contract no
+    /// repair (`component manifest drift` when the distribution-owned contract no
     /// longer matches the state snapshot).
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest_reconciliation: Option<&'static str>,
@@ -2752,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_drift_is_judged_against_the_package_datadir_only() {
+    fn manifest_drift_prefers_the_fhs_distribution_registry() {
         use anolisa_core::adapter::contract::{
             ContractProvenance, ContractSourceKind, write_snapshot_provenance,
         };
@@ -2816,7 +2816,7 @@ mod tests {
     }
 
     #[test]
-    fn local_manifest_is_ignored_when_the_package_contract_is_missing() {
+    fn repair_snapshots_the_local_distribution_registry_without_a_component_contract() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let component = "manifest-missing-package-contract";
@@ -2832,7 +2832,8 @@ mod tests {
             )],
         );
         let layout = common::resolve_layout(&ctx);
-        // Only a local datadir copy exists; the package publishes no contract.
+        // A source-installed ANOLISA owns this registry; the component RPM
+        // publishes no ANOLISA metadata of its own.
         let local = FsLayout::component_contract_path(&layout.datadir, component);
         fs::create_dir_all(local.parent().expect("local parent")).expect("mkdir local");
         fs::write(&local, "framework = \"local-only\"\n").expect("write local copy");
@@ -2843,13 +2844,10 @@ mod tests {
 
         repair_with_deps(component, &ctx, &fake, &fake, false).expect("repair ok");
 
-        // An absent package contract is not drift: the local datadir copy
-        // must be ignored, so no snapshot gets seeded and no partial phase
-        // is entered.
         let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
-        assert!(
-            !snapshot.exists(),
-            "an absent package contract must not seed a snapshot"
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read distribution snapshot"),
+            "framework = \"local-only\"\n"
         );
         let store = load_store(&ctx);
         assert_eq!(store.operations.len(), 1, "idempotent R3 refresh");

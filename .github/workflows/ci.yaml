@@ -157,6 +157,7 @@ jobs:
 
           # Exercise cache consumers when the runner image or cache bootstrap changes.
           if echo "$CHANGED" | grep -Eq '^\.github/actions/setup-sccache/|^\.github/runner-images/ubuntu22-ci/|^\.github/workflows/ci\.yaml$'; then
+            AGENTSIGHT=true
             TOKENLESS=true
             AGENT_MEMORY=true
           fi
@@ -719,6 +720,10 @@ jobs:
         working-directory: src/agentsight/dashboard
         run: npm run test:stale-load
 
+      - name: Run dashboard controls regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:dashboard-controls
+
       - name: Install eBPF build dependencies
         run: |
           sudo apt-get update
@@ -757,9 +762,9 @@ jobs:
           cargo build -p agentsight-enforcer --no-default-features --features actplane
           ./scripts/build-enforcer.sh
 
-      - name: Test raw packaging
+      - name: Test raw packaging and batch analysis
         working-directory: src/agentsight
-        run: uv run --python 3.11.6 --no-project make test-raw-package
+        run: uv run --python 3.11.6 --no-project make test-raw-package test-batch-analysis
 
       - name: Test doctests
         run: |
@@ -851,6 +856,16 @@ jobs:
             echo "::error::Incremental coverage gate failed: new code coverage < ${THRESHOLD}%"
             exit 1
           fi
+
+      # Runs after the Rust build so the generated FFI header exists for the
+      # native tests. The suite spawns bare python3 subprocesses, hence PATH.
+      - name: Test benchmark Python suite
+        working-directory: src/agentsight/scripts/benchmark
+        run: |
+          uv venv "$RUNNER_TEMP/benchmark-venv" --python 3.11.6
+          uv pip install --python "$RUNNER_TEMP/benchmark-venv/bin/python" -r requirements.txt
+          PATH="$RUNNER_TEMP/benchmark-venv/bin:$PATH" \
+            "$RUNNER_TEMP/benchmark-venv/bin/python" -m pytest -q tests
 
   # =========================================================================
   # Step 6: Test tokenless
@@ -978,7 +993,8 @@ jobs:
             src/tokenless/third_party/rtk
             src/tokenless/crates/tokenless-stats/src/home.rs
             src/tokenless/crates/tokenless-stats/src/path_policy.rs
-          key: tokenless-rtk-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rtk-cache-inputs.outputs.rust }}-${{ steps.rtk-cache-inputs.outputs.glibc }}-${{ hashFiles('src/tokenless/scripts/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/Makefile', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs') }}
+            src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs
+          key: tokenless-rtk-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rtk-cache-inputs.outputs.rust }}-${{ steps.rtk-cache-inputs.outputs.glibc }}-${{ hashFiles('src/tokenless/packaging/build/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/Makefile', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs', 'src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs') }}
 
       - name: Test bundled RTK integration
         env:
@@ -1143,6 +1159,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.6'
+
       # scripts/install.sh talks to the openclaw CLI, which cargo cannot
       # cover; the stub-based negotiation test needs no Node/npm and runs
       # in ~1 s using only the runner's bash + make, so it precedes all
@@ -1151,6 +1171,9 @@ jobs:
         run: |
           cd src/agent-memory
           make test-openclaw-install
+
+      - name: Test memory smoke failure detection
+        run: python3 src/agent-memory/tests/test_smoke.py -v
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -1198,6 +1221,9 @@ jobs:
         run: |
           cd src/agent-memory
           make test-openclaw-plugin
+
+      - name: Test automatic capture over MCP
+        run: make -C src/agent-memory test-auto-capture
 
   # =========================================================================
   # Step 9: Test anolisa (Rust workspace)
@@ -1385,7 +1411,7 @@ jobs:
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     environment: ${{ needs.detect-changes.outputs.cache_environment }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

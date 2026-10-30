@@ -239,6 +239,8 @@ fn benchmark_userspace_pipeline(criterion: &mut Criterion) {
     let handle = recorder.handle();
     agentsight::with_runtime_metrics_enabled(|| {
         metrics::with_local_recorder(&recorder, || {
+            let mut measured = Aggregator::new();
+            assert!(run_userspace_pipeline(&inputs, &mut measured, &GenAIBuilder::new()) > 0);
             bench_pipeline(&mut group, "http_json_4k_with_metrics", &inputs);
         });
     });
@@ -298,10 +300,104 @@ fn benchmark_metrics_overhead(criterion: &mut Criterion) {
     black_box(handle.render());
 }
 
+fn benchmark_streaming(criterion: &mut Criterion) {
+    use agentsight::config::RuntimeLimits;
+    use agentsight::parser::ParseResult;
+    use std::time::Duration;
+
+    let mut group = criterion.benchmark_group("streaming");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    let parser = Parser::new();
+    for raw in [false, true] {
+        for events in [128, 512] {
+            let limits = RuntimeLimits {
+                retain_raw_sse: raw,
+                connection_max_bytes: 128 * 1024 * 1024,
+                max_sse_retained_bytes: 8 * 1024 * 1024,
+                ..Default::default()
+            };
+            let source = |id, bytes, rw| {
+                let mut event = (*ssl_event(bytes, rw, 1)).clone();
+                event.ssl_ptr = id;
+                event
+            };
+            let requests: Vec<_> = (1..=32)
+                .map(|id| {
+                    parser
+                        .parse_event(Event::Ssl(source(id, openai_request(4096), 1)))
+                        .messages
+                })
+                .collect();
+            let responses: Vec<_> = (1..=32)
+                .map(|id| {
+                    parser
+                        .parse_event(Event::Ssl(source(
+                            id,
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".to_vec(),
+                            0,
+                        )))
+                        .messages
+                })
+                .collect();
+            let reads: Vec<_> = (0..events).flat_map(|_| (1..=32).map(|id| {
+                let event = source(id, b"data: {\"id\":\"benchmark\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" x\"}}]}\n\n".to_vec(), 0);
+                if raw { parser.parse_event(Event::Ssl(event)).messages }
+                else { vec![ParsedMessage::RawData(Rc::new(event))] }
+            })).collect();
+            group.throughput(Throughput::Elements(events * 32));
+            group.bench_function(
+                format!("{}-32x{events}", if raw { "raw" } else { "compact" }),
+                |bencher| {
+                    bencher.iter_batched(
+                        || {
+                            let mut aggregator = Aggregator::with_limits(32, &limits);
+                            for (request, response) in requests.iter().zip(&responses) {
+                                assert!(
+                                    aggregator
+                                        .process_result(ParseResult {
+                                            messages: request.clone()
+                                        })
+                                        .is_empty()
+                                );
+                                assert!(
+                                    aggregator
+                                        .process_result(ParseResult {
+                                            messages: response.clone()
+                                        })
+                                        .is_empty()
+                                );
+                            }
+                            aggregator
+                        },
+                        |mut aggregator| {
+                            for read in &reads {
+                                assert!(
+                                    aggregator
+                                        .process_result(ParseResult {
+                                            messages: read.clone()
+                                        })
+                                        .is_empty()
+                                );
+                            }
+                            assert_eq!(aggregator.http().active_connections(), 32);
+                            black_box(aggregator)
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_parser,
     benchmark_userspace_pipeline,
-    benchmark_metrics_overhead
+    benchmark_metrics_overhead,
+    benchmark_streaming
 );
 criterion_main!(benches);

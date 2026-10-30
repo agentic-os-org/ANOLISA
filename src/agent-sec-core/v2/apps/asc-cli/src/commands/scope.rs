@@ -1,4 +1,4 @@
-//! Scope commands and mutually exclusive process/cgroup selectors.
+//! Scope commands and mutually exclusive process selectors.
 
 use asc_daemon_protocol::method::{
     POLICY_SCOPES_CREATE, POLICY_SCOPES_DELETE, POLICY_SCOPES_GET, POLICY_SCOPES_LIST,
@@ -55,9 +55,6 @@ pub(crate) struct Selector {
     /// Exact normalized absolute executable path.
     #[arg(long)]
     executable: Option<String>,
-    /// Positive cgroup ID; mutually exclusive with --pid.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    cgroup_id: Option<u64>,
 }
 
 impl ScopeCommand {
@@ -98,20 +95,14 @@ impl ScopeCommand {
 
 impl Selector {
     fn value(&self) -> ScopeSelector {
-        match (
-            self.pid,
-            self.cgroup_id,
-            &self.process_name,
-            &self.executable,
-        ) {
-            (Some(pid), None, None, None) => ScopeSelector::Pid { pid },
-            (None, Some(cgroup_id), None, None) => ScopeSelector::CgroupId { cgroup_id },
-            (None, None, Some(name), None) => ScopeSelector::Process {
+        match (self.pid, &self.process_name, &self.executable) {
+            (Some(pid), None, None) => ScopeSelector::Pid { pid },
+            (None, Some(name), None) => ScopeSelector::Process {
                 matcher: ProcessMatcher::Name {
                     process_name: name.clone(),
                 },
             },
-            (None, None, None, Some(path)) => ScopeSelector::Process {
+            (None, None, Some(path)) => ScopeSelector::Process {
                 matcher: ProcessMatcher::Executable {
                     executable: path.clone(),
                 },

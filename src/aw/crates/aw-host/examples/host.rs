@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cancelled = AtomicBool::new(false);
     // Synthetic capabilities exercise composition; they certify no Agent version.
     let capabilities = AdapterCapabilities {
+        failure_actions: Default::default(),
         adapter: "qoder".into(),
         version: "host-example".into(),
         entrypoint: "synthetic".into(),
@@ -54,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for step in event.steps() {
         let invocation = event.invoke(&step.step_id)?;
         let (effects, failure) = match invocation.result {
+            Ok(aw_host::StepOutput::Skipped) => (json!([]), None),
             Ok(aw_host::StepOutput::Provider(outcome)) => {
                 (outcome.as_value()["effects"].clone(), None)
             }
@@ -72,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "event_id": invocation.record.event_id, "request_id": invocation.record.request_id,
                 "provider": invocation.record.provider, "step_id": invocation.record.step_id,
                 "candidate_effects": effects, "failure": failure,
-                "failure_action": invocation.failure_action.map(|action| match action { FailureAction::Report => "report", FailureAction::Block => "block" }),
+                "failure_action": invocation.failure_action.map(|action| match action { FailureAction::Report => "report", FailureAction::Block => "block", FailureAction::WithholdResult => "withhold_result" }),
                 "adoption": "not_tested"
             })
         );

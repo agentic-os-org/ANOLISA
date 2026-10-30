@@ -78,6 +78,9 @@
             "maintainers": [
                 {
                     "github": "yummypeng"
+                },
+                {
+                    "github": "Ziqi002"
                 }
             ]
         },
@@ -124,6 +127,14 @@
             "maintainers": [
                 {
                     "github": "jfeng18"
+                }
+            ]
+        },
+        {
+            "label": "component:benchmark",
+            "maintainers": [
+                {
+                    "github": "alex-yuxi"
                 }
             ]
         }

@@ -19,11 +19,45 @@ impl RemovedConnection {
     pub(crate) fn into_result(self) -> Option<AggregatedResult> {
         let Self {
             id,
-            state,
+            mut state,
             continuation,
             reason,
             sse_summary,
         } = self;
+        if reason.metadata_only() {
+            match &mut state {
+                ConnectionState::RequestPending { request }
+                | ConnectionState::RequestBodyPending { request, .. } => metadata_request(request),
+                ConnectionState::SseActive {
+                    request,
+                    response_headers,
+                    sse_events,
+                    compressed_buffer,
+                    zstd_decoder,
+                    ..
+                } => {
+                    if let Some(request) = request {
+                        metadata_request(request);
+                    }
+                    metadata_response(response_headers);
+                    *sse_events = Vec::new();
+                    *compressed_buffer = None;
+                    *zstd_decoder = None;
+                }
+                ConnectionState::ResponsePending { request, assembly } => {
+                    if let Some(request) = request {
+                        metadata_request(request);
+                    }
+                    if let PendingResponse::Body { response, .. } = assembly {
+                        metadata_response(response);
+                    }
+                }
+                ConnectionState::Idle => {}
+            }
+            if let ConnectionState::RequestBodyPending { body_buffer, .. } = &mut state {
+                *body_buffer = Vec::new();
+            }
+        }
         let partial = match state {
             ConnectionState::Idle => return None,
             ConnectionState::RequestPending { request } => AggregatedResult::RequestOnly {
@@ -35,7 +69,7 @@ impl RemovedConnection {
                 body_buffer,
                 ..
             } => {
-                request.reassembled_body = Some(body_buffer);
+                request.set_reassembled_body(body_buffer);
                 AggregatedResult::RequestOnly {
                     connection_id: id,
                     request,
@@ -121,8 +155,51 @@ fn pair_or_response(
     }
 }
 
+/// Detach capture payloads and bound routing fields before queuing a diagnostic.
+pub(super) fn metadata_request(request: &mut ParsedRequest) {
+    request.method = crate::aggregator::result::metadata_text(&request.method);
+    request.path = crate::aggregator::result::metadata_text(&request.path);
+    request.headers = request
+        .headers
+        .iter()
+        .filter(|(name, _)| crate::aggregator::result::metadata_header(name))
+        .take(8)
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                crate::aggregator::result::metadata_text(value),
+            )
+        })
+        .collect();
+    request.source_event = std::rc::Rc::new(request.source_event.metadata_only());
+    request.reassembled_body = None;
+    request.body_offset = 0;
+    request.body_len = 0;
+}
+
+/// Drop response bytes without decompressing or serializing partial content.
+pub(super) fn metadata_response(response: &mut crate::parser::http::ParsedResponse) {
+    response.headers = response
+        .headers
+        .iter()
+        .filter(|(name, _)| crate::aggregator::result::metadata_header(name))
+        .take(8)
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                crate::aggregator::result::metadata_text(value),
+            )
+        })
+        .collect();
+    response.reason = crate::aggregator::result::metadata_text(&response.reason);
+    response.source_event = std::rc::Rc::new(response.source_event.metadata_only());
+    response.body_offset = 0;
+    response.body_len = 0;
+}
+
 impl HttpConnectionAggregator {
     pub(super) fn cleanup(&mut self, key: &ConnectionId) -> Option<Vec<u8>> {
+        self.forget_retained(key);
         let continuation = self.sse_continuation_buffers.pop(key);
         self.sse_read_state.pop(key);
         self.last_activity.pop(key);
@@ -138,7 +215,18 @@ impl HttpConnectionAggregator {
         reason: RemoveReason,
     ) -> Option<RemovedConnection> {
         let mut state = self.connections.pop(key)?;
+        if matches!(state, ConnectionState::SseActive { .. })
+            && matches!(
+                reason,
+                RemoveReason::LruEvicted | RemoveReason::OverBudget | RemoveReason::ProtocolError
+            )
+        {
+            self.retired_sse.put(*key, (Instant::now(), reason));
+        }
         let sse_summary = self.sse_streams.pop(key).and_then(|stream| {
+            if reason.metadata_only() {
+                return None;
+            }
             let (events, count, timestamp) = stream.into_events();
             if let ConnectionState::SseActive { sse_events, .. } = &mut state {
                 *sse_events = events;
@@ -147,7 +235,7 @@ impl HttpConnectionAggregator {
                 None
             }
         });
-        let continuation = self.cleanup(key);
+        let continuation = self.cleanup(key).filter(|_| !reason.metadata_only());
         if matches!(
             reason,
             RemoveReason::LruEvicted
@@ -199,13 +287,54 @@ impl HttpConnectionAggregator {
         }
     }
 
-    pub(super) fn ensure_room(&mut self) {
-        if self.connections.len() == self.connections.cap().get() {
-            if let Some((key, _)) = self.connections.peek_lru() {
-                let key = *key;
-                self.abandon(&key, RemoveReason::LruEvicted);
-            }
+    pub(super) fn ensure_room(&mut self, id: &ConnectionId) -> bool {
+        let now = Instant::now();
+        self.expire_completed(now);
+        // A returning keep-alive request consumes its own reserved slot. New
+        // connections cannot steal that slot between a response and its next request.
+        self.recently_completed.pop(id);
+        if self.connections.len() + self.recently_completed.len() >= self.connections.cap().get() {
+            let Some(key) = self.eviction_candidate(now) else {
+                return false;
+            };
+            self.abandon(&key, RemoveReason::LruEvicted);
         }
+        true
+    }
+
+    fn expire_completed(&mut self, now: Instant) {
+        while self.recently_completed.peek_lru().is_some_and(|(_, time)| {
+            now.saturating_duration_since(*time)
+                >= crate::aggregator::result::ACTIVE_CONNECTION_GRACE
+        }) {
+            self.recently_completed.pop_lru();
+        }
+    }
+
+    /// Protect recent traffic throughout request assembly, response waiting and streaming.
+    pub(super) fn eviction_candidate(&self, now: Instant) -> Option<ConnectionId> {
+        self.connections.iter().rev().find_map(|(id, state)| {
+            let protected = !matches!(state, ConnectionState::Idle)
+                && self.last_activity.peek(id).is_some_and(|time| {
+                    now.saturating_duration_since(*time)
+                        < crate::aggregator::result::ACTIVE_CONNECTION_GRACE
+                });
+            (!protected).then_some(*id)
+        })
+    }
+
+    /// Refuse a new exchange while preserving all protected streams and the count cap.
+    pub(super) fn reject_capacity(&mut self, id: ConnectionId, state: ConnectionState) {
+        self.retired_sse
+            .put(id, (Instant::now(), RemoveReason::CapacityRejected));
+        metrics::counter!("agentsight_http_conn_removed_total", "reason" => "capacity_rejected", "state" => "admission").increment(1);
+        self.queue_removed([RemovedConnection {
+            id,
+            state,
+            continuation: None,
+            reason: RemoveReason::CapacityRejected,
+            sse_summary: None,
+        }]);
     }
 
     pub(super) fn insert(&mut self, key: ConnectionId, state: ConnectionState) {
@@ -214,63 +343,65 @@ impl HttpConnectionAggregator {
         if self.connections.contains(&key) {
             self.abandon(&key, RemoveReason::Replaced);
         }
-        if self.connections.len() == self.connections.cap().get() {
-            if let Some((key, _)) = self.connections.peek_lru() {
-                let key = *key;
-                self.abandon(&key, RemoveReason::LruEvicted);
-            }
+        if !self.ensure_room(&key) {
+            self.reject_capacity(key, state);
+            return;
         }
         self.touch(&key);
         self.connections.put(key, state);
+        self.refresh_retained(&key);
+        self.enforce_connection_limits(&key);
+    }
+
+    pub(super) fn enforce_connection_limits(&mut self, id: &ConnectionId) {
+        if let Some(reason) = self.sse_errors.pop(id) {
+            self.abandon(id, reason);
+        }
+        let over = match self.connections.peek(id) {
+            Some(ConnectionState::RequestBodyPending { body_buffer, .. }) => {
+                body_buffer.len() > self.max_body_bytes
+            }
+            Some(ConnectionState::SseActive { .. }) => self
+                .retained
+                .get(id)
+                .is_some_and(|retained| retained.sse_bytes > self.max_sse_retained_bytes),
+            _ => false,
+        };
+        if over {
+            self.abandon(id, RemoveReason::OverBudget);
+        }
         self.enforce_limits();
     }
 
     pub(super) fn enforce_limits(&mut self) {
-        let failed: Vec<_> = self
-            .sse_errors
-            .iter()
-            .map(|(id, reason)| (*id, *reason))
-            .collect();
-        for (id, reason) in failed {
-            self.abandon(&id, reason);
-        }
-        let oversized: Vec<_> = self
-            .connections
-            .iter()
-            .filter_map(|(id, state)| {
-                let over = match state {
-                    ConnectionState::RequestBodyPending { body_buffer, .. } => {
-                        body_buffer.len() > self.max_body_bytes
-                    }
-                    ConnectionState::SseActive { .. } => self.sse_streams.peek(id).map_or_else(
-                        || {
-                            state.sse_retained_bytes().saturating_add(
-                                self.sse_continuation_buffers
-                                    .peek(id)
-                                    .map_or(0, Vec::capacity),
-                            ) > self.max_sse_retained_bytes
-                        },
-                        |stream| stream.payload_retained_bytes() > self.max_sse_retained_bytes,
-                    ),
-                    _ => false,
-                };
-                over.then_some(*id)
-            })
-            .collect();
-        for id in oversized {
-            self.abandon(&id, RemoveReason::OverBudget);
-        }
         while self.bytes_budget != 0 && self.metrics().connection_cache_bytes > self.bytes_budget {
-            let Some((id, _)) = self.connections.peek_lru() else {
+            let Some(id) = self
+                .eviction_candidate(Instant::now())
+                .or_else(|| self.connections.peek_lru().map(|(id, _)| *id))
+            else {
                 break;
             };
-            let id = *id;
             self.abandon(&id, RemoveReason::OverBudget);
         }
     }
 
     /// Run maintenance independently of incoming traffic.
     pub(crate) fn tick(&mut self, now: Instant) {
+        self.expire_completed(now);
+        let retention = self
+            .hard_timeout
+            .max(self.idle_timeout)
+            .max(super::DEFAULT_IDLE_TIMEOUT);
+        let expired: Vec<_> = self
+            .retired_sse
+            .iter()
+            .filter_map(|(key, (time, _))| {
+                (now.saturating_duration_since(*time) >= retention).then_some(*key)
+            })
+            .collect();
+        for key in expired {
+            self.retired_sse.pop(&key);
+        }
         let idle: Vec<_> = self
             .last_activity
             .iter()
@@ -295,7 +426,11 @@ impl HttpConnectionAggregator {
                 self.abandon(&key, RemoveReason::HardTimeout);
             }
         }
-        self.enforce_limits();
+        let keys: Vec<_> = self.connections.iter().map(|(id, _)| *id).collect();
+        for id in keys {
+            self.refresh_retained(&id);
+            self.enforce_connection_limits(&id);
+        }
     }
 
     /// Preserve soft-timeout pending semantics without cloning connection payloads.
@@ -325,20 +460,42 @@ impl HttpConnectionAggregator {
         snapshots
     }
 
-    pub(crate) fn oldest_activity(&self) -> Option<Instant> {
-        self.last_activity.peek_lru().map(|(_, time)| *time)
+    /// Rank unprotected entries ahead of the hard-byte fallback across HTTP versions.
+    pub(crate) fn eviction_priority(&self) -> Option<(bool, Instant)> {
+        if let Some(id) = self.eviction_candidate(Instant::now()) {
+            return self.last_activity.peek(&id).map(|time| (false, *time));
+        }
+        self.last_activity.peek_lru().map(|(_, time)| (true, *time))
     }
 
     pub(crate) fn abandon_oldest(&mut self) -> bool {
-        let Some((id, _)) = self.connections.peek_lru() else {
+        let Some(id) = self
+            .eviction_candidate(Instant::now())
+            .or_else(|| self.connections.peek_lru().map(|(id, _)| *id))
+        else {
             return false;
         };
-        let id = *id;
         self.abandon(&id, RemoveReason::OverBudget);
         true
     }
 
     pub(crate) fn drain_connections_for_pid(&mut self, pid: u32) -> Vec<RemovedConnection> {
+        let completed: Vec<_> = self
+            .recently_completed
+            .iter()
+            .filter_map(|(key, _)| (key.pid == pid).then_some(*key))
+            .collect();
+        for key in completed {
+            self.recently_completed.pop(&key);
+        }
+        let retired: Vec<_> = self
+            .retired_sse
+            .iter()
+            .filter_map(|(key, _)| (key.pid == pid).then_some(*key))
+            .collect();
+        for key in retired {
+            self.retired_sse.pop(&key);
+        }
         let keys: Vec<_> = self
             .connections
             .iter()
@@ -350,8 +507,13 @@ impl HttpConnectionAggregator {
     }
 
     pub(crate) fn drain_dead_pid_connections(&mut self) -> Vec<RemovedConnection> {
-        let pids: std::collections::HashSet<_> =
-            self.connections.iter().map(|(key, _)| key.pid).collect();
+        let pids: std::collections::HashSet<_> = self
+            .connections
+            .iter()
+            .map(|(key, _)| key.pid)
+            .chain(self.retired_sse.iter().map(|(key, _)| key.pid))
+            .chain(self.recently_completed.iter().map(|(key, _)| key.pid))
+            .collect();
         pids.into_iter()
             .filter(|pid| !crate::utils::procfs::proc_pid(*pid).exists())
             .flat_map(|pid| self.drain_connections_for_pid(pid))
@@ -361,8 +523,12 @@ impl HttpConnectionAggregator {
     /// Retire side caches after a normal result has taken ownership of its payload.
     pub(crate) fn cleanup_completed(&mut self, id: &ConnectionId) {
         if !self.connections.contains(id) {
+            let tracked = self.last_activity.contains(id);
             self.cleanup(id);
             self.sse_streams.pop(id);
+            if tracked {
+                self.recently_completed.put(*id, Instant::now());
+            }
         }
     }
 

@@ -17,6 +17,7 @@ use tokenless_protocol::{
     ToolResultStatus, estimate_tokens,
 };
 use tokenless_schema::SchemaCompressor;
+use tokenless_stats::rtk_outcome::OutcomeStore;
 use tokenless_stats::{OperationType, StatsRecorder};
 
 use crate::post_tool::{self, PostToolPipeline, PostToolPipelineConfig};
@@ -28,6 +29,7 @@ use crate::{
 const MIN_RESPONSE_CHARS: usize = 200;
 const RTK_TIMEOUT: Duration = Duration::from_secs(5);
 
+mod native_output;
 mod rtk;
 
 /// Per-call behavior resolved by a transport frontend.
@@ -35,7 +37,7 @@ mod rtk;
 pub struct EntryOptions {
     /// Whether accepted candidates replace the original content.
     pub compression_enabled: bool,
-    /// Whether API search listings may share paths; independent of other domains.
+    /// Whether API search records and non-file path lists may share paths.
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
     pub diff_compression_enabled: bool,
@@ -117,7 +119,8 @@ pub fn dispatch_with_store(
                 Vec::new(),
             ),
             Request::PostTool(request) => {
-                let outcome = post_tool_with_store(request, options, stash_store)?;
+                let outcome =
+                    post_tool_with_outcomes(request, options, stash_store, &envelope.attribution)?;
                 let artifact_keys = outcome.response.stash_keys.clone();
                 (
                     Response::PostTool(outcome.response),
@@ -345,9 +348,8 @@ fn pre_tool_with_optional_rtk(
     if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
         return Ok(pre_tool_passthrough(request));
     }
-    // RTK ownership would bypass the PostTool domain selected for native
-    // build/test output, so the two optimizers remain mutually exclusive.
-    if is_build_log_owned_command(command) {
+    // Preserve native execution for previews, build logs and path lists.
+    if keeps_command_native(command) {
         return Ok(pre_tool_passthrough(request));
     }
     let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
@@ -379,7 +381,48 @@ fn pre_tool_with_optional_rtk(
     if rewritten.is_empty() || rewritten == command {
         return Ok(pre_tool_passthrough(request));
     }
-    let anchored = anchor_rtk_prefix(command, rewritten, rtk_path, attribution, data_dir);
+    let anchored = if request.tool_name.eq_ignore_ascii_case("PowerShell") {
+        anchor_powershell_rtk(rewritten, rtk_path, attribution, data_dir)
+    } else {
+        anchor_rtk_prefix_with_outcomes(
+            command,
+            rewritten,
+            rtk_path,
+            attribution,
+            data_dir,
+            |expected, render| {
+                if attribution
+                    .session_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
+                    || attribution
+                        .tool_use_id
+                        .as_deref()
+                        .unwrap_or_default()
+                        .is_empty()
+                {
+                    return None;
+                }
+                match OutcomeStore::open(data_dir, true).and_then(|mut store| {
+                    store.begin(
+                        &attribution.agent_id,
+                        attribution.session_id.as_deref().unwrap_or_default(),
+                        attribution.tool_use_id.as_deref().unwrap_or_default(),
+                        expected,
+                        command,
+                        render,
+                    )
+                }) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        warn_rtk_outcome(&error);
+                        None
+                    }
+                }
+            },
+        )
+    };
     let mut rewritten_arguments = arguments.clone();
     rewritten_arguments.insert(request.command_field.clone(), Value::String(anchored));
     let action = if request.capabilities.replace_arguments {
@@ -402,15 +445,20 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
     }
 }
 
-fn is_build_log_owned_command(command: &str) -> bool {
+fn keeps_command_native(command: &str) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
+    // Empty quoted words still consume wrapper arguments.
+    let mut word_started = false;
     let mut quote = None;
     let mut escaped = false;
 
     for character in command.chars() {
         if escaped {
-            word.push(character);
+            if character != '\n' {
+                word_started = true;
+                word.push(character);
+            }
             escaped = false;
             continue;
         }
@@ -427,36 +475,45 @@ fn is_build_log_owned_command(command: &str) -> bool {
             continue;
         }
         if matches!(character, '\'' | '"') {
+            word_started = true;
             quote = Some(character);
         } else if character.is_whitespace() {
-            if !word.is_empty() {
+            if word_started {
                 words.push(std::mem::take(&mut word));
+                word_started = false;
             }
-            if character == '\n' && segment_is_build_log_owned(&words) {
+            if character == '\n' && segment_keeps_native(&words) {
                 return true;
             }
             if character == '\n' {
                 words.clear();
             }
         } else if matches!(character, '&' | '|' | ';' | '(' | ')') {
-            if !word.is_empty() {
+            if word_started {
                 words.push(std::mem::take(&mut word));
+                word_started = false;
             }
-            if segment_is_build_log_owned(&words) {
+            if segment_keeps_native(&words) {
                 return true;
             }
             words.clear();
         } else {
+            word_started = true;
             word.push(character);
         }
     }
-    if !word.is_empty() {
+    if word_started {
         words.push(word);
     }
-    segment_is_build_log_owned(&words)
+    segment_keeps_native(&words)
 }
 
-fn segment_is_build_log_owned(words: &[String]) -> bool {
+fn segment_keeps_native(words: &[String]) -> bool {
+    // RTK smart-truncates --max-lines rather than preserving a head window.
+    // Keep head/tail and find native through the supported wrappers.
+    if native_output::owns_command(words) {
+        return true;
+    }
     let mut index = words
         .iter()
         .position(|word| !is_environment_assignment(word))
@@ -584,6 +641,54 @@ fn is_python_pytest(arguments: &[String], start: usize) -> bool {
     )
 }
 
+fn anchor_powershell_rtk(
+    rewritten: &str,
+    rtk_path: &Path,
+    attribution: &Attribution,
+    data_dir: &Path,
+) -> String {
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let values = [
+        ("TOKENLESS_AGENT_ID", attribution.agent_id.as_str()),
+        (
+            "TOKENLESS_SESSION_ID",
+            attribution.session_id.as_deref().unwrap_or_default(),
+        ),
+        (
+            "TOKENLESS_TOOL_USE_ID",
+            attribution.tool_use_id.as_deref().unwrap_or_default(),
+        ),
+        ("TOKENLESS_DATA_DIR", &data_dir.to_string_lossy()),
+    ];
+    // A child scope's alias binds native RTK calls without parsing or translating
+    // RTK's script. Its pipelines, conditions, arguments and quoting stay intact.
+    let mut script = format!(
+        "& {{ [CmdletBinding()] param(); Set-Alias -Name rtk -Value {} -Scope Local; ",
+        quote(&rtk_path.to_string_lossy())
+    );
+    for (index, (name, _)) in values.iter().enumerate() {
+        script.push_str(&format!(
+            "$tokenlessOld{index} = [Environment]::GetEnvironmentVariable('{name}', 'Process'); "
+        ));
+    }
+    script.push_str("try { ");
+    for (name, value) in values {
+        script.push_str(&format!("$env:{name} = {}; ", quote(value)));
+    }
+    script.push_str(rewritten);
+    script.push_str("\n} finally { $tokenlessOk = $?; $tokenlessExit = $LASTEXITCODE; ");
+    for (index, (name, _)) in values.iter().enumerate() {
+        script.push_str(&format!(
+            "[Environment]::SetEnvironmentVariable('{name}', $tokenlessOld{index}, 'Process'); "
+        ));
+    }
+    // $? is read-only. An advanced script block must report its own failure;
+    // Ignore preserves that status without adding stderr or an $Error entry.
+    script.push_str("$global:LASTEXITCODE = $tokenlessExit } if (-not $tokenlessOk) { $ErrorActionPreference = 'Ignore'; $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([Exception]::new('Command failed'), 'TokenlessCommandFailed', [System.Management.Automation.ErrorCategory]::NotSpecified, $null)) } }");
+    script
+}
+
+#[cfg(test)]
 fn anchor_rtk_prefix(
     original: &str,
     rewritten: &str,
@@ -591,14 +696,31 @@ fn anchor_rtk_prefix(
     attribution: &Attribution,
     data_dir: &Path,
 ) -> String {
+    anchor_rtk_prefix_with_outcomes(
+        original,
+        rewritten,
+        rtk_path,
+        attribution,
+        data_dir,
+        |_, _| None,
+    )
+}
+
+fn anchor_rtk_prefix_with_outcomes(
+    original: &str,
+    rewritten: &str,
+    rtk_path: &Path,
+    attribution: &Attribution,
+    data_dir: &Path,
+    begin: impl FnOnce(usize, &dyn Fn(&str) -> String) -> Option<String>,
+) -> String {
     let quoted_path = shell_quote(&rtk_path.to_string_lossy());
     let prefix = format!(
-        "env TOKENLESS_AGENT_ID={} TOKENLESS_SESSION_ID={} TOKENLESS_TOOL_USE_ID={} TOKENLESS_DATA_DIR={} {}",
+        "env TOKENLESS_AGENT_ID={} TOKENLESS_SESSION_ID={} TOKENLESS_TOOL_USE_ID={} TOKENLESS_DATA_DIR={} ",
         shell_quote(&attribution.agent_id),
         shell_quote(attribution.session_id.as_deref().unwrap_or_default()),
         shell_quote(attribution.tool_use_id.as_deref().unwrap_or_default()),
         shell_quote(&data_dir.to_string_lossy()),
-        quoted_path,
     );
     // RTK can preserve arbitrary configured transparent prefixes before its
     // wrapper. The first divergence in each rewritten segment locates the
@@ -634,15 +756,41 @@ fn anchor_rtk_prefix(
         }
     }
 
-    let mut anchored = String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
-    let mut copied_until = 0;
-    for offset in replacements {
-        anchored.push_str(&rewritten[copied_until..offset]);
-        anchored.push_str(&prefix);
-        copied_until = offset + 3;
-    }
-    anchored.push_str(&rewritten[copied_until..]);
-    anchored
+    // Opaque substitutions or existing RTK references may execute untracked wrappers.
+    let all_tracked = original_segments
+        .iter()
+        .all(|(_, tokens)| tokens.is_empty())
+        && !original.contains("rtk")
+        && !original.contains('`')
+        && !original.contains("$(")
+        && rewritten_segments
+            .iter()
+            .map(|(_, tokens)| tokens.len())
+            .sum::<usize>()
+            == replacements.len();
+    let render = |run: Option<&str>| {
+        let mut anchored =
+            String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
+        let mut copied_until = 0;
+        for (ordinal, offset) in replacements.iter().copied().enumerate() {
+            anchored.push_str(&rewritten[copied_until..offset]);
+            anchored.push_str(&prefix);
+            if let Some(run) = run {
+                anchored.push_str(&format!(
+                    "TOKENLESS_RTK_RUN_ID={} TOKENLESS_RTK_ORDINAL={ordinal} ",
+                    shell_quote(run)
+                ));
+            }
+            anchored.push_str(&quoted_path);
+            copied_until = offset + 3;
+        }
+        anchored.push_str(&rewritten[copied_until..]);
+        anchored
+    };
+    begin(if all_tracked { replacements.len() } else { 0 }, &|run| {
+        render(Some(run))
+    })
+    .unwrap_or_else(|| render(None))
 }
 
 fn bare_rtk_offsets_by_segment(command: &str) -> Vec<(usize, Vec<usize>)> {
@@ -727,8 +875,18 @@ fn shell_quote(value: &str) -> String {
     {
         value.to_owned()
     } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+        let quoted = format!("'{}'", value.replace('\'', "'\\''"));
+        if cfg!(windows) {
+            msys_harden_quoted(&quoted)
+        } else {
+            quoted
+        }
     }
+}
+
+fn msys_harden_quoted(quoted: &str) -> String {
+    // MSYS decodes backslash pairs in -c arguments before Bash parses quotes.
+    quoted.replace(r"\\", r"\''\")
 }
 
 pub(crate) struct PostToolOutcome {
@@ -737,6 +895,52 @@ pub(crate) struct PostToolOutcome {
     pub(crate) stash_writes: Option<usize>,
     pub(crate) stash_errors: Option<usize>,
     pub(crate) stash_size: Option<usize>,
+}
+
+fn warn_rtk_outcome(error: &tokenless_stats::rtk_outcome::OutcomeError) {
+    crate::warn_soft(&format!(
+        "tokenless: {error}; retaining RTK output ownership"
+    ));
+}
+
+pub(crate) fn post_tool_with_outcomes(
+    request: &PostToolRequest,
+    options: &EntryOptions,
+    stash_store: Option<&Arc<dyn StashStore>>,
+    attribution: &Attribution,
+) -> Result<PostToolOutcome, RuntimeError> {
+    let mut original_command = None;
+    if request.output_optimization == OutputOptimization::Rtk
+        && let Some(command) = request.command.as_deref()
+        && let Some(data_dir) = options.rtk_data_dir.as_deref()
+        && OutcomeStore::path(data_dir).exists()
+    {
+        match OutcomeStore::open(data_dir, false).and_then(|mut store| {
+            store.consume_unchanged(
+                &attribution.agent_id,
+                attribution.session_id.as_deref().unwrap_or_default(),
+                attribution.tool_use_id.as_deref().unwrap_or_default(),
+                command,
+            )
+        }) {
+            Ok(value) => original_command = value,
+            Err(error) => warn_rtk_outcome(&error),
+        }
+    }
+    let refined;
+    let request = if let Some(command) = original_command
+        && request.status == ToolResultStatus::Success
+    {
+        refined = PostToolRequest {
+            output_optimization: OutputOptimization::None,
+            command: Some(command),
+            ..request.clone()
+        };
+        &refined
+    } else {
+        request
+    };
+    post_tool_with_store(request, options, stash_store)
 }
 
 pub(crate) fn post_tool_with_store(
@@ -805,7 +1009,6 @@ pub(crate) fn post_tool_with_store(
                 stash_enabled: options.stash_enabled,
                 require_reversibility: true,
                 force_json: false,
-                preserve_top_level_shape: !request.capabilities.replace_with_text,
                 allow_toon: true,
                 min_toon_chars: MIN_TOON_CHARS,
                 json: JsonCompressionConfig {
@@ -816,8 +1019,7 @@ pub(crate) fn post_tool_with_store(
                 },
             },
             attached_store,
-        )
-        .map_err(|error| RuntimeError::Pipeline(error.to_string()))?;
+        );
         if let Some(count) = run.stash_errors.filter(|count| *count > 0) {
             return Err(RuntimeError::StashWrite { count });
         }
@@ -962,9 +1164,9 @@ pub(crate) fn retrieve_authorized_with_store(
             attribution.tool_use_id.as_deref(),
         ) {
             // Fail-soft, and the warning itself must not be able to
-            // fail the retrieval: warn_stats discards its own write
+            // fail the retrieval: warn_soft discards its own write
             // errors.
-            crate::warn_stats(&format!(
+            crate::warn_soft(&format!(
                 "[tokenless-stats] WARNING: failed to record retrieve event: {e}"
             ));
         }
@@ -994,8 +1196,104 @@ pub fn response_operation(outcome: &EntryOutcome) -> Operation {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn msys_quoting_separates_backslash_pairs() {
+        for (quoted, expected) in [
+            (r"'\\server\share'", r"'\''\server\share'"),
+            (r"'C:\user'\''s\\data'", r"'C:\user'\''s\''\data'"),
+            (r"'C:\trailing\'", r"'C:\trailing\'"),
+            (r"'a\\\b'", r"'a\''\\b'"),
+            (r"'a\\\\b'", r"'a\''\\''\b'"),
+        ] {
+            assert_eq!(super::msys_harden_quoted(quoted), expected);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_binding_preserves_script_exit_and_restores_environment() {
+        let path = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/cmd.exe");
+        let mut attribution = tokenless_protocol::Attribution::new("test-agent");
+        attribution.session_id = Some("session 'quoted'".into());
+        let shell =
+            std::env::var("TOKENLESS_TEST_POWERSHELL").unwrap_or_else(|_| "powershell.exe".into());
+        for (command, status, last_exit, process_exit) in [
+            (
+                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'",
+                "False",
+                7,
+                1,
+            ),
+            (
+                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 0'",
+                "True",
+                0,
+                0,
+            ),
+            (
+                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'; Write-Output 'done'",
+                "True",
+                7,
+                0,
+            ),
+        ] {
+            let script = super::anchor_powershell_rtk(
+                command,
+                &path,
+                &attribution,
+                std::path::Path::new("C:/data with spaces"),
+            );
+            let preamble = "$env:TOKENLESS_AGENT_ID='before'; Set-Alias rtk Write-Output; $ErrorActionPreference='Stop'; $Error.Clear();";
+            let output = std::process::Command::new(&shell)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &format!(
+                    "{preamble} {script}; [Console]::Write(\"ok=$?;exit=$LASTEXITCODE;env=$env:TOKENLESS_AGENT_ID;alias=$((Get-Alias rtk).Definition);errors=$($Error.Count);preference=$ErrorActionPreference\")")])
+                .output().unwrap();
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("test-agent"), "{stdout}");
+            assert!(stdout.contains(&format!("ok={status};exit={last_exit};env=before;alias=Write-Output;errors=0;preference=Stop")), "{stdout}");
+
+            let output = std::process::Command::new(&shell)
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("{preamble} {script}"),
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(process_exit), "{command}");
+            assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_binding_restores_environment_on_throw() {
+        let script = super::anchor_powershell_rtk(
+            "throw 'expected-error'",
+            std::path::Path::new("C:/unused/rtk.exe"),
+            &tokenless_protocol::Attribution::new("test-agent"),
+            std::path::Path::new("C:/data"),
+        );
+        let shell =
+            std::env::var("TOKENLESS_TEST_POWERSHELL").unwrap_or_else(|_| "powershell.exe".into());
+        let output = std::process::Command::new(shell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!(
+                "$env:TOKENLESS_AGENT_ID='before'; try {{ {script} }} catch {{ [Console]::Write($_.Exception.Message) }}; [Console]::Write(\";env=$env:TOKENLESS_AGENT_ID\")")])
+            .output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "expected-error;env=before"
+        );
+    }
+    #[cfg(unix)]
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::time::Instant;
 
     use serde_json::json;
@@ -1025,12 +1323,14 @@ mod tests {
     // still open for writing on another thread makes this thread's exec fail
     // with ETXTBSY (`ExecutableFileBusy`). Tests that write and run scripts
     // hold this lock across both steps.
+    #[cfg(unix)]
     fn serialize_rtk_scripts() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(unix)]
     fn write_executable(path: &Path, script: &str) {
         fs::write(path, script).unwrap();
         let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -1292,6 +1592,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_applies_rtk_exit_zero_and_anchors_path() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1323,6 +1624,229 @@ mod tests {
     }
 
     #[test]
+    fn pre_tool_preserves_native_source_previews() {
+        for command in [
+            "head -40 source.py",
+            "head -n 40 'source file.py'",
+            "head --lines=40 source.py",
+            "tail -n 40 source.py",
+            "tail --lines=40 source.py",
+            "wc -l source.py; head -40 source.py",
+            "cd /testbed && head -40 source.py",
+            "cat source.py | head -40",
+            "git diff | tail -40",
+            "env LANG=C timeout 10 command /usr/bin/head -40 source.py",
+            "nohup nice -n 5 tail -40 source.py",
+            "uv run head -40 source.py",
+            "he\\\nad -40 source.py",
+        ] {
+            let request = PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": command, "timeout": 30}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            };
+            let response = pre_tool_with_optional_rtk(
+                &request,
+                &Attribution::new("test"),
+                None,
+                None,
+                RTK_TIMEOUT,
+            )
+            .unwrap_or_else(|error| panic!("{command:?}: {error}"));
+            assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert_eq!(response.arguments, request.arguments);
+        }
+        for command in [
+            "echo 'head -40 source.py'",
+            "rg tail source.py",
+            "time echo head",
+            "timeout 10 rtk read source.py --max-lines 40",
+            "rtk head -40 source.py",
+            "rtk tail -40 source.py",
+            "env LANG=C timeout 10 rtk head -40 source.py",
+            "command rtk tail -40 source.py",
+        ] {
+            assert!(!keeps_command_native(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn pre_tool_keeps_native_find_commands_without_calling_rtk() {
+        for command in [
+            "find /workspace -name '*.json' 2>/dev/null",
+            "find /workspace -path '*records*document*' 2>/dev/null",
+            "find /workspace -name 'document*'; echo '---'; ls -la /workspace | head",
+            "git status && /usr/bin/find ./data -type f",
+            "env -i find ./data -print0 | xargs -0 cat",
+            "LANG=C command find './project with spaces' -type f",
+            "env -u TEMP /usr/bin/find . -type f",
+            "noglob find . -name '*.json'",
+            "nocorrect /usr/bin/find . -type f",
+            "builtin find . -type f",
+            "command exec noglob nocorrect find . -type f",
+            "noglob env -u TEMP command find . -type f",
+            "env -i nocorrect command exec /usr/bin/find . -type f",
+        ] {
+            let request = PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": command, "timeout": 30}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            };
+            // No RTK path or data directory: invoking RTK would fail this call.
+            let response = pre_tool_with_optional_rtk(
+                &request,
+                &Attribution::new("test"),
+                None,
+                None,
+                RTK_TIMEOUT,
+            )
+            .unwrap();
+            assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert_eq!(response.arguments, request.arguments);
+        }
+        for command in [
+            "echo 'find . -name *.json'",
+            "printf '%s' find",
+            "rg find README.md",
+            "fd document",
+            "rg --files",
+            "rtk find . -name '*.json'",
+            "noglob echo find",
+            "nocorrect printf '%s' 'find . -type f'",
+            "builtin printf '%s' find",
+            "command exec rtk find . -type f",
+            "noglob cargo test",
+            "nocorrect pytest -q",
+            "command exec cargo test",
+            "command env -i cargo test",
+        ] {
+            assert!(!keeps_command_native(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn pre_tool_keeps_find_behind_rtk_process_wrappers() {
+        for command in [
+            "timeout 30 find . -type f",
+            "timeout -k 5 -s TERM 30 find . -type f",
+            "timeout --signal=TERM --kill-after=5 30 find . -type f",
+            "timeout -sTERM -k5 --preserve-status --foreground -v --verbose 30 find . -type f",
+            "timeout -- 30 find . -type f",
+            "time find . -type f",
+            "time -p -a -v --append --verbose --portability --quiet find . -type f",
+            "time -f %e -o timing.log find . -type f",
+            "time -f '' find . -type f",
+            "timeout -s '' 30 find . -type f",
+            "nice -n '' find . -type f",
+            "time --format=%e --output=timing.log find . -type f",
+            "time -f%e -otiming.log find . -type f",
+            "time -- find . -type f",
+            "nice -n 10 find . -type f",
+            "nice -n10 find . -type f",
+            "nice --adjustment=10 find . -type f",
+            "nice -5 +10 find . -type f",
+            "nice -- find . -type f",
+            "nohup find . -type f",
+            "nohup -- find . -type f",
+            "/usr/bin/timeout 30 find . -type f",
+            "/usr/bin/time -p /usr/bin/find . -type f",
+            "/usr/bin/nice -n10 /usr/bin/find . -type f",
+            "/usr/bin/nohup /usr/bin/find . -type f",
+            "env FOO=1 timeout 20 find . -type f",
+            "nohup nice -n 5 timeout 30 find . -type f",
+            "noglob env -u TEMP timeout 30 command find . -type f",
+            "uv run find . -type f",
+            "timeout 30 uv run find . -type f",
+            "uv run nohup nice -n 5 find . -type f",
+            "\\\n  find . -type f",
+            "command \\\n  find . -type f",
+            "noglob \\\n  find . -type f",
+            "env \\\n  FOO=1 \\\n  find . -type f",
+            "timeout 30 \\\n  find . -type f",
+            "fi\\\nnd . -type f",
+        ] {
+            let response = pre_tool_with_optional_rtk(
+                &PreToolRequest {
+                    tool_name: "Bash".into(),
+                    arguments: json!({"command": command}),
+                    command_field: "command".into(),
+                    capabilities: PreToolCapabilities {
+                        replace_arguments: true,
+                        block_and_suggest: false,
+                    },
+                },
+                &Attribution::new("test"),
+                None,
+                None,
+                RTK_TIMEOUT,
+            )
+            .unwrap_or_else(|error| panic!("{command:?}: {error}"));
+            assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert_eq!(response.arguments["command"], command);
+        }
+        for command in [
+            "timeout 30 rg find README.md",
+            "time echo find",
+            "nohup rtk find . -type f",
+            "timeout 30 rtk find . -type f",
+            "timeout --bogus 30 find .",
+            "time --bogus find .",
+            "nice --bogus find .",
+            "nohup --bogus find .",
+            "timeout 30 cargo build",
+            "nice -n 10 pytest -q",
+            "TIMEOUT 30 find .",
+            "timeout",
+            "timeout -s",
+            "timeout -s TERM",
+            "time -f",
+            "nice -n",
+            "timeout -s find 30 echo find",
+            "timeout -s rtk 30 find .",
+            "time -f find echo find",
+            "uv run echo find",
+            "uv run rtk find .",
+            "'' find . -type f",
+            "command '' find . -type f",
+            "timeout 30 '' find . -type f",
+        ] {
+            assert!(!keeps_command_native(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn pre_tool_ownership_folds_shell_line_continuations() {
+        for command in [
+            "\\\n  find . -type f",
+            "command \\\n  find . -type f",
+            "noglob \\\n  find . -type f",
+            "env \\\n  FOO=1 \\\n  find . -type f",
+            "timeout 30 \\\n  find . -type f",
+            "fi\\\nnd . -type f",
+            "env \\\n  RUSTFLAGS=-C \\\n  cargo test",
+        ] {
+            assert!(keeps_command_native(command), "{command:?}");
+        }
+        for command in [
+            "echo 'command \\\n find . -type f'",
+            "printf '%s' \"noglob \\\n find . -type f\"",
+        ] {
+            assert!(!keeps_command_native(command), "{command:?}");
+        }
+    }
+
+    #[test]
     fn pre_tool_reserves_supported_build_and_test_commands_for_post_tool() {
         let commands = [
             "cargo test --workspace",
@@ -1339,7 +1863,7 @@ mod tests {
         ];
         for command in commands {
             assert!(
-                is_build_log_owned_command(command),
+                keeps_command_native(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1354,7 +1878,7 @@ mod tests {
             "rg pytest README.md",
         ] {
             assert!(
-                !is_build_log_owned_command(command),
+                !keeps_command_native(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
@@ -1382,7 +1906,7 @@ mod tests {
             "make -j8",
         ] {
             assert!(
-                is_build_log_owned_command(command),
+                keeps_command_native(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1393,13 +1917,14 @@ mod tests {
             "env -u RUSTC grep error log",
         ] {
             assert!(
-                !is_build_log_owned_command(command),
+                !keeps_command_native(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_build_log_owner_behind_env_flag_beats_rtk_rewriting() {
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("fake rtk");
@@ -1558,6 +2083,43 @@ mod tests {
     }
 
     #[test]
+    fn rtk_receipts_cover_all_wrappers_or_keep_conservative_ownership() {
+        let attribution = Attribution::new("test");
+        let path = Path::new("/opt/tokenless/rtk");
+        let anchored = anchor_rtk_prefix_with_outcomes(
+            "git log && git show",
+            "rtk git log && rtk git show",
+            path,
+            &attribution,
+            Path::new("/tmp/state"),
+            |count, render| {
+                assert_eq!(count, 2);
+                Some(render("generation"))
+            },
+        );
+        assert!(anchored.contains("TOKENLESS_RTK_ORDINAL=0"));
+        assert!(anchored.contains("TOKENLESS_RTK_ORDINAL=1"));
+        for original in [
+            "rtk git log && git show",
+            "/usr/local/bin/rtk git log && git show",
+            "echo \"$(rtk git log)\" && git show",
+            "echo `git log` && git show",
+        ] {
+            anchor_rtk_prefix_with_outcomes(
+                original,
+                &original.replace("git show", "rtk git show"),
+                path,
+                &attribution,
+                Path::new("/tmp/state"),
+                |count, _| {
+                    assert_eq!(count, 0);
+                    None
+                },
+            );
+        }
+    }
+
+    #[test]
     fn pre_tool_no_op_does_not_require_rtk() {
         let requests = [
             PreToolRequest {
@@ -1628,6 +2190,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_honors_rtk_exit_contract_and_preserves_arguments() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1670,6 +2233,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_passes_attribution_and_rejects_unexpected_exit() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1717,6 +2281,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_timeout_is_an_operation_error() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1746,6 +2311,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_deadline_includes_stdout_held_by_a_descendant() {
         let _serial = serialize_rtk_scripts();
         for parent in ["exit 0", "wait"] {
@@ -1801,6 +2367,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_collects_descendant_output_before_the_deadline() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1830,6 +2397,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_preserves_invalid_utf8_output_errors() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1855,6 +2423,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_drains_large_rtk_output_before_exit() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -2225,6 +2794,48 @@ mod tests {
     }
 
     #[test]
+    fn path_list_routing_keeps_file_and_rtk_guards_and_records_stats() {
+        let input: String = (0..60)
+            .map(|i| {
+                format!("/workspace/project with spaces/long_directory/records/file {i}.json\n")
+            })
+            .collect();
+        let mut request = post_tool_request(&input);
+        request.tool_name = "Bash".into();
+        request.content_origin = ContentOrigin::CommandOutput;
+        let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert_eq!(
+            outcome.stats.content_type.as_deref(),
+            Some("search_results")
+        );
+        assert_eq!(
+            outcome.stats.applied_operations,
+            [AppliedOperation::SearchPathSharing]
+        );
+        assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+        assert!(outcome.response.stash_keys.is_empty());
+
+        for (command, origin, optimization) in [
+            (None, ContentOrigin::FileContent, OutputOptimization::None),
+            (None, ContentOrigin::FileRead, OutputOptimization::None),
+            (
+                Some("cat paths.txt"),
+                ContentOrigin::CommandOutput,
+                OutputOptimization::None,
+            ),
+            (None, ContentOrigin::CommandOutput, OutputOptimization::Rtk),
+        ] {
+            request.command = command.map(str::to_owned);
+            request.content_origin = origin;
+            request.output_optimization = optimization;
+            let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+            assert_eq!(outcome.response.output, input);
+            assert!(outcome.response.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
     fn search_path_sharing_records_stats_and_respects_rtk_ownership() {
         let content = "crates/long_directory/src/file.rs:12:matching source text\n".repeat(20);
         let mut request = post_tool_request(&content);
@@ -2265,7 +2876,11 @@ mod tests {
             assert!(outcome.stats.applied_operations.is_empty());
             assert!(outcome.response.stash_keys.is_empty());
         }
-        let input = serde_json::json!({"debug": "x".repeat(1000), "value": 1}).to_string();
+        let input = format!(
+            "{{\n{}\"debug\": null,\n{}\"value\": 1\n}}",
+            " ".repeat(600),
+            " ".repeat(600)
+        );
         let mut request = post_tool_request(&input);
         request.tool_name = "SearchFiles".into();
         request.content_origin = ContentOrigin::ApiResponse;
@@ -2296,6 +2911,109 @@ mod tests {
             };
             let outcome = post_tool_with_store(&request, &options(), None).unwrap();
             assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+            assert!(outcome.response.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
+    fn confirmed_unchanged_rtk_output_reenters_post_tool_once() {
+        let directory = tempdir().unwrap();
+        let mut options = options();
+        options.rtk_data_dir = Some(directory.path().to_path_buf());
+        let attribution = Attribution {
+            agent_id: "test".into(),
+            session_id: Some("session".into()),
+            tool_use_id: Some("call".into()),
+        };
+        let content = serde_json::to_string_pretty(
+            &(0..30)
+                .map(|index| serde_json::json!({"name": format!("item-{index}"), "value": index}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut request = post_tool_request(&content);
+        request.output_optimization = OutputOptimization::Rtk;
+        let mut store = OutcomeStore::open(directory.path(), true).unwrap();
+        for changed in [true, false] {
+            let run = store
+                .begin("test", "session", "call", 1, "git log", str::to_owned)
+                .unwrap()
+                .unwrap();
+            store.record(&run, 0, changed).unwrap();
+            request.command = Some(run);
+            let outcome = post_tool_with_outcomes(&request, &options, None, &attribution).unwrap();
+            assert_eq!(
+                outcome.response.disposition,
+                if changed {
+                    Disposition::Passthrough
+                } else {
+                    Disposition::Applied
+                }
+            );
+            if !changed {
+                assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+                assert!(outcome.response.after_tokens < outcome.response.before_tokens);
+            }
+            let repeated = post_tool_with_outcomes(&request, &options, None, &attribution).unwrap();
+            assert_eq!(repeated.response.output, request.content);
+            assert_eq!(repeated.response.disposition, Disposition::Passthrough);
+        }
+    }
+
+    #[test]
+    fn rtk_fallback_preserves_error_file_and_retrieve_guards() {
+        let directory = tempdir().unwrap();
+        let mut options = options();
+        options.rtk_data_dir = Some(directory.path().to_path_buf());
+        let attribution = Attribution {
+            agent_id: "test".into(),
+            session_id: Some("session".into()),
+            tool_use_id: Some("call".into()),
+        };
+        let content = serde_json::to_string_pretty(
+            &(0..30)
+                .map(|index| serde_json::json!({"name": format!("item-{index}"), "value": index}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        for (status, origin, kind) in [
+            (
+                ToolResultStatus::Error,
+                ContentOrigin::CommandOutput,
+                ResultKind::Tool,
+            ),
+            (
+                ToolResultStatus::Success,
+                ContentOrigin::FileContent,
+                ResultKind::Tool,
+            ),
+            (
+                ToolResultStatus::Success,
+                ContentOrigin::CommandOutput,
+                ResultKind::Retrieve,
+            ),
+            (
+                ToolResultStatus::Denied,
+                ContentOrigin::CommandOutput,
+                ResultKind::Tool,
+            ),
+        ] {
+            let mut store = OutcomeStore::open(directory.path(), true).unwrap();
+            let run = store
+                .begin("test", "session", "call", 1, "git log", str::to_owned)
+                .unwrap()
+                .unwrap();
+            store.record(&run, 0, false).unwrap();
+            let request = PostToolRequest {
+                status,
+                content_origin: origin,
+                result_kind: kind,
+                output_optimization: OutputOptimization::Rtk,
+                command: Some(run),
+                ..post_tool_request(&content)
+            };
+            let outcome = post_tool_with_outcomes(&request, &options, None, &attribution).unwrap();
+            assert_eq!(outcome.response.output, content);
             assert!(outcome.response.applied_operations.is_empty());
         }
     }
@@ -2341,6 +3059,25 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn post_tool_preserves_printed_html_and_reports_file_read_statistics() {
+        let content = format!(
+            "<html><body><main>{}</main></body></html>",
+            "source text ".repeat(200)
+        );
+        let request = PostToolRequest {
+            content_origin: ContentOrigin::CommandOutput,
+            command: Some("cat page.html".into()),
+            ..post_tool_request(&content)
+        };
+        let mut opts = options();
+        opts.html_extraction_enabled = true;
+        let outcome = post_tool_with_store(&request, &opts, None).unwrap();
+        assert_eq!(outcome.stats.content_origin.as_deref(), Some("file_read"));
+        assert_eq!(outcome.response.output, content);
+        assert!(outcome.response.applied_operations.is_empty());
     }
 
     #[test]
@@ -2428,8 +3165,9 @@ mod tests {
     #[test]
     fn post_tool_accepts_lossless_json_and_requires_retrieve_for_truncation() {
         let cleanup = post_tool_request(&format!(
-            r#"{{"debug":"{}","value":"kept"}}"#,
-            "noise".repeat(100)
+            "{{\n{}\"debug\": null,\n{}\"value\": \"kept\"\n}}",
+            " ".repeat(600),
+            " ".repeat(600)
         ));
         let outcome = post_tool_with_store(&cleanup, &options(), None).unwrap();
         assert_eq!(outcome.response.disposition, Disposition::Applied);
@@ -2437,6 +3175,10 @@ mod tests {
         assert_eq!(
             outcome.response.applied_operations,
             vec![AppliedOperation::JsonCleanup]
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&outcome.response.output).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&cleanup.content).unwrap()
         );
 
         let lossy =
@@ -2483,7 +3225,127 @@ mod tests {
     }
 
     #[test]
-    fn post_tool_preserves_numbers_the_parser_cannot_represent() {
+    fn post_tool_preserves_json_values_in_text_and_structured_slots() {
+        let original = json!({
+            "debug": "x".repeat(1000), "trace": null, "traces": [],
+            "stack": {}, "stacktrace": "", "logs": [null, {}, "", [], false, 0],
+            "logging": {"debug": null, "items": [1, null, 2]},
+            "empty": null
+        });
+        for content in [
+            original.to_string(),
+            serde_json::to_string_pretty(&original).unwrap(),
+        ] {
+            for replace_with_text in [false, true] {
+                for recovery in [
+                    tokenless_protocol::RecoveryMethod::None,
+                    tokenless_protocol::RecoveryMethod::Shell,
+                ] {
+                    for have_store in [false, true] {
+                        let concrete = Arc::new(ReadCountingStore::default());
+                        let store: Arc<dyn StashStore> = concrete.clone();
+                        let mut request = post_tool_request(&content);
+                        request.content_origin = ContentOrigin::ApiResponse;
+                        request.capabilities.replace_with_text = replace_with_text;
+                        request.capabilities.recovery = recovery.clone();
+                        let outcome = post_tool_with_store(
+                            &request,
+                            &options(),
+                            have_store.then_some(&store),
+                        )
+                        .unwrap();
+                        let decoded: serde_json::Value = if outcome
+                            .response
+                            .applied_operations
+                            .contains(&AppliedOperation::Toon)
+                        {
+                            toon_format::decode_default(&outcome.response.output).unwrap()
+                        } else {
+                            serde_json::from_str(&outcome.response.output).unwrap()
+                        };
+                        assert_eq!(decoded, original);
+                        assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+                        assert!(outcome.response.stash_keys.is_empty());
+                        assert_eq!(concrete.writes.load(Ordering::Relaxed), 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn post_tool_applies_lossless_json_envelope_unwrapping() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/contract/fixtures/post_tool/double_encoded.json"
+        ))
+        .unwrap();
+        let content = fixture["tool_response"].as_str().unwrap();
+        let inner: String = serde_json::from_str(content).unwrap();
+        let original: Value = serde_json::from_str(&inner).unwrap();
+        for replace_with_text in [false, true] {
+            let concrete = Arc::new(ReadCountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut request = post_tool_request(content);
+            request.content_origin = ContentOrigin::ApiResponse;
+            request.capabilities.replace_with_text = replace_with_text;
+            let outcome = post_tool_with_store(&request, &options(), Some(&store)).unwrap();
+            assert_eq!(outcome.response.disposition, Disposition::Applied);
+            assert_eq!(
+                outcome.response.applied_operations,
+                [AppliedOperation::JsonCleanup]
+            );
+            assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                serde_json::from_str::<Value>(&outcome.response.output).unwrap(),
+                original
+            );
+            assert!(outcome.response.stash_keys.is_empty());
+            assert_eq!(concrete.writes.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn diagnostic_field_bounds_require_recovery_and_preserve_empty_siblings() {
+        let original =
+            json!({"debug": "x".repeat(100_000), "empty": null, "items": [null, {}, [], ""]});
+        for reachable in [false, true] {
+            let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+            let mut request = post_tool_request(&original.to_string());
+            request.capabilities.replace_with_text = false;
+            if reachable {
+                request.capabilities.recovery = tokenless_protocol::RecoveryMethod::Shell;
+            }
+            let outcome = post_tool_with_store(&request, &options(), Some(&store)).unwrap();
+            if reachable {
+                assert_eq!(outcome.response.disposition, Disposition::Applied);
+                assert_eq!(outcome.response.recoverability, Recoverability::Retrievable);
+                assert_eq!(
+                    outcome.response.applied_operations,
+                    [AppliedOperation::JsonTruncation]
+                );
+                assert_eq!(outcome.response.stash_keys.len(), 1);
+                let recovered = store
+                    .retrieve(&outcome.response.stash_keys[0])
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(recovered, original["debug"].as_str().unwrap());
+                let mut output: serde_json::Value =
+                    serde_json::from_str(&outcome.response.output).unwrap();
+                output["debug"] = json!(recovered);
+                assert_eq!(output, original);
+            } else {
+                assert_eq!(
+                    outcome.response.disposition,
+                    Disposition::RecoverabilityUnavailable
+                );
+                assert_eq!(outcome.response.output, request.content);
+                assert!(outcome.response.stash_keys.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn post_tool_retains_numbers_the_parser_cannot_represent() {
         for literal in [
             "18446744073709551617",
             "-9223372036854775809",
@@ -2500,13 +3362,58 @@ mod tests {
                 request.content_origin = ContentOrigin::ApiResponse;
                 request.capabilities.replace_with_text = replace_with_text;
                 let outcome = post_tool_with_store(&request, &options(), None).unwrap();
-                assert_eq!(outcome.response.disposition, Disposition::NoSavings);
+                // One unrepresentable number no longer costs the whole
+                // response its compression: the literal is retained and the
+                // rest of the document is compacted around it.
+                assert_eq!(outcome.response.disposition, Disposition::Applied);
                 assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
-                assert!(outcome.response.applied_operations.is_empty());
+                assert_eq!(
+                    outcome.response.applied_operations,
+                    [AppliedOperation::JsonCleanup]
+                );
                 assert!(outcome.response.stash_keys.is_empty());
-                assert_eq!(outcome.response.output, content);
+                assert!(
+                    outcome
+                        .response
+                        .output
+                        .contains(&format!("\"value\":{literal},")),
+                    "{literal} missing from {}",
+                    outcome.response.output
+                );
+                assert!(outcome.response.output.len() < content.len());
             }
         }
+    }
+
+    #[test]
+    fn html_stash_write_failure_reports_stashwrite_not_pipeline() {
+        // When the stash backend rejects the pre-candidate write, the HTML
+        // domain degrades to the unchanged candidate and counts the failed
+        // write. The lifecycle must then classify the failure as a stash
+        // write (the taxonomy every other domain already uses), never as
+        // the generic Pipeline compressor error that used to fail the call.
+        let page = format!(
+            "<!DOCTYPE html><html><head><title>Doc</title><style>{}</style></head>\
+             <body><main><h1>Title</h1>{}</main></body></html>",
+            "body{margin:0;padding:0}".repeat(64),
+            (0..10)
+                .map(|i| format!("<p>Paragraph {i}: {}</p>", "readable words ".repeat(12)))
+                .collect::<String>()
+        );
+        let request = PostToolRequest {
+            capabilities: PostToolCapabilities {
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                ..post_tool_request(&page).capabilities
+            },
+            ..post_tool_request(&page)
+        };
+        let mut opts = options();
+        opts.html_extraction_enabled = true;
+        let failing: Arc<dyn StashStore> = Arc::new(FailingStore);
+        assert!(matches!(
+            post_tool_with_store(&request, &opts, Some(&failing)),
+            Err(RuntimeError::StashWrite { count }) if count == 1
+        ));
     }
 
     fn post_tool_request(content: &str) -> PostToolRequest {

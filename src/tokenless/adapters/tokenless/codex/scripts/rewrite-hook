@@ -148,9 +148,12 @@ _MIN_RTK_VERSION = (0, 35, 0)
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
 _RTK_FALLBACK_DEBIAN = "/usr/lib/anolisa/tokenless/rtk"
 _RTK_SYSTEM_BIN = "/usr/local/bin/rtk"
+_RTK_SYSTEM_STANDALONE = "/usr/local/libexec/tokenless/rtk"
 _RTK_SYSTEM_LIBEXEC = "/usr/local/libexec/anolisa/tokenless/rtk"
 _RTK_RPM_BIN = "/usr/bin/rtk"
+_RTK_RPM_STANDALONE = "/usr/libexec/tokenless/rtk"
 _RTK_LOCAL_BIN = _user_path(".local", "bin", "rtk")
+_RTK_USER_STANDALONE = _user_path(".local", "libexec", "tokenless", "rtk")
 _RTK_ANOLISA_USER = _user_path(
     ".local",
     "lib",
@@ -175,11 +178,14 @@ def _find_rtk() -> Optional[str]:
         return path
     for fp in (
         _RTK_LOCAL_BIN,
+        _RTK_USER_STANDALONE,
         _RTK_ANOLISA_USER,
         _RTK_MAKE_USER,
         _RTK_SYSTEM_BIN,
+        _RTK_SYSTEM_STANDALONE,
         _RTK_SYSTEM_LIBEXEC,
         _RTK_RPM_BIN,
+        _RTK_RPM_STANDALONE,
         _RTK_FALLBACK,
         _RTK_FALLBACK_DEBIAN,
         _RTK_LOCAL_SHARE,
@@ -237,8 +243,18 @@ def main() -> None:
             tool_input = json.loads(tool_input)
         except (json.JSONDecodeError, ValueError):
             _skip()
+    if not isinstance(tool_input, dict):
+        # A JSON-encoded tool_input can decode to a list, number, or plain
+        # string. There is no command to rewrite in any of them, so take the
+        # silent pass-through path instead of raising AttributeError on
+        # .get() — the sibling common/hooks/rewrite_hook.py holds the same
+        # guard, and the fail-open contract ("all error paths exit 0 with
+        # empty stdout") covers decoded-but-unusable nested shapes too.
+        _skip()
     cmd = tool_input.get("command", "")
-    if not cmd:
+    if not isinstance(cmd, str) or not cmd:
+        # A non-string command would only fail later inside the subprocess
+        # call's broad except; skip it here so the guard is explicit.
         _skip()
 
     # 5. Set up RTK env context for stats

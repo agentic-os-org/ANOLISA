@@ -4,28 +4,29 @@ import copy
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_ci_checks import GateFixture, gate
-from check_inventory import collect, inventory
+from check_inventory import check_inventory, collect, inventory
 from check_layout import source_sizes
-from check_matrix import END, START, table, validate
+from check_matrix import CAPABILITY_DOCS, END, START, main, table, validate
 
 
 class InventoryTests(GateFixture):
     def test_build_once_and_reject_missing_empty_ignored_or_failed_targets(self) -> None:
         metadata = {
-            "workspace_members": ["service"],
+            "workspace_members": ["cli"],
             "packages": [
                 {
-                    "id": "service",
-                    "name": "aw-service",
+                    "id": "cli",
+                    "name": "aw-cli",
                     "targets": [{"name": "new_agent", "kind": ["test"]}],
                 }
             ],
         }
         artifact = {
             "reason": "compiler-artifact",
-            "package_id": "service",
+            "package_id": "cli",
             "target": metadata["packages"][0]["targets"][0],
             "profile": {"test": True},
             "executable": "/fixture/new_agent",
@@ -61,7 +62,7 @@ class InventoryTests(GateFixture):
 
             with self.subTest(mode=mode):
                 opt_in = (
-                    frozenset({"aw-service/test/new_agent"})
+                    frozenset({"aw-cli/test/new_agent"})
                     if mode.startswith("opt-in")
                     else frozenset()
                 )
@@ -69,7 +70,7 @@ class InventoryTests(GateFixture):
                     self.assertEqual(
                         collect(self.root, metadata, run, opt_in),
                         {
-                            "aw-service/test/new_agent": (
+                            "aw-cli/test/new_agent": (
                                 {"regression"} if mode == "valid" else set()
                             ),
                         },
@@ -94,15 +95,63 @@ class InventoryTests(GateFixture):
 class MatrixTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()
+        self.root = self.root / "src/aw"
+        self.root.mkdir(parents=True)
         self.matrix = json.loads((gate.AW / "tests/regression-matrix.json").read_text())
         self.runnable = {target: {"fixture"} for target in self.matrix["required_targets"]}
         for case in self.matrix["cases"].values():
             self.runnable.setdefault(case["target"], set()).add(case["test"])
-        for name in ("README.md", "README_zh.md"):
-            (self.root / name).write_text(f"{START}\n{table(self.matrix)}\n{END}\n")
+        for name in CAPABILITY_DOCS:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{START}\n{table(self.matrix)}\n{END}\n")
 
     def test_complete_manifest_is_accepted(self) -> None:
         validate(self.matrix, self.runnable, self.root)
+
+    def test_independent_workspaces_preserve_the_complete_matrix(self) -> None:
+        names = {target.split("/", 1)[0] for target in self.runnable}
+        names.update(target.split("/", 1)[0] for target in self.matrix["opt_in_targets"])
+        providers = {"aw-provider-sec-core", "aw-provider-tokenless"}
+
+        def workspace(packages: set[str], root: Path) -> dict:
+            return {
+                "workspace_root": str(root),
+                "workspace_members": sorted(packages),
+                "packages": [{"id": name, "name": name} for name in sorted(packages)],
+            }
+
+        metadata = workspace(names - providers, self.root)
+        metadata["provider_workspaces"] = [
+            workspace({name}, self.root / name) for name in sorted(providers)
+        ]
+        (self.root / "tests").mkdir()
+        for mode in ("valid", "missing-provider", "missing-framework", "duplicate-target", "unknown-opt-in"):
+            matrix = copy.deepcopy(self.matrix)
+            if mode == "unknown-opt-in":
+                matrix["opt_in_targets"]["unknown/test/acceptance"] = "fixture"
+            (self.root / "tests/regression-matrix.json").write_text(json.dumps(matrix))
+
+            def collected(root: Path, data: dict, run: object, opt_in: frozenset) -> dict:
+                owned = set(data["workspace_members"])
+                self.assertTrue(all(target.split("/", 1)[0] in owned for target in opt_in))
+                if (mode == "missing-provider" and owned == {"aw-provider-tokenless"}) or (mode == "missing-framework" and "aw-cli" in owned):
+                    return {}
+                result = {
+                    target: tests for target, tests in self.runnable.items()
+                    if target.split("/", 1)[0] in owned
+                }
+                if mode == "duplicate-target":
+                    result["duplicate/test/target"] = {"case"}
+                return result
+
+            with self.subTest(mode=mode), patch("check_inventory.collect", side_effect=collected) as build:
+                if mode == "valid":
+                    check_inventory(self.root, metadata, object())
+                    self.assertEqual(build.call_count, 3)
+                else:
+                    with self.assertRaises(ValueError):
+                        check_inventory(self.root, metadata, object())
 
     def test_each_required_case_must_exist_and_be_runnable(self) -> None:
         for name, case in self.matrix["cases"].items():
@@ -140,14 +189,42 @@ class MatrixTests(GateFixture):
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 validate(matrix, self.runnable, self.root)
 
-    def test_empty_target_and_stale_readme_fail(self) -> None:
+    def test_empty_target_and_stale_or_missing_guide_grids_fail(self) -> None:
         runnable = copy.deepcopy(self.runnable)
         runnable[self.matrix["required_targets"][0]] = set()
         with self.assertRaisesRegex(ValueError, "target is missing or empty"):
             validate(self.matrix, runnable, self.root)
-        (self.root / "README_zh.md").write_text(f"{START}\nstale\n{END}\n")
-        with self.assertRaisesRegex(ValueError, "update the grid"):
-            validate(self.matrix, self.runnable, self.root)
+        for name in CAPABILITY_DOCS:
+            path = self.root / name
+            original = path.read_text()
+            for text, error in (
+                (f"{START}\nstale\n{END}\n", "update the grid"),
+                ("no generated table", "missing unique matrix markers"),
+                (original + original, "missing unique matrix markers"),
+                (f"<details>\n{original}</details>\n", "keep the Hook grid expanded"),
+            ):
+                with self.subTest(document=name, content=text), self.assertRaisesRegex(
+                    ValueError, error
+                ):
+                    path.write_text(text)
+                    validate(self.matrix, self.runnable, self.root)
+            path.write_text(original)
+
+    def test_regeneration_updates_all_grids_without_changing_surrounding_text(self) -> None:
+        (self.root / "tests").mkdir()
+        (self.root / "tests/regression-matrix.json").write_text(json.dumps(self.matrix))
+        for name in CAPABILITY_DOCS:
+            (self.root / name).write_text(f"intro\n{START}\nstale\n{END}\nfooter\n")
+        with patch("check_matrix.__file__", str(self.root / "scripts/check_matrix.py")), patch(
+            "sys.argv", ["check_matrix.py", "--write-docs"]
+        ):
+            main()
+        validate(self.matrix, self.runnable, self.root)
+        for name in CAPABILITY_DOCS:
+            self.assertEqual(
+                (self.root / name).read_text(),
+                f"intro\n{START}\n{table(self.matrix)}\n{END}\nfooter\n",
+            )
 
 
 class ScriptLayoutTests(GateFixture):
@@ -155,11 +232,11 @@ class ScriptLayoutTests(GateFixture):
         for relative in (
             "utility.py",
             "crates/new/scripts/check.py",
-            "adapters/new/worker.py",
+            "crates/aw-adapter/native/new/worker.py",
             "scripts/check.py",
             "tests/acceptance.py",
             "crates/new/tests/fixtures/bridge.js",
-            "adapters/new/worker.mjs",
+            "crates/aw-adapter/native/new/worker.mjs",
             "crates/new/src/bridge.cjs",
         ):
             file = self.root / relative
@@ -172,8 +249,8 @@ class ScriptLayoutTests(GateFixture):
             file.unlink()
 
     def test_symlink_cannot_bypass_script_audit(self) -> None:
-        directory = self.root / "adapters"
-        directory.mkdir()
+        directory = self.root / "crates/aw-adapter/native"
+        directory.mkdir(parents=True)
         (directory / "bridge.py").symlink_to(self.root / "outside.py")
         with self.assertRaisesRegex(ValueError, "symlink"):
             source_sizes(self.root)

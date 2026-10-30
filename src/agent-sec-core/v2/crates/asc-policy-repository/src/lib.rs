@@ -94,8 +94,6 @@ pub enum StoreError {
 pub struct ReconciliationPatch {
     pub status: Option<asc_policy_types::binding::BindingLifecycle>,
     pub deployments: Option<Vec<Deployment>>,
-    /// Merge registered target observations even after the original status claim changed.
-    pub preserve_observations_on_conflict: bool,
 }
 
 /// Conditional reconciliation transaction. None removes the whole aggregate.
@@ -116,7 +114,6 @@ impl BindingStateWrite {
         Self::patch(ReconciliationPatch {
             status: Some(next.binding.status),
             deployments: Some(next.deployments),
-            preserve_observations_on_conflict: false,
         })
     }
     pub fn patch(next: ReconciliationPatch) -> Self {
@@ -131,7 +128,7 @@ impl BindingStateWrite {
 pub struct WriteReceipt {
     /// Absent when the aggregate was deleted.
     pub status_version: Option<i64>,
-    /// False when observations committed without changing a superseded lifecycle.
+    /// Retained for stored receipt compatibility; new writes require a matching lifecycle.
     pub status_applied: bool,
 }
 
@@ -143,7 +140,7 @@ pub enum WriteResult {
 }
 
 /// Reads are consistent; writes are atomic with PAP and never replace spec.
-/// Compare revision/phase and only the status explanation/deployments being written.
+/// Compare revision, status version and lifecycle before applying any field.
 /// Removal compares all reconciliation fields. Exact latest-write replay may be
 /// acknowledged within the current call, even after an intervening PAP write.
 /// Errors never establish target absence; no transaction spans remote I/O.

@@ -216,7 +216,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentsight"
-version = "0.14.1"
+version = "0.15.1"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -263,6 +263,7 @@ dependencies = [
  "log 0.4.33",
  "log4rs",
  "lru",
+ "memchr",
  "memmap2 0.9.11",
  "metrics",
  "metrics-exporter-prometheus",
@@ -391,11 +392,13 @@ dependencies = [
  "agentsight-atif",
  "agentsight-sqlite-lifecycle",
  "anyhow",
+ "chrono",
  "dirs",
  "log 0.4.33",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

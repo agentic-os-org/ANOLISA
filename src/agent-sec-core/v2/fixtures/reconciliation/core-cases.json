@@ -384,7 +384,7 @@
             ]
           },
           "expected": {
-            "$ref": "record.delete.new-b-present.status-3"
+            "$ref": "record.delete.new-b-unknown.status-3"
           },
           "result": {
             "Ok": {
@@ -405,9 +405,7 @@
             "admit",
             "create",
             "create:return",
-            "read",
-            "finish",
-            "finish:matched"
+            "read"
           ]
         },
         {
@@ -522,9 +520,7 @@
             "admit",
             "create",
             "create:return",
-            "read",
-            "finish",
-            "finish:matched"
+            "read"
           ]
         },
         {
@@ -639,9 +635,7 @@
             "admit",
             "create",
             "create:return",
-            "read",
-            "finish",
-            "finish:matched"
+            "read"
           ]
         },
         {
@@ -735,7 +729,7 @@
             ]
           },
           "expected": {
-            "$ref": "record.delete.new-b-present.status-3"
+            "$ref": "record.delete.new-b-unknown.status-3"
           },
           "result": {
             "Ok": {
@@ -758,7 +752,8 @@
             "read",
             "admit",
             "finish",
-            "finish:matched"
+            "finish:conflict",
+            "read"
           ]
         }
       ]
@@ -825,7 +820,7 @@
             ]
           },
           "expected": {
-            "$ref": "record.reapply.rev-8-with-new-b-present.status-4"
+            "$ref": "record.reapply.rev-8-with-new-b-unknown.status-4"
           },
           "result": {
             "Ok": {
@@ -850,9 +845,7 @@
             "admit",
             "finish",
             "finish:conflict",
-            "read",
-            "finish",
-            "finish:matched"
+            "read"
           ]
         }
       ]
@@ -1268,7 +1261,7 @@
     },
     {
       "caseId": "REC-CORE-010",
-      "variant": "recompute-after-storage-repair",
+      "variant": "resume-write-after-storage-repair",
       "initial": {
         "$ref": "record.create.pending"
       },

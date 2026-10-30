@@ -6,13 +6,17 @@ CMA-style persistent filesystem memory for AI agents, served over MCP. Provides 
 
 ## Features
 
-- **File-form memory** — read/write with filesystem semantics via 37 MCP tools; namespace isolation and path sandboxing (openat2 RESOLVE_BENEATH)
+- **File-form memory** — read/write with filesystem semantics via 38 MCP tools; namespace isolation and path sandboxing (openat2 RESOLVE_BENEATH)
 - **Hybrid semantic search** — BM25 keyword + dense vector embeddings with reciprocal rank fusion (RRF); time-decay ranking
 - **Auto capture & recall** — observes at conversation end, injects relevant context before the next prompt
 - **Memory consolidation** — automatic extraction of atomic facts from session audit logs
 - **Versioning & snapshots** — optional git auto-commit + tar.gz snapshots for file-level and mount-level rollback
 - **Safety** — prompt-injection detection and secret/PII redaction for injected content
 - **Cross-session tasks** — save/resume/close tasks across sessions with full context
+
+Keyword search accepts terms such as `config.toml`, `example.com`, and `v1.2.3`.
+Words such as `AND`, `NOT`, and `OR` are searched as text. Separate search terms
+with spaces; partial matches are returned when no result matches every term.
 
 ## Quick Start
 
@@ -35,7 +39,7 @@ grants the plugin's declared capabilities by default. Set
 consent the install then fails until consent is granted interactively. Set
 `AGENT_MEMORY_SAFE_INSTALL=1` to decline the unsafe-install bypass on hosts
 that would still receive one. Full reference:
-[user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
+[user guide](../../docs/user-guide/en/agent-memory/index.md).
 
 ```bash
 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
@@ -99,18 +103,33 @@ The OpenClaw plugin uses `anolisa_memory_search` and `anolisa_memory_get` for
 ANOLISA memories, alongside `memory_observe` and `memory_get_context`. Update
 old tool-name references in prompts and allowlists when upgrading, restart the
 gateway, and start a new conversation. Internal MCP names and stored data stay
-unchanged. See the [user guide](../../docs/user-guide/en/token-saving/agent-memory.md)
+unchanged. See the [user guide](../../docs/user-guide/en/agent-memory/index.md)
 for migration from installers that disabled `memory-core`. The manifest keeps
 all four plugin tools in OpenClaw 2026.9.2's `coding` conversation profile. Custom
 allowlists, sandbox policies, and hosts that ignore this metadata need explicit
 new-name entries; the guide shows how to add them without replacing your policy.
 
+Automatic OpenClaw observations use `memory_capture`, which checks the current
+capture consent before writing and marks the source as `auto-capture`. Explicit
+`memory_observe` calls remain available when automatic capture is disabled.
+Upgrade the server and adapter together; an older server rejects automatic
+capture requests without falling back to a manual write.
+
+For single-line list entries, `memory_summary` concept and file rankings remain
+available after a `mem_export` / `mem_import` round trip, including literal commas.
+Import replaces ASCII control characters in frontmatter, including newlines, with spaces.
+
+Embedding providers selected in TOML also accept their `MEMORY_OPENAI_*` or
+`MEMORY_OLLAMA_*` field overrides without repeating the backend selector. See
+the [configuration guide](../../docs/user-guide/en/agent-memory/index.md)
+for credential precedence and model-change indexing limits.
+
 ## Architecture
 
-Single-process Tokio async runtime exposing 37 MCP tools over stdio JSON-RPC 2.0:
+Single-process Tokio async runtime exposing 38 MCP tools over stdio JSON-RPC 2.0:
 
 - **Tier A** (11 tools): file operations — read, write, append, edit, list, grep, diff, mkdir, remove, promote, session_log
-- **Tier B** (6 tools): structured retrieval — search, observe, get_context, sessions, timeline, index_refresh
+- **Tier B** (7 tools): structured retrieval — search, observe, capture, get_context, sessions, timeline, index_refresh
 - **Tier C** (7 tools): governance — snapshot, restore, git log/revert, consolidate, compact
 - **Sovereignty** (13 tools): about, forget, consent, export/import, tasks, dream
 
@@ -149,9 +168,13 @@ plugin output directory, target, timestamp and TOML build metadata inputs.
 Metadata binds `version`, `target_os`, `target_arch`,
 `binaries.agent-memory` (SHA256) and `plugin.sha256` to the supplied files.
 The packager does not build or execute binaries. It renders the raw installation
-contract from `.anolisa/component.raw.toml.in` and Cargo.toml; the RPM contract
+contract from `packaging/anolisa/raw/component.toml.in` and Cargo.toml; the RPM contract
 remains separate. Both installation modes leave the user service stopped.
 Run `python3 tests/test_raw_packaging.py` for packaging regressions.
+
+## Smoke validation
+
+Run `make smoke` with Python 3.8+ to validate the release MCP server in a temporary namespace. `make smoke SMOKE_TIMEOUT=10` overrides the default 30-second protocol deadline; process cleanup is bounded separately to two seconds. See the [testing guide](../../docs/user-guide/en/getting-started/testing.md).
 
 ## License
 

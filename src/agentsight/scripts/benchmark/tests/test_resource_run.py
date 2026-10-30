@@ -7,6 +7,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import pty
 import shutil
 import signal
 import socket
@@ -145,9 +146,11 @@ def sudo_environment(
     executable(
         tools / "sudo",
         """#!/usr/bin/env python3
-import os, signal, subprocess, sys
+import json, os, signal, subprocess, sys
 from pathlib import Path
 cache = Path(os.environ["MEMORY_TEST_SUDO_CACHE"])
+with cache.with_suffix(".commands").open("a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
 scope = str(os.getsid(0))
 if sys.argv[1:] == ["-v"]:
     cache.write_text(scope)
@@ -229,7 +232,7 @@ def command(output: Path, binary: Path, script: Path = SINGLE_RUN / "resource_ru
         "--duration",
         "2",
         "--startup-delay",
-        "0",
+        "1",
         "--rate-tolerance",
         "0.15",
         "--validation-wait-seconds",
@@ -245,8 +248,21 @@ def command(output: Path, binary: Path, script: Path = SINGLE_RUN / "resource_ru
     ]
 
 
-def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=40)
+def run(
+    args: list[str], env: dict[str, str], *, interactive: bool = False
+) -> subprocess.CompletedProcess[str]:
+    if not interactive:
+        return subprocess.run(
+            args, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=40
+        )
+    master, slave = pty.openpty()
+    try:
+        return subprocess.run(
+            args, env=env, stdin=slave, capture_output=True, text=True, timeout=40
+        )
+    finally:
+        os.close(slave)
+        os.close(master)
 
 
 def assert_reaped(output: Path) -> None:
@@ -676,27 +692,51 @@ def test_ab_does_not_publish_improvement_when_one_capture_fails(
 
 
 @pytest.mark.parametrize("ab", [False, True], ids=["single", "ab"])
+@pytest.mark.parametrize("interactive", [False, True], ids=["noninteractive", "tty"])
 def test_sudo_reuses_session_authentication(
-    tmp_path: Path, sudo_environment: dict[str, str], ab: bool
+    tmp_path: Path, sudo_environment: dict[str, str], ab: bool, interactive: bool
 ) -> None:
+    cache = Path(sudo_environment["MEMORY_TEST_SUDO_CACHE"])
+    if not interactive:
+        cache.write_text(str(os.getsid(0)))
     binary = executable(tmp_path / "observer", FAKE_TRACE.replace("MEMORY_MIB", "1"))
     output = tmp_path / "result"
     args = command(output, binary)
     args.remove("--no-sudo")
     if ab:
         args.extend(["--ab", "--baseline-bin", str(binary)])
-    result = run(args, sudo_environment)
+    result = run(args, sudo_environment, interactive=interactive)
     assert result.returncode == 0, result.stdout + result.stderr
     summary = json.loads((output / "resource-summary.json").read_text())
     assert summary["valid"]
-    assert Path(sudo_environment["MEMORY_TEST_SUDO_CACHE"]).exists()
+    assert cache.exists()
+    calls = [json.loads(line) for line in cache.with_suffix(".commands").read_text().splitlines()]
+    assert (["-v"] in calls) == interactive
     assert all(measured["capture"] == "PASS" for measured in summary["runs"].values())
+    assert_reaped(output)
+
+
+def test_noninteractive_sudo_without_credentials_fails_fast(
+    tmp_path: Path, sudo_environment: dict[str, str]
+) -> None:
+    binary = executable(tmp_path / "observer", FAKE_TRACE.replace("MEMORY_MIB", "1"))
+    output = tmp_path / "result"
+    args = command(output, binary)
+    args.remove("--no-sudo")
+    result = run(args, sudo_environment)
+    assert result.returncode == 1, result.stdout + result.stderr
+    cache = Path(sudo_environment["MEMORY_TEST_SUDO_CACHE"])
+    assert not cache.exists()
+    calls = [json.loads(line) for line in cache.with_suffix(".commands").read_text().splitlines()]
+    assert ["-v"] not in calls
+    assert "sudo: a password is required" in (output / "run/worker.log").read_text()
     assert_reaped(output)
 
 
 def test_sudo_launcher_cancels_worker_without_fresh_credentials(
     tmp_path: Path, sudo_environment: dict[str, str]
 ) -> None:
+    Path(sudo_environment["MEMORY_TEST_SUDO_CACHE"]).write_text(str(os.getsid(0)))
     binary = executable(tmp_path / "observer", FAKE_TRACE.replace("MEMORY_MIB", "1"))
     output = tmp_path / "result"
     args = command(output, binary) + ["--duration", "30"]
@@ -793,6 +833,27 @@ def fixture_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def test_short_load_tolerates_delayed_collector_startup(
+    tmp_path: Path, environment: dict[str, str]
+) -> None:
+    repo = fixture_repo(tmp_path)
+    harness = repo / "src/agentsight/scripts/benchmark/single_run"
+    collector = harness / "collect_metrics.py"
+    source = collector.read_text()
+    marker = "    identity = read_process_identity(args.pid)\n"
+    assert source.count(marker) == 1
+    collector.write_text(source.replace(marker, "    time.sleep(0.25)\n" + marker))
+    binary = repo / "src/agentsight/observer"
+    output = tmp_path / "result"
+    result = run(command(output, binary, harness / "resource_run.sh"), environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((output / "resource-summary.json").read_text())
+    measured = summary["runs"]["run"]
+    assert summary["valid"]
+    assert measured["cpu_measurement_seconds"] == pytest.approx(2, abs=0.1)
+    assert_reaped(output)
+
+
 def test_git_ab_freezes_dirty_tree_and_preserves_index(
     tmp_path: Path, environment: dict[str, str]
 ) -> None:
@@ -819,7 +880,8 @@ assert Path("../../staged").read_text() in ("before", "staged and unstaged")
     start = args.index("--agentsight-bin")
     del args[start : start + 2]
     result = run(
-        args + ["--ab", "--baseline", "HEAD"],
+        # Let the sampler initialize before the short measured load window.
+        args + ["--ab", "--baseline", "HEAD", "--startup-delay", "1"],
         dict(environment, PATH=f"{tools}:{environment['PATH']}"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -848,6 +910,52 @@ def test_snapshot_contains_deletions_and_untracked_without_staging(tmp_path: Pat
         assert (snapshot / "staged").read_text() == "staged and unstaged"
     finally:
         inputs.close()
+
+
+@pytest.mark.parametrize(
+    ("output_name", "neighbor_name"),
+    [("run[1]", "run1"), ("nested/run[1]", "nested/run1"), ("run", "run-other")],
+)
+def test_snapshot_excludes_only_the_literal_output_directory(
+    tmp_path: Path, output_name: str, neighbor_name: str
+) -> None:
+    repo = fixture_repo(tmp_path)
+    neighbor = repo / neighbor_name
+    neighbor.mkdir(parents=True)
+    (neighbor / "modified").write_text("before")
+    (neighbor / "deleted").write_text("before")
+    git(repo, "add", "--", neighbor_name)
+    git(repo, "commit", "-qm", "add snapshot neighbor")
+    (neighbor / "modified").write_text("staged")
+    git(repo, "add", "--", neighbor_name)
+    (neighbor / "modified").write_text("staged and unstaged")
+    (neighbor / "deleted").unlink()
+    (neighbor / "untracked").write_text("untracked")
+    output = repo / output_name
+    (output / "logs/nested").mkdir(parents=True)
+    (output / "settings.json").write_text("{}")
+    (output / "logs/nested/run.log").write_text("generated output")
+    head_before = git(repo, "rev-parse", "HEAD")
+    status_before = git(repo, "status", "--porcelain")
+    index = Path(git(repo, "rev-parse", "--absolute-git-dir")) / "index"
+    index_before = index.read_bytes()
+    inputs = resource_inputs.Inputs(repo, output)
+    try:
+        source = inputs.prepare("after", "working-tree", None)
+        snapshot = Path(source["component"]).parents[1]
+        assert (snapshot / neighbor_name / "modified").read_text() == "staged and unstaged"
+        assert not (snapshot / neighbor_name / "deleted").exists()
+        assert (snapshot / neighbor_name / "untracked").read_text() == "untracked"
+        assert not (snapshot / output_name).exists()
+        assert source["dirty"]
+        assert index.read_bytes() == index_before
+    finally:
+        inputs.close()
+    assert git(repo, "rev-parse", "HEAD") == head_before
+    assert git(repo, "status", "--porcelain") == status_before
+    assert (neighbor / "modified").read_text() == "staged and unstaged"
+    assert (output / "logs/nested/run.log").read_text() == "generated output"
+    assert git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
 def test_build_failure_removes_worktrees_and_reports_reason(
@@ -909,6 +1017,10 @@ def test_invalid_binary_reports_specific_cause(
         ["--ring-buffer-mb", "3"],
         ["--cpu-budget-percent", "-1"],
         ["--cpu-budget-percent", "101"],
+        ["--candidate-lib", "missing.so"],
+        ["--ffi-api", "v2"],
+        ["--ffi", "--agentsight-bin", "observer"],
+        ["--ffi", "--baseline-lib", "missing.so"],
     ],
 )
 def test_invalid_arguments_fail_before_build(options: list[str]) -> None:

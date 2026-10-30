@@ -245,6 +245,15 @@ WAL/SHM sidecar 受私有目录保护。绑定 UDS 前必须实际打开 JSONL�
 失败即非零退出；JSONL 失败只输出告警，daemon 仍启动并对该副本保持 best-effort 写入。成功
 启动后单侧瞬时写失败仍保持独立 fail-open，不改变 capability 的业务结果。
 
+Policy 存储独立执行 DPROC-023 路径选择：显式非空 `AGENT_SEC_DATA_DIR` 为固定路径，
+否则候选 A 为 `/var/log/agent-sec/policy-state.db`，B 为
+`/var/lib/agent-sec/policy/policy-state.db`。先检查两处已有状态，再按目录安全性优先选择 A，
+A 的祖先不安全时选择安全的 B。祖先安全且已有叶目录归 daemon 所有时，先将叶目录修复为 `0700`；
+叶目录属主错误或修复失败直接报错。两处都有库，或选址会绕过另一处已有库时拒绝启动并列出路径与原因。
+不能把读取错误视为不存在，也不因数据库损坏、schema、锁或 I/O 错误换库。
+预检查不创建文件、不改变祖先权限、不迁移数据；无冲突时才打开或初始化所选库，最终打开再次验证目录。
+`0700` 私有目录及 `0600` 文件要求保持不变，安全事件和可观测路径不随 Policy fallback 改变。
+
 scan composition root 还注入共享 telemetry sink。`AGENT_SEC_TELEMETRY_LOG_PATH` 沿用 V1，
 默认 uploader-owned JSONL。路径中的 `~` 优先使用 `HOME`，未设置时查询当前 UID 的系统
 用户数据库；`~user` 查询指定用户的 home，保持 V1 `Path.expanduser()` 对已有用户的展开行为。
@@ -356,7 +365,9 @@ runner 工作目录的 owner、权限和 umask。
 
 **[TARGET V2][IMPLEMENTED] DPROC-UDS-002 服务端身份认证**：
 `asc-daemon-client` 在 connect 成功后、首次 write 前，对同一连接 fd 读取 Linux
-`SO_PEERCRED`，要求服务端 UID 为 0。凭据读取失败或 UID 不符返回独立的
+`SO_PEERCRED`，要求服务端 UID 为 0。跨 PID namespace 时内核可返回 PID=0，
+凭据读取必须允许该值，认证仅判断 UID，不要求共享 PID namespace。
+凭据读取失败或 UID 不符返回独立的
 `ServerIdentity` 错误，关闭连接，不发送请求、不重试、不回退本地实现；非 Linux
 返回不支持认证的错误。期望 UID 不从 socket 文件属主、客户端 UID 或响应 JSON 推导。
 服务 UID 是信任域；该检查不区分其它 root 进程，也不能保护同 UID 的不可信 Agent。
@@ -371,6 +382,8 @@ runner 工作目录的 owner、权限和 umask。
 可执行 fixture：`tests/v2/e2e/test_daemon_process_e2e.py::test_dproc_uds_002_rejects_fake_peer_even_with_root_owned_socket`
 验证 socket 文件属主改为 root 的非 root 伪服务仍被真实 Rust CLI 和 native health probe 拒绝，
 服务端不得收到请求字节；该用例需要 root 的跨 UID 进程环境，编译或单元测试不替代该验收。
+同文件的 `test_dproc_uds_002_authenticates_uid_with_zero_peer_pid` 使用 user/PID namespace
+确认内核实际返回 PID=0，并验证 CLI 和 health probe 接受 UID=0、拒绝非 root UID 且不发送请求。
 普通 workspace CI 统一启用默认关闭的 `asc-daemon-client/testing` feature，并设置
 `AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1`，允许非 root 模拟服务执行协议和业务测试，
 普通测试无需修改。身份认证回归单独使用默认配置执行；RPM 构建和 E2E 不启用该 feature
@@ -408,6 +421,23 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 回退本次变更时停止测试用 V2 服务并恢复此前 V2 构建，不操作 V1 服务或迁移数据。
 PAP 持久化、readiness/持续健康检查和 OTel 不在本次交付范围；
 SkillSec 持久化与激活恢复见第 11 节。
+
+**DPROC-V2-SOURCE-BUILD-1（2026-09-29）**：仓库级
+`./scripts/build-all.sh --component sec-core` 源码安装改为 V2 交付。它构建 Rust
+`agent-sec-cli`、`agent-sec-daemon` 和 `linux-sandbox`，以 root 安装到
+`/usr/local/bin`，并在 `/etc/systemd/system/agent-sec-core.service` 渲染 V2
+host-level unit；不创建 wheel、venv、Python wrapper 或 user unit。默认模式仍将
+现有 Agent integration assets 安装在调用用户路径，`--system` 则安装 system 路径。
+安装器在 active systemd host 上必须 daemon-reload、enable 与 restart 服务；没有
+active systemd 的构建环境只安装文件，并明确要求操作者在 systemd host 启用服务。
+
+**DPROC-V2-SOURCE-BUILD-2（2026-10-20）**：source-build 的 V2 验收不再要求
+Security Baseline 迁移。`harden`、`verify` 和 `log-sandbox` 按 `CHANGELOG.md` 1.0.0
+记录的版本化退役契约不再由 V2 CLI 提供；依赖这些命令的脚本必须在切换安装器前
+更新。`verify` 的发行资产校验由 Skill Ledger 的 Ed25519 签名承担。Prompt、PII、
+Skill Ledger、Observability 和 Security Events 仍须具备对应的 Rust command/RPC、
+兼容输出和端到端 fixture 后才能切换。RPM 和 raw 安装路径不由该变更修改。
+回退本变更时恢复目标 revision 的安装器与文档，不恢复已退役命令。
 
 RuntimeLease 是 binary 私有实现；目录 fd 仅用于验证/openat，锁 fd 保留至进程退出。
 V2 不继承 V1 的 PID 文件内容契约，单实例判断依赖非阻塞 flock。
@@ -493,6 +523,7 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 | DPROC-017 | state migrator 完成 V1 per-user 到 system-owned state 的 owner-safe 迁移和回滚 |
 | DPROC-018 | CLI/TUI 不直读 SQLite；query 必须经过 daemon authorization |
 | DPROC-019 | raw/RPM/container/systemd/Helm 生成 checksum、SBOM 和 build metadata |
+| DPROC-023 | Policy 默认目录安全性选择与已有状态冲突拒绝；已有自有叶目录修复为 `0700`，仅祖先不安全触发回退；显式数据根不回退，不修改已有数据库；fixture 为 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs` 和 `v2/apps/asc-daemon/tests/bootstrap.rs` 的同名测试及叶目录修复回归 |
 
 每个 DPROC ID 必须映射到机器可执行 fixture 或真实部署证据。Rust unit test 不能代替安装后
 service/package、server-side admission 或真实 Kubernetes rollout 验证。
@@ -618,6 +649,9 @@ CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；�
 领域状态默认 `/var/lib/agent-sec/skillsec`，root 所有、0700，当前 signing-key.pk8 为 0600。
 `/etc/agent-sec/skillsec.json` 或 --skillsec-config 可注入 stateDir、精确 managedSkillDirs、
 scanners 和 parsers，以及默认开启的 enableDefaultSkillDirs；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+公开 file-only `make install` / `make install-core` 生成的 system unit 使用
+`--skillsec-config CONFIGDIR/skillsec.json`，读取本次安装的配置；`DESTDIR` 只用于暂存，
+不进入服务参数。RPM/raw 原有 unit 继续使用 native 配置默认值，配置和状态的安全校验不变。
 默认授权包含系统目录及本地 `/etc/passwd` 的所有有效账户 HOME 下标准 Skill 目录，不按 UID 或
 登录 shell 排除账户，不采信客户端环境。禁用默认目录不影响显式配置或 SkillFS；账户变化重启后生效。
 DPROC-SG-007 的可执行边界为 `apps/asc-daemon/src/skill_sec/defaults.rs` 及 capability 的 `tests/scope.rs`。
