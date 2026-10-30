@@ -334,10 +334,15 @@ OpenClaw profile、session 和 sandbox agent。
 - 将 SWE-bench repo 准备到临时工作区。
 - 将 repo 挂载到 OpenClaw sandbox 的 `/testbed`。
 - 将 OpenClaw workspace 放在单独的 `/workspace`。
-- 为每个实例生成独立 profile，写入 `<output>/run/openclaw-profiles/<instance_id>/`。
+- 为每次尝试生成独立 profile，写入 `<output>/run/openclaw-profiles/<instance_id>-<attempt_id>/`。
 - 复制基础 OpenClaw 配置后，只修改该实例 profile 的配置。
 - 通过 `openclaw --profile <profile> agent --local --json ...` 执行。
 - 运行结束后清理 profile symlink、临时 workspace 和对应 sandbox 容器。
+
+每次尝试独立拥有临时 repo、profile、runtime agent/session ID 和镜像准备容器。
+同一实例的重叠尝试不会清除彼此的 workspace 或 sandbox 容器，即使使用相同输出目录。
+若要保留独立的结果汇总与 predictions，请使用不同输出目录；共享输出文件不会协调
+独立进程的写入。run metadata 会记录用于 trace 收集的准确 profile 路径。
 
 基础 OpenClaw 配置路径解析顺序：
 
@@ -574,7 +579,7 @@ which openclaw
 - `which openclaw`
 - `OPENCLAW_CONFIG_PATH`
 - `~/.openclaw/openclaw.json`
-- `output/run/openclaw-profiles/<instance_id>/openclaw.json`
+- `output/run/openclaw-profiles/<instance_id>-<attempt_id>/openclaw.json`
 - `output/run/openclaw-errors/<instance_id>.log`
 
 OpenClaw adapter 不会改写基础配置文件；它只复制基础配置并修改每个实例自己的
