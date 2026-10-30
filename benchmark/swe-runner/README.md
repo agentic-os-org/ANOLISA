@@ -215,7 +215,13 @@ swe-runner run \
 ### Prompt Resource Directories
 
 `--use-skill` and `--per-case-prompt` are mutually exclusive. Both options load
-resources from user-provided directories.
+their resources from user-specified directories.
+
+Run settings expand home prefixes such as `~/` in `output.output_dir`,
+`agent.skills_dir`, and `agent.prompts_dir`. The `run` command also accepts
+quoted home paths for `--output`, `--skills-dir`, and `--prompts-dir`; profiles,
+logs, results, and guidance use the same expanded paths. Relative paths retain
+their working-directory meaning, and tilde characters inside names stay literal.
 
 #### Skill
 
