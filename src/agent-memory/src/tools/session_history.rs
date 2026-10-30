@@ -54,8 +54,27 @@ pub fn memory_sessions(svc: &MemoryService, limit: usize) -> Result<String> {
     let summary_dir = svc.mount.root.join(SUMMARY_DIR);
     let mut sessions: Vec<SessionSummary> = Vec::new();
 
-    if !summary_dir.exists() {
-        return Ok("(no historical sessions found)".to_string());
+    // `facts/summary` itself sits in the model-writable mount, so it can be
+    // swapped for a symlink — and `read_dir` follows links. The entry reads
+    // below are anchored on `root_fd`, so no foreign body can reach the
+    // model, but the walk would still enumerate an outside directory (one
+    // refusal logged per entry) and, when the link resolves to a regular
+    // file, fail the whole listing with ENOTDIR. Resolve the directory the
+    // same sandboxed way (openat2, RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)
+    // and fail closed instead: a missing directory and a refused one are
+    // both "nothing to list".
+    match safe_fs::metadata(svc.mount.root_fd.as_fd(), Path::new(SUMMARY_DIR)) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            tracing::warn!("memory_sessions: refusing summary dir {SUMMARY_DIR}: not a directory");
+            return Ok("(no historical sessions found)".to_string());
+        }
+        // A fresh mount has no `facts/summary` yet; that is not a refusal.
+        Err(MemoryError::NotFound(_)) => return Ok("(no historical sessions found)".to_string()),
+        Err(e) => {
+            tracing::warn!("memory_sessions: refusing summary dir {SUMMARY_DIR}: {e}");
+            return Ok("(no historical sessions found)".to_string());
+        }
     }
 
     for entry in std::fs::read_dir(&summary_dir)? {

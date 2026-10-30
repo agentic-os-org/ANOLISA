@@ -5,9 +5,9 @@
 //! read. `memory_sessions` is a read-only listing tool and must never
 //! follow one: doing so discloses the link target's body to the model
 //! through the session's JSON `description` field. These tests pin the
-//! guarantee that every summary open is anchored on the mount's `root_fd`
-//! with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, so a planted link is
-//! skipped instead of read.
+//! guarantee that every summary open — the `facts/summary` directory itself
+//! included — is anchored on the mount's `root_fd` with `RESOLVE_BENEATH |
+//! RESOLVE_NO_SYMLINKS`, so a planted link is skipped instead of followed.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -168,5 +168,70 @@ fn session_history_still_lists_regular_summaries() {
     assert!(
         a["description"].as_str().unwrap().contains("7 tool calls"),
         "description lost the summary body: {out}"
+    );
+}
+
+/// Same guard one level up: `facts/summary` is itself inside the
+/// model-writable mount, so it can be replaced with a link to a directory
+/// outside. `read_dir` follows links, so the listing must not be built on a
+/// plain `exists()` — it would walk the planted directory and refuse it only
+/// entry by entry. The directory is resolved through `root_fd` instead, and
+/// a refused one fails closed as "nothing to list".
+#[test]
+fn session_history_refuses_a_symlinked_summary_dir() {
+    let (_base, outside, svc) = setup();
+
+    let planted = outside.path().join("summary");
+    fs::create_dir_all(&planted).unwrap();
+    plant_summary(&planted, "ses_planted.md", "ses_planted", VICTIM_BODY);
+
+    let facts = svc.mount.root.join("facts");
+    fs::create_dir_all(&facts).unwrap();
+    symlink(&planted, facts.join("summary")).unwrap();
+
+    let out = memory_sessions(&svc, 10).unwrap();
+
+    assert_eq!(
+        out, "(no historical sessions found)",
+        "a symlinked summary dir must fail closed: {out}"
+    );
+    assert!(
+        !out.contains(VICTIM_BODY),
+        "memory_sessions leaked the planted summary: {out}"
+    );
+    assert_eq!(
+        fs::read_to_string(planted.join("ses_planted.md")).unwrap(),
+        format!(
+            "---\nsession_id: ses_planted\ncreated_at: 2026-10-04T08:00:00Z\n---\n\n{VICTIM_BODY}\n"
+        ),
+        "the file outside the mount must be untouched"
+    );
+}
+
+/// Refusing the directory also keeps a planted link from breaking the tool:
+/// `read_dir` on a path that resolves to a regular file fails with ENOTDIR,
+/// which the previous `exists()` check walked straight into (a link follows
+/// to its target, so `exists()` said yes). The listing degrades to the same
+/// empty answer instead of erroring out.
+#[test]
+fn session_history_survives_a_summary_dir_replaced_by_a_file_link() {
+    let (_base, outside, svc) = setup();
+
+    let victim = outside.path().join("not-a-dir.md");
+    fs::write(&victim, VICTIM_BODY).unwrap();
+
+    let facts = svc.mount.root.join("facts");
+    fs::create_dir_all(&facts).unwrap();
+    symlink(&victim, facts.join("summary")).unwrap();
+
+    let out = memory_sessions(&svc, 10).unwrap();
+
+    assert_eq!(
+        out, "(no historical sessions found)",
+        "a link standing in for the summary dir must not fail the call: {out}"
+    );
+    assert!(
+        !out.contains(VICTIM_BODY),
+        "memory_sessions leaked the link target's body: {out}"
     );
 }
