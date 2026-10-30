@@ -1,8 +1,9 @@
 rule_id: shell-kernel-module
 cwe_id: CWE-250
 desc_en: >-
-  Detects kernel module loading commands that may install rootkits
+  Detects kernel module load/unload commands that may install
+  rootkits or disable security modules
 desc_zh: >-
-  检测可能安装rootkit的内核模块加载命令
-regex: '(^|[^/\w])(/sbin/)?(insmod|modprobe)\b'
+  检测可能安装 rootkit 或卸载安全模块的内核模块加载/卸载命令
+regex: '(^|[^/\w])(/sbin/)?(insmod|modprobe|rmmod)\b'
 severity: warn

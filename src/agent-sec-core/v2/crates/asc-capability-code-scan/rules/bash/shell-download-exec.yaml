@@ -8,6 +8,7 @@ desc_zh: >-
 regex: |-
   \b(curl|wget)\b[^;\n]*\|\s*(?:sudo\s+)?(?:env\s+)?\b(sh|bash|zsh|dash|ksh|python[23]?|perl|ruby|node(js)?|php)\b
   |(\b(sh|bash|zsh|dash|ksh|python[23]?|perl|ruby|node(js)?|php|source)\b|\.\s)[^;\n&]*<\([^)]*\b(curl|wget)\b
+  |\b(?:sh|bash|zsh|dash|ksh|python[23]?|perl|ruby|node(?:js)?|php)\b[^;\n&]*\s-[A-Za-z]*c[A-Za-z]*[ \t]*["']?[ \t]*\$\([^)]*\b(curl|wget)\b
   |\beval\b[^;\n&]*\$\([^)]*\b(curl|wget)\b
   |\beval\b[^;\n&]*`[^`]*\b(curl|wget)\b
 severity: warn
