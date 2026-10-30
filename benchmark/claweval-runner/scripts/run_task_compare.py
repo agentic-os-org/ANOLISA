@@ -94,13 +94,14 @@ def run_native(task_dir: Path, config: str | None = None,
     print(f"  [native] Running: {' '.join(cmd)}")
     print(f"{'='*60}")
 
+    before = _trace_snapshot()
     result = subprocess.run(cmd, cwd=str(CLAW_EVAL_DIR))
 
     if result.returncode != 0:
         print(f"\n[native] ❌ Failed with exit code {result.returncode}")
         return None
 
-    return _find_latest_trace(task_dir.name, dir_pattern=None)
+    return _find_latest_trace(task_dir.name, dir_pattern=None, before=before)
 
 
 def run_ce_runner(task_dir: Path, config: str | None = None,
@@ -128,22 +129,44 @@ def run_ce_runner(task_dir: Path, config: str | None = None,
     print(f"  [ce-runner] Running: {' '.join(cmd)}")
     print(f"{'='*60}")
 
+    before = _trace_snapshot()
     result = subprocess.run(cmd, cwd=str(REPO_ROOT))
 
     if result.returncode != 0:
         print(f"\n[ce-runner] ❌ Failed with exit code {result.returncode}")
         return None
 
-    return _find_latest_trace(task_dir.name, dir_pattern=None)
+    return _find_latest_trace(task_dir.name, dir_pattern=None, before=before)
 
 
-def _find_latest_trace(task_id: str, dir_pattern: str | None) -> Path | None:
+def _trace_signature(stat: os.stat_result) -> tuple[int, int, int, int]:
+    """Identify an unchanged file without relying on a wall-clock cutoff."""
+    return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino
+
+
+def _trace_snapshot() -> dict[Path, tuple[int, int, int, int]]:
+    """Record existing trace files before starting one backend."""
+    traces_dir = CLAW_EVAL_DIR / "traces"
+    return {
+        path: _trace_signature(path.stat())
+        for path in traces_dir.glob("*/*.jsonl")
+        if path.is_file()
+    }
+
+
+def _find_latest_trace(
+    task_id: str,
+    dir_pattern: str | None,
+    before: dict[Path, tuple[int, int, int, int]] | None = None,
+) -> Path | None:
     """Find the latest trace file matching task_id in traces directory.
 
     Args:
         task_id: Task ID to match in filename
         dir_pattern: If set, only search directories starting with this prefix.
             None means search all directories.
+        before: If supplied, only consider files created or updated since this
+            snapshot. An empty snapshot still excludes no newly created files.
     """
     traces_dir = CLAW_EVAL_DIR / "traces"
     if not traces_dir.exists():
@@ -158,7 +181,10 @@ def _find_latest_trace(task_id: str, dir_pattern: str | None) -> Path | None:
 
         for f in d.glob(f"*{task_id}*.jsonl"):
             if f.is_file():
-                candidates.append((f.stat().st_mtime, f))
+                stat = f.stat()
+                if before is not None and before.get(f) == _trace_signature(stat):
+                    continue
+                candidates.append((stat.st_mtime, f))
 
     if not candidates:
         return None
@@ -233,6 +259,7 @@ def run_native_batch(task_ids: list[str], config: str | None = None,
     print(f"  [native-batch] Running: {' '.join(cmd)}")
     print(f"{'='*60}")
 
+    before = _trace_snapshot()
     result = subprocess.run(cmd, cwd=str(CLAW_EVAL_DIR))
     if result.returncode != 0:
         print(f"\n[native-batch] ❌ Failed with exit code {result.returncode}")
@@ -241,7 +268,7 @@ def run_native_batch(task_ids: list[str], config: str | None = None,
     # Find traces for each task
     results = {}
     for tid in task_ids:
-        results[tid] = _find_latest_trace(tid, dir_pattern=None)
+        results[tid] = _find_latest_trace(tid, dir_pattern=None, before=before)
     return results
 
 
@@ -302,6 +329,7 @@ def run_ce_runner_batch(task_ids: list[str], config: str | None = None,
     print(f"  [ce-runner-batch] Running: {' '.join(cmd)}")
     print(f"{'='*60}")
 
+    before = _trace_snapshot()
     result = subprocess.run(cmd, cwd=str(REPO_ROOT))
     if result.returncode != 0:
         print(f"\n[ce-runner-batch] ❌ Failed with exit code {result.returncode}")
@@ -310,7 +338,7 @@ def run_ce_runner_batch(task_ids: list[str], config: str | None = None,
     # Find traces for each task
     results = {}
     for tid in task_ids:
-        results[tid] = _find_latest_trace(tid, dir_pattern=None)
+        results[tid] = _find_latest_trace(tid, dir_pattern=None, before=before)
     return results
 
 

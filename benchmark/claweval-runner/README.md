@@ -198,6 +198,10 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+`run_task_compare.py` reports only traces created or updated during each backend
+invocation. An invocation that exits successfully without producing a trace is
+reported as missing, even if earlier runs of the same task have trace files.
+
 ## Troubleshooting
 
 | Issue | Fix |
