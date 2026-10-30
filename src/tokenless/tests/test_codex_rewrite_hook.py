@@ -11,22 +11,21 @@ non-string ``command`` only survived through the subprocess call's broad
 ``except``. These tests pin both nested shapes to the silent pass-through,
 and keep the happy path (a dict with a string command) applying the rewrite.
 
-The hook is driven through its real script with an ``rtk`` stub on PATH so
-the version gate passes and the payload parsing itself is under test.
+The hook is driven through its real script with a ``tokenless`` stub on PATH
+that records the PreTool request and answers with a fixed Core result, so the
+payload parsing and the Core contract are under test.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import runpy
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 TESTS_DIR = Path(__file__).resolve().parent
 REWRITE_HOOK = (
@@ -38,12 +37,31 @@ REWRITE_HOOK = (
     / "rewrite-hook"
 )
 
-RTK_STUB = (
-    "#!/bin/sh\n"
-    'if [ "$1" = "--version" ]; then echo \'rtk 0.43.0\'; exit 0; fi\n'
-    'if [ "$1" = "rewrite" ]; then echo \'rtk grep --count error log\'; exit 0; fi\n'
-    "exit 1\n"
-)
+ANCHORED = "env TOKENLESS_AGENT_ID=codex /stub/tokenless rtk grep --count error log"
+
+# Answers `tokenless compress` with RESULT (a JSON Core result, default a
+# rewrite of the request's arguments) and records the request in REQUEST_LOG.
+TOKENLESS_STUB = f"""#!{sys.executable}
+import json, os, sys
+if sys.argv[1:] != ["compress"]:
+    sys.exit(2)
+request = json.load(sys.stdin)
+with open(os.environ["REQUEST_LOG"], "w", encoding="utf-8") as log:
+    json.dump(request, log)
+result = os.environ.get("RESULT")
+if result is None:
+    arguments = dict(request["input"]["arguments"], command={ANCHORED!r})
+    result = json.dumps({{
+        "arguments": arguments,
+        "action": "replace_arguments",
+        "output_optimization": "rtk",
+    }})
+print(json.dumps({{
+    "protocol_version": 2,
+    "operation": "pre_tool",
+    "result": json.loads(result),
+}}))
+"""
 
 
 class CodexRewriteHookTest(unittest.TestCase):
@@ -52,9 +70,12 @@ class CodexRewriteHookTest(unittest.TestCase):
         root = Path(self.tmp.name)
         bin_dir = root / "bin"
         bin_dir.mkdir()
-        rtk = bin_dir / "rtk"
-        rtk.write_text(RTK_STUB)
-        rtk.chmod(rtk.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        tokenless = bin_dir / "tokenless"
+        tokenless.write_text(TOKENLESS_STUB)
+        tokenless.chmod(
+            tokenless.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        )
+        self.request_log = root / "request.json"
         # Runtime detection and a declared agent id would only change
         # attribution, not the parsing under test; strip them so the runs are
         # deterministic on machines that happen to export them.
@@ -63,12 +84,11 @@ class CodexRewriteHookTest(unittest.TestCase):
             for key, value in os.environ.items()
             if key not in ("COSH_NG_VERSION", "COSH_RUNTIME", "TOKENLESS_AGENT_ID")
         }
-        # HOME is redirected so the hook's session-tracking context file (and
-        # any hook_utils state) lands in the sandbox, never in a real HOME.
         self.env = {
             **env,
             "HOME": str(root / "home"),
             "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "REQUEST_LOG": str(self.request_log),
         }
         (root / "home").mkdir()
 
@@ -85,20 +105,6 @@ class CodexRewriteHookTest(unittest.TestCase):
             timeout=15,
             check=False,
         )
-
-    def test_standalone_rtk_fallbacks(self) -> None:
-        hook = runpy.run_path(str(REWRITE_HOOK))
-        self.assertTrue(hook["_RTK_USER_STANDALONE"].endswith("/.local/libexec/tokenless/rtk"))
-        for candidate in (
-            hook["_RTK_USER_STANDALONE"],
-            "/usr/local/libexec/tokenless/rtk",
-            "/usr/libexec/tokenless/rtk",
-        ):
-            with self.subTest(candidate=candidate):
-                with patch("shutil.which", return_value=None), \
-                     patch("os.path.isfile", side_effect=lambda path: path == candidate), \
-                     patch("os.access", return_value=True):
-                    self.assertEqual(hook["_find_rtk"](), candidate)
 
     def test_non_object_tool_input_passes_through_silently(self) -> None:
         # Every shape decodes to a value without a "command" field: a bare
@@ -135,9 +141,28 @@ class CodexRewriteHookTest(unittest.TestCase):
         envelope = json.loads(proc.stdout)["hookSpecificOutput"]
         self.assertEqual(envelope["hookEventName"], "PreToolUse")
         self.assertEqual(envelope["permissionDecision"], "allow")
+        self.assertEqual(envelope["updatedInput"], {"command": ANCHORED, "timeout": 30})
+        request = json.loads(self.request_log.read_text())
         self.assertEqual(
-            envelope["updatedInput"],
-            {"command": "rtk grep --count error log", "timeout": 30},
+            request,
+            {
+                "protocol_version": 2,
+                "operation": "pre_tool",
+                "attribution": {
+                    "agent_id": "codex",
+                    "session_id": "session-1",
+                    "tool_use_id": "call-1",
+                },
+                "input": {
+                    "tool_name": "Bash",
+                    "arguments": {"command": "grep error log", "timeout": 30},
+                    "command_field": "command",
+                    "capabilities": {
+                        "replace_arguments": True,
+                        "block_and_suggest": False,
+                    },
+                },
+            },
         )
 
     def test_json_encoded_object_tool_input_still_applies_rewrite(self) -> None:
@@ -152,25 +177,30 @@ class CodexRewriteHookTest(unittest.TestCase):
         proc = self.run_hook(payload)
         self.assertEqual(proc.returncode, 0, msg=f"stderr:\n{proc.stderr}")
         envelope = json.loads(proc.stdout)["hookSpecificOutput"]
-        self.assertEqual(
-            envelope["updatedInput"], {"command": "rtk grep --count error log"}
-        )
+        self.assertEqual(envelope["updatedInput"], {"command": ANCHORED})
 
-    def test_rtk_no_rewrite_exits_silently(self) -> None:
-        # rtk exit 1 = no equivalent rewrite: silent pass-through.
+    def test_core_passthrough_or_failure_exits_silently(self) -> None:
         payload = json.dumps(
             {"tool_name": "Bash", "tool_input": {"command": "grep error log"}}
         )
-        stub_root = Path(self.tmp.name)
-        rtk = stub_root / "bin" / "rtk"
-        rtk.write_text(
-            "#!/bin/sh\n"
-            'if [ "$1" = "--version" ]; then echo \'rtk 0.43.0\'; exit 0; fi\n'
-            "exit 1\n"
-        )
-        proc = self.run_hook(payload)
-        self.assertEqual(proc.returncode, 0, msg=f"stderr:\n{proc.stderr}")
-        self.assertEqual(proc.stdout, "", msg=f"stdout:\n{proc.stdout}")
+        passthrough = {
+            "arguments": {"command": "grep error log"},
+            "action": "passthrough",
+            "output_optimization": "none",
+        }
+        for result in (
+            json.dumps(passthrough),
+            # A rewrite Core did not attribute to RTK is not this hook's to apply.
+            json.dumps(
+                dict(passthrough, action="replace_arguments", arguments={"command": "x"})
+            ),
+            "not json",
+        ):
+            with self.subTest(result=result):
+                self.env["RESULT"] = result
+                proc = self.run_hook(payload)
+                self.assertEqual(proc.returncode, 0, msg=f"stderr:\n{proc.stderr}")
+                self.assertEqual(proc.stdout, "", msg=f"stdout:\n{proc.stdout}")
 
 
 if __name__ == "__main__":

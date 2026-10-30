@@ -199,15 +199,6 @@ def _dependencies(root: Path) -> None:
     if not tokenless:
         raise LifecycleError("tokenless binary not found; install Tokenless separately, then retry")
     print(f"Tokenless: {tokenless}")
-    rtk = utils.resolve_binary("rtk")
-    if rtk:
-        print(f"RTK: {rtk}")
-    else:
-        print(
-            "WARNING: rtk binary not found; command rewriting is unavailable "
-            "(response hooks remain available).",
-            file=sys.stderr,
-        )
     _data_directory_notice(utils.resolve_data_directory)
 
 
