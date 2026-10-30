@@ -13,6 +13,17 @@ use tokio::net::UnixStream;
 
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
+// Release blocking test workers during unwinding so runtime shutdown can finish.
+struct ReleaseGateOnDrop<'a>(&'a (Mutex<bool>, Condvar));
+
+impl Drop for ReleaseGateOnDrop<'_> {
+    fn drop(&mut self) {
+        let (lock, ready) = self.0;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+    }
+}
+
 #[derive(Default)]
 struct FakeDispatcher {
     requests: Mutex<Vec<DispatchRequest>>,
@@ -221,6 +232,7 @@ fn start_service_with_rejection_encoder(
 
 async fn request(path: &PathBuf, payload: &[u8], eof_terminated: bool) -> Vec<u8> {
     let mut stream = UnixStream::connect(path).await.unwrap();
+    // An empty payload reads admission rejections without writing to a closed peer.
     stream.write_all(payload).await.unwrap();
     if eof_terminated {
         stream.shutdown().await.unwrap();
@@ -299,7 +311,7 @@ async fn request_read_timeout_releases_the_uid_quota() {
     let service = start_service("uid-timeout", limits, dispatcher);
     let mut idle = UnixStream::connect(&service.socket_path).await.unwrap();
     assert_eq!(
-        request(&service.socket_path, b"busy\n", false).await,
+        request(&service.socket_path, b"", false).await,
         b"reject:busy\n"
     );
     let mut response = Vec::new();
@@ -315,6 +327,7 @@ async fn request_read_timeout_releases_the_uid_quota() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
     let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
     let mut limits = config();
     limits.max_connections_per_uid = 1;
     let service = start_service("busy", limits, dispatcher.clone());
@@ -324,7 +337,7 @@ async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
 
     let busy = tokio::time::timeout(
         Duration::from_secs(1),
-        request(&service.socket_path, b"busy\n", false),
+        request(&service.socket_path, b"", false),
     )
     .await;
     dispatcher.release_hold();
@@ -346,6 +359,7 @@ async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_blocked_dispatch_does_not_block_an_independent_healthy_request() {
     let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
     let mut limits = config();
     limits.max_connections = 2;
     limits.dispatch_timeout = Duration::from_secs(1);
@@ -369,6 +383,7 @@ async fn one_blocked_dispatch_does_not_block_an_independent_healthy_request() {
 async fn blocked_rejection_encoder_is_bounded_and_does_not_block_dispatch() {
     let dispatcher = Arc::new(FakeDispatcher::default());
     let rejection_encoder = Arc::new(BlockingRejectionEncoder::default());
+    let _release = ReleaseGateOnDrop(&rejection_encoder.gate);
     let mut limits = config();
     limits.request_read_timeout = Duration::from_millis(20);
     limits.rejection_encode_timeout = Duration::from_millis(30);
@@ -402,6 +417,7 @@ async fn blocked_rejection_encoder_is_bounded_and_does_not_block_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_deadline_cancels_lifetime_and_releases_connection_capacity() {
     let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
     let mut limits = config();
     limits.max_connections = 1;
     limits.max_connections_per_uid = 1;
@@ -494,6 +510,7 @@ async fn disconnected_client_cannot_terminate_the_service() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_admission_and_bounds_the_drain_wait() {
     let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
     let mut limits = config();
     limits.drain_timeout = Duration::from_millis(50);
     let service = start_service("drain", limits, dispatcher.clone());
