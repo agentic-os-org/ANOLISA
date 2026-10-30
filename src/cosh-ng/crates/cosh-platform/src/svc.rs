@@ -22,10 +22,7 @@ pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&p| p > 0);
 
-    let enabled = props
-        .get("UnitFileState")
-        .map(|s| s == "enabled")
-        .unwrap_or(false);
+    let enabled = enabled_from_properties(&props);
 
     let memory_bytes = props
         .get("MemoryCurrent")
@@ -262,6 +259,18 @@ fn state_from_properties(props: &std::collections::HashMap<String, String>) -> S
     }
 }
 
+/// Determine whether a unit is enabled from its `UnitFileState` property.
+///
+/// Per systemctl(1), both `enabled` and `enabled-runtime` denote an enabled
+/// unit; the latter is active only until reboot. All other states
+/// (`disabled`, `static`, `masked`, `indirect`, `linked`, ...) report false.
+fn enabled_from_properties(props: &std::collections::HashMap<String, String>) -> bool {
+    matches!(
+        props.get("UnitFileState").map(String::as_str),
+        Some("enabled") | Some("enabled-runtime")
+    )
+}
+
 fn parse_systemctl_show(output: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for line in output.lines() {
@@ -410,6 +419,48 @@ mod tests {
         let props = parse_systemctl_show("MainPID=0");
         let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Unknown("unknown".to_string()));
+    }
+
+    // --- enabled from UnitFileState mapping ---
+
+    #[test]
+    fn test_enabled_from_properties_enabled_states() {
+        for value in ["enabled", "enabled-runtime"] {
+            let props = parse_systemctl_show(&format!("UnitFileState={value}"));
+            assert!(
+                enabled_from_properties(&props),
+                "UnitFileState={value} must report enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_enabled_from_properties_non_enabled_states() {
+        for value in [
+            "disabled",
+            "static",
+            "masked",
+            "masked-runtime",
+            "indirect",
+            "linked",
+            "linked-runtime",
+            "generated",
+            "transient",
+            "alias",
+            "bad",
+        ] {
+            let props = parse_systemctl_show(&format!("UnitFileState={value}"));
+            assert!(
+                !enabled_from_properties(&props),
+                "UnitFileState={value} must not report enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_enabled_from_properties_missing_key_defaults_to_false() {
+        let props = parse_systemctl_show("ActiveState=active");
+        assert!(!enabled_from_properties(&props));
     }
 
     // --- UTF-8 service names and descriptions ---
