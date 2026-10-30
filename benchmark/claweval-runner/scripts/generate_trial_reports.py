@@ -49,6 +49,7 @@ from pathlib import Path
 
 try:
     import yaml
+    from report_evidence import load_grading_result, load_task_info
 except ImportError:
     print("Error: pyyaml is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
@@ -152,42 +153,6 @@ def resolve_task_id(trace_filename: str) -> str:
     base = trace_filename.replace(".jsonl", "")
     parts = base.rsplit("_", 1)
     return parts[0] if len(parts) == 2 else base
-
-
-def load_task_info(task_id: str, tasks_dir: str) -> dict:
-    """Load task.yaml and extract relevant fields."""
-    yaml_path = os.path.join(tasks_dir, task_id, "task.yaml")
-    if not os.path.exists(yaml_path):
-        return {"task_id": task_id, "error": f"task.yaml not found"}
-
-    with open(yaml_path) as f:
-        data = yaml.safe_load(f)
-
-    return {
-        "task_id": data.get("task_id", task_id),
-        "task_name": data.get("task_name", ""),
-        "category": data.get("category", ""),
-        "difficulty": data.get("difficulty", ""),
-        "prompt": data.get("prompt", {}).get("text", "")[:300],
-        "scoring_components": data.get("scoring_components", []),
-        "judge_rubric": data.get("judge_rubric", ""),
-        "reference_solution": data.get("reference_solution", "")[:300],
-        "primary_dimensions": data.get("primary_dimensions", []),
-    }
-
-
-def load_grading_result(trace_path: str) -> tuple:
-    """Read jsonl trace and extract grading_result + trace_end."""
-    grading = None
-    trace_end = None
-    with open(trace_path) as f:
-        for line in f:
-            obj = json.loads(line)
-            if obj.get("type") == "grading_result":
-                grading = obj
-            if obj.get("type") == "trace_end":
-                trace_end = obj
-    return grading, trace_end
 
 
 def infer_failure_reason(grading: dict, scores: dict, primary_dimensions: list | None = None) -> list:
