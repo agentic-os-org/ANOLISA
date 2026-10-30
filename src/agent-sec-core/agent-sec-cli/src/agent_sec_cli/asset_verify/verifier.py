@@ -2,6 +2,7 @@
 """Skill integrity verifier - Manifest + PGP signature verification."""
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -173,6 +174,37 @@ def compute_file_hash(file_path: str) -> str:
     return sha256.hexdigest()
 
 
+def _hash_contained_file(
+    skill_dir: str, rel_path: str, skill_name: str, expected_hash: str
+) -> str:
+    """Hash a manifest entry without following symlinks out of skill_dir.
+
+    Resolving the candidate against the resolved skill root catches symlinked
+    directory and file components; opening the leaf with O_NOFOLLOW closes the
+    TOCTOU window between the containment check and the read.
+    """
+    root = Path(skill_dir).resolve()
+    full_path = Path(skill_dir) / rel_path
+    if not full_path.resolve().is_relative_to(root):
+        raise ErrInvalidManifestPath(skill_name, rel_path)
+
+    try:
+        fd = os.open(full_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ErrInvalidManifestPath(skill_name, rel_path) from exc
+        # File vanished between the exists() check and open; treat as missing.
+        raise ErrHashMismatch(
+            skill_name, rel_path, expected_hash, "<FILE_MISSING>"
+        ) from exc
+
+    sha256 = hashlib.sha256()
+    with os.fdopen(fd, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
 def _is_hidden_manifest_path(rel_path: str) -> bool:
     """Return True if a manifest-relative path contains a hidden component."""
     return any(part.startswith(".") for part in Path(rel_path).parts)
@@ -313,7 +345,7 @@ def verify_manifest_hashes(skill_dir: str, manifest: dict, skill_name: str) -> N
         if not os.path.exists(full_path):
             raise ErrHashMismatch(skill_name, rel_path, expected_hash, "<FILE_MISSING>")
 
-        actual_hash = compute_file_hash(full_path)
+        actual_hash = _hash_contained_file(skill_dir, rel_path, skill_name, expected_hash)
         if actual_hash != expected_hash:
             raise ErrHashMismatch(skill_name, rel_path, expected_hash, actual_hash)
 
