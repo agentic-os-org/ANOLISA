@@ -970,6 +970,61 @@ impl SkillFs {
             return;
         }
 
+        // Passthrough labels can denote real directories as well as files.
+        // Preserve directory moves while refusing non-directories in virtual
+        // directory slots, with the errno used by create at the same slot.
+        let virtual_slot_errno = match (&old_path_type, &new_path_type) {
+            (
+                PathType::SkillMd { .. }
+                | PathType::Passthrough { .. }
+                | PathType::NestedSkillMd { .. }
+                | PathType::NestedPassthrough { .. }
+                | PathType::HermesMeta { .. }
+                | PathType::HermesMetaChild { .. }
+                | PathType::CategoryPassthrough { .. },
+                PathType::SkillDir { .. }
+                | PathType::CategoryDir { .. }
+                | PathType::Root
+                | PathType::SkillsDir,
+            ) => Some(libc::EROFS),
+            (PathType::InboxPassthrough { .. }, PathType::InboxSkillDir { .. }) => {
+                Some(libc::EISDIR)
+            }
+            _ => None,
+        };
+        if let Some(slot_errno) = virtual_slot_errno {
+            // A cached entry's absolute physical path can exceed PATH_MAX.
+            // Probe through its parent fd without following symlinks, and
+            // propagate probe errors rather than allowing an untyped move.
+            match self
+                .open_parent_dir_for(&old_path)
+                .map_err(std::io::Error::from_raw_os_error)
+                .and_then(|(parent_fd, leaf)| fstatat_leaf(&parent_fd, &leaf, false))
+            {
+                Ok(meta) if meta.st_mode & libc::S_IFMT != libc::S_IFDIR => {
+                    self.ro_warn("rename", &new_path);
+                    self.emit_op_event_with_detail(
+                        req,
+                        &old_path_type,
+                        SkillEventKind::Rename,
+                        SkillEventAction::Rejected,
+                        Some(slot_errno),
+                        None,
+                        Some(format!(
+                            "class=virtual_dir_slot old={old_path} new={new_path}"
+                        )),
+                    );
+                    reply.error(slot_errno);
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    reply.error(errno(&e));
+                    return;
+                }
+            }
+        }
+
         // I4/H3: reject renames on hidden skills unless both sides
         // match the post-publish grace whitelist.
         //
