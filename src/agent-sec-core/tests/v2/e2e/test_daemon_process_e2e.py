@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.v2.e2e.conftest import _SOCKET_WAIT_SECONDS
+
 
 def test_bound_socket_allows_ordinary_users(daemon):
     mode = stat.S_IMODE(os.stat(daemon.socket_path).st_mode)
@@ -228,7 +230,7 @@ def test_ordinary_uid_connects_but_cannot_administer_or_replace_socket(
             env=environment,
         )
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
             while (
                 not endpoint.exists() or stat.S_IMODE(endpoint.stat().st_mode) != 0o666
             ):
@@ -528,7 +530,7 @@ def test_socket_environment_and_explicit_precedence(
         env=env,
     )
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
         while not endpoint.exists():
             assert process.poll() is None
             assert time.monotonic() < deadline

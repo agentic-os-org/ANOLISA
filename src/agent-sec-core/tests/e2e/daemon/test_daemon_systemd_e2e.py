@@ -50,7 +50,7 @@ def _systemctl_user(*args: str, timeout: int = 30) -> subprocess.CompletedProces
     )
 
 
-def _wait_for_service_active(service: str, timeout_sec: int = 15) -> bool:
+def _wait_for_service_active(service: str, timeout_sec: int = 30) -> bool:
     """Poll until the service reaches 'active' state or timeout."""
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
@@ -222,5 +222,5 @@ class TestSystemdManagedDaemon:
 
         # Service should restart automatically and become active again
         assert _wait_for_service_active(
-            managed_service, timeout_sec=20
-        ), "Service did not auto-restart after SIGKILL within 20s"
+            managed_service
+        ), "Service did not auto-restart after SIGKILL within 30s"

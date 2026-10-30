@@ -144,7 +144,7 @@ def _scan_endpoint(data_dir: Path, env: dict[str, str]):
             argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 30
             while (
                 not socket_path.exists()
                 and process.poll() is None

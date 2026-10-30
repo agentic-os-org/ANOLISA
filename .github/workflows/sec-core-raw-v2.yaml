@@ -116,7 +116,8 @@ jobs:
           echo $! > "$RUNNER_TEMP/agent-sec-daemon.pid"
           echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
           echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
-          for _ in $(seq 1 100); do
+          startup_deadline=$((SECONDS + 30))
+          while (( SECONDS < startup_deadline )); do
             if ! kill -0 "$(cat "$RUNNER_TEMP/agent-sec-daemon.pid")" 2>/dev/null; then
               cat "$daemon_log" >&2
               exit 1
