@@ -7,7 +7,7 @@
 源码包内容或 AW 依赖。
 
 ```text
-AW Host → aw-provider-sec-core → agent-sec-cli scan-code → sec-core daemon
+AW Host → aw-provider-sec-core → agent-sec-cli scan-code / scan-pii → sec-core daemon
         ← AW 效果/错误        ← 扫描 JSON + 退出状态    ← 规则/判定
 ```
 
@@ -51,6 +51,12 @@ AW 响应数据返回。Host 独立处理 `on_error`。
 上下文和剩余预算，风险按 `pii.input_mode` 处理，故障保留独立 Provider 错误路径。
 AW 效果及元数据审计不包含后端发现详情和用户原文。配置、版本范围
 及可执行原生验收入口见[Provider 参考](../../../../../../../docs/developer-guide/zh/aw/providers/sec-core.md#用户提交检查)。
+
+## PII 边界
+
+`pii::call` 负责 stdin CLI 请求、来源、剩余预算和严格结果解析，供两个工具阶段与用户输入消费者共用。校验包括来源、字节覆盖、截断和已报告的执行/自定义规则错误。`tool_pii` 应用私有输入/输出模式。结构化值先按 JSON 扫描以保留字段和值的上下文，再逐个扫描解码后的字符串值和对象键，保留空白边界与自定义规则锚点；普通字符串直接扫描。参数、完整原生结果和保留结构使用同一遍历逻辑，每次 CLI 调用仅获本次调用的剩余预算。输出命中后在私有副本中清空 Adapter 授权的唯一文本值，再用同一预算扫描保留结构。保留结构通过后才能返回固定安全提示替换；其他结构通过配置的输出故障动作处置。
+
+Adapter 负责结果投影与采用。Qoder SDK 普通常驻 Post 返回 `updatedToolOutput`；失败工具回调保留原生错误语义，无法采用该指令。QwenPaw 在 Coordinator/公开交付前缓冲选中替换步骤的流。AW 仍只允许每个事件最后一步进行一次结果替换，PII 替换策略须占据该步骤。
 
 ## 验收边界
 

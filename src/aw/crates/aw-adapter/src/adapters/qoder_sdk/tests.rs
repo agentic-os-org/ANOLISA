@@ -133,7 +133,10 @@ fn only_resident_queries_admit_post_withholding() {
                 Some(vec!["withhold_result".into()])
             }
         );
-        assert!(!capabilities.events["tool.after"].contains(&"replace_result".into()));
+        assert_eq!(
+            capabilities.events["tool.after"].contains(&"replace_result".into()),
+            !reloadable
+        );
     }
 }
 

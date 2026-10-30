@@ -5,8 +5,8 @@
 This reference is for integration and maintenance. For installation and daily use,
 see the [user guide](../../../../user-guide/en/aw/security.md).
 
-`aw-provider-sec-core` lets an AW policy call the existing `agent-sec-cli scan-code`
-command. You choose which tool inputs contain code and whether reported risks
+`aw-provider-sec-core` lets an AW policy call the public `agent-sec-cli scan-code` and `scan-pii`
+commands. You choose which tool inputs contain code and whether reported risks
 produce an observation or a block candidate. sec-core supplies the scanner and
 rules; AW supplies configuration, protocol validation and bounded invocation.
 
@@ -129,8 +129,8 @@ The Provider's private `config` accepts:
 | `mode` | Required, `observe` or `block`; only affects `scan_code` |
 | `unmapped_tool` | Optional, `error` (default) or `observe`; controls `scan_code` for a selected tool with no mapping |
 | `prompt` | Optional `{mode: observe\|block, scan_mode: fast}` for `scan_prompt` |
-| `pii` | Optional `{input_mode: observe\|block, output_mode: observe\|replace_result}`; `scan_user_input` uses `input_mode` |
-| `tools` | Up to 128 exact normalized tool names; may be omitted for submission-only policy |
+| `pii` | Optional `{input_mode: observe\|block, output_mode: observe\|replace_result}`; input mode covers user/tool input; output mode covers tool results |
+| `tools` | Up to 128 exact normalized tool names; may be omitted when `prompt` or `pii` is configured |
 | `tools.<name>.language` | `bash` or `python` |
 | `tools.<name>.input_pointer` | JSON Pointer into `event.tool.input`; the selected value must be a string |
 
@@ -234,6 +234,52 @@ Only text submission is covered. QwenPaw non-text user blocks are mapping errors
 subject to `on_error`. Restricted reloadable entrypoints reject this event at
 admission; use ordinary resident mode. Keep each PII/Prompt check under one chosen
 native or AW policy to avoid duplicate scans; AW does not remove user Hooks.
+
+## Tool PII policy
+
+The [two-framework example](../../../../../providers/agent-sec-core/examples/aw.tool-pii.yaml)
+adds input PII, code scanning and output PII to one Provider. `scan_tool_input`
+scans the complete tool arguments with source `tool_input`; a risk
+returns `block/pii_risk` when `pii.input_mode: block`. `scan_tool_output` scans
+the actual complete result with source `tool_output`. Pass returns
+`observe/pii_pass`; observe modes return `observe/pii_risk` for risks.
+
+Structured arguments and results are scanned as JSON to retain field/value context,
+then each decoded string value and object key is scanned separately. This preserves
+newlines, tabs and custom-rule anchors. A plain string is scanned directly.
+All scans, including the retained-envelope check, share the invocation's remaining
+budget; an exhausted budget fails the check.
+
+With `pii.output_mode: replace_result`, a risky result requires an Adapter-authorized
+text projection. The Provider clears that single text value in a private copy
+and scans the retained envelope within the same budget. Only a clean retained
+envelope yields `replace_result` with the fixed message
+`Sensitive data detected by AW; content withheld.` It never adopts backend
+redacted text. A missing or ambiguous slot, or sensitive retained fields, returns
+`unsupported_pii_result`. Native error state and result metadata remain intact.
+Safe failed-tool results retain their original error semantics; a Qoder
+`PostToolUseFailure` containing PII is withheld because that callback cannot
+replace the native error text.
+
+Configure input `on_error: block` and output `on_error: withhold_result` for
+required checks. Missing CLI/backend, nonzero exits, empty or malformed responses,
+wrong source, truncated or incomplete scans, byte-count mismatch and invalid or
+failed custom rules produce errors, separately from risk. Text travels only over
+stdin; neither source text nor findings enter Provider responses. The common
+`pii::call` API also accepts `Source::UserInput` for submit consumers.
+
+Qoder SDK ordinary resident Queries return the native `updatedToolOutput` directive;
+restricted `--reloadable` mode rejects replacement at admission. QwenPaw ordinary
+App replies buffer selected replacement/withholding tool streams, including the
+Coordinator's public stream, until final adoption. Select supported native tools
+explicitly for production. Multiple text blocks, media, managed MCP and background
+result delivery need their own native acceptance; a Post callback alone does not
+establish replacement support for those modes.
+
+Choose AW or native PII for each tool phase. Explicitly remove the native PII
+PreToolUse/PostToolUse registrations when AW owns those phases, retaining any
+UserPromptSubmit registration needed for user text. AW preserves native settings
+and does not remove Hooks. Keeping both tool registrations causes duplicate scans.
 
 ## Trace correlation
 

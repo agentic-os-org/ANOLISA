@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-Bridge the public sec-core CLI into AW. This directory owns the bridge; the
+Bridge public sec-core code and PII scans into AW. This directory owns the bridge; the
 corresponding component supplies the backend.
 
 Select code tools with each Hook step's `match.tools`, using standard names such
@@ -25,6 +25,11 @@ before a model request. See the [submission configuration](../../docs/developer-
 Maintained by @kongche-jbw under [CODEOWNERS](../../.github/CODEOWNERS).
 Bridge code uses [Apache-2.0](../../LICENSE); backend source is
 [agent-sec-core](../../src/agent-sec-core/README.md).
+
+Use [the tool PII example](examples/aw.tool-pii.yaml) for Qoder SDK or QwenPaw.
+`scan_tool_input` blocks sensitive arguments; `scan_tool_output` replaces a risky
+text slot with a fixed safety message. Required output checks use
+`on_error: withhold_result`; scan failures remain distinct from risk.
 
 - [Configuration and operation](../../docs/developer-guide/en/aw/providers/sec-core.md)
 - [Configuration example](examples/aw.yaml)

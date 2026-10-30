@@ -127,7 +127,7 @@ interfaces, which require regression checks when upgrading the SDK.
 | Native settings | Ordinary resident Queries retain native configuration. Explicit declarative/command-consumer profiles retain their restrictions. Transport replacement remains unsupported; runtime wrappers/imports require [execution-asset grants](../configuration.md#qoder-sdk-execution-assets). |
 | Permissions and input | Preserve native denial; check public Hook input. Subsequent native rewrites remain unchecked before execution. |
 | Environment and authentication | Queries sharing a daemon cannot override env/auth; use native `daemon.auth()` for credential changes or separate daemons for different credentials |
-| Post checks | Observation and `withhold_result`; no result replacement |
+| Post checks | Ordinary resident Queries adopt `replace_result` for one text slot via `updatedToolOutput`; `withhold_result` closes delivery on check failure. Restricted `--reloadable` mode remains observation-only. |
 | AgentSight | Ordinary resident mode requires `evidence.mode: off` |
 | Worktree | Ordinary callbacks carry parent Query cwd, so policies needing actual execution cwd cannot use worktrees; restricted mode rejects them |
 

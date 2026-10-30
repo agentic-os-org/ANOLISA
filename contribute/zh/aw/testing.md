@@ -54,6 +54,21 @@ Qoder 改用 `--agent qoder-sdk --npm /absolute/path/to/private-sdk-install`，�
 清理报告，移除自己的运行目录和 daemon 容器。固定版本的 parser/middleware 套件
 另覆盖回调取消与清理。
 
+## 工具 PII 验收
+
+`qoder-sdk` 与 `qwenpaw` 目标均包含 `tool-pii`、`tool-pii-backend-error`、`tool-pii-timeout-block` 和 `tool-pii-cancel`，使用候选 AW/Provider 与真实 sec-core CLI/daemon。基础场景覆盖正常执行、输入拒绝且无标记副作用、实际输出替换、已有代码拒绝、原生错误和配置保留。QwenPaw 核对 SSE 与下一次模型请求；Qoder 核对已采用的 `tool_result` 与后续 assistant 消息。故障场景停止结果交付，取消发生在输出扫描已启动之后。
+
+从 `src/aw` 执行，先将四个二进制放入 `target/native-binaries`，准备私有 SDK 安装或原生 App 依赖。单独验证 QwenPaw：
+
+```bash
+python3 crates/aw-cli/tests/fixtures/sec_core/tool_pii.py \
+  --agent qwenpaw --bin target/native-binaries \
+  --agent-bin "$(command -v qwenpaw)" --image ubuntu:24.04 \
+  --output target/tool-pii-evidence
+```
+
+Qoder SDK 改用 `--agent qoder-sdk --npm /absolute/path/to/private-sdk-install`，运行时通过 `QODER_PERSONAL_ACCESS_TOKEN` 提供 PAT。另加 `--fault backend-error`、`--fault timeout-block` 或 `--fault cancel` 可独立验证输出故障。每次使用新输出目录。保留 `results.json`、`cleanup.json`、后端/进程记录与原生消息/模型请求；运行目录与自建 daemon 容器在结束后移除。多文本块、媒体、托管 MCP 和后台 PII 结果交付需另做原生验收。
+
 ## 原生单目标
 
 在干净、已提交的 checkout 中准备清单要求的 Python、Node 24.16.0、uv 0.11.13 和 SDK 依赖。

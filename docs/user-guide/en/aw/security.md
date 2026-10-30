@@ -108,6 +108,26 @@ If checks fail, verify the sec-core backend and socket using the
 [backend diagnostics](../../../developer-guide/en/aw/providers/sec-core.md#external-backend-and-explicit-health-diagnostics).
 Generated configuration blocks selected tools on input or scan errors; unselected tools skip scanning.
 
+## Check tool PII with Qoder SDK or QwenPaw
+
+Use the [tool PII configuration](../../../../providers/agent-sec-core/examples/aw.tool-pii.yaml)
+with the same CLI, Provider and running backend. Replace its absolute paths and
+follow the [Qoder SDK](../../../developer-guide/en/aw/agents/qoder-sdk.md) or
+[QwenPaw](../../../developer-guide/en/aw/agents/qwenpaw.md) setup for the native
+worker/App. Start with `aw run --config aw.tool-pii.yaml --agent sdk` or `--agent app`.
+
+The input step scans all selected arguments before execution and blocks sensitive
+content without running the tool. The output step scans the actual result;
+a risky text slot becomes `Sensitive data detected by AW; content withheld.`
+The remaining result structure is checked before replacement. Check failures
+withhold original output and stop the Query/reply; completed tool side effects
+remain. Use synthetic test credentials when verifying these behaviors.
+
+Select one owner for PII in each tool phase. Remove native PII PreToolUse/PostToolUse
+registrations when AW owns those phases; keep user-submit checks as required.
+The [integration reference](../../../developer-guide/en/aw/providers/sec-core.md#tool-pii-policy)
+explains configuration, unsupported result shapes and native mode limits.
+
 ## Stop and extend
 
 After exiting the Agent, run `aw stop --config "$AW_HOME/security.yaml"`.

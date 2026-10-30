@@ -1354,7 +1354,7 @@
         "qwenpaw==2.2.2.post1",
         "agentscope==2.0.10"
       ],
-      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks. Ordinary App replies use child scopes through pinned Agent and Coordinator seams; resident tests cover 1025 calls with bounded active capacity, cancellation and original finalizers, private execution environments, exact dispatch input and strict PostTool output withholding. Pinned HTTP output and next-Agent hints are checked across processor, completion and offload barriers, cleanup failures and one shutdown deadline. A real scope CLI/service fixture checks denial text, Tokenless retry instructions and completion. Ordinary resident App startup confirms readiness before its first reply; the native startup seam and real service tests verify pre-first-task updates. Ordinary resident replies support explicit idle policy updates with immutable task snapshots, same-Agent reuse, strict Post and MCP route changes; private lease cleanup retains busy after child closure. Evidence capture is rejected. The separate reloadable path retains its prior idle-update contract. Managed MCP tool resolution adds a real ClientSession tools/call boundary with native-parent identity, full schema/annotations, exact approved arguments and complete structured/multimodal error envelopes; real protocol and AW Provider suites verify denial causes zero server calls and phases execute once. Resident App acceptance compares native and AW startup in one user profile, preserves existing plugin names and configuration, and exercises native MCP create/update/deny/delete while AW covers shell only. Fresh text input is checked before native reply admission; pinned native types distinguish confirmation, interruption and external tool-result resumes. Submission tests cover denial, recovery on the next fresh input, failure policy, turn identity and cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks. Ordinary App replies use child scopes through pinned Agent and Coordinator seams; resident tests cover 1025 calls with bounded active capacity, cancellation and original finalizers, private execution environments, exact dispatch input and strict PostTool output withholding. Pinned HTTP output and next-Agent hints are checked across processor, completion and offload barriers, cleanup failures and one shutdown deadline. A real scope CLI/service fixture checks denial text, Tokenless retry instructions and completion. Ordinary resident App startup confirms readiness before its first reply; the native startup seam and real service tests verify pre-first-task updates. Ordinary resident replies support explicit idle policy updates with immutable task snapshots, same-Agent reuse, strict Post and MCP route changes; private lease cleanup retains busy after child closure. Evidence capture is rejected. The separate reloadable path retains its prior idle-update contract. Managed MCP tool resolution adds a real ClientSession tools/call boundary with native-parent identity, full schema/annotations, exact approved arguments and complete structured/multimodal error envelopes; real protocol and AW Provider suites verify denial causes zero server calls and phases execute once. Resident App acceptance compares native and AW startup in one user profile, preserves existing plugin names and configuration, and exercises native MCP create/update/deny/delete while AW covers shell only. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. Fresh text input is checked before native reply admission; pinned native types distinguish confirmation, interruption and external tool-result resumes. Submission tests cover denial, recovery on the next fresh input, failure policy, turn identity and cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded.",
       "cases": [
         {
           "name": "middleware",
@@ -1691,6 +1691,198 @@
               }
             }
           ]
+        },
+        {
+          "name": "tool-pii",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii",
+            "--agent-bin",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "tool-input-pii",
+                  "tool-output-pii",
+                  "tool-output-pii-newline",
+                  "tool-output-pii-tab",
+                  "code-deny",
+                  "tool-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-backend-error",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-timeout-block",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-cancel",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
         }
       ],
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
@@ -1859,7 +2051,7 @@
       "npm_packages": [
         "@qoder-ai/qoder-agent-sdk@1.0.56"
       ],
-      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy or result replacement. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 119-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: six hosted Worker cases verify successful/error results, required failure, timeout and report behavior through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon are unsupported. Ordinary resident policies update between fully closed Queries; model waits, callbacks, MCP and private lease cleanup retain busy. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Ordinary resident Queries require evidence mode off; launch admission rejects enabled AgentSight evidence. The explicit managed MCP factory rejects schema parsing that changes approved arguments; native-configuration SDK MCP checks parsed handler input. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request. The installed Bridge declarative-profile lane verifies automatic settings acknowledgement before prompt release, native visibility and cleanup of two independent snapshots, daemon reuse and zero remaining AW scopes. The parser covers command consumer settlement, finite-input EOF gating, typed background identities and cancellation; failed cleanup retains ownership. Seven hosted ordinary-resident policy cases verify daemon prewarming for 35 seconds without a Query, first-task Hook addition, no-Hook busy admission, newly added and removed security routes, strict Post enable/report restoration, managed MCP denial and unchanged worker/daemon across revisions. The installed Bridge native-command lane uses the real official Worker in seven daemon/direct cases: post-authorization wrapper execution, logical native rule/canUseTool/Post input, command-specific native denial in default and acceptEdits modes, timeout auto-background, consumer acknowledgement before finite EOF or close, ticket retirement and exact native-process cleanup. Ordinary resident Queries retain native settings and Hooks without modifying SDK/Worker files. Policy checks the public PreToolUse input snapshot; later native Hook/permission rewrites are accepted without a final-input recheck. Initialization rejects disabled and headless-fast Hooks. The 20 native-configuration parser cases cover this boundary; separate manual global Pilot evidence covers unmodified SDK 1.0.54 and 1.0.56 in daemon and direct Query modes. UserPromptSubmit parser cases cover native blocking without tool identities and original callback draining on cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded.",
+      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 119-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: seven hosted Worker cases verify successful/error results, required failure, timeout, report and native text replacement behavior through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon are unsupported. Ordinary resident policies update between fully closed Queries; model waits, callbacks, MCP and private lease cleanup retain busy. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Ordinary resident Queries require evidence mode off; launch admission rejects enabled AgentSight evidence. The explicit managed MCP factory rejects schema parsing that changes approved arguments; native-configuration SDK MCP checks parsed handler input. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request. The installed Bridge declarative-profile lane verifies automatic settings acknowledgement before prompt release, native visibility and cleanup of two independent snapshots, daemon reuse and zero remaining AW scopes. The parser covers command consumer settlement, finite-input EOF gating, typed background identities and cancellation; failed cleanup retains ownership. Seven hosted ordinary-resident policy cases verify daemon prewarming for 35 seconds without a Query, first-task Hook addition, no-Hook busy admission, newly added and removed security routes, strict Post enable/report restoration, managed MCP denial and unchanged worker/daemon across revisions. The installed Bridge native-command lane uses the real official Worker in seven daemon/direct cases: post-authorization wrapper execution, logical native rule/canUseTool/Post input, command-specific native denial in default and acceptEdits modes, timeout auto-background, consumer acknowledgement before finite EOF or close, ticket retirement and exact native-process cleanup. Ordinary resident Queries retain native settings and Hooks without modifying SDK/Worker files. Policy checks the public PreToolUse input snapshot; later native Hook/permission rewrites are accepted without a final-input recheck. Initialization rejects disabled and headless-fast Hooks. The 20 native-configuration parser cases cover this boundary; separate manual global Pilot evidence covers unmodified SDK 1.0.54 and 1.0.56 in daemon and direct Query modes. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. UserPromptSubmit parser cases cover native blocking without tool identities and original callback draining on cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded.",
       "cases": [
         {
           "name": "daemon-hooks",
@@ -1995,7 +2187,8 @@
                   "timeout",
                   "report",
                   "native-error",
-                  "failure-error"
+                  "failure-error",
+                  "replace"
                 ],
                 "values": {
                   "status": "passed"
@@ -2254,6 +2447,198 @@
             },
             {
               "file": "fixtures/input-submission-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "tool-input-pii",
+                  "tool-output-pii",
+                  "tool-output-pii-newline",
+                  "tool-output-pii-tab",
+                  "code-deny",
+                  "tool-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-backend-error",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-timeout-block",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-cancel",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-cancel/cleanup.json",
               "values": {
                 "processes_stopped": true,
                 "backend_removed": true

@@ -7,7 +7,7 @@ on sec-core is a public process interface, not a Rust crate or daemon protocol.
 No sec-core CLI subcommand, source-package inclusion or AW dependency is needed.
 
 ```text
-AW Host → aw-provider-sec-core → agent-sec-cli scan-code → sec-core daemon
+AW Host → aw-provider-sec-core → agent-sec-cli scan-code / scan-pii → sec-core daemon
         ← AW effects/errors   ← scan JSON + exit status ← rules/verdict
 ```
 
@@ -67,6 +67,27 @@ and remaining budget. Its risk mode is `pii.input_mode`; failures retain their
 separate Provider error path. Configuration,
 version limits and runnable native evidence are described in the
 [Provider reference](../../../../../../../docs/developer-guide/en/aw/providers/sec-core.md#user-submission-checks).
+
+## PII boundaries
+
+`pii::call` owns the stdin-only CLI request, source label, remaining budget and
+strict scan parsing for both tool phases and user-input consumers. It checks
+source, byte coverage, truncation and reported execution/custom-rule failures.
+`tool_pii` applies private input/output modes. It scans structured values as JSON
+for field/value context, then scans decoded string values and object keys
+individually to preserve whitespace boundaries and custom-rule anchors. Plain
+strings are scanned directly. The same traversal covers arguments, the complete
+native result and its retained envelope; each CLI call receives only the remaining
+invocation budget. On risk, one Adapter-authorized text value is cleared in a private
+copy and the retained envelope is scanned again within the same budget. Only a
+clean residual yields the fixed safety-message replacement. Other shapes fail
+through the configured output failure action.
+
+The Adapter projects and adopts the result. Qoder SDK ordinary resident Post
+returns `updatedToolOutput`; failed-tool callbacks retain native error semantics
+and cannot adopt that directive. QwenPaw buffers selected replacement streams
+before Coordinator/public delivery. AW admission still permits one final result
+replacement per event. A PII replacement policy must occupy that final step.
 
 ## Validation boundary
 

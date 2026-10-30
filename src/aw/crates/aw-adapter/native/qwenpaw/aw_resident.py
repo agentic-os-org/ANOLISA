@@ -428,7 +428,7 @@ class ResidentMiddleware(MiddlewareBase):
         # A task-private redactor may need adjacent chunks to recognize a secret.
         # Withhold native/UI chunks and redact the accumulated response instead.
         return self.private or any(h["event"] == "tool.after"
-                                   and h["on_error"] == "withhold_result"
+                                   and (h["on_error"] == "withhold_result" or h.get("replace_result", False))
                                    and self.selected(h, call)
                                    for h in self.config["hooks"])
 

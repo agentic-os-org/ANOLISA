@@ -17,7 +17,7 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder-sdk` | ✓ | ✓ | ✓ | × | ✓ | ✓ |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
@@ -27,6 +27,8 @@ Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点�
 普通 resident Qoder SDK 和 QwenPaw 在模型请求前支持 `input.submit` 观察与阻断，
 检查完整文本并关联会话和轮次。受限 reloadable 模式及其他 Adapter 拒绝该事件。
 配置与验收方法见[用户提交检查](security.md#检查用户提交)。
+
+工具 PII 已在 Qoder SDK 1.0.56 / Worker 1.1.78 普通常驻 Query，以及 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App 回复中验收。输入检查先于工具执行；输出检查扫描完整结果，检查保留字段后替换一个获准文本槽，必需检查失败时停止交付。QwenPaw 对选中工具的流在 SSE/模型交付前缓冲。Qoder SDK 的受限 `--reloadable` 模式拒绝结果替换。多文本块、媒体、托管 MCP 与后台 PII 结果交付需分别验收。参见 [PII 配置](security.md#在-qoder-sdk-或-qwenpaw-中检查工具-pii)和[原生验收用例](../../../../contribute/zh/aw/testing.md#工具-pii-验收)。
 
 ## 16 个通用 Hook
 

@@ -23,13 +23,12 @@ pub(super) struct Config {
 #[serde(deny_unknown_fields)]
 pub(super) struct Pii {
     pub(super) input_mode: Mode,
-    #[serde(rename = "output_mode")]
-    _output_mode: OutputMode,
+    pub(super) output_mode: OutputMode,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum OutputMode {
+pub(super) enum OutputMode {
     Observe,
     ReplaceResult,
 }

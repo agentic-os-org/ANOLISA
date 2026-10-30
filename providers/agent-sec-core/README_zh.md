@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-通过现有 sec-core CLI 提供命令安全检查。本目录维护桥接实现，后端由对应组件提供。
+通过公共 sec-core CLI 提供代码和 PII 安全检查。本目录维护桥接实现，后端由对应组件提供。
 
 通过 Hook 步骤的 `match.tools` 选择代码工具，使用 `bash` 等标准名称或精确的
 `native:<adapter>:<name>` 选择器。Provider `config.tools` 按规范化的
@@ -19,6 +19,8 @@
 
 维护人按 [CODEOWNERS](../../.github/CODEOWNERS) 由 @kongche-jbw 负责。
 桥接代码使用 [Apache-2.0](../../LICENSE)，后端来源见 [agent-sec-core](../../src/agent-sec-core/README_zh.md)。
+
+[工具 PII 示例](examples/aw.tool-pii.yaml)支持 Qoder SDK 与 QwenPaw。`scan_tool_input` 阻断敏感参数，`scan_tool_output` 用固定安全提示替换命中的文本槽。必需输出检查使用 `on_error: withhold_result`；扫描失败与风险命中分别处理。
 
 - [配置与运行](../../docs/developer-guide/zh/aw/providers/sec-core.md)
 - [配置示例](examples/aw.yaml)

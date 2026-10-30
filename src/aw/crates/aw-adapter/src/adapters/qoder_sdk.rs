@@ -137,8 +137,10 @@ impl PreparedLaunch for Prepared {
             .capabilities(&self.versions[&self.policy.sites[0]].version, "sdk-worker");
         if self.input.options.reloadable {
             capabilities.events.remove("input.submit");
-        }
-        if !self.input.options.reloadable {
+            if let Some(effects) = capabilities.events.get_mut("tool.after") {
+                effects.retain(|effect| effect != "replace_result");
+            }
+        } else {
             capabilities
                 .failure_actions
                 .insert("tool.after".into(), vec!["withhold_result".into()]);

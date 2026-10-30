@@ -426,7 +426,7 @@ pub(crate) fn event_routes(
                 .find(|candidate| candidate.event == event && candidate.step_id == step.step_id);
             let all_tools = vec!["*".to_owned()];
             hooks.push(json!({"event": event, "step": step.step_id,
-                "on_error": step.on_error, "budget_ms": budget,
+                "on_error": step.on_error, "budget_ms": budget, "replace_result": step.replaces_result,
                 "event_tools": admitted.map(|step| &step.event_tools).unwrap_or(&all_tools),
                 "step_tools": admitted.map(|step| &step.step_tools).unwrap_or(&all_tools)}));
         }

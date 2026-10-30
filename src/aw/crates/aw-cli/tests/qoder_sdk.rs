@@ -112,10 +112,9 @@ fn denial_and_failed_initialization_never_execute_tools() {
     }
 }
 #[test]
-fn invalid_metadata_overrides_and_replacement_are_rejected() {
+fn invalid_metadata_and_launch_overrides_are_rejected() {
     for mode in [
         "metadata",
-        "replacement",
         "override",
         "reloadable-plugins",
         "reloadable-wrappers",
@@ -133,10 +132,6 @@ fn invalid_metadata_overrides_and_replacement_are_rejected() {
                     .replace("1.0.56", "invalid version"),
             )
             .unwrap();
-        }
-        if mode == "replacement" {
-            document["spec"]["events"]["tool.after"]["steps"][0]["effects"] =
-                json!(["replace_result"]);
         }
         if mode.starts_with("reloadable-") {
             document["spec"]["agents"]["sdk"]["qoder_sdk"] = if mode == "reloadable-plugins" {

@@ -44,7 +44,9 @@
     "aw-cli/test/native_configuration",
     "aw-config/test/native_sources",
     "aw-provider-sec-core/test/coverage",
-    "aw-host/test/tool_matching"
+    "aw-host/test/tool_matching",
+    "aw-provider-sec-core/test/pii",
+    "aw-provider-sec-core/test/pii_transport"
   ],
   "cases": {
     "package-doctor-files": {
@@ -950,6 +952,38 @@
     "user-pii-failure": {
       "target": "aw-provider-sec-core/test/provider",
       "test": "user_pii::user_pii_observes_risk_and_keeps_failures_separate"
+    },
+    "pii-policy": {
+      "target": "aw-provider-sec-core/test/pii",
+      "test": "tool_input_and_output_distinguish_pass_risk_and_backend_error"
+    },
+    "pii-completeness": {
+      "target": "aw-provider-sec-core/test/pii_transport",
+      "test": "malformed_incomplete_and_failed_scans_are_errors_not_risks"
+    },
+    "pii-residual": {
+      "target": "aw-provider-sec-core/test/pii",
+      "test": "retained_sensitive_fields_and_unsupported_slots_stop_result_delivery"
+    },
+    "pii-transport": {
+      "target": "aw-provider-sec-core/test/pii_transport",
+      "test": "shared_scanner_uses_stdin_sources_and_complete_verdicts"
+    },
+    "pii-deadline": {
+      "target": "aw-provider-sec-core/test/pii_transport",
+      "test": "pii_deadline_joins_cli_and_missing_backend_is_a_failure"
+    },
+    "pii-decoded-boundaries": {
+      "target": "aw-provider-sec-core/test/pii",
+      "test": "decoded_credentials_retain_boundaries_in_arguments_results_and_retained_fields"
+    },
+    "pii-decoded-context": {
+      "target": "aw-provider-sec-core/test/pii",
+      "test": "decoded_strings_and_structured_field_context_are_both_scanned"
+    },
+    "pii-structured-deadline": {
+      "target": "aw-provider-sec-core/test/pii",
+      "test": "decoded_scans_and_retained_checks_share_one_deadline"
     }
   },
   "agents": {
@@ -1327,7 +1361,10 @@
         "coverage-native-identity",
         "qwenpaw-native-terminal-drain",
         "submit-qwenpaw",
-        "prompt-failure"
+        "prompt-failure",
+        "pii-policy",
+        "pii-completeness",
+        "pii-residual"
       ],
       "tokenless": [
         "final-replacement",
@@ -1351,6 +1388,10 @@
           "observe": [
             "qoder-sdk-lifecycle",
             "qoder-sdk-strict-post"
+          ],
+          "replace_result": [
+            "final-replacement",
+            "qoder-sdk-post-drain"
           ]
         },
         "input.submit": {
@@ -1401,7 +1442,10 @@
         "qoder-sdk-private-fence",
         "coverage-native-identity",
         "submit-qoder-sdk",
-        "prompt-failure"
+        "prompt-failure",
+        "pii-policy",
+        "pii-completeness",
+        "pii-residual"
       ],
       "tokenless": [
         "security-retry",
@@ -1422,7 +1466,15 @@
       "coverage-extraction",
       "coverage-provider-example",
       "prompt-transport",
-      "prompt-failure"
+      "prompt-failure",
+      "pii-policy",
+      "pii-completeness",
+      "pii-residual",
+      "pii-transport",
+      "pii-deadline",
+      "pii-decoded-boundaries",
+      "pii-decoded-context",
+      "pii-structured-deadline"
     ],
     "tokenless": [
       "compression-bound",

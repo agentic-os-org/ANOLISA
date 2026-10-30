@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 
@@ -22,9 +23,12 @@ if case.get("record_health_environment"):
 if "scan-pii" in sys.argv:
     text = stdin.decode()
     (root / "stdin.txt").write_text(text)
+    with (root / "scans.jsonl").open("a") as scans:
+        scans.write(json.dumps({"text": text, "argv": sys.argv[1:]}) + "\n")
     source = sys.argv[sys.argv.index("--source") + 1]
     if case.get("pii"):
-        case["stdout"] = {"ok": True, "verdict": "deny" if "SENSITIVE" in text else "pass",
+        risk = re.search(case.get("pii_pattern", "SENSITIVE"), text) is not None
+        case["stdout"] = {"ok": True, "verdict": "deny" if risk else "pass",
                           "summary": {"source": source, "truncated": False,
                                       "bytes_scanned": len(text.encode())}}
 time.sleep(case.get("sleep", 0))

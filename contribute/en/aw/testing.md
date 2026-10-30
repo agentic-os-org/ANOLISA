@@ -59,6 +59,34 @@ for each run. The runner retains results, native messages/model requests and
 cleanup reports, and removes its runtime directory and daemon container. Pinned
 parser/middleware suites separately cover callback cancellation and cleanup.
 
+## Tool PII acceptance
+
+Both `qoder-sdk` and `qwenpaw` targets include `tool-pii`, `tool-pii-backend-error`,
+`tool-pii-timeout-block` and `tool-pii-cancel`. They use the candidate AW/Provider
+and real sec-core CLI/daemon. The baseline covers normal execution, input refusal
+without a marker, actual output replacement, existing code denial, native errors
+and preserved native settings. QwenPaw checks SSE and the next model request;
+Qoder checks adopted `tool_result` and the subsequent assistant messages.
+Fault suites withhold results; cancellation occurs after the output scan starts.
+
+Run from `src/aw` with the four binaries in `target/native-binaries`, a private
+SDK installation and the stock App dependencies. For an isolated QwenPaw check:
+
+```bash
+python3 crates/aw-cli/tests/fixtures/sec_core/tool_pii.py \
+  --agent qwenpaw --bin target/native-binaries \
+  --agent-bin "$(command -v qwenpaw)" --image ubuntu:24.04 \
+  --output target/tool-pii-evidence
+```
+
+For Qoder SDK use `--agent qoder-sdk --npm /absolute/path/to/private-sdk-install`
+with the runtime PAT in `QODER_PERSONAL_ACCESS_TOKEN`. Add `--fault backend-error`,
+`--fault timeout-block` or `--fault cancel` for a separate output-failure run.
+Each output directory must be new. `results.json`, `cleanup.json`, backend/process
+records and native messages/model requests are retained; runtime directories and
+the owned daemon container are removed. Multi-block/media, managed MCP and
+background PII result delivery require separate native acceptance.
+
 ## One native target
 
 Use a clean, committed checkout with manifest-required Python, Node 24.16.0, uv 0.11.13 and SDK dependencies.

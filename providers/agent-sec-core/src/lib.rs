@@ -5,6 +5,7 @@ pub mod health;
 pub mod pii;
 mod prompt;
 mod scan;
+mod tool_pii;
 mod trace_context;
 
 use std::io::{Read, Write};
@@ -80,7 +81,9 @@ fn dispatch(
                 {"name":"scan_code", "events":["tool.before"], "effects":["observe","block"]},
                 {"name":"observe_tool", "events":["tool.after"], "effects":["observe"]},
                 {"name":"scan_prompt", "events":["input.submit"], "effects":["observe","block"]},
-                {"name":"scan_user_input", "events":["input.submit"], "effects":["observe","block"]}
+                {"name":"scan_user_input", "events":["input.submit"], "effects":["observe","block"]},
+                {"name":"scan_tool_input", "events":["tool.before"], "effects":["observe","block"]},
+                {"name":"scan_tool_output", "events":["tool.after"], "effects":["observe","replace_result"]}
             ]),
         )]));
     }
@@ -90,6 +93,14 @@ fn dispatch(
     }
     let remaining = remaining_budget(value, timeout, started)?;
     let event = &value["event"];
+    if matches!(
+        value["operation"].as_str(),
+        Some("scan_tool_input" | "scan_tool_output")
+    ) {
+        let fields = tool_pii::invoke(value, &config, cli, socket, remaining)?;
+        remaining_budget(value, timeout, started)?;
+        return Ok(fields);
+    }
     let (effect, reason) = match (value["operation"].as_str(), event["name"].as_str()) {
         (Some("scan_prompt"), Some("input.submit")) => {
             let mode = config.prompt.as_ref().ok_or("prompt_not_configured")?.mode;

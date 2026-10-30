@@ -25,7 +25,8 @@ export function validateHooks(config) {
         typeof hook.step !== "string" || !hook.step ||
         !(["block", "report"].includes(hook.on_error) ||
           (config.resident && hook.event === "tool.after" && hook.on_error === "withhold_result")) ||
-        hook.replace_result !== false ||
+        !(typeof hook.replace_result === "boolean" &&
+          (!hook.replace_result || hook.event === "tool.after")) ||
         !Number.isInteger(hook.budget_ms) || hook.budget_ms < 1 || hook.budget_ms > 55000)
       throw new Error("Invalid AW Qoder SDK hook route");
 }
@@ -517,8 +518,7 @@ export class Resident {
             if (!entry) throw new Error("AW policy callback lacks native dispatch identity");
             if (delegatesMcp(this, this.identities.dispatch.getStore().request.input)) return {};
             if (event !== "PreToolUse") {
-              await postTools(this, this.identities.payload(entry, input), context.signal);
-              return {};
+              return await postTools(this, this.identities.payload(entry, input), context.signal);
             }
             return await callback(this.identities.payload(entry, input), entry.id, context);
           }));

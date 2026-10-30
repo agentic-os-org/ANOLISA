@@ -17,7 +17,7 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder-sdk` | ✓ | ✓ | ✓ | × | ✓ | ✓ |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
@@ -28,6 +28,16 @@ Qoder CLI has no failed-tool Post callback integration. See each Agent page for 
 resident Qoder SDK and QwenPaw launches. Submission policy uses complete text and
 session/turn identities. Restricted reloadable mode and other Adapters reject
 this event. See [submission checks](security.md#check-user-submissions).
+
+Tool PII is verified with Qoder SDK 1.0.56 / Worker 1.1.78 ordinary resident
+Queries and QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App replies. Input checks precede
+tool dispatch; output checks scan the complete result and replace one authorized
+text slot after checking retained fields. Required failures withhold delivery.
+QwenPaw buffers selected tool streams before SSE/model delivery. Qoder SDK's
+restricted `--reloadable` mode rejects result replacement. Multi-block/media,
+managed MCP and background PII result delivery require separate acceptance.
+See [PII policy setup](security.md#check-tool-pii-with-qoder-sdk-or-qwenpaw) and
+[runnable native cases](../../../../contribute/en/aw/testing.md#tool-pii-acceptance).
 
 ## 16 common Hooks
 

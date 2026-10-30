@@ -43,5 +43,5 @@ fn strict_post_joins_original_callbacks_and_preserves_native_results() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 9"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 11"));
 }

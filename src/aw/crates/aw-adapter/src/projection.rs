@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
     match adapter {
         "qoder" | "qwenpaw" | "pi" | "agentscope" => &native["tool_response"],
+        "qoder-sdk" if native["hook_event_name"] == "PostToolUse" => &native["tool_response"],
         "claude-sdk"
             if native["hook_event_name"] == "PostToolUse"
                 && native["tool_name"] == "Bash"
@@ -54,7 +55,7 @@ fn text_slot<'a>(adapter: &str, result: &'a Value) -> Option<(&'static str, &'a 
 
 fn tool<'a>(adapter: &str, native: &'a Value) -> (&'a str, &'a Value) {
     match adapter {
-        "qoder" | "hermes" | "claude-sdk" => (
+        "qoder" | "qoder-sdk" | "hermes" | "claude-sdk" => (
             native["tool_name"].as_str().unwrap_or(""),
             &native["tool_input"],
         ),
@@ -215,8 +216,10 @@ pub fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
         .pointer_mut(&pointer)
         .ok_or("native result slot disappeared")? = json!(text);
     let response = match adapter {
-        "qoder" => json!({"hookSpecificOutput":{"hookEventName":"PostToolUse", "updatedToolOutput":
-            if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}}}),
+        "qoder" | "qoder-sdk" => {
+            json!({"hookSpecificOutput":{"hookEventName":"PostToolUse", "updatedToolOutput":
+            if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}}})
+        }
         "claude-sdk" => {
             json!({"hookSpecificOutput":{"hookEventName":"PostToolUse", "updatedToolOutput":value}})
         }

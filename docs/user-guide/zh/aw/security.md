@@ -97,6 +97,14 @@ git -c http.sslVerify=false --version
 检查失败时，按[后台诊断说明](../../../developer-guide/zh/aw/providers/sec-core.md#外部后台与显式健康诊断)
 确认 sec-core 后台与 socket。选中工具的输入或扫描错误按生成配置阻断，未选中的工具跳过扫描。
 
+## 在 Qoder SDK 或 QwenPaw 中检查工具 PII
+
+使用[工具 PII 配置](../../../../providers/agent-sec-core/examples/aw.tool-pii.yaml)，沿用同一 CLI、Provider 和已运行后端。替换绝对路径，按 [Qoder SDK](../../../developer-guide/zh/aw/agents/qoder-sdk.md) 或 [QwenPaw](../../../developer-guide/zh/aw/agents/qwenpaw.md) 指南准备原生 worker/App。通过 `aw run --config aw.tool-pii.yaml --agent sdk` 或 `--agent app` 启动。
+
+输入步骤在执行前扫描选中的完整参数，敏感内容会被拒绝，工具不执行。输出步骤扫描实际结果，命中的文本槽替换为 `Sensitive data detected by AW; content withheld.`；替换前再次检查保留的结果结构。检查失败时停止原始输出交付并结束 Query/回复；工具已产生的副作用仍保留。验证时使用合成测试凭证。
+
+各工具阶段明确选择 PII 的检查方。AW 接管时移除原生 PII 的 PreToolUse/PostToolUse 注册，按需保留用户提交检查。[集成参考](../../../developer-guide/zh/aw/providers/sec-core.md#工具-pii-策略)说明配置、不支持的结果结构和原生模式限制。
+
 ## 停止与扩展
 
 退出 Agent 后执行 `aw stop --config "$AW_HOME/security.yaml"`。

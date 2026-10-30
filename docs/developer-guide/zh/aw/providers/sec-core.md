@@ -4,7 +4,7 @@
 
 本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../../user-guide/zh/aw/security.md)。
 
-`aw-provider-sec-core` 让 AW 策略调用已有的 `agent-sec-cli scan-code` 命令。
+`aw-provider-sec-core` 让 AW 策略调用公共 `agent-sec-cli scan-code` 与 `scan-pii` 命令。
 配置指定哪些工具输入包含代码，以及发现风险后返回观察还是阻断候选效果。
 sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调用。
 
@@ -115,8 +115,8 @@ Provider 的私有 `config` 接受以下字段：
 | `mode` | 必填，`observe` 或 `block`，只影响 `scan_code` |
 | `unmapped_tool` | 可选，`error`（默认）或 `observe`，控制 `scan_code` 对已选中但没有映射的工具的处理 |
 | `prompt` | 可选 `{mode: observe\|block, scan_mode: fast}`，用于 `scan_prompt` |
-| `pii` | 可选 `{input_mode: observe\|block, output_mode: observe\|replace_result}`；`scan_user_input` 使用 `input_mode` |
-| `tools` | 最多 128 个精确的规范化工具名；仅检查提交时可省略 |
+| `pii` | 可选 `{input_mode: observe\|block, output_mode: observe\|replace_result}`；输入模式用于用户及工具输入，输出模式用于工具结果 |
+| `tools` | 最多 128 个精确的规范化工具名；配置 `prompt` 或 `pii` 时可省略或为空 |
 | `tools.<name>.language` | `bash` 或 `python` |
 | `tools.<name>.input_pointer` | 指向 `event.tool.input` 内部的 JSON Pointer，所选值必须为字符串 |
 
@@ -205,6 +205,22 @@ Qoder 等待公开 `UserPromptSubmit` 快照的检查结果，拒绝时返回原
 当前覆盖文本提交。QwenPaw 的非文本用户块按映射错误交给 `on_error` 处理。
 受限 reloadable 入口在准入时拒绝该事件，使用普通 resident 模式。PII/Prompt 每项
 检查选择原生或 AW 管理，避免重复扫描；AW 保留用户 Hook。
+
+## 工具 PII 策略
+
+[双框架示例](../../../../../providers/agent-sec-core/examples/aw.tool-pii.yaml)在同一 Provider 上组合工具输入 PII、代码扫描和输出 PII。`scan_tool_input` 以 `tool_input` 来源扫描完整工具参数；`pii.input_mode: block` 时命中返回 `block/pii_risk`。`scan_tool_output` 以 `tool_output` 来源扫描工具实际完整结果。通过返回 `observe/pii_pass`；观察模式命中返回 `observe/pii_risk`。
+
+配置增加 `pii.input_mode`（`observe` / `block`）和 `pii.output_mode`（`observe` / `replace_result`），两者在配置 `pii` 时必填。此时 `tools` 可省略或为空；代码扫描仍依赖其工具映射。
+
+结构化参数和结果先按 JSON 扫描以保留字段和值的上下文，再逐个扫描解码后的字符串值与对象键，保留换行、Tab 和自定义规则锚点的语义。普通字符串直接扫描。所有扫描及保留结构检查共用本次调用的剩余预算；预算耗尽时检查失败。
+
+`pii.output_mode: replace_result` 命中后需要 Adapter 授权的文本投影。Provider 在私有副本中清空唯一对应文本，再用同一预算扫描保留结构。保留结构通过后返回固定安全提示 `Sensitive data detected by AW; content withheld.`，保留原生错误状态和元数据。缺失或歧义文本槽、保留字段仍含敏感信息时返回 `unsupported_pii_result`。后端脱敏文本不参与替换。安全的失败工具结果保留原错误语义；Qoder 的 `PostToolUseFailure` 无法替换错误文本，含 PII 时停止交付。
+
+必需检查使用输入 `on_error: block`、输出 `on_error: withhold_result`。CLI/后端不可用、非零退出、空或损坏响应、来源不符、截断或不完整扫描、字节数不符、自定义规则无效或失败均返回检查错误，与风险命中分开。文本仅经 stdin 传入，Provider 响应不含原文或 findings。共用 `pii::call` 同时提供 `Source::UserInput`，供提交阶段消费者复用。
+
+Qoder SDK 普通常驻 Query 返回原生 `updatedToolOutput` 替换指令；受限 `--reloadable` 模式在准入时拒绝替换。QwenPaw 普通 App 回复对选中替换或停止交付的工具流进行缓冲，Coordinator 的公开流同样等待最终采用。生产配置按实际工具选择范围。多文本块、媒体、托管 MCP 和后台结果交付需要分别完成原生验收；Post 回调本身不能证明这些模式采用了替换。
+
+各工具阶段明确选择 AW 或原生 PII。AW 接管时显式移除原生 PII 的 PreToolUse/PostToolUse 注册，按用户文本保护需求保留 UserPromptSubmit。AW 保留原生设置，不自动删除 Hook；同时保留两套工具检查会造成重复扫描。
 
 ## Trace 关联
 

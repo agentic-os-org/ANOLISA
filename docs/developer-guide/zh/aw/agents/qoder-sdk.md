@@ -118,7 +118,7 @@ wrapper 须启动所选 SDK 的 Worker，镜像保留其 preload 资产与环境
 | 原生设置 | 普通常驻 Query 保留原生配置；显式声明式与命令消费者模式保留原有限制。不支持替换 transport；runtime wrapper/import 需要[执行资产授权](../configuration.md#qoder-sdk-执行资产)。 |
 | 权限与输入 | 保留原生拒绝，检查公开 Hook 可见的参数；后续原生改写未经过最终执行前再次检查 |
 | 环境与认证 | 共享 daemon 的 Query 不覆盖 env/auth；更换凭据用原生 `daemon.auth()`；不同凭据可用独立 daemon |
-| 后置检查 | 支持观察和 `withhold_result`；不支持结果替换 |
+| 后置检查 | 普通常驻 Query 通过 `updatedToolOutput` 采用单文本槽的 `replace_result`；检查失败用 `withhold_result` 停止交付。受限 `--reloadable` 模式仍仅支持观察。 |
 | AgentSight | 普通 resident 设置 `evidence.mode: off` |
 | worktree | 普通模式回调携带父 Query cwd，依赖实际执行目录的策略不支持 worktree；受限模式直接拒绝 |
 

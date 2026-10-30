@@ -1,4 +1,4 @@
-/** Bounded callback subprocess; only neutral or deny directives are admitted. */
+/** Bounded callback subprocess with event-specific effect validation. */
 import { spawn } from "node:child_process";
 async function execute(config, args, payload, signal, timeout) {
   const input = Buffer.from(JSON.stringify(payload));
@@ -78,6 +78,11 @@ export async function invoke(config, hook, payload, signal) {
   }
   if (code !== 0) throw new Error(`callback_exit_${code}`);
   const value = stdout.length ? JSON.parse(stdout.toString("utf8")) : {};
+  if (hook.event === "tool.after" && hook.replace_result &&
+      payload.hook_event_name === "PostToolUse" && value &&
+      Object.keys(value).length === 1 && Object.keys(value.hookSpecificOutput ?? {}).length === 2 &&
+      value.hookSpecificOutput.hookEventName === "PostToolUse" &&
+      typeof value.hookSpecificOutput.updatedToolOutput === "string") return value;
   if (!value || Array.isArray(value) || typeof value !== "object" || Object.keys(value).length)
     throw new Error("unsupported_qoder_sdk_directive");
   return value;
