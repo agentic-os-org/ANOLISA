@@ -67,6 +67,7 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
     """Summarize counters and latency points from k6 JSON output."""
     result: dict[str, Any] = {
         "available": False,
+        "requests_observed": False,
         "requests": 0,
         "http_success": 0,
         "timeouts": 0,
@@ -88,8 +89,14 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
         if metric == "http_req_duration" and latency["benchmark_latency"]:
             continue
         value = numeric(data.get("value"))
-        if metric == "benchmark_requests" and value is not None:
+        if (
+            metric == "benchmark_requests"
+            and value is not None
+            and value >= 0
+            and value.is_integer()
+        ):
             result["requests"] += int(value)
+            result["requests_observed"] = True
         elif metric == "benchmark_http_success" and value is not None:
             result["http_success"] += int(value)
         elif metric == "benchmark_timeouts" and value is not None:
@@ -244,6 +251,15 @@ def _summarize_drop_rows(
     }
 
 
+def _load_throughput(load: dict[str, Any], duration: str) -> float | None:
+    """Derive rates only from observed counters, preserving directly recorded rates."""
+    if load.get("throughput") is not None:
+        return load["throughput"]
+    if not load.get("requests_observed", load.get("available", True)):
+        return None
+    seconds = numeric(duration)
+    return int(load["requests"]) / seconds if seconds is not None and seconds > 0 else None
+
 
 def build_summary(
     *,
@@ -292,11 +308,7 @@ def build_summary(
         "measured_seconds": seconds,
         "sent_requests": requests,
         "successful_http_requests": successes,
-        "effective_qps": (
-            load.get("throughput")
-            if load.get("throughput") is not None
-            else requests / seconds if seconds and seconds > 0 else None
-        ),
+        "effective_qps": _load_throughput(load, duration),
         "tokens_per_second": {
             "generated": (
                 expected_tokens / seconds
@@ -382,11 +394,7 @@ def render_markdown(
     timeouts = int(load.get("timeouts", 0))
     success_rate = success / requests * 100 if requests else None
     seconds = numeric(duration)
-    throughput = (
-        load.get("throughput")
-        if load.get("throughput") is not None
-        else requests / seconds if seconds and seconds > 0 else None
-    )
+    throughput = _load_throughput(load, duration)
     latency = load["latency"]
     if load["available"]:
         lines.append(
