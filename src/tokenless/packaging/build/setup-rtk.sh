@@ -11,9 +11,11 @@ PATCH_DIR="$COMPONENT_ROOT/third_party/patches"
 # Applied in order. build-windows.ps1 and tests/test_windows.py parse this
 # list too: keep one bare file name per line, with no quotes or comments,
 # and the closing parenthesis alone at the start of a line.
+# rtk-library.patch builds on the files the others change.
 PATCHES=(
     rtk-tokenless-stats.patch
     rtk-pytest-error-report.patch
+    rtk-library.patch
 )
 REVISION_MARKER="$RTK_DIR/.anolisa-rtk-commit"
 PATCH_MARKER="$RTK_DIR/.anolisa-rtk-patches"

@@ -112,14 +112,14 @@ done <<< "$INSTALL_HELP"
 
 # Why the bypass is legitimate on the hosts that still need it: their scanner
 # reads child_process imports as "dangerous code patterns", and the tokenless
-# plugin does delegate to the tokenless and rtk system binaries via
+# plugin does delegate to the tokenless system binary via
 # execFileSync/spawnSync — with fixed paths and timeouts. No shell injection
 # vector exists: all subprocess arguments are hardcoded or come from
 # resolveBinaryPath(), never from user input. Hosts that dropped install-time
 # scanning get no note, because nothing was bypassed.
 if [ "$UNSAFE_SUPPORT" = "effective" ]; then
     echo "[${COMPONENT}] Note: --dangerously-force-unsafe-install is required because"
-    echo "[${COMPONENT}]       this plugin wraps tokenless/rtk system binaries via child_process."
+    echo "[${COMPONENT}]       this plugin wraps the tokenless system binary via child_process."
     echo "[${COMPONENT}]       See https://github.com/alibaba/anolisa for source."
 fi
 

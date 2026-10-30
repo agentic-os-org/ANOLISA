@@ -34,9 +34,10 @@ env PATH=/usr/bin:/bin "$TEST_ENV/venv/bin/python" - <<'PY'
 import os
 from importlib.resources import files
 
-rtk = files("anolisa_tokenless").joinpath("_bin", "rtk")
-assert rtk.is_file()
-assert os.access(rtk, os.X_OK)
+launcher = files("anolisa_tokenless").joinpath("_bin", "tokenless")
+assert launcher.is_file()
+assert os.access(launcher, os.X_OK)
+assert not files("anolisa_tokenless").joinpath("_bin", "rtk").exists()
 PY
 
 EXPECTED_VERSION="$(sed -n \

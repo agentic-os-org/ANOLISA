@@ -28,11 +28,12 @@
 //! guard the protocol, samples, stats and retention logic. Static samples,
 //! probes, remote-run scripts and the headroom worker ship under `assets/`.
 //!
-//! [`rtk_side`](l2::rtk_side) reuses this crate's [`metrics::find_rtk_binary`]
-//! for rtk discovery. That function is a deliberate copy of the L1 suite's
-//! (`l1-compressor/src/metrics.rs`), not a shared dependency: the two
-//! benchmark workspaces are independent by design, so discovery order must be
-//! kept in sync by hand whenever either side changes.
+//! [`rtk_side`](l2::rtk_side) reuses this crate's
+//! [`metrics::find_tokenless_binary`] for tokenless discovery. That function
+//! is a deliberate copy of the L1 suite's (`l1-compressor/src/metrics.rs`),
+//! not a shared dependency: the two benchmark workspaces are independent by
+//! design, so discovery order must be kept in sync by hand whenever either
+//! side changes.
 
 pub mod l2;
 pub mod metrics;

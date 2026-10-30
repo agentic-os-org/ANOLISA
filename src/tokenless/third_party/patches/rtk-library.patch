@@ -1,0 +1,292 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index de9c222..307c2db 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,6 +11,18 @@ repository = "https://github.com/rtk-ai/rtk"
+ readme = "README.md"
+ keywords = ["cli", "llm", "token", "filter", "productivity"]
+ categories = ["command-line-utilities", "development-tools"]
++# Tokenless links RTK as a library. The upstream crate root stays in
++# src/main.rs so this patch remains a small diff that rebases cleanly.
++autobins = false
++
++[lib]
++path = "src/main.rs"
++# Upstream examples were written for a binary crate and never compiled.
++doctest = false
++
++[[bin]]
++name = "rtk"
++path = "src/bin/rtk.rs"
+ 
+ [dependencies]
+ thiserror = "2"
+diff --git a/src/bin/rtk.rs b/src/bin/rtk.rs
+new file mode 100644
+index 0000000..4e47ae3
+--- /dev/null
++++ b/src/bin/rtk.rs
+@@ -0,0 +1,3 @@
++fn main() {
++    std::process::exit(rtk::run("rtk", std::env::args_os().skip(1)));
++}
+diff --git a/src/core/args_utils.rs b/src/core/args_utils.rs
+index e431783..f76f9cd 100644
+--- a/src/core/args_utils.rs
++++ b/src/core/args_utils.rs
+@@ -7,7 +7,10 @@
+ /// than `parsed_args` (nothing was consumed). Otherwise restores all consumed `--` at
+ /// their original positions by returning the user-args suffix of `raw_args` verbatim.
+ pub fn restore_double_dash(parsed_args: &[String]) -> Vec<String> {
+-    let raw_args: Vec<String> = std::env::args().collect();
++    let raw_args: Vec<String> = crate::cli_args()
++        .iter()
++        .map(|arg| arg.to_string_lossy().into_owned())
++        .collect();
+     restore_double_dash_with_raw(parsed_args, &raw_args)
+ }
+ 
+diff --git a/src/core/retriever.rs b/src/core/retriever.rs
+index 86d3486..b789976 100644
+--- a/src/core/retriever.rs
++++ b/src/core/retriever.rs
+@@ -643,7 +643,10 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
+                 println!("(no recall entries)");
+                 return Ok(0);
+             }
+-            eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
++            eprintln!(
++                "rtk recall: no matching entry (try `{} recall --list`)",
++                crate::program_name()
++            );
+             return Ok(1);
+         }
+         Err(e) => {
+@@ -670,7 +673,10 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
+     };
+ 
+     let Some(row) = row else {
+-        eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
++        eprintln!(
++            "rtk recall: no matching entry (try `{} recall --list`)",
++            crate::program_name()
++        );
+         return Ok(1);
+     };
+ 
+diff --git a/src/core/tee.rs b/src/core/tee.rs
+index e87e736..cd33e76 100644
+--- a/src/core/tee.rs
++++ b/src/core/tee.rs
+@@ -21,7 +21,11 @@ fn store_hint(
+     exit_code: Option<i32>,
+ ) -> Option<String> {
+     match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
+-        Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
++        Stored::Saved(s) => Some(format!(
++            "[full output: {} recall {}]",
++            crate::program_name(),
++            s.hash
++        )),
+         Stored::Unavailable | Stored::Empty => None,
+     }
+ }
+@@ -97,8 +101,10 @@ pub fn force_tee_tail_hint(
+         RecoveryMode::Sqlite => {
+             match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
+                 Stored::Saved(s) if s.hidden_lines > 0 => Some(format!(
+-                    "[+{} hidden: rtk recall {}]",
+-                    s.hidden_lines, s.hash
++                    "[+{} hidden: {} recall {}]",
++                    s.hidden_lines,
++                    crate::program_name(),
++                    s.hash
+                 )),
+                 Stored::Saved(_) | Stored::Unavailable | Stored::Empty => None,
+             }
+diff --git a/src/hooks/rewrite_cmd.rs b/src/hooks/rewrite_cmd.rs
+index f0a144a..7feba68 100644
+--- a/src/hooks/rewrite_cmd.rs
++++ b/src/hooks/rewrite_cmd.rs
+@@ -73,12 +73,12 @@ pub(crate) fn track_tee_read(cmd: &str) {
+ 
+ pub fn run(cmd: &str) -> anyhow::Result<()> {
+     let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
++    let options = RewriteOptions {
++        excluded,
++        transparent_prefixes,
++    };
+ 
+-    let outcome = evaluate(cmd, &excluded, &transparent_prefixes);
+-    if !matches!(outcome, RewriteOutcome::Deny) {
+-        track_tee_read(cmd);
+-    }
+-    match outcome {
++    match rewrite(cmd, &options) {
+         RewriteOutcome::Allow(rewritten) => {
+             print!("{}", rewritten);
+             let _ = std::io::stdout().flush();
+@@ -94,14 +94,55 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
+     }
+ }
+ 
++/// User configuration that shapes [`rewrite`].
++#[derive(Debug, Clone, Default)]
++pub struct RewriteOptions {
++    /// Commands never rewritten (`[hooks] exclude_commands`).
++    pub excluded: Vec<String>,
++    /// Wrappers kept in front of a rewritten command (`[hooks] transparent_prefixes`).
++    pub transparent_prefixes: Vec<String>,
++}
++
++impl RewriteOptions {
++    /// Reads the current RTK configuration; a missing or invalid file yields defaults.
++    ///
++    /// Unlike the process-wide cache used by the CLI, every call reads the file
++    /// again, so long-lived embedders observe configuration changes.
++    pub fn load() -> Self {
++        let hooks = crate::core::config::Config::load()
++            .unwrap_or_default()
++            .hooks;
++        Self {
++            excluded: hooks.exclude_commands,
++            transparent_prefixes: hooks.transparent_prefixes,
++        }
++    }
++}
++
++/// How a hook should treat one command, matching the `rtk rewrite` exit codes.
+ #[derive(Debug, PartialEq)]
+-enum RewriteOutcome {
++pub enum RewriteOutcome {
++    /// Exit 0: run the rewritten command; the hook may auto-allow it.
+     Allow(String),
++    /// Exit 1: no RTK equivalent; run the command unchanged.
+     Passthrough,
++    /// Exit 2: a deny rule matched; defer to the host's native deny.
+     Deny,
++    /// Exit 3: run the rewritten command but let the host prompt.
+     Ask(String),
+ }
+ 
++/// Decides how a hook should treat `cmd` without printing or exiting.
++///
++/// Records a recall when `cmd` reads one of RTK's tee logs, as `rtk rewrite` does.
++pub fn rewrite(cmd: &str, options: &RewriteOptions) -> RewriteOutcome {
++    let outcome = evaluate(cmd, &options.excluded, &options.transparent_prefixes);
++    if !matches!(outcome, RewriteOutcome::Deny) {
++        track_tee_read(cmd);
++    }
++    outcome
++}
++
+ fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
+     evaluate_with_verdict(cmd, check_command(cmd), excluded, transparent_prefixes)
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 4ac0df0..3a7b180 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -6,6 +6,29 @@ mod hooks;
+ mod learn;
+ mod parser;
+ 
++pub use hooks::rewrite_cmd::{rewrite, RewriteOptions, RewriteOutcome};
++
++/// Version of the RTK command line built into this library.
++pub const VERSION: &str = env!("CARGO_PKG_VERSION");
++
++static CLI_ARGS: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock::new();
++static PROGRAM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
++
++/// Raw command-line arguments, program name first.
++///
++/// [`run`] installs the caller's arguments; code reached without it (unit
++/// tests) reads the process arguments.
++pub(crate) fn cli_args() -> &'static [OsString] {
++    CLI_ARGS.get_or_init(|| std::env::args_os().collect())
++}
++
++/// Program name printed in recovery hints such as `rtk recall <hash>`.
++///
++/// `rtk` unless [`run`] was given another name.
++pub(crate) fn program_name() -> &'static str {
++    PROGRAM.get().map_or("rtk", String::as_str)
++}
++
+ // Re-export command modules for routing
+ use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
+@@ -1517,7 +1540,11 @@ fn configured_awareness_level() -> core::config::AwarenessLevel {
+ }
+ 
+ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
+-    let args: Vec<String> = std::env::args().skip(1).collect();
++    let args: Vec<String> = cli_args()
++        .iter()
++        .skip(1)
++        .map(|arg| arg.to_string_lossy().into_owned())
++        .collect();
+ 
+     // No args → show Clap's error (user ran just "rtk" with bad syntax)
+     if args.is_empty() {
+@@ -1763,7 +1790,20 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
+     }
+ }
+ 
+-fn main() {
++/// Runs the RTK command line and returns its exit code.
++///
++/// `program` is the name shown in usage and recovery hints: `rtk` for the
++/// standalone binary, or the embedding command such as `tokenless rtk`.
++/// `args` follow it. Call this at most once per process: commands read the
++/// arguments through process-wide state, and some exit the process directly.
++pub fn run(program: &str, args: impl IntoIterator<Item = OsString>) -> i32 {
++    let _ = PROGRAM.set(program.to_string());
++    let _ = CLI_ARGS.set(
++        std::iter::once(OsString::from(program))
++            .chain(args)
++            .collect(),
++    );
++
+     // Reset SIGPIPE to default handler so writing to a closed pipe
+     // e.g `rtk git log | head` exits silently instead of panicking.
+     // Rust ignores SIGPIPE by default and with panic="abort" in the
+@@ -1775,14 +1815,13 @@ fn main() {
+         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+     }
+ 
+-    let code = match run_cli() {
++    match run_cli() {
+         Ok(code) => code,
+         Err(e) => {
+             eprintln!("rtk: {:#}", e);
+             1
+         }
+-    };
+-    std::process::exit(code);
++    }
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+@@ -1837,7 +1876,7 @@ fn run_cli() -> Result<i32> {
+     // Fire-and-forget telemetry ping (1/day, non-blocking)
+     core::telemetry::maybe_ping();
+ 
+-    let cli = match Cli::try_parse_from(std::env::args_os()) {
++    let cli = match Cli::try_parse_from(cli_args()) {
+         Ok(cli) => cli,
+         Err(e) => {
+             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+@@ -1848,8 +1887,9 @@ fn run_cli() -> Result<i32> {
+     };
+ 
+     // Warn if installed hook is outdated/missing (1/day, non-blocking).
+-    // Skip for Gain — it shows its own inline hook warning.
+-    if !matches!(cli.command, Commands::Gain { .. }) {
++    // Skip for Gain — it shows its own inline hook warning — and when an
++    // embedding program owns the hooks, since `rtk init` does not apply there.
++    if !matches!(cli.command, Commands::Gain { .. }) && program_name() == "rtk" {
+         hooks::hook_check::maybe_warn();
+     }
+ 

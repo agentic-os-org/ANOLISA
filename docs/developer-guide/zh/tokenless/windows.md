@@ -23,12 +23,12 @@ Hook 命令的 PowerShell；前述 manifest 标记识别的是工具使用的 Sh
 
 PreTool 匹配 `Bash`、`PowerShell`、`mcp__workspace__bash` 和
 `mcp__qw-builtin__mcp_workspace_bash`，由 RTK 决定每条命令是否改写。PowerShell 调用
-绑定原生 RTK，并在该次调用内设置归属环境变量。PostTool 将 PowerShell 输出归类为
+通过原生 `tokenless.exe` 运行 RTK，并在该次调用内设置归属环境变量。PostTool 将 PowerShell 输出归类为
 命令输出，保留文件内容保护，避免对 RTK 输出重复压缩。不支持的命令透传。
 
-PowerShell 包装脚本在子作用域内设置 `rtk` 别名。在被改写的复合命令中，原本已有的
-裸 `rtk` 调用也会绑定到托管二进制；POSIX 绑定只修改本次改写插入的调用。显式可执行
-文件路径不受影响。包装脚本恢复归属环境变量后保留 `$?` 和 `$LASTEXITCODE`，包括
+PowerShell 包装脚本把本次改写插入的每个 RTK 调用替换为
+`& '<path>\tokenless.exe' rtk`。原本已有的裸 `rtk` 调用和显式可执行文件路径不受影响。
+插入的调用不位于 PowerShell 命令开头时，跳过改写，原命令透传。包装脚本恢复归属环境变量后保留 `$?` 和 `$LASTEXITCODE`，包括
 原生命令非零退出的状态，且不会新增 stderr 输出或 `$Error` 项。
 当此包装脚本是 `powershell -Command` 或 `pwsh -Command` 执行的最后一条命令时，
 `$?` 为 `$false` 时进程退出码为 `1`；原生退出码仍可通过会话内的 `$LASTEXITCODE` 获取。
@@ -49,7 +49,7 @@ PowerShell 包装脚本在子作用域内设置 `rtk` 别名。在被改写的�
 
 原生二进制从当前可执行文件同级目录和 PATH 的绝对路径项中查找。与 Unix 不同，
 Windows 查找不检查文件和目录的 ACL、所有者或重解析点，而是信任配置的安装目录和
-PATH。RTK 只接受 `.exe`；一般依赖查找还接受 `PATHEXT` 中的 `.com`、`.bat` 和 `.cmd` 项。
+PATH。依赖查找接受 `.exe`，也接受 `PATHEXT` 中的 `.com`、`.bat` 和 `.cmd` 项。
 
 Windows 支持原生 CLI 和千问办公 Adapter。npm 会复制其他 Adapter 资源，但跳过
 Claude 自动启用；其他 Windows Adapter 尚未验证。不支持安全工作区／VM 会话和

@@ -5,7 +5,8 @@
 # Covered behaviours (all offline — curl, npm and cargo are stubbed):
 #   1. The source-build fallback locates src/tokenless/Cargo.toml inside a real
 #      GitHub archive layout, where the manifest sits four levels below the
-#      temporary directory.
+#      temporary directory. Tags that link RTK run their setup-rtk.sh first,
+#      and a failed RTK setup stops the build.
 #   2. A version pin whose tag does not exist fails hard and never requests the
 #      `main` branch archive.
 #   3. The temporary source tree is removed and the EXIT trap does not report
@@ -148,6 +149,25 @@ build_fake_archive() {
   printf '%s\n' "$DIST_DIR/tag.tar.gz"
 }
 FAKE_TARBALL="$(build_fake_archive)"
+
+# Tags that link RTK declare its path dependency and ship the script that
+# fetches it; the stub records its run in the cargo log to prove the ordering.
+build_linked_archive() {
+  local stage="$TEST_DIR/linked-stage/$ARCHIVE_ROOT"
+  rm -rf "$TEST_DIR/linked-stage"
+  mkdir -p "$stage/src/tokenless/crates/tokenless-cli" "$stage/src/tokenless/packaging/build"
+  # An extra key ahead of `path` must still mark the tree as linked.
+  printf '[workspace]\nmembers = ["crates/tokenless-cli"]\n\n[workspace.dependencies]\nrtk = { version = "0.49.0", path = "third_party/rtk" }\n' \
+    > "$stage/src/tokenless/Cargo.toml"
+  printf '[package]\nname = "tokenless-cli"\n' > "$stage/src/tokenless/crates/tokenless-cli/Cargo.toml"
+  cat > "$stage/src/tokenless/packaging/build/setup-rtk.sh" <<'SETUP'
+printf 'setup-rtk\n' >> "${CARGO_LOG:-/dev/null}"
+[ "${SETUP_RTK_FAIL:-0}" = "0" ]
+SETUP
+  tar -czf "$DIST_DIR/linked-tag.tar.gz" -C "$TEST_DIR/linked-stage" "$ARCHIVE_ROOT"
+  printf '%s\n' "$DIST_DIR/linked-tag.tar.gz"
+}
+LINKED_TARBALL="$(build_linked_archive)"
 
 # --- stubs -------------------------------------------------------------------
 cat > "$STUB_DIR/curl" <<'STUB'
@@ -821,6 +841,31 @@ assert_eq "receipt records only the CLI" "$(receipt_files source-build)" "$S1_DI
 assert_eq "source receipt has no npm prefix" "$(receipt_value source-build npm_prefix)" ""
 assert_eq "source receipt has no adapters dir" "$(receipt_value source-build adapters_dir)" ""
 assert_contains "reports CLI-only scope" "$RUN_OUTPUT" "CLI only"
+assert_not_contains "a tag without linked RTK skips its setup" "$(cargo_log source-build)" "setup-rtk"
+
+# =============================================================================
+# Scenario 1b — a tag that links RTK fetches its source before cargo runs
+# =============================================================================
+run_script "$INSTALL_SH" source-build-linked-rtk \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1" \
+  "CURL_TAG_TARBALL=$LINKED_TARBALL"
+assert_eq "RTK-linked source build exits 0" "$RUN_STATUS" "0"
+assert_eq "fetches RTK before building the CLI" \
+  "$(cargo_log source-build-linked-rtk | tr '\n' ' ')" "setup-rtk build --release --locked -p tokenless-cli "
+assert_file "RTK-linked source build installs the CLI" \
+  "$TEST_DIR/source-build-linked-rtk/home/.local/bin/tokenless"
+
+run_script "$INSTALL_SH" source-build-rtk-failure \
+  "TOKENLESS_VERSION=$FAKE_VERSION" \
+  "TOKENLESS_FORCE_BUILD=1" \
+  "CURL_TAG_TARBALL=$LINKED_TARBALL" \
+  "SETUP_RTK_FAIL=1"
+assert_eq "a failed RTK setup fails the source build" "$RUN_STATUS" "1"
+assert_contains "names the failed RTK setup" "$RUN_OUTPUT" "RTK source setup failed"
+assert_eq "never builds without the RTK source" "$(cargo_log source-build-rtk-failure)" "setup-rtk"
+assert_no_file "installs nothing after a failed RTK setup" \
+  "$TEST_DIR/source-build-rtk-failure/home/.local/bin/tokenless"
 
 # =============================================================================
 # Scenario 2 — source build must not remove files it never installed

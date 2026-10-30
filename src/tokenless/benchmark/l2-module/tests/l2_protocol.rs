@@ -107,8 +107,8 @@ fn mismatched_response_id_is_a_protocol_error() {
 
 #[test]
 fn rtk_paired_run_captures_both_sides() {
-    // `/bin/echo` stands in for rtk: the wrapped run prepends the argv, so
-    // the two outputs differ and both wall clocks are observable.
+    // `/bin/echo` stands in for tokenless: the wrapped run echoes `rtk` and the
+    // argv, so the two outputs differ and both wall clocks are observable.
     let cwd = std::env::temp_dir();
     let argv: Vec<String> = ["/bin/echo", "hello", "world"]
         .iter()
@@ -120,11 +120,7 @@ fn rtk_paired_run_captures_both_sides() {
         "raw: {:?}",
         run.raw_text
     );
-    assert!(
-        run.rtk_text.contains("hello world"),
-        "wrapped: {:?}",
-        run.rtk_text
-    );
+    assert_eq!(run.rtk_text, "rtk /bin/echo hello world\n");
     assert!(run.raw_wall_s >= 0.0 && run.rtk_wall_s >= 0.0);
     // The overhead estimate is floored at zero by construction.
     assert!(run.rtk_overhead_s() >= 0.0);

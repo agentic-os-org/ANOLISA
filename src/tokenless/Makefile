@@ -291,7 +291,7 @@ test-qwenwork-install:
 	python3 tests/test_qwenwork_install.py
 
 # The L1 runner records an `rtk_version` in benchmark_identity.json through a
-# best-effort probe that must never stall the suite: a bare `$RTK_BIN` is
+# best-effort probe that must never stall the suite: a bare `$TOKENLESS_BIN` is
 # resolved through PATH, the probe runs under a timeout(1) deadline whose child
 # is reaped, and only a successful probe records a version (everything else
 # collapses to "unavailable"). tests/test-benchmark-rtk-version-probe.sh guards
@@ -305,13 +305,11 @@ test-benchmark-rtk-probe:
 	@echo "==> Testing benchmark RTK version probe..."
 	bash tests/test-benchmark-rtk-version-probe.sh
 
-# Hook counterfactuals need both real binaries to rule out fail-open success.
+# Hook counterfactuals need the real binary to rule out fail-open success.
 test-rtk-integration: test-benchmark-rtk-probe
-	cargo build --locked -p tokenless-cli
 	bash packaging/build/setup-rtk.sh
-	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
-	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
-		python3 tests/test_rtk_integration.py
+	cargo build --locked -p tokenless-cli
+	python3 tests/test_rtk_integration.py
 
 # Protocol v2 Common Hook parity: replay the contract corpus through the
 # current hooks and real debug binary, then compare with the v2 goldens.

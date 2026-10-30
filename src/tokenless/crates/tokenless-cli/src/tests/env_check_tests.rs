@@ -239,23 +239,8 @@ fn version_ge_patch_comparison() {
 #[cfg(unix)]
 #[test]
 fn binary_fallback_paths_cover_supported_installers() {
-    let paths = binary_fallback_paths("rtk", "/home/alice");
-    let expected = [
-        "/home/alice/.local/bin/rtk",
-        "/home/alice/.local/libexec/tokenless/rtk",
-        "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
-        "/home/alice/.local/libexec/anolisa/tokenless/rtk",
-        "/usr/local/bin/rtk",
-        "/usr/local/libexec/tokenless/rtk",
-        "/usr/local/libexec/anolisa/tokenless/rtk",
-        "/usr/bin/rtk",
-        "/usr/libexec/tokenless/rtk",
-        "/usr/libexec/anolisa/tokenless/rtk",
-        "/usr/lib/anolisa/tokenless/rtk",
-        "/home/alice/.local/share/anolisa/tokenless/rtk",
-        "/home/alice/.local/lib/anolisa/tokenless/rtk",
-    ]
-    .map(PathBuf::from);
+    let paths = binary_fallback_paths("jq", "/home/alice");
+    let expected = ["/home/alice/.local/bin/jq", "/usr/local/bin/jq", "/usr/bin/jq"].map(PathBuf::from);
     assert_eq!(paths, expected);
 }
 
@@ -263,15 +248,18 @@ fn binary_fallback_paths_cover_supported_installers() {
 #[cfg(unix)]
 #[test]
 fn generic_binary_fallbacks_do_not_probe_component_helpers() {
-    let paths = binary_fallback_paths("docker", "/home/alice");
-    assert!(paths.contains(&PathBuf::from("/home/alice/.local/bin/docker")));
-    assert!(paths.contains(&PathBuf::from("/usr/local/bin/docker")));
-    assert!(paths.contains(&PathBuf::from("/usr/bin/docker")));
-    assert!(
-        !paths
-            .iter()
-            .any(|path| path.to_string_lossy().contains("tokenless"))
-    );
+    // RTK is embedded in Tokenless, so it has no helper layout of its own either.
+    for binary in ["docker", "rtk"] {
+        let paths = binary_fallback_paths(binary, "/home/alice");
+        assert!(paths.contains(&PathBuf::from(format!("/home/alice/.local/bin/{binary}"))));
+        assert!(paths.contains(&PathBuf::from(format!("/usr/local/bin/{binary}"))));
+        assert!(paths.contains(&PathBuf::from(format!("/usr/bin/{binary}"))));
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("tokenless"))
+        );
+    }
 }
 
 // Legacy readiness checks require Unix tools or filesystem layouts.
@@ -462,35 +450,6 @@ fn chmod_file(path: &std::path::Path, mode: u32) {
     let mut perm = std::fs::metadata(path).unwrap().permissions();
     perm.set_mode(mode);
     std::fs::set_permissions(path, perm).unwrap();
-}
-
-#[cfg(unix)]
-#[test]
-fn rtk_resolution_skips_incompatible_path_candidate() {
-    let directory = tempfile::tempdir().unwrap();
-    let incompatible = directory.path().join("path-rtk");
-    std::fs::write(&incompatible, "#!/bin/sh\nprintf 'rtk 0.1.0'\n").unwrap();
-    chmod_file(&incompatible, 0o700);
-
-    let bundled_dir = directory
-        .path()
-        .join(".local/lib/anolisa/libexec/tokenless");
-    std::fs::create_dir_all(&bundled_dir).unwrap();
-    let bundled = bundled_dir.join("rtk");
-    std::fs::write(&bundled, "#!/bin/sh\nprintf 'rtk 0.43.0'\n").unwrap();
-    chmod_file(&bundled, 0o700);
-
-    assert_eq!(
-        select_rtk_candidates(
-            std::iter::once(incompatible)
-                .chain(binary_fallback_paths(
-                    "rtk",
-                    directory.path().to_str().unwrap()
-                ))
-                .collect()
-        ),
-        Some(bundled.to_string_lossy().into_owned())
-    );
 }
 
 #[cfg(unix)]

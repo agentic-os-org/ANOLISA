@@ -519,7 +519,7 @@ fn version_ge(installed: &str, required: &str) -> bool {
 // KEEP IN SYNC with common/hooks/hook_utils.py, tool_ready_hook.sh, OpenClaw's
 // fallback constants, and the Codex standalone scripts. Makefile and the
 // Anolisa component manifest define the supported layouts; the canonical
-// order is user, /usr/local, /usr, then legacy.
+// order is user, /usr/local, then /usr.
 #[cfg(unix)]
 fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     let mut components = std::path::Path::new(binary).components();
@@ -533,51 +533,11 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     let home = std::path::Path::new(home);
     let user_home = (!home.as_os_str().is_empty() && home.is_absolute()).then_some(home);
     let mut paths = Vec::new();
-    if binary == "rtk"
-        && let Ok(executable) = std::env::current_exe()
-        && executable
-            .file_name()
-            .is_some_and(|name| name == "tokenless")
-        && let Some(prefix) = executable.parent().and_then(std::path::Path::parent)
-    {
-        paths.push(prefix.join("libexec/tokenless/rtk"));
-    }
     if let Some(home) = user_home {
         paths.push(home.join(".local/bin").join(binary));
-        if binary == "rtk" {
-            paths.extend([
-                home.join(".local/libexec/tokenless").join(binary),
-                // Anolisa CLI user mode.
-                home.join(".local/lib/anolisa/libexec/tokenless")
-                    .join(binary),
-                // Makefile user mode.
-                home.join(".local/libexec/anolisa/tokenless").join(binary),
-            ]);
-        }
     }
     paths.push(PathBuf::from("/usr/local/bin").join(binary));
-    if binary == "rtk" {
-        // Anolisa CLI system mode.
-        paths.push(PathBuf::from("/usr/local/libexec/tokenless").join(binary));
-        paths.push(PathBuf::from("/usr/local/libexec/anolisa/tokenless").join(binary));
-    }
     paths.push(PathBuf::from("/usr/bin").join(binary));
-    if binary == "rtk" {
-        paths.extend([
-            PathBuf::from("/usr/libexec/tokenless").join(binary),
-            // Makefile system mode and RPM.
-            PathBuf::from("/usr/libexec/anolisa/tokenless").join(binary),
-            // Debian and pre-layout-migration compatibility.
-            PathBuf::from("/usr/lib/anolisa/tokenless").join(binary),
-        ]);
-        if let Some(home) = user_home {
-            paths.extend([
-                home.join(".local/share/anolisa/tokenless").join(binary),
-                home.join(".local/lib/anolisa/tokenless").join(binary),
-            ]);
-        }
-    }
-
     paths
 }
 
@@ -653,50 +613,6 @@ pub(crate) fn resolve_binary_path(binary: &str) -> Option<String> {
                 .map(|path| path.to_string_lossy().into_owned())
         }
     }
-}
-
-pub(crate) fn resolve_rtk_path() -> Option<String> {
-    #[cfg(windows)]
-    let candidates = windows_binary_paths("rtk", ".exe");
-    #[cfg(unix)]
-    let path_candidate = if let Ok(output) = Command::new("sh")
-        .args(["-c", "command -v \"$1\"", "--", "rtk"])
-        .output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        (!path.is_empty()).then(|| PathBuf::from(path))
-    } else {
-        None
-    };
-    #[cfg(unix)]
-    let candidates = path_candidate
-        .into_iter()
-        .chain(binary_fallback_paths("rtk", &crate::get_home_dir()))
-        .collect::<Vec<_>>();
-    select_rtk_candidates(candidates)
-}
-
-fn select_rtk_candidates(candidates: Vec<PathBuf>) -> Option<String> {
-    candidates.into_iter().find_map(|path| {
-        if !is_executable_file(&path) {
-            return None;
-        }
-        let output = Command::new(&path).arg("--version").output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let version_text = format!(
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let version = VERSION_RE
-            .captures(&version_text)
-            .and_then(|captures| captures.get(1))?
-            .as_str();
-        version_ge(version, "0.35.0").then(|| path.to_string_lossy().into_owned())
-    })
 }
 
 /// Check if a binary is available and meets version constraints.

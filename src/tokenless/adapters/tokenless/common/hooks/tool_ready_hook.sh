@@ -292,7 +292,7 @@ version_ge() {
 # KEEP IN SYNC with hook_utils.py::_known_binary_paths,
 # env_check.rs::binary_fallback_paths, OpenClaw's fallback constants, and the
 # Codex standalone scripts. Makefile and the Anolisa component manifest define
-# the supported layouts; the canonical order is user, /usr/local, /usr, legacy.
+# the supported layouts; the canonical order is user, /usr/local, then /usr.
 resolve_binary() {
   local name="$1"
   case "$name" in
@@ -306,39 +306,7 @@ resolve_binary() {
   if [ -n "$USER_HOME" ]; then
     candidates+=("$USER_HOME/.local/bin/$name")
   fi
-  case "$name" in
-    rtk)
-      if [ -n "$USER_HOME" ]; then
-        candidates+=(
-          "$USER_HOME/.local/libexec/tokenless/$name"
-          "$USER_HOME/.local/lib/anolisa/libexec/tokenless/$name"
-          "$USER_HOME/.local/libexec/anolisa/tokenless/$name"
-        )
-      fi
-      ;;
-  esac
-  candidates+=("/usr/local/bin/$name")
-  case "$name" in
-    rtk)
-      candidates+=("/usr/local/libexec/tokenless/$name" "/usr/local/libexec/anolisa/tokenless/$name")
-      ;;
-  esac
-  candidates+=("/usr/bin/$name")
-  case "$name" in
-    rtk)
-      candidates+=(
-        "/usr/libexec/tokenless/$name"
-        "/usr/libexec/anolisa/tokenless/$name"
-        "/usr/lib/anolisa/tokenless/$name"
-      )
-      if [ -n "$USER_HOME" ]; then
-        candidates+=(
-          "$USER_HOME/.local/share/anolisa/tokenless/$name"
-          "$USER_HOME/.local/lib/anolisa/tokenless/$name"
-        )
-      fi
-      ;;
-  esac
+  candidates+=("/usr/local/bin/$name" "/usr/bin/$name")
 
   local candidate
   for candidate in "${candidates[@]}"; do

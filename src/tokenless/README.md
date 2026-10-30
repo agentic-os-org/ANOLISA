@@ -12,7 +12,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
 The bundled RTK 0.49.0 preserves native `grep -l` / `-m` semantics, rewrites pipelines
-conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rtk recall`; retained output is scoped to the host OS user,
+conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `tokenless rtk recall`; retained output is scoped to the host OS user,
 not isolated by Tokenless tenant or session.
 See [bundled RTK commands](../../docs/user-guide/en/tokenless/cli-reference.md#bundled-rtk-commands)
 for flag migration, pipeline behavior, and output recovery.
@@ -203,7 +203,7 @@ apply to them; enable a framework with its bundled script under
 instead. The curl installer records what it created in
 `~/.local/share/tokenless/install-receipt`, which `scripts/uninstall.sh`
 consumes to remove exactly those paths; its source-build path is CLI-only
-(no `rtk`, no adapters). Agent frameworks can run the same steps through the
+(no adapters) and needs Git and `patch` to fetch the pinned RTK source. Agent frameworks can run the same steps through the
 `install-tokenless` OS Skill. The full method matrix lives in
 `docs/user-guide/en/tokenless/index.md`.
 
@@ -279,8 +279,9 @@ plain workspace-default Cargo commands exclude the Python extension.
 
 The `anolisa_tokenless` module supports CPython 3.11 and later on the platform
 where its native wheel was built. It exposes the four Tokenless lifecycle
-methods and bundles the matching RTK executable; TOON is linked into the native
-runtime. It does not require the Tokenless CLI or system helper binaries. The
+methods and bundles the matching `tokenless` executable, which runs rewritten
+commands; TOON is linked into the native runtime. It does not require the
+Tokenless CLI or system helper binaries. The
 package is built and tested in this repository but is not yet published to
 PyPI. See the [Python SDK guide](../../docs/developer-guide/en/sdk/tokenless/index.md) for
 runnable lifecycle and Stats examples, the
@@ -1018,8 +1019,9 @@ lifecycle policy, and do not expect retrieval across nodes.
 
 Both AgentScope adapters enable schema compression, RTK command rewriting,
 response compression, TOON, retrieval, environment-error guidance, and
-per-call attribution. The native wheel contains RTK and links TOON directly;
-it does not search for system executables. Host objects and streaming chunks
+per-call attribution. The native wheel links TOON directly and runs rewritten
+commands through its bundled `tokenless` executable; it does not search for
+system executables. Host objects and streaming chunks
 remain unchanged; only copied call arguments and final model-visible text are
 transformed. Tool Ready remains hard-disabled.
 

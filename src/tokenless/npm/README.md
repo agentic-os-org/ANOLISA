@@ -128,9 +128,9 @@ make install
 ### Prerequisites
 
 - **Linux** host (glibc-based distribution)
-- **Rust** toolchain >= 1.91 (required by rtk v0.49.0)
-- **just** — build runner for rtk setup
-- **Git** — for rtk source download
+- **Rust** toolchain >= 1.91 (required by RTK v0.49.0)
+- **just** — build runner for RTK source setup
+- **Git** and **patch** — for the pinned RTK source download
 - **Node.js 22+ and npm** — for the framework plugin build and validation
 
 ## Packaging for npm

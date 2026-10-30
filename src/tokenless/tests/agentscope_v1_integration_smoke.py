@@ -216,7 +216,7 @@ async def main() -> None:
             ),
         )
         assert len(_SHELL_COMMANDS) == 1
-        assert str(integration.sdk._rtk_path) in _SHELL_COMMANDS[0]
+        assert str(integration.sdk._rtk_launcher) in _SHELL_COMMANDS[0]
         assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_SESSION_ID=smoke-session" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]

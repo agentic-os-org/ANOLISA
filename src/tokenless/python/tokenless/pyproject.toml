@@ -35,7 +35,7 @@ module-name = "anolisa_tokenless._native"
 features = ["pyo3/extension-module"]
 strip = true
 include = [
-    { path = "python/anolisa_tokenless/_bin/rtk", format = "wheel" },
-    { path = "python/anolisa_tokenless/_bin/rtk.exe", format = "wheel" },
+    { path = "python/anolisa_tokenless/_bin/tokenless", format = "wheel" },
+    { path = "python/anolisa_tokenless/_bin/tokenless.exe", format = "wheel" },
 ]
 exclude = ["python/anolisa_tokenless/**/__pycache__/**"]

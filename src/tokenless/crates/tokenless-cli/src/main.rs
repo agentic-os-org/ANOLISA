@@ -2,6 +2,7 @@
 mod env_check;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
@@ -178,7 +179,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run the embedded RTK command line (see `tokenless rtk --help`)
+    ///
+    /// Commands rewritten by PreTool run RTK through this subcommand.
+    #[command(disable_help_flag = true)]
+    Rtk {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
 }
+
+/// Subcommand that hands the remaining arguments to the embedded RTK.
+const RTK_SUBCOMMAND: &str = "rtk";
+/// Program name RTK prints in usage and recovery hints.
+const RTK_PROGRAM: &str = "tokenless rtk";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum DiffSortArg {
@@ -680,10 +694,23 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 None
             };
-            let rtk_path = matches!(&request.request, Request::PreTool(_))
-                .then(env_check::resolve_rtk_path)
-                .flatten()
-                .map(PathBuf::from);
+            // The rewritten command runs later from the agent's working directory,
+            // so it names this executable by absolute path.
+            let rtk_launcher = match &request.request {
+                Request::PreTool(_) => Some(
+                    std::env::current_exe()
+                        .and_then(std::path::absolute)
+                        .map_err(|error| {
+                            (
+                                format!(
+                                    "cannot locate the tokenless executable for RTK commands: {error}"
+                                ),
+                                1,
+                            )
+                        })?,
+                ),
+                _ => None,
+            };
             let rtk_data_dir = match &request.request {
                 Request::PreTool(_) => Some(
                     database_paths
@@ -717,7 +744,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
                     html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", true),
                     stash_enabled: true,
-                    rtk_path,
+                    rtk_launcher,
                     rtk_data_dir,
                 },
                 stash.as_ref(),
@@ -1287,6 +1314,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
         }
+        // main() runs RTK before parsing so `--` and help flags reach it
+        // verbatim; a parsed `rtk` subcommand still runs RTK rather than relying
+        // on that.
+        Commands::Rtk { args } => process::exit(rtk::run(RTK_PROGRAM, args)),
     }
 
     Ok(())
@@ -1488,6 +1519,12 @@ fn report_fatal(message: &str) {
 }
 
 fn main() {
+    // RTK parses its own arguments, including `--` and help flags, so they pass
+    // through verbatim instead of through the Tokenless parser.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|arg| arg == RTK_SUBCOMMAND) {
+        process::exit(rtk::run(RTK_PROGRAM, args));
+    }
     if let Err((msg, code)) = run() {
         report_fatal(&msg);
         process::exit(code);

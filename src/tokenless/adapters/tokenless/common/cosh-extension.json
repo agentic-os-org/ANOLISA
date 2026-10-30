@@ -25,7 +25,7 @@
           {
             "type": "command",
             "name": "tokenless-rewrite",
-            "description": "Rewrites shell commands via rtk for token savings",
+            "description": "Rewrites shell commands via the embedded RTK for token savings",
             "command": "python3 ${extensionPath}/hooks/rewrite_hook.py --agent-id copilot-shell",
             "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }

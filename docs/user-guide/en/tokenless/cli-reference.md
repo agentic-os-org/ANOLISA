@@ -18,6 +18,7 @@ operations, Stash retrieval, environment status, and statistics. Shared Agent ho
 | `tokenless retrieve` | Recover a payload truncated into Stash |
 | `tokenless env-check` | Report the hard-disabled state of the legacy environment check |
 | `tokenless stats` | Query and control local statistics |
+| `tokenless rtk` | Run the bundled RTK commands that PreTool rewrites to; see [Bundled RTK commands](#bundled-rtk-commands) |
 
 Use the installed version's help as the final argument reference:
 
@@ -152,12 +153,13 @@ Exit codes are part of the transport contract:
 
 - `0`: a normal operation result, including passthrough, no savings, dry-run, unavailable
   recoverability, RTK not applicable, and tool errors.
-- `1`: an operation failed, including RTK timeout, unauthorized or missing Retrieve, Stash failure,
-  or Pipeline failure. The error is written to stderr and no response JSON is emitted.
+- `1`: an operation failed, including a missing RTK launcher or state directory, unauthorized or
+  missing Retrieve, Stash failure, or Pipeline failure. The error is written to stderr and no response JSON is emitted.
 - `2`: malformed JSON, unsupported protocol version, or an invalid envelope/payload shape.
 
-The `pre_tool` operation resolves the separately packaged `rtk` executable from `PATH` and supported
-install layouts, skipping candidates older than 0.35.0 before trying the next packaged location.
+The `pre_tool` operation rewrites commands with the RTK library linked into Tokenless; it does not
+search `PATH` for a separate `rtk` executable. Rewritten commands call the running `tokenless`
+executable by its absolute path as `tokenless rtk`, so they always run the same RTK version.
 Recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands stay native so their output has
 a single PostTool owner. Entire commands containing a recognized native `find`, `head`, or `tail`
 invocation also stay native. The protection covers direct calls and RTK's built-in prefixes:
@@ -180,24 +182,24 @@ does not require model-visibility context.
 
 ## Bundled RTK commands
 
-Tokenless bundles RTK 0.49.0. The behavior below applies to that binary; a compatible
-`rtk` found earlier on `PATH` can be a different version. Check `rtk --version` when
-using these commands directly.
+Tokenless links RTK 0.49.0 and exposes its commands as `tokenless rtk`. The behavior
+below applies to that subcommand; a separately installed `rtk` on `PATH` can be a
+different version. Check `tokenless rtk --version` to confirm the bundled version.
 
 ### Search flags
 
-`rtk grep` forwards native search flags to `grep`: `-l` lists matching file names,
+`tokenless rtk grep` forwards native search flags to `grep`: `-l` lists matching file names,
 and `-m N` limits matches per file. They no longer mean RTK's line-length or display
 limits. Use the long options `--max-len` and `--max` before the pattern to control
 those RTK display limits. The former RTK `-t` / `--file-type` option is removed;
-use `rtk rg -t rust` for ripgrep's native file-type filtering. Passing `-t` to
-`rtk grep` now exposes the underlying grep's unsupported-option error.
+use `tokenless rtk rg -t rust` for ripgrep's native file-type filtering. Passing `-t` to
+`tokenless rtk grep` now exposes the underlying grep's unsupported-option error.
 
 ```bash
-rtk grep -l 'TODO' src/*.rs
-rtk grep -m 3 'TODO' src/*.rs
-rtk grep --max 20 --max-len 120 'TODO' src/*.rs
-rtk rg -t rust 'TODO' src/
+tokenless rtk grep -l 'TODO' src/*.rs
+tokenless rtk grep -m 3 'TODO' src/*.rs
+tokenless rtk grep --max 20 --max-len 120 'TODO' src/*.rs
+tokenless rtk rg -t rust 'TODO' src/
 ```
 
 ### Shell rewriting
@@ -209,7 +211,7 @@ or `cat`. Pipelines that count or parse raw output may remain unchanged; rewriti
 is not guaranteed for every shell expression. `sudo` commands pass through unchanged,
 so automatic rewriting does not insert RTK into a privileged command.
 
-Use `rtk rewrite 'COMMAND'` to inspect a proposed rewrite without executing the
+Use `tokenless rtk rewrite 'COMMAND'` to inspect a proposed rewrite without executing the
 command. Tokenless keeps its recognized build/test commands and native `find`, `head`, and `tail` calls,
 including whole compound commands containing such a call, outside RTK rewriting as described above. PostTool can
 share profitable pure path lists; mixed output and unsupported `find` formats remain native.
@@ -218,9 +220,9 @@ share profitable pure path lists; mixed output and unsupported `find` formats re
 
 With the default RTK configuration, supported filters store failure output of at
 least 500 bytes and explicitly truncated output in a local SQLite recovery store.
-When a recovery hint appears, run `rtk recall HASH` with the displayed hash;
-`rtk recall --full HASH` requests all stored output, and `--from`, `--lines`, and
-`--grep` narrow the result. `rtk recall --list` lists retained entries. Storage limits
+When a recovery hint appears, run `tokenless rtk recall HASH` with the displayed hash;
+`tokenless rtk recall --full HASH` requests all stored output, and `--from`, `--lines`, and
+`--grep` narrow the result. `tokenless rtk recall --list` lists retained entries. Storage limits
 and expiry apply, so recall is not a permanent archive. Existing legacy tee
 configuration continues to use its file-based recovery mode.
 

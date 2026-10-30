@@ -284,9 +284,6 @@ def _resolve_hook_utils() -> tuple[str, list[str]]:
 _HOOK_UTILS_RESOLVED, _HOOK_UTILS_CANDIDATES = _resolve_hook_utils()
 
 from hook_utils import (
-    _RTK_FALLBACK,
-    _RTK_LOCAL_LIB,
-    _RTK_LOCAL_SHARE,
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
@@ -324,22 +321,9 @@ _SHELL_TOOLS: set[str] = _SHELL_TOOLS_SHARED
 # Binary resolution (thin wrapper over shared cached resolve_binary)
 # ---------------------------------------------------------------------------
 
-# Hermes-specific fallback paths for the RTK binary.
-_RTK_LIB_FALLBACK = "/usr/lib/anolisa/tokenless/rtk"
-
-
 def _resolve_binary(name: str, fallback: str) -> str | None:
     """Resolve binary with hermes-specific fallback paths (cached via shared)."""
     local_bin = os.path.join(os.path.expanduser("~"), ".local", "bin", name)
-    if name == "rtk":
-        return resolve_binary(
-            name,
-            fallback,
-            _RTK_LIB_FALLBACK,
-            local_bin,
-            _RTK_LOCAL_LIB,
-            _RTK_LOCAL_SHARE,
-        )
     return resolve_binary(name, fallback, local_bin, _TOKENLESS_LOCAL_LIB, _TOKENLESS_LOCAL_SHARE)
 
 
@@ -404,8 +388,9 @@ def _output_optimization(args: Any) -> str:
             and wrapper[2].startswith("TOKENLESS_SESSION_ID=")
             and wrapper[3].startswith("TOKENLESS_TOOL_USE_ID=")
             and wrapper[4].startswith("TOKENLESS_DATA_DIR=")
-            and executable < len(tokens)
-            and os.path.basename(tokens[executable]) == "rtk"
+            and executable + 1 < len(tokens)
+            and os.path.basename(tokens[executable]) in ("tokenless", "tokenless.exe")
+            and tokens[executable + 1] == "rtk"
         ):
             return "rtk"
     return "none"

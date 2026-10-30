@@ -213,23 +213,27 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             "tenant-retrieve_2",
         )
 
-    def test_packaged_rtk_requires_a_stable_filesystem_resource(self) -> None:
+    def test_packaged_launcher_requires_a_stable_filesystem_resource(self) -> None:
         with patch("anolisa_tokenless.sdk.files") as package_files:
             package_files.return_value.joinpath.return_value = object()
             with self.assertRaisesRegex(RuntimeError, "unpacked wheel"):
                 self.sdk()
 
-    def test_packaged_rtk_uses_the_platform_executable_name(self) -> None:
+    def test_packaged_launcher_uses_the_platform_executable_name(self) -> None:
         package = Path(self.temporary_directory.name) / "package"
         (package / "_bin").mkdir(parents=True)
-        for platform, name in (("win32", "rtk.exe"), ("linux", "rtk"), ("darwin", "rtk")):
+        for platform, name in (
+            ("win32", "tokenless.exe"),
+            ("linux", "tokenless"),
+            ("darwin", "tokenless"),
+        ):
             with self.subTest(platform=platform):
                 executable = package / "_bin" / name
                 executable.touch(mode=0o755)
                 with patch("sys.platform", platform), patch(
                     "anolisa_tokenless.sdk.files", return_value=package
                 ):
-                    self.assertEqual(self.sdk()._rtk_path, executable)
+                    self.assertEqual(self.sdk()._rtk_launcher, executable)
                 executable.unlink()
 
     async def test_pre_tool_uses_core_rewrite_and_preserves_input(self) -> None:
@@ -250,7 +254,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.action, PreToolAction.REPLACE_ARGUMENTS)
         self.assertEqual(result.output_optimization, OutputOptimization.RTK)
         self.assertEqual(original_arguments["command"], "grep needle file.txt")
-        self.assertIn(str(sdk._rtk_path), result.arguments["command"])
+        self.assertIn(f"{sdk._rtk_launcher} rtk grep", result.arguments["command"])
         self.assertIn("TOKENLESS_AGENT_ID=sdk-agent", result.arguments["command"])
         self.assertIn("TOKENLESS_SESSION_ID=sdk-session", result.arguments["command"])
         self.assertIn("TOKENLESS_TOOL_USE_ID=call-7", result.arguments["command"])

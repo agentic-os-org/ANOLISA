@@ -101,14 +101,13 @@ trap cleanup EXIT
 
 mkdir -p "$FAKE_BIN" "$SHARED_HOOKS"
 
-# detect.sh also requires `tokenless` and `rtk` on PATH (their absence is a
-# prerequisite failure). Provide isolated stubs so this test is
-# self-contained: run_detect restricts PATH to the fake home plus system
-# directories, and a fresh runner or detached worktree may not have either
-# binary installed globally.
+# detect.sh also requires `tokenless` on PATH (its absence is a prerequisite
+# failure). Provide an isolated stub so this test is self-contained:
+# run_detect restricts PATH to the fake home plus system directories, and a
+# fresh runner or detached worktree may not have the binary installed
+# globally.
 printf '#!/bin/sh\nexit 0\n' >"$FAKE_BIN/tokenless"
-printf '#!/bin/sh\nexit 0\n' >"$FAKE_BIN/rtk"
-chmod +x "$FAKE_BIN/tokenless" "$FAKE_BIN/rtk"
+chmod +x "$FAKE_BIN/tokenless"
 
 fail() {
     echo "FAIL: $1" >&2
@@ -302,12 +301,10 @@ grep -qF "installed ($PLUGIN_ID)" <<<"$out" \
     || fail "plugin should be reported installed after the race settles" "$out"
 grep -qF "claude-code: ready" <<<"$out" \
     || fail "claude-code should be reported ready after the race settles" "$out"
-# Self-containment: detect.sh must have resolved the isolated stubs above,
-# not any runner-installed binaries.
+# Self-containment: detect.sh must have resolved the isolated stub above,
+# not a runner-installed binary.
 grep -qF "present ($FAKE_BIN/tokenless)" <<<"$out" \
     || fail "detect.sh should resolve the isolated tokenless stub, not a host binary" "$out"
-grep -qF "present ($FAKE_BIN/rtk)" <<<"$out" \
-    || fail "detect.sh should resolve the isolated rtk stub, not a host binary" "$out"
 # The $HOME/.claude half of the reported race: the config dir is still
 # invisible at probe time. detect.sh must report it as missing without
 # letting that affect readiness (the probe is informational only).

@@ -18,6 +18,7 @@
 | `tokenless retrieve` | 取回被截断并写入 Stash 的 Payload |
 | `tokenless env-check` | 报告旧版环境检查已硬关闭 |
 | `tokenless stats` | 查询和控制本地统计 |
+| `tokenless rtk` | 运行 PreTool 改写后使用的随包 RTK 命令，见[随包提供的 RTK 命令](#随包提供的-rtk-命令) |
 
 使用当前安装版本的帮助查看最终参数定义：
 
@@ -143,12 +144,13 @@ BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增�
 
 - `0`：正常操作结果，包括透传、无收益、Dry-run、Recoverability 不可用、RTK 不适用和
   Tool Error。
-- `1`：操作失败，包括 RTK Timeout、未授权/缺失 Retrieve、Stash 或 Pipeline 失败。错误写入
+- `1`：操作失败，包括缺少 RTK 启动程序或状态目录、未授权/缺失 Retrieve、Stash 或 Pipeline 失败。错误写入
   stderr，不输出 Response JSON。
 - `2`：JSON 格式错误、不支持的协议版本，或 Envelope/Payload Shape 无效。
 
-`pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`；低于 0.35.0 的候选会被跳过，
-并继续尝试后续打包位置。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
+`pre_tool` 使用链接进 Tokenless 的 RTK 库改写命令，不会在 `PATH` 中查找独立的 `rtk`
+可执行文件。改写后的命令以绝对路径调用当前运行的 `tokenless`，形式为 `tokenless rtk`，
+因此始终使用同一版本的 RTK。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
 原生形式，使其输出只有一个 PostTool 所有者。包含已识别原生 `find`、`head` 或 `tail`
 调用的整条命令也保持原生形式。保护覆盖直接调用，以及 RTK 的内置前缀：
 `env`、`command`、`exec`、`noglob`、`nocorrect`、
@@ -168,23 +170,23 @@ Agent-facing
 
 ## 随包提供的 RTK 命令
 
-Tokenless 随包提供 RTK 0.49.0。以下行为适用于该二进制；如果 `PATH` 中更靠前的
-位置存在兼容的 `rtk`，实际使用的版本可能不同。直接使用这些命令时，可通过
-`rtk --version` 检查版本。
+Tokenless 链接 RTK 0.49.0，并以 `tokenless rtk` 子命令提供其命令。以下行为适用于该
+子命令；`PATH` 中单独安装的 `rtk` 可能是其他版本。可通过 `tokenless rtk --version`
+确认随包版本。
 
 ### 搜索 Flag
 
-`rtk grep` 将原生搜索 Flag 转交给 `grep`：`-l` 列出匹配文件名，`-m N` 限制每个
+`tokenless rtk grep` 将原生搜索 Flag 转交给 `grep`：`-l` 列出匹配文件名，`-m N` 限制每个
 文件的匹配数量。它们不再表示 RTK 的行长度或显示数量限制。要控制 RTK 的显示限制，
 请在 Pattern 前使用长选项 `--max-len` 和 `--max`。原先 RTK 提供的 `-t` /
-`--file-type` 选项已移除；按文件类型过滤时，使用 `rtk rg -t rust` 调用 ripgrep
-的原生功能。向 `rtk grep` 传入 `-t` 现在会显示底层 grep 不支持该选项的错误。
+`--file-type` 选项已移除；按文件类型过滤时，使用 `tokenless rtk rg -t rust` 调用 ripgrep
+的原生功能。向 `tokenless rtk grep` 传入 `-t` 现在会显示底层 grep 不支持该选项的错误。
 
 ```bash
-rtk grep -l 'TODO' src/*.rs
-rtk grep -m 3 'TODO' src/*.rs
-rtk grep --max 20 --max-len 120 'TODO' src/*.rs
-rtk rg -t rust 'TODO' src/
+tokenless rtk grep -l 'TODO' src/*.rs
+tokenless rtk grep -m 3 'TODO' src/*.rs
+tokenless rtk grep --max 20 --max-len 120 'TODO' src/*.rs
+tokenless rtk rg -t rust 'TODO' src/
 ```
 
 ### Shell 重写
@@ -194,7 +196,7 @@ RTK 支持跨多行处理已支持的命令，并对 Pipeline 应用保守规则
 受支持的输出生产者。统计或解析原始输出的 Pipeline 可能保持原样，不能保证每个
 Shell 表达式都会被重写。`sudo` 命令保持原样透传，自动重写不会将 RTK 插入特权命令。
 
-使用 `rtk rewrite 'COMMAND'` 可以查看建议的重写结果，而不执行命令。
+使用 `tokenless rtk rewrite 'COMMAND'` 可以查看建议的重写结果，而不执行命令。
 Tokenless 按上文规则让已识别的构建/测试命令及原生 `find`、`head`、`tail` 调用（包括含此类调用的整条复合命令）
 跳过 RTK 改写。PostTool 可以共享有净收益的纯路径列表；混合输出和不支持的 `find` 格式保持原样。
 
@@ -202,8 +204,8 @@ Tokenless 按上文规则让已识别的构建/测试命令及原生 `find`、`h
 
 在默认 RTK 配置下，受支持的 Filter 会将至少 500 字节的失败输出及明确截断的输出
 保存到本地 SQLite 恢复存储。出现恢复提示时，使用提示中的 Hash 执行
-`rtk recall HASH`；`rtk recall --full HASH` 请求全部已保存的输出，`--from`、
-`--lines` 和 `--grep` 可缩小返回范围。`rtk recall --list` 列出保留的条目。
+`tokenless rtk recall HASH`；`tokenless rtk recall --full HASH` 请求全部已保存的输出，`--from`、
+`--lines` 和 `--grep` 可缩小返回范围。`tokenless rtk recall --list` 列出保留的条目。
 存储受容量及过期策略限制，因此 Recall 不是永久归档。已有的旧版 tee 配置继续
 使用基于文件的恢复模式。
 

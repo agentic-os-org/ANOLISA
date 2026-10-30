@@ -70,7 +70,7 @@ class TokenlessRuntime:
     def _pre_tool_json(
         self,
         request_json: str,
-        rtk_path: str | os.PathLike[str],
+        rtk_launcher: str | os.PathLike[str],
         *,
         agent_id: str = "python",
         session_id: str | None = None,
