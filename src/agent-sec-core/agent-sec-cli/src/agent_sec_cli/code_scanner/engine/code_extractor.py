@@ -39,8 +39,13 @@ def extract_inline_code(command: str) -> Optional[Tuple[str, Language]]:
     return _try_extract(command)
 
 
-def _try_extract(command: str) -> Optional[Tuple[str, Language]]:
-    """Attempt to extract inline code from *command*."""
+def extract_inline_code_span(command: str) -> Optional[Tuple[str, Language, int, int]]:
+    """Extract inline code plus the span of the interpreter invocation.
+
+    Returns ``(code, language, start, end)`` where ``command[start:end]`` is
+    the matched interpreter call — the remainder around it still needs its
+    own scan. ``None`` when the command does not match any known pattern.
+    """
     m = _INLINE_RE.search(command)
     if m is None:
         return None
@@ -49,7 +54,16 @@ def _try_extract(command: str) -> Optional[Tuple[str, Language]]:
     code = m.group(3)
 
     if interpreter in _SHELL_INTERPRETERS:
-        return (code, Language.BASH)
+        return (code, Language.BASH, m.start(), m.end())
     if interpreter in _PYTHON_INTERPRETERS:
-        return (code, Language.PYTHON)
+        return (code, Language.PYTHON, m.start(), m.end())
     return None
+
+
+def _try_extract(command: str) -> Optional[Tuple[str, Language]]:
+    """Attempt to extract inline code from *command*."""
+    span = extract_inline_code_span(command)
+    if span is None:
+        return None
+    code, language, _, _ = span
+    return (code, language)
