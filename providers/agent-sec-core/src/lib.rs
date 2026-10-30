@@ -2,6 +2,7 @@
 
 mod config;
 pub mod health;
+pub mod pii;
 mod scan;
 mod trace_context;
 

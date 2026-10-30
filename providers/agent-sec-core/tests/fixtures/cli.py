@@ -17,6 +17,14 @@ if case.get("record_health_environment"):
         key: os.environ.get(key) for key in ["AGENT_SEC_DAEMON_SOCKET",
         "AGENT_SEC_HEALTH_TIMEOUT_SECONDS", "AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK"]
     }))
+if "scan-pii" in sys.argv:
+    text = sys.stdin.read()
+    (root / "stdin.txt").write_text(text)
+    source = sys.argv[sys.argv.index("--source") + 1]
+    if case.get("pii"):
+        case["stdout"] = {"ok": True, "verdict": "deny" if "SENSITIVE" in text else "pass",
+                          "summary": {"source": source, "truncated": False,
+                                      "bytes_scanned": len(text.encode())}}
 time.sleep(case.get("sleep", 0))
 sys.stderr.write(case.get("stderr", "") + "e" * case.get("stderr_repeat", 0))
 sys.stderr.flush()
