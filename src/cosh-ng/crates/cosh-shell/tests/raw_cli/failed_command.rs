@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::mpsc;
 
 #[test]
 fn raw_cli_failure_insight_keeps_shell_only_ownership_of_shift_tab() {
@@ -87,7 +88,11 @@ fn raw_cli_success_then_command_not_found_keeps_failure_insight() {
     let home = temp_shell_home("success-then-command-not-found-insight");
     fs::write(home.join(".bashrc"), "PS1='insight-sequence$ '\n").unwrap();
     let home_str = home.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    // The input clock starts at the shell's first prompt, not at process
+    // spawn: with a slow shell start the whole sequence used to be consumed
+    // as startup type-ahead and the failed-command insight was skipped.
+    let (session_ready_tx, _session_ready_rx) = mpsc::channel();
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input_after_ready(
         "fake",
         &[],
         &[
@@ -98,13 +103,11 @@ fn raw_cli_success_then_command_not_found_keeps_failure_insight() {
             ("COSH_SHELL_STARTUP_BANNER", "0"),
         ],
         vec![
-            (
-                b"printf '__PREVIOUS_OK__\\n'\n".to_vec(),
-                Duration::from_millis(500),
-            ),
+            (b"printf '__PREVIOUS_OK__\\n'\n".to_vec(), Duration::ZERO),
             (b"sdsd\n".to_vec(), Duration::from_millis(300)),
             (b"exit 0\n".to_vec(), Duration::from_millis(1_000)),
         ],
+        session_ready_tx,
     );
     let _ = fs::remove_dir_all(&home);
     let visible = strip_ansi_escape(&output);
