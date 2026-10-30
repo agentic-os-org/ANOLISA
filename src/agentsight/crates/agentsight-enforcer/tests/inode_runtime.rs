@@ -376,6 +376,7 @@ impl TreeFiles {
         fs::write(root.join("existing"), b"existing").expect("existing descendant");
         fs::write(root.join("nested/child"), b"nested").expect("nested descendant");
         fs::write(outside.join("marker"), b"marker").expect("binding marker");
+        // The ignored suite runs alone and joins runtime threads between fixtures.
         unsafe {
             std::env::set_var("ACTPLANE_PINNED_PROFILE", "agent-file-guard");
             std::env::set_var("ACTPLANE_BPF_PIN_ROOT", &pin_root);
@@ -1201,19 +1202,40 @@ fn structured_policy_classifier() {
         }
     }
 
-    let observed: Vec<_> = events.try_iter().collect();
-    assert!(
-        observed
+    let mut target_paths: Vec<_> = binding
+        .request
+        .file_protection_policy
+        .as_ref()
+        .unwrap()
+        .targets
+        .iter()
+        .map(|target| &target.path)
+        .collect();
+    target_paths.sort();
+    let rule_for = |path: &std::path::Path| {
+        let index = target_paths
             .iter()
-            .any(|event| event.blocked && event.rule_id.is_some()),
-        "structured denials must retain a stable target rule id"
-    );
-    assert!(
-        observed.iter().any(|event| {
-            event.operation == "ordinary_write" && event.blocked && event.rule_id.is_some()
-        }),
-        "ordinary-write denials must identify their operation and target"
-    );
+            .position(|target| target.as_str() == TreeFiles::text(path))
+            .unwrap();
+        format!("file-protection-target-{}", index + 1)
+    };
+    let observed: Vec<_> = events.try_iter().collect();
+    for (operation, path) in [
+        ("unlink", &exact),
+        ("ordinary_write", &write_only),
+        ("rmdir", &files.root),
+    ] {
+        let rule = rule_for(path);
+        assert!(
+            observed.iter().any(|event| {
+                event.operation == operation
+                    && event.blocked
+                    && event.binding_id == binding_id
+                    && event.rule_id.as_deref() == Some(rule.as_str())
+            }),
+            "{operation} denials must retain the matched target rule"
+        );
+    }
     backend
         .detach(binding_id)
         .expect("detach structured binding");
