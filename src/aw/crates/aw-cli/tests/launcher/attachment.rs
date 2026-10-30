@@ -435,9 +435,13 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
     assert_eq!(service.status()["bindings"], 0);
     fs::remove_file(fail_install).unwrap();
     success(install(&fixture, pid, false));
-    assert!(profile
-        .join("plugins/aw-native/aw-attachment.json")
-        .is_file());
+    let record: Value = serde_json::from_slice(&fs::read(&ownership).unwrap()).unwrap();
+    let plugin = profile.join("plugins").join(
+        record["registration"]["descriptor"]["plugin_id"]
+            .as_str()
+            .unwrap(),
+    );
+    assert!(plugin.join("aw-attachment.json").is_file());
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
@@ -458,7 +462,6 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
         .unwrap()
         .error_for_status()
         .unwrap();
-    let plugin = profile.join("plugins/aw-native");
     let moved = profile.join("plugins/moved-aw-native");
     fs::rename(&plugin, &moved).unwrap();
     let missing = install(&fixture, pid, true);
@@ -470,7 +473,7 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
     fs::rename(moved, &plugin).unwrap();
     success(install(&fixture, pid, true));
     assert_eq!(service.status()["bindings"], 0);
-    assert!(!profile.join("plugins/aw-native").exists());
+    assert!(!plugin.exists());
     assert!(!profile.join(".aw-attachment.json").exists());
     assert_eq!(
         fs::read(profile.join("plugins/unrelated/owned-by-user")).unwrap(),

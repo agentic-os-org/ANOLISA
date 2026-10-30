@@ -207,3 +207,24 @@ fn native_denial_text_survives_resident_scope_transport() {
     preserved(&fixture);
     service.released(&fixture);
 }
+
+#[test]
+fn native_early_terminal_consumer_observes_completed_finalizers() {
+    let fixture = Fixture::new();
+    let document = resident(&fixture, "withhold_result");
+    let service = Service::start(&fixture, &document);
+    let mut command = launch(&fixture);
+    command.env("FAKE_QWENPAW_EARLY_TERMINAL", "1");
+    let result = fixture.successful(command);
+    assert_eq!(result["failure"], Value::Null);
+    assert_eq!(result["results"].as_array().unwrap().len(), 2);
+    for index in 0..2 {
+        assert_eq!(
+            fs::read_to_string(fixture.root.join(format!("call-{index}-finalized"))).unwrap(),
+            "done"
+        );
+    }
+    assert_eq!(events(&fixture).len(), 4);
+    preserved(&fixture);
+    service.released(&fixture);
+}

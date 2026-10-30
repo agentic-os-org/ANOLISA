@@ -84,7 +84,7 @@ else:
         module = ModuleType(name)
         module.__dict__.update(values)
         sys.modules[name] = module
-    source = Path(os.environ["QWENPAW_WORKING_DIR"]) / "plugins/aw-native/plugin.py"
+    source = Path(os.environ["QWENPAW_WORKING_DIR"]) / "plugins" / json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())["plugin_id"] / "plugin.py"
     spec = importlib.util.spec_from_file_location("reload_plugin", source)
     plugin = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(plugin)

@@ -29,6 +29,7 @@ for name, values in {
     module.__dict__.update(values)
     sys.modules[name] = module
 factories = []
+plugin_id = None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -43,15 +44,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
-        assert self.path == "/api/plugins/aw-native/status"
+        assert self.path.startswith("/api/plugins/aw-native-") and self.path.endswith("/status")
         if (root / "fail-status").exists():
             self.send_error(503)
         elif factories:
-            self.respond({"id": "aw-native", "loaded": True})
+            self.respond({"id": plugin_id, "loaded": True})
         else:
             self.send_error(404)
 
     def do_POST(self):
+        global plugin_id
         (root / "post-seen").write_text(self.path)
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
         if self.path == "/api/plugins/install":
@@ -59,7 +61,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if (root / "fail-install").exists():
                 self.send_error(503)
                 return
-            destination = profile / "plugins/aw-native"
+            plugin_id = json.loads((Path(body["source"]) / "plugin.json").read_text())["id"]
+            destination = profile / "plugins" / plugin_id
             shutil.copytree(body["source"], destination)
             spec = importlib.util.spec_from_file_location("attach_plugin", destination / "plugin.py")
             plugin = importlib.util.module_from_spec(spec)
@@ -69,7 +72,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 register_startup_hook=lambda name, callback: startup.append(callback)))
             for callback in startup:
                 asyncio.run(callback())
-            self.respond({"id": "aw-native", "loaded": True})
+            self.respond({"id": plugin_id, "loaded": True})
         elif self.path in ("/begin", "/end"):
             phase = "request_start" if self.path == "/begin" else "request_end"
             asyncio.run(factories[0](None, None).lifecycle(phase, "request"))
@@ -78,9 +81,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_DELETE(self):
-        assert self.path == "/api/plugins/aw-native"
+        assert self.path == "/api/plugins/" + plugin_id
         factories.clear()
-        shutil.rmtree(profile / "plugins/aw-native")
+        shutil.rmtree(profile / "plugins" / plugin_id)
         self.respond({"uninstalled": True})
 
 

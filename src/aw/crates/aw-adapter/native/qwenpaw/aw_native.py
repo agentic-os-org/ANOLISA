@@ -10,7 +10,8 @@ from contextvars import ContextVar
 from functools import wraps
 from types import MethodType
 
-from agentscope.tool import ToolResponse
+from agentscope.message import ToolResultState
+from agentscope.tool import ToolChunk, ToolResponse
 
 from .aw_resident import ResidentFailure, ResidentMiddleware, current_call, frozen, settle
 
@@ -291,11 +292,21 @@ def bind_coordinator(coordinator):
         async def guarded(**kwargs):
             call.check(kwargs["tool_call"])
             stream = next_handler(**kwargs)
+            terminal = None
+            terminal_chunk = None
             try:
                 async for item in stream:
                     call.check(kwargs["tool_call"])
+                    if terminal is not None or (terminal_chunk is not None and not isinstance(item, ToolResponse)):
+                        raise ResidentFailure("AW native output followed a terminal response")
                     # Redact before native Hooks, pruning and external observers.
-                    yield type(item).model_validate(call.owner.lease.redact(item.model_dump(mode="json")))
+                    item = type(item).model_validate(call.owner.lease.redact(item.model_dump(mode="json")))
+                    if isinstance(item, ToolResponse):
+                        terminal = item
+                    elif isinstance(item, ToolChunk) and item.state in (ToolResultState.ERROR, ToolResultState.INTERRUPTED):
+                        terminal_chunk = item
+                    else:
+                        yield item
             except BaseException:
                 call.failure = True
                 call.owner.failed = True
@@ -307,6 +318,12 @@ def bind_coordinator(coordinator):
                     call.failure = True
                     call.owner.failed = True
                     raise ResidentFailure("AW native generator cleanup failed") from None
+            # Some native Coordinators stop pulling at ToolResponse. Complete
+            # the actual tool finalizer before handing that response to them.
+            if terminal_chunk is not None:
+                yield terminal_chunk
+            if terminal is not None:
+                yield terminal
 
         try:
             call.check(tool_call)
@@ -468,8 +485,8 @@ def install_guard():
     build = AgentBuilder.build
 
     @wraps(build_middlewares)
-    def checked_middlewares(ctx, agent_config):
-        middlewares = build_middlewares(ctx, agent_config)
+    def checked_middlewares(*args, **kwargs):
+        middlewares = build_middlewares(*args, **kwargs)
         resident = [mw for mw in middlewares if isinstance(mw, ResidentMiddleware)]
         coordinators = [mw for mw in middlewares if isinstance(mw, ToolCoordinatorMiddleware)]
         if len(resident) != 1 or len(coordinators) != 1:

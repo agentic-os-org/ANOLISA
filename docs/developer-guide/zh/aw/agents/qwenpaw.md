@@ -40,6 +40,10 @@ Hook 就绪信息后使用 App/API；ACP/TUI、多 worker 启动继续被拒绝�
 App startup 在首个 reply 前确认更新就绪；启动策略持续生效，直到更新成功。共享
 子作用域尚无原生证据采集合同，普通 resident 启动会拒绝该配置。
 
+每次安装使用独立的 `aw-native-<uuid>` 目录与 manifest ID，保留用户已有的
+`aw-native` 插件及配置。`config.json` 加载和 MCP 动态更新由 QwenPaw 负责。
+AW 原样转发原生工厂参数，工具生成器完成清理后再向 Coordinator 交付终态结果。
+
 ```bash
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
   --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \

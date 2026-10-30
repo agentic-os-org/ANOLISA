@@ -17,7 +17,7 @@ if sys.argv[1:] == ["--version"]:
 
 root = Path(os.environ["FAKE_ROOT"])
 working = Path(os.environ["QWENPAW_WORKING_DIR"])
-plugin_path = working / "plugins/aw-native/plugin.py"
+plugin_path = working / "plugins" / json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())["plugin_id"] / "plugin.py"
 if os.environ.get("FAKE_QWENPAW_PROFILE"):
     os.environ["PROFILE_SECRET"] = "qwenpaw-callback-profile-secret"
     os.environ.pop("REMOVED_BY_NATIVE_HOST", None)

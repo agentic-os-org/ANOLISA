@@ -906,6 +906,14 @@
     "python-scope-validity": {
       "target": "aw-cli/test/claude_sdk",
       "test": "shared_python_scope_monitors_failure_and_joins_concurrent_cleanup"
+    },
+    "qwenpaw-native-configuration": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "user_plugin_name_and_disabled_settings_do_not_conflict_with_owned_installation"
+    },
+    "qwenpaw-native-terminal-drain": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::native_early_terminal_consumer_observes_completed_finalizers"
     }
   },
   "agents": {
@@ -1249,7 +1257,9 @@
         "resident-bridge-isolation",
         "resident-bridge-expiry",
         "resident-bridge-generation",
-        "python-scope-validity"
+        "python-scope-validity",
+        "qwenpaw-native-configuration",
+        "qwenpaw-native-terminal-drain"
       ],
       "security": [
         "security-retry",
@@ -1263,7 +1273,8 @@
         "qwenpaw-resident-denial",
         "qwenpaw-resident-registration",
         "qwenpaw-withhold-reload-rejection",
-        "coverage-native-identity"
+        "coverage-native-identity",
+        "qwenpaw-native-terminal-drain"
       ],
       "tokenless": [
         "final-replacement",

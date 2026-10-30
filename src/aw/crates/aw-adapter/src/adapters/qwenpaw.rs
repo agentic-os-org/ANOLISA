@@ -36,7 +36,7 @@ struct OwnedPlugin {
 }
 
 impl OwnedPlugin {
-    fn create(working: &std::path::Path) -> Result<Self> {
+    fn create(working: &std::path::Path, id: &str) -> Result<Self> {
         let parent = working.join("plugins");
         let mut created_parent = false;
         match fs::symlink_metadata(&parent) {
@@ -48,9 +48,9 @@ impl OwnedPlugin {
             }
             Err(error) => return Err(error.into()),
         }
-        let path = parent.join("aw-native");
+        let path = parent.join(id);
         DirBuilder::new().mode(0o700).create(&path).map_err(|error| {
-            format!("cannot install owned QwenPaw plugins/aw-native (existing entries are preserved): {error}")
+            format!("cannot install owned QwenPaw plugin {id} (existing entries are preserved): {error}")
         })?;
         let metadata = fs::symlink_metadata(&path)?;
         let owned = Self {
@@ -59,11 +59,9 @@ impl OwnedPlugin {
             created_parent,
             cleanup_on_drop: true,
         };
+        let manifest = manifest(id)?;
         for (name, bytes) in [
-            (
-                "plugin.json",
-                include_bytes!("../../native/qwenpaw/plugin.json").as_slice(),
-            ),
+            ("plugin.json", manifest.as_slice()),
             (
                 "plugin.py",
                 include_bytes!("../../native/qwenpaw/plugin.py").as_slice(),
@@ -152,14 +150,8 @@ impl Adapter for QwenPaw {
             return Err("QWENPAW_WORKING_DIR must be an existing absolute directory".into());
         }
         let working = working.canonicalize()?;
-        let config: Value =
-            serde_json::from_slice(&read_file(working.join("config.json"), 1024 * 1024)?)?;
-        if !config.is_object() || config["plugins"]["aw-native"]["enabled"] == false {
-            return Err("QwenPaw configuration must be an object and permit the AW plugin".into());
-        }
-        if fs::symlink_metadata(working.join("plugins/aw-native")).is_ok() {
-            return Err("QwenPaw working directory already owns plugins/aw-native".into());
-        }
+        // QwenPaw owns config.json parsing, defaults and live updates. The
+        // launch adds a distinct plugin without interpreting user plugin settings.
         for name in ["QWENPAW_RUNTIME_ID", "QWENPAW_RUNTIME_PROVISIONER"] {
             if input
                 .command
@@ -253,7 +245,12 @@ impl PreparedLaunch for Prepared {
             context.files.directory().join("qwenpaw-hooks.json"),
             1024 * 1024,
         )?)?;
-        let source = context.files.directory().join("plugins/aw-native");
+        let source = self
+            .plugin
+            .as_ref()
+            .ok_or("missing staged plugin")?
+            .path
+            .clone();
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -317,18 +314,20 @@ impl Prepared {
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
+        let plugin_id = format!("aw-native-{token}");
         let ready = context.files.directory().join("qwenpaw-ready.json");
         let native = context.files.write(
             "qwenpaw-hooks.json",
             &serde_json::to_vec(&json!({
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
+                "plugin_id": plugin_id,
                 "reloadable":self.input.options.reloadable,
                 "resident": !self.input.options.reloadable,
                 "resident_policy_reload": !self.input.options.reloadable,
             }))?,
         )?;
-        self.plugin = Some(OwnedPlugin::create(plugin_root)?);
+        self.plugin = Some(OwnedPlugin::create(plugin_root, &plugin_id)?);
         let mut command = self.input.command.clone();
         command.environment.insert(
             "QWENPAW_WORKING_DIR".into(),
@@ -351,6 +350,14 @@ impl Prepared {
             }),
         })
     }
+}
+
+/// Bind the bundled manifest to this installation without changing native settings.
+pub(crate) fn manifest(id: &str) -> Result<Vec<u8>> {
+    let mut manifest: Value =
+        serde_json::from_slice(include_bytes!("../../native/qwenpaw/plugin.json"))?;
+    manifest["id"] = json!(id);
+    Ok(serde_json::to_vec(&manifest)?)
 }
 
 fn check_args(args: &[std::ffi::OsString]) -> Result<()> {

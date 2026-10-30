@@ -77,7 +77,12 @@ fn preserved(fixture: &Fixture) {
         fs::read_to_string(fixture.root.join("home/plugins/existing/data")).unwrap(),
         "unchanged"
     );
-    assert!(!fixture.root.join("home/plugins/aw-native").exists());
+    assert_eq!(
+        fs::read_dir(fixture.root.join("home/plugins"))
+            .unwrap()
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -245,7 +250,7 @@ fn report_callback_failures_preserve_before_execution_and_after_result() {
 }
 
 #[test]
-fn unsupported_entries_and_existing_plugin_are_rejected_before_service_creation() {
+fn unsupported_entries_are_rejected_before_service_creation() {
     let fixture = Fixture::new();
     let mut document = setup(&fixture);
     native(&fixture, &mut document, "tool.before", "before");
@@ -265,21 +270,38 @@ fn unsupported_entries_and_existing_plugin_are_rejected_before_service_creation(
         assert!(!fixture.run(launch(&fixture)).status.success());
         assert!(!fixture.root.join("state").exists());
     }
-    document["spec"]["agents"]["qwenpaw"]["argv"] =
-        json!([fixture.root.join("fake qwenpaw"), "app"]);
-    fixture.save(&document);
+}
+
+#[test]
+fn user_plugin_name_and_disabled_settings_do_not_conflict_with_owned_installation() {
+    let fixture = Fixture::new();
+    let document = setup(&fixture);
+    let original = r#"{"plugins":{"aw-native":{"enabled":false}},"future":{"nested":[1,true]}}"#;
+    fs::write(fixture.root.join("home/config.json"), original).unwrap();
     fs::create_dir(fixture.root.join("home/plugins/aw-native")).unwrap();
     fs::write(
         fixture.root.join("home/plugins/aw-native/owned-by-user"),
         "preserve",
     )
     .unwrap();
-    assert!(!fixture.run(launch(&fixture)).status.success());
+    let service = Service::start(&fixture, &document);
+    let result = fixture.successful(launch(&fixture));
+    assert_eq!(result["tool_executed"], true);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("home/config.json")).unwrap(),
+        original
+    );
     assert_eq!(
         fs::read_to_string(fixture.root.join("home/plugins/aw-native/owned-by-user")).unwrap(),
         "preserve"
     );
-    assert!(!fixture.root.join("state").exists());
+    assert_eq!(
+        fs::read_dir(fixture.root.join("home/plugins"))
+            .unwrap()
+            .count(),
+        2
+    );
+    service.released(&fixture);
 }
 
 #[test]

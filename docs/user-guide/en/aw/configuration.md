@@ -81,6 +81,15 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 
 Wait for `AW openclaw native hooks ready`, then use a client connected to that Gateway. `agent --local` bypasses it. Select the corresponding template above to enable security or compression.
 
+### QwenPaw
+
+Use the existing initialized `QWENPAW_WORKING_DIR` with an App/API target from
+the [QwenPaw integration guide](../../../developer-guide/en/aw/agents/qwenpaw.md).
+Each AW launch installs a separate temporary plugin and preserves existing
+plugin names and settings. QwenPaw keeps ownership of `config.json`, plugin
+configuration and dynamic MCP updates. Select covered tools explicitly; native
+permissions continue to apply to tools outside those selectors.
+
 ## Custom rules and service deployment
 
 Custom rules can read tool events and return a JSON boolean; see the [Hook tutorial](../../../developer-guide/en/aw/providers/hooks.md).

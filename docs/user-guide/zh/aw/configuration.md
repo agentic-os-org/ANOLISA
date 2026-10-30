@@ -81,6 +81,13 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 
 等待 `AW openclaw native hooks ready` 后，通过连接该 Gateway 的客户端使用。`agent --local` 会绕过它。启用安全或压缩时，选择上表中的对应模板。
 
+### QwenPaw
+
+按照 [QwenPaw 接入指南](../../../developer-guide/zh/aw/agents/qwenpaw.md) 配置 App/API
+目标，沿用已初始化的 `QWENPAW_WORKING_DIR`。每次 AW 启动使用独立临时插件，保留已有
+插件名称和配置。`config.json`、插件配置及 MCP 动态更新继续由 QwenPaw 管理。
+显式选择 AW 覆盖的工具，范围外工具继续遵循原生权限。
+
 ## 自定义规则与服务部署
 
 自定义规则可读取工具事件并返回 JSON 布尔值，见[Hook 教程](../../../developer-guide/zh/aw/providers/hooks.md)。

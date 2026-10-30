@@ -85,9 +85,15 @@ lease 实现负责，需单独验收。
 
 ## 入口与兼容边界
 
-启动器仅拥有 `plugins/aw-native`，写入私有运行资源并在 App 退出后删除该目录。
-已有插件目录与原生 profile 由原所有者管理。使用已初始化的绝对 `QWENPAW_WORKING_DIR`
+每次启动使用独立的 `plugins/aw-native-<uuid>` 目录与 manifest ID，保留已有
+`aw-native` 插件及其配置。原生 App 负责加载 `config.json`，沿用自身默认值、校验与
+更新行为；AW 不解析或改写该文件，退出时仅删除自身拥有的目录。
+挂接记录保存生成的 ID，用于原生 API 安装和卸载；已有固定名称挂接记录仍可卸载。
+使用已初始化的绝对 `QWENPAW_WORKING_DIR`
 和 App/API 入口；ACP、TUI、多 worker 启动仍在本适配器准入范围之外。
+
+降级 AW 前，使用创建挂接的版本卸载调用方自管 App 的挂接。AW 自行启动的 App 应先
+停止，等待临时插件清理完成，再切换二进制。
 
 `--reloadable` 保留既有整请求/工具 busy 跟踪及策略更新行为，其 binding 无法创建
 resident 子作用域；混合启用两种模式会明确失败。共享子作用域尚无原生证据采集合同，
@@ -108,6 +114,15 @@ middleware 构造函数。传输替身用于隔离验证原生顺序、严格 Po
 收尾、输入完整性、私有环境/脱敏、容量恢复及连续 1,025 次调用。
 `native_resident_service.py --bin <directory>` 将相同 Coordinator 接至真实 Scope CLI、
 服务和 Provider，验证拒绝及完成排空。原生矩阵继续保留既有 middleware、reload 和 App 套件。
+
+`native_app_reload.py` 还通过本地模型运行普通常驻 App，在同一 profile 中对照原生与
+AW 行为，检查用户插件、原生初始化后的配置字节、策略切换、范围外文件工具的成功与错误，
+以及 MCP 动态创建、环境更新、原生拒绝和删除。原生初始化可能规范化自身配置；
+对照测试先记录这一行为，再安装 AW。
+
+Middleware 构造原样转发原生工厂参数。面对收到最终响应或错误 chunk 后停止拉取的
+Coordinator，AW 先耗尽并关闭底层工具生成器，再交付终态，确保工具清理先于后置 Hook、
+结果交付和 scope 释放。准入继续验证实际接点，不依据版本字符串拒绝接入。
 
 这些确定性用例无需模型凭据。完整 App 部署、应用凭据生命周期、真实安全后端组合及
 生产流量验收在整套 SDK/MCP 接入完成后单独执行。

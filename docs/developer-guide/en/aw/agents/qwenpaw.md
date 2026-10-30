@@ -12,7 +12,11 @@ QwenPaw. AW records the installed version and checks the plugin, middleware and
 native task lifecycle interfaces for other releases. The example uses `argv: [qwenpaw, app]`. Set
 `QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
 its owned temporary plugin, preserves existing plugins and native configuration,
-and removes its plugin after the App exits.
+and removes its plugin after the App exits. Each installation has its own
+`aw-native-<uuid>` directory and manifest ID, preserving user-owned `aw-native`
+plugins and settings. AW leaves `config.json` loading and native MCP updates to
+QwenPaw. Native factory arguments are forwarded unchanged, and tool generators
+finish cleanup before their terminal result reaches the Coordinator.
 
 Ordinary launches verify resident middleware on each constructed Agent and open
 an acknowledged task scope. Before Hooks run forward; after Hooks unwind in
