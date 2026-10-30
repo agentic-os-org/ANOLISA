@@ -310,7 +310,14 @@ When enabled, runner:
 | `--prompts-dir` | none | Per-instance prompt resource root directory |
 | `--tokenless` | `false` | Enable tokenless/rtk injection; currently supported by `openclaw` |
 | `--redo` | `false` | Rerun instances that already have result files |
+| `--retry-failed` | `false` | Retry unsuccessful saved runs and run new instances; keep saved successes |
 | `--verbose, -v` | `false` | Write DEBUG logs |
+
+By default, resume skips every instance with a readable result file.
+`--retry-failed` skips only results with `success: true`, so preparation failures,
+agent failures, and missing success values are retried. A successful run means
+the agent completed and produced a patch; it does not mean the evaluator accepted
+that patch. `--retry-failed` and `--redo` are mutually exclusive.
 
 ## Agent Adapters
 

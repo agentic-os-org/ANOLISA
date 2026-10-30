@@ -303,7 +303,13 @@ swe-runner run \
 | `--prompts-dir` | 无 | per-instance prompt 资源根目录 |
 | `--tokenless` | `false` | 启用 tokenless/rtk 注入，当前仅 `openclaw` 支持 |
 | `--redo` | `false` | 重新运行已经有 result 文件的实例 |
+| `--retry-failed` | `false` | 重试已有的失败运行并运行新实例，保留已有的成功运行 |
 | `--verbose, -v` | `false` | 写入 DEBUG 级别日志 |
+
+默认续跑会跳过所有具有可读 result 文件的实例。`--retry-failed` 仅跳过
+`success: true` 的结果，因此准备失败、agent 失败或缺少成功标记的实例都会
+重试。运行成功表示 agent 完成并生成补丁，并不表示评估器已通过该补丁。
+`--retry-failed` 与 `--redo` 互斥。
 
 ## Agent adapter
 
