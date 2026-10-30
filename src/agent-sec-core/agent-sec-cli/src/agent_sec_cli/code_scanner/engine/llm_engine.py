@@ -130,11 +130,13 @@ def _extract_verdict(content: str) -> tuple[Optional[str], str]:
         reason = str(obj.get("reason", "")).strip()
         if verdict in {"PASS", "DENY"}:
             return verdict, reason
-    # Fallback: regex token search on the raw text.
+    # Fallback: word-boundary token search on the raw text. Substring
+    # matching made any word containing the token decide the verdict:
+    # "password"/"bypass" fabricated a PASS from an exfiltration narrative.
     upper = text.upper()
-    if "DENY" in upper and "PASS" not in upper:
+    if re.search(r"\bDENY\b", upper) and not re.search(r"\bPASS\b", upper):
         return "DENY", text[:60]
-    if "PASS" in upper and "DENY" not in upper:
+    if re.search(r"\bPASS\b", upper) and not re.search(r"\bDENY\b", upper):
         return "PASS", text[:60]
     return None, text[:120]
 
