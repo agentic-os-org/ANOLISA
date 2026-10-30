@@ -233,11 +233,11 @@ class WindowsPackagingTests(unittest.TestCase):
         self.root = Path(sandbox.name)
         self.component = self.root / "tokenless"
         self.rtk = self.component / "third_party/rtk"
-        scripts = self.component / "scripts"
+        scripts = self.component / "packaging/build"
         scripts.mkdir(parents=True)
         self.rtk.mkdir(parents=True)
         for name in ("build-windows.ps1", "setup-rtk.sh"):
-            shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+            shutil.copyfile(ROOT / "packaging/build" / name, scripts / name)
         setup = (scripts / "setup-rtk.sh").read_text(encoding="utf-8")
         self.revision = re.search(r'^RTK_COMMIT="([0-9a-f]{40})"', setup, re.M).group(1)
         (self.rtk / ".anolisa-rtk-commit").write_text(self.revision, encoding="utf-8")
