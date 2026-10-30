@@ -6,7 +6,7 @@ from pathlib import Path
 
 from native_reports import validate_case, verify_case
 
-BINARIES = {"aw", "aw-provider-tokenless", "tokenless", "rtk"}
+BINARIES = {"aw", "aw-provider-tokenless", "tokenless"}
 
 
 def shards(manifest: dict) -> dict:

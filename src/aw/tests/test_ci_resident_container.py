@@ -102,7 +102,7 @@ class ResidentContainerTests(GateFixture):
         stage(AW, binaries, context, "a" * 40, self.manifest)
         self.assertEqual(
             {p.name for p in (context / "payload").iterdir()},
-            {"aw", "aw-provider-tokenless", "tokenless", "rtk", "SHA256SUMS", "source-sha.txt"},
+            {"aw", "aw-provider-tokenless", "tokenless", "SHA256SUMS", "source-sha.txt"},
         )
         verify_bundle(context / "payload", "a" * 40, BINARIES)
         for path in context.rglob("*"):

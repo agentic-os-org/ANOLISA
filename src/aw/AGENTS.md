@@ -226,7 +226,7 @@ Use deterministic service/CLI/Provider fixtures on every relevant push. Keep
 real SDK/CLI adoption checks explicit and pinned; describe which native seam
 was exercised. A callback transport test does not certify native adoption.
 Do not substitute ignored, opt-in or credential-dependent tests for a required
-matrix case. Package acceptance separately covers real Tokenless/RTK binaries.
+matrix case. Package acceptance separately covers the real Tokenless binary.
 
 ## Layout and CI cost
 

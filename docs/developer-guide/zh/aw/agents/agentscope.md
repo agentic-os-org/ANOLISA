@@ -46,6 +46,6 @@ native 和观察 Hook 不替换响应；只有最后一个已准入的结构化�
 只有观察的链保持原生逆序退出。
 
 PreTool 拒绝原始调用，向模型返回完整重试参数；每次新尝试重新经过原生权限和
-sec-core。带 RTK 归属的重试即使使用新 call ID 也不会重复压缩。PreTool 需独立安装
-RTK，PostTool 不依赖 RTK。文本槽适用条件、故障处理和遥测配置见
+sec-core。带 RTK 归属的重试即使使用新 call ID 也不会重复压缩。文本槽适用条件、
+故障处理和遥测配置见
 [Tokenless 行为](../../../../user-guide/zh/aw/tokenless.md)。无效的最终响应替换指令会报告故障并保留原结果。

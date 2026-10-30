@@ -147,7 +147,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           cargo build --locked --release --manifest-path src/aw/Cargo.toml -p aw-provider --example policy
           mkdir -p "$AW_PACKAGE_DIR/native"
-          cp src/aw/target/release/{aw,rtk} providers/agent-sec-core/target/release/aw-provider-sec-core providers/tokenless/target/release/aw-provider-tokenless "$AW_PACKAGE_DIR/native/"
+          cp src/aw/target/release/aw providers/agent-sec-core/target/release/aw-provider-sec-core providers/tokenless/target/release/aw-provider-tokenless "$AW_PACKAGE_DIR/native/"
           cp src/aw/target/release/examples/policy src/tokenless/target/release/tokenless "$AW_PACKAGE_DIR/native/"
           cp src/agent-sec-core/v2/target/release/{agent-sec-cli,agent-sec-daemon} "$AW_PACKAGE_DIR/native/"
           cp src/aw/target/rtk-provenance.json "$AW_PACKAGE_DIR/test-evidence/"
@@ -158,7 +158,7 @@ jobs:
           cargo metadata --locked --no-deps --format-version 1 --manifest-path src/tokenless/Cargo.toml > "$AW_PACKAGE_DIR/native/tokenless-packages.json"
           rustc --version > "$AW_PACKAGE_DIR/native/rustc-version.txt"
           cd "$AW_PACKAGE_DIR/native"
-          sha256sum aw aw-provider-tokenless aw-provider-sec-core tokenless rtk policy agent-sec-cli agent-sec-daemon > SHA256SUMS
+          sha256sum aw aw-provider-tokenless aw-provider-sec-core tokenless policy agent-sec-cli agent-sec-daemon > SHA256SUMS
           printf '%s\n' "$CANDIDATE_SHA" > source-sha.txt
           tar -czf "$AW_PACKAGE_DIR/native.tar.gz" .
       - uses: actions/upload-artifact@v4
@@ -180,11 +180,9 @@ jobs:
           TOKENLESS_SLS_ENABLED: '0'
         run: |
           export AW_TOKENLESS_TEST_CLI="$GITHUB_WORKSPACE/src/tokenless/target/release/tokenless"
-          export AW_TOKENLESS_TEST_RTK="$GITHUB_WORKSPACE/src/aw/target/release/rtk"
           test -x "$AW_TOKENLESS_TEST_CLI"
-          test -x "$AW_TOKENLESS_TEST_RTK"
           cargo test --locked --manifest-path providers/tokenless/Cargo.toml \
-            -p aw-provider-tokenless --test provider --test pretool --test managed_rtk -- --ignored
+            -p aw-provider-tokenless --test provider --test pretool --test linked_rtk -- --ignored
           cargo test --locked --manifest-path providers/tokenless/Cargo.toml \
             -p aw-provider-tokenless --test views -- --ignored
       - name: Verify installed packages and service lifecycle
@@ -228,7 +226,6 @@ jobs:
           "$aw" install --bundle "$tokenless_bundle" --prefix "$root/split"
           "$aw" list --installed --prefix "$root/split" --json > "$runtime/split.json"
           export AW_TOKENLESS_TEST_CLI="$GITHUB_WORKSPACE/src/tokenless/target/release/tokenless"
-          export AW_TOKENLESS_TEST_RTK="$GITHUB_WORKSPACE/src/aw/target/release/rtk"
           export AW_TEST_SEC_CLI="$GITHUB_WORKSPACE/src/agent-sec-core/v2/target/release/agent-sec-cli"
           export AW_TEST_SEC_DAEMON="$GITHUB_WORKSPACE/src/agent-sec-core/v2/target/release/agent-sec-daemon"
           export TOKENLESS_STATS_ENABLED=0 TOKENLESS_SLS_ENABLED=0
