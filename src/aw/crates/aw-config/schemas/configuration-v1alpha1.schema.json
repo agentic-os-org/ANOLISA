@@ -401,6 +401,13 @@
                 "$ref": "#/$defs/qoderSdkAsset"
               }
             },
+            "runtime_launchers": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "$ref": "#/$defs/qoderSdkAsset"
+              }
+            },
             "declarative_plugins": {
               "type": "boolean",
               "default": false

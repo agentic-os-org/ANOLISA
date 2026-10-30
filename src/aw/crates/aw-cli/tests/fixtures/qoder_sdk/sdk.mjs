@@ -12,6 +12,10 @@ export function query({ options }) {
   let sequence = 0;
   const callbacks = new Map();
   const q = {
+    async request(request) {
+      if (request.type !== "get_settings") throw new Error("Unexpected fixture request");
+      return { effective: options.settings ?? {} };
+    },
     transport: { write() {} },
     async initializationResult() {
       if (process.env.QODER_INIT_FAIL) throw new Error("fixture initialization failed");

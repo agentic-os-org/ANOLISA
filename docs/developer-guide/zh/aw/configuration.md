@@ -71,6 +71,7 @@ Provider 引用与步骤 ID 重复，避免启用时才暴露引用拼写错误�
 | `sites` | `global`、`cn` 的非空去重列表，第一个区域为默认值；省略时为 `[global]`。在应用目录安装对应 SDK 包。 |
 | `command_wrappers` | 最多 16 个原生 Bash 消费者授权。每项为 `{path, sha256}`，使用普通文件的绝对路径和 64 位小写十六进制 SHA-256。 |
 | `runtime_preloads` | 最多 16 个受信任 Worker import 授权，文件格式与上项相同。 |
+| `runtime_launchers` | 最多 16 个 `{path, sha256}` 授权，用于 Pilot/runtime wrapper；用于普通常驻 Query。 |
 | `declarative_plugins` | 默认 `false`；为使用受管 Daemon 的普通常驻 Query 接入本地角色、Agent、命令和 Skill 资产快照。 |
 
 每个授权文件最多 16 MiB。将 wrapper 和 preload 固定在镜像中。
@@ -83,7 +84,7 @@ Bridge 的 `startDaemon`、`createQuery().options` 和 `createSdkMcpServer` 接�
 ### Worker import
 
 `startDaemon` 的 `executableArgs` 接受成对的 `--import` 与已授权 preload 路径。
-若提供 `pathToQoderCLIExecutable`，它必须指向对应 SDK 包的官方 Worker。
+若提供 `pathToQoderCLIExecutable`，它须指向对应 SDK 包的官方 Worker，或普通常驻 Query 中已授权的 `runtime_launchers` 文件。
 其他 executable 或 transport 替换会被拒绝。固定 Worker-thread transport 忽略
 `executableArgs`，因此直接 Query 拒绝该选项；需要 import 时使用受管 Daemon。
 

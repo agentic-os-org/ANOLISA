@@ -81,6 +81,7 @@ Omit them when the application needs no execution extensions.
 | `sites` | Nonempty unique list of `global` and/or `cn`; the first entry is the default. Omitted: `[global]`. Install the selected SDK packages in the application directory. |
 | `command_wrappers` | Up to 16 grants for native Bash consumers. Each is `{path, sha256}` with an absolute regular-file path and a 64-character lowercase hexadecimal SHA-256. |
 | `runtime_preloads` | Up to 16 grants with the same file shape, for trusted Worker imports. |
+| `runtime_launchers` | Up to 16 `{path, sha256}` grants for Pilot/runtime wrappers; available for ordinary resident Queries. |
 | `declarative_plugins` | Default `false`; admit snapshots of local role, Agent, command and skill assets on ordinary resident Queries using managed daemons. |
 
 Each granted file is limited to 16 MiB. Keep wrappers and preloads immutable in
@@ -96,7 +97,8 @@ managed daemon's site; an explicit different site is rejected.
 
 On `startDaemon`, `executableArgs` accepts paired `--import` arguments naming
 admitted preload paths. `pathToQoderCLIExecutable`, if provided, must identify
-the selected SDK package's official Worker. AW rejects other executable and
+the selected SDK package's official Worker or an admitted `runtime_launchers` file
+on ordinary resident Queries. AW rejects other executable and
 transport replacements. Direct Queries reject `executableArgs` because the pinned
 Worker-thread transport ignores it; use a managed daemon for imports.
 

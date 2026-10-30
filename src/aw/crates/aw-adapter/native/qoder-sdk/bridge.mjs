@@ -9,9 +9,14 @@ import { Resident, bounded, validateHooks } from "./resident.mjs";
 import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
 import { managedMcpServer } from "./mcp.mjs";
 import { Scope } from "./scope.mjs";
+import { prewarm } from "./startup.mjs";
+import { nativeConfiguration } from "./native-configuration.mjs";
 import { pluginsAdmitted, runtimeOptions, sdkEntry, verifyNativeSettings } from "./native-options.mjs";
 export { PRIVATE_EXECUTION_VERSION, executionEnvironment, hookEnvironment } from "./private.mjs";
 export { NATIVE_COMMAND_WRAPPER_VERSION } from "./command-wrapper.mjs";
+
+/** Initialize an admitted one-shot Query without submitting a prompt. */
+export function startup(input) { return prewarm(createQuery, input); }
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
@@ -69,11 +74,12 @@ export async function createSdkMcpServer(options) {
 }
 
 function compose(config, options) {
-  if (!Array.isArray(options.settingSources) || options.settingSources.length ||
+  const native = nativeConfiguration(config);
+  if (options.transport != null || (!native && (!Array.isArray(options.settingSources) || options.settingSources.length ||
       options.settings != null || !pluginsAdmitted(options.plugins) ||
       Object.keys(options.extraArgs ?? {}).length ||
-      options.transport != null || options.permissionPromptToolName != null ||
-      options.hooks?.PermissionRequest?.length)
+      options.permissionPromptToolName != null ||
+      options.hooks?.PermissionRequest?.length)))
     throw new Error("AW Qoder SDK requires settingSources=[] and no settings, plugins, runtime or permission-hook overrides");
   runtime(config, options);
   daemonOwner(options.daemon, config);
@@ -83,7 +89,7 @@ function compose(config, options) {
     [event, groups.map((group) => ({ ...group, hooks: group.hooks.map((callback) =>
       async (payload, id, context) => {
         const result = await callback(copy(payload), id, context);
-        if (event === "PreToolUse" && result?.hookSpecificOutput?.updatedInput !== undefined)
+        if (!native && event === "PreToolUse" && result?.hookSpecificOutput?.updatedInput !== undefined)
           return deny("Tool argument rewriting is unsupported with AW");
         return result;
       }) }))]));
@@ -91,7 +97,7 @@ function compose(config, options) {
     ["tool.before", ["PreToolUse"]], ["tool.after", ["PostToolUse", "PostToolUseFailure"]],
   ]) {
     const routes = config.hooks.filter((hook) => hook.event === event);
-    if (!routes.length) continue;
+    if (!routes.length && !(native && event === "tool.before")) continue;
     const callback = async (input, id, { signal }) => {
       const payload = copy(input);
       if (id !== undefined && id !== payload.tool_use_id)
@@ -116,13 +122,13 @@ function compose(config, options) {
   }
   const canUseTool = options.canUseTool && (async (name, input, context) => {
     const result = await options.canUseTool(name, copy(input), context);
-    if (result?.updatedInput !== undefined && !isDeepStrictEqual(result.updatedInput, input))
+    if (!native && result?.updatedInput !== undefined && !isDeepStrictEqual(result.updatedInput, input))
       return { behavior: "deny", message: "Tool argument rewriting is unsupported with AW" };
     return result;
   });
   // The pinned Worker expands skill arguments before shell interpolation. Its
   // native switch must disable that secondary executor even for inert assets.
-  const settings = config.native_policy?.declarative_plugins ?
+  const settings = !native && config.native_policy?.declarative_plugins ?
     { settings: { skills: { disableShellExecution: true } } } : {};
   return { ...options, ...settings, hooks, ...(canUseTool ? { canUseTool } : {}) };
 }
@@ -140,13 +146,13 @@ function ready(config) {
 }
 
 /** Return the native Query after its initialization handshake accepts AW callbacks. */
-export async function createQuery({ prompt, options }) {
+export async function createQuery({ prompt, options }, initialization = {}) {
   let config = configuration();
-  if (config.native_policy?.declarative_plugins && !options.daemon)
+  if (!nativeConfiguration(config) && config.native_policy?.declarative_plugins && !options.daemon)
     throw new Error("AW declarative profile requires a managed daemon");
   if (config.resident) {
     const resident = new Resident(config);
-    return await resident.create(prompt, options, compose, ready);
+    return await resident.create(prompt, options, compose, ready, initialization);
   }
   if (options.awExecutionFactory !== undefined)
     throw new Error("Private execution requires an AW resident Query");
@@ -165,12 +171,14 @@ export async function createQuery({ prompt, options }) {
   const query = sdk.query({ prompt: reload ? reload.input(prompt) : prompt,
     options: reload ? reload.decorate(composed) : composed });
   try {
-    const initialization = await query.initializationResult();
+    const result = await (initialization.initializeTimeoutMs === undefined ? query.initializationResult() :
+      bounded(query.initializationResult(), initialization.initializeTimeoutMs));
     await verifyNativeSettings(config, query, bounded);
-    const managed = reload ? await reload.attach(query, initialization) : query;
+    const managed = reload ? await reload.attach(query, result) : query;
     ready(config);
     return managed;
   } catch (error) {
+    initialization.discard?.();
     if (reload?.admitted) await reload.close();
     else {
       if (reload) { reload.closing = true; reload.initialized.resolve(); }

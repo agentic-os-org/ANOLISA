@@ -76,7 +76,7 @@ Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
 SDK applications explicitly use managed factories. Runtime admission checks the required
 native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)
 record the tested framework versions.
-[Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers pinned Bash consumers, Worker imports and declarative role assets.
+[Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers prewarming, native configuration with unmodified SDK/Worker files, Pilot runtime launcher grants, pinned Bash consumers and declarative role assets.
 The [capability matrix](../../docs/user-guide/en/aw/capabilities.md) compares result handling,
 MCP and policy updates by Adapter and launch mode, with links to verified baselines and setup.
 

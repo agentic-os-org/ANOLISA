@@ -74,14 +74,49 @@ aw stop --config /absolute/aw.yaml
 `startDaemon()` 确认预热就绪；`createQuery()` 在 SDK 握手后确认 Query 就绪。按[原生验收](../validation.md)检查允许、阻断、后置故障和清理。
 安全组合使用[SDK 示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)，先替换路径并启动 sec-core。
 
+## 原生配置
+
+普通常驻 Query 保留原生 user/project/local 配置源、未知字段、插件路径、MCP 配置、
+Hook 顺序、权限与会话行为。AW 不修改 SDK 或 Worker 文件。已验证版本为
+SDK 1.0.54 / Worker 1.1.74 和 SDK 1.0.56 / Worker 1.1.78，覆盖 CN/global parser
+及 Linux arm64 上的 global 认证联调；其他版本需要验证 AW 使用的接口。
+
+AW 检查公开 `PreToolUse` 回调当时可见的参数。原生 Hook 和权限处理随后仍可改写
+参数，这些后续参数没有经过最终执行前的再次检查。Post 策略记录沿用 AW 检查时的
+输入快照，应用 Hook 收到原生 payload。原生拒绝保留优先级。Hook 命令和 Skill
+插值位于模型工具边界之外；此接入不提供操作系统进程隔离。
+Query 生命周期内须保持原生 Hook 开启。初始化发现有效配置为 `disableAllHooks: true`、
+`hooksConfig.enabled: false` 或 `hooksConfig.headlessFastMode: true`，以及
+`headless-fast-hooks` CLI 覆盖时，会在提交 prompt 前报错；不支持在活跃 Query
+期间关闭 Hook。
+
+省略 `settingSources` 可沿用原生默认值，也可传入应用原有的配置源列表。
+settings、插件、Hook 和权限选项沿用原值。探测、普通 Query、预热 Query 和 daemon
+创建均经过 Bridge；配置了 AW 时，准入失败须向调用方返回。应用入口支持 `.js` 与 `.mjs`。
+
+一次性预热使用 `await bridge.startup({options})`：初始化期间不提交 prompt，
+`warm.query(prompt)` 再次校验 scope 有效性。未使用的实例通过 `await warm.close()`
+清理。AW 启停保持 SDK/Worker 文件不变；移除 AW 接入时，重启应用并恢复原生工厂调用。
+
+原生 SDK 进程内 MCP 保留 schema transform 和默认值：AW 检查解析后的 handler 输入，
+在 SDK 完成输出校验和异常转换后检查最终响应。模型回调委托到具有 Query 身份的 MCP
+接点，取消时保留 handler finalizer 与 scope，直到清理完成。外部 MCP 回调检查公开
+Hook 可见的参数，远端 server 内部执行由 server 负责。下文显式受管 MCP/私有执行
+工厂继续沿用参数不得经 schema 改变的合同。
+
+Pilot 沿用原生 Stop 设置，通过 `qoder_sdk.runtime_launchers` 授权 runtime wrapper。
+wrapper 须启动所选 SDK 的 Worker，镜像保留其 preload 资产与环境。显式设置
+`declarative_plugins: true` 以及使用 `awNativeExecutionFactory` 的 Query 继续沿用
+下文的受限模式。Query 派发及原生 MCP 接管仍使用部分 SDK 内部接口，升级时需要回归验证。
+
 ## 应用约束
 
 | 项目 | 接入要求 |
 | --- | --- |
 | 退出 | 普通与 `--reloadable` worker 均处理 TERM/INT，停止接单并等待清理后退出；没有处理器时 Node 立即退出，AW 随后强制回收遗留 SDK 子进程。 |
 | 工厂覆盖 | 所有受保护 Query 经过 Bridge；直接使用原生工厂的 Query 无 AW 检查 |
-| 原生设置 | `settingSources: []`；不传 settings、额外 CLI 参数或 transport 覆盖。Import 与本地插件需[执行资产授权](../configuration.md#qoder-sdk-执行资产)。 |
-| 权限与输入 | 保留原生拒绝；不支持参数改写或权限 Hook 覆盖 |
+| 原生设置 | 普通常驻 Query 保留原生配置；显式声明式与命令消费者模式保留原有限制。不支持替换 transport；runtime wrapper/import 需要[执行资产授权](../configuration.md#qoder-sdk-执行资产)。 |
+| 权限与输入 | 保留原生拒绝，检查公开 Hook 可见的参数；后续原生改写未经过最终执行前再次检查 |
 | 环境与认证 | 共享 daemon 的 Query 不覆盖 env/auth；更换凭据用原生 `daemon.auth()`；不同凭据可用独立 daemon |
 | 后置检查 | 支持观察和 `withhold_result`；不支持结果替换 |
 | AgentSight | 普通 resident 设置 `evidence.mode: off` |

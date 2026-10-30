@@ -12,6 +12,7 @@ import "./daemon.test.mjs";
 import "./private.test.mjs";
 import "./cleanup-fence.test.mjs";
 import "./native-options.test.mjs";
+import "./startup.test.mjs";
 const { createQuery } = bridge;
 
 function fixture(t, mode = "allow") {

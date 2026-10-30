@@ -21,7 +21,8 @@ fn document(policy: Value) -> Value {
 fn grants_preserve_sites_and_explicit_asset_digests() {
     let value = document(json!({"sites":["cn","global"],"declarative_plugins":true,
         "command_wrappers":[{"path":"/app/wrapper","sha256":"a".repeat(64)}],
-        "runtime_preloads":[{"path":"/app/preload.mjs","sha256":"b".repeat(64)}]}));
+        "runtime_preloads":[{"path":"/app/preload.mjs","sha256":"b".repeat(64)}],
+        "runtime_launchers":[{"path":"/app/pilot.sh","sha256":"c".repeat(64)}]}));
     let parsed = Validator::new()
         .unwrap()
         .parse(&serde_json::to_vec(&value).unwrap())
@@ -39,6 +40,7 @@ fn malformed_or_unknown_native_grants_are_rejected() {
         json!({"unknown":true}),
         json!({"command_wrappers":[{"path":"relative","sha256":"a".repeat(64)}]}),
         json!({"runtime_preloads":[{"path":"/app/a","sha256":"not-a-digest"}]}),
+        json!({"runtime_launchers":[{"path":"relative","sha256":"a".repeat(64)}]}),
         json!({"runtime_preloads":[{"path":"/app/a","sha256":"a".repeat(64),"extra":true}]}),
     ] {
         assert!(

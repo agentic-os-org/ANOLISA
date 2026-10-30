@@ -64,6 +64,10 @@ Qoder SDK applications can also integrate pinned Bash credential consumers, Work
 imports and declarative role assets. Setup and permission requirements are in the
 [Qoder SDK guide](../../../developer-guide/en/aw/agents/qoder-sdk.md#native-bash-command-consumers).
 
+Qoder SDK supports native configuration and one-shot prewarming with unmodified
+SDK/Worker files. Checks observe public Hook input; later native argument rewrites
+are outside the final-input guarantee. See [native configuration](../../../developer-guide/en/aw/agents/qoder-sdk.md#native-configuration) for MCP, Pilot and coverage limits.
+
 ## Boundaries
 
 - Ordinary Qoder SDK and QwenPaw accept Post failure action `withhold_result`, withholding delivery and stopping subsequent dispatch. Existing tool side effects remain.

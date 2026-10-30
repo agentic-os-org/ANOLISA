@@ -63,6 +63,10 @@ MCP 工具需按实际输入语义配置安全检查，接线见 [Qoder SDK / Qw
 Qoder SDK 应用还可接入固定摘要的 Bash 凭据消费者、Worker import 和声明式角色资产。
 接线与权限要求见 [Qoder SDK 指南](../../../developer-guide/zh/aw/agents/qoder-sdk.md#原生-bash-命令消费者)。
 
+Qoder SDK 保留原生配置并支持一次性预热，SDK/Worker 文件保持原样。
+检查覆盖公开 Hook 可见的参数，后续原生改写没有最终执行前再次检查。
+MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/aw/agents/qoder-sdk.md#原生配置)。
+
 ## 使用边界
 
 - 普通 Qoder SDK、QwenPaw 可配置后置故障 `withhold_result`，暂扣结果并停止后续派发；已发生的工具副作用保留。

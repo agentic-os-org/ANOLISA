@@ -522,3 +522,17 @@ for (const name of ["recordInboundSessionMessage", "handleControlRequest", "tran
     await second.resident.close();
   });
 }
+
+
+test("disabled native Hooks reject admission without submitting a prompt", async t => {
+  const f = fixture(t);
+  f.state.query.request = async () => ({ effective: { hooksConfig: { headlessFastMode: true } } });
+  f.state.importGate.resolve();
+  f.state.closeGate.resolve();
+  const { error } = await f.create();
+  assert.match(error.message, /Hooks enabled/);
+  assert.equal(f.state.executions, 0);
+  assert.equal(f.state.ready, 0);
+  assert.equal(f.state.nativeCloses, 1);
+  assert.equal(f.state.scopeCloses, 1);
+});

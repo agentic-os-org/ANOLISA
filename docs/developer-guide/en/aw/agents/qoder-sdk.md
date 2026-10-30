@@ -74,14 +74,58 @@ aw stop --config /absolute/aw.yaml
 `startDaemon()` confirms prewarm readiness; `createQuery()` confirms Query readiness after the SDK handshake. [Validate native behavior](../validation.md), including allow, block, Post failure and cleanup.
 For security composition, use the [SDK example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml), replace paths and start sec-core first.
 
+## Native configuration
+
+Ordinary resident Queries retain native user/project/local settings, unknown keys,
+plugin paths, MCP configuration, Hook order, permissions and sessions. AW does not
+modify SDK or Worker files. The verified releases are SDK 1.0.54 / Worker 1.1.74
+and SDK 1.0.56 / Worker 1.1.78, with CN/global parser checks and global authenticated
+acceptance on Linux arm64. Other releases require validation of the interfaces AW uses.
+
+AW checks the input visible at its public `PreToolUse` callback. Native Hooks and
+permission handling can rewrite arguments afterward; those later arguments are
+not checked again at a final execution boundary. Post policy records retain the
+input snapshot checked by AW, while application Hooks receive native payloads.
+Native denial retains precedence. Hook commands and skill interpolation remain
+outside the model-tool boundary. This integration does not provide OS containment.
+Keep native Hooks enabled throughout the Query lifetime. Initialization rejects
+an effective `disableAllHooks: true` or `hooksConfig.enabled: false`, and rejects `hooksConfig.headlessFastMode: true`
+and the `headless-fast-hooks` CLI override before releasing
+a prompt; changing Hook availability during an active Query is unsupported.
+
+Omit `settingSources` to retain native defaults, or pass the application's native
+source list. Pass settings, plugins, Hooks and permissions unchanged. Route probes,
+ordinary Queries, warmed Queries and daemon creation through the bridge; configured
+AW admission failures must propagate. Application entries support `.js` and `.mjs`.
+
+Use `await bridge.startup({options})` for one-shot prewarming. It initializes without
+a prompt and checks scope validity again on `warm.query(prompt)`. Await `warm.close()`
+for an unused instance. SDK/Worker files remain unchanged when AW starts and stops;
+removing AW integration means restarting through the application's native factories.
+
+Native in-process SDK MCP servers retain schema transforms and defaults: AW checks
+the parsed handler input, then checks the final SDK response after output validation
+and error conversion. Model callbacks delegate to that Query-owned MCP boundary.
+Cancellation retains the handler finalizer and scope until cleanup completes.
+External MCP callbacks check arguments visible at the public Hook; remote-server
+internals remain the server's responsibility. The explicit managed MCP/private
+execution factory below keeps its existing no-transform contract.
+
+For Pilot, retain its native Stop settings and grant the runtime wrapper using
+`qoder_sdk.runtime_launchers`. The wrapper must launch the selected SDK Worker;
+preserve its preload assets and environment. Explicit `declarative_plugins: true`
+and Queries using `awNativeExecutionFactory` retain their existing restrictive
+profiles below. Query dispatch and native MCP adoption still use private SDK
+interfaces, which require regression checks when upgrading the SDK.
+
 ## Application constraints
 
 | Item | Requirement |
 | --- | --- |
 | Shutdown | Handle TERM/INT in both ordinary and `--reloadable` workers; stop admission and await cleanup before exiting. Without handlers, Node exits immediately and AW forcibly reclaims remaining SDK children. |
 | Factory coverage | Route every protected Query through the Bridge; direct native factories bypass AW checks |
-| Native settings | Use `settingSources: []`; omit settings, extra CLI arguments and transport overrides. Imports and local plugins require [execution-asset grants](../configuration.md#qoder-sdk-execution-assets). |
-| Permissions and input | Preserve native denial; argument rewriting and permission Hook overrides are unsupported |
+| Native settings | Ordinary resident Queries retain native configuration. Explicit declarative/command-consumer profiles retain their restrictions. Transport replacement remains unsupported; runtime wrappers/imports require [execution-asset grants](../configuration.md#qoder-sdk-execution-assets). |
+| Permissions and input | Preserve native denial; check public Hook input. Subsequent native rewrites remain unchecked before execution. |
 | Environment and authentication | Queries sharing a daemon cannot override env/auth; use native `daemon.auth()` for credential changes or separate daemons for different credentials |
 | Post checks | Observation and `withhold_result`; no result replacement |
 | AgentSight | Ordinary resident mode requires `evidence.mode: off` |

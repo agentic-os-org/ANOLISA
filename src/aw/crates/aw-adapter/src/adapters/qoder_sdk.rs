@@ -54,12 +54,15 @@ impl Adapter for QoderSdk {
             .args
             .first()
             .map(PathBuf::from)
-            .ok_or("Qoder SDK requires node and an absolute .mjs worker")?;
+            .ok_or("Qoder SDK requires node and an absolute .mjs or .js worker")?;
         if !application.is_absolute()
             || !application.is_file()
-            || application.extension().and_then(|s| s.to_str()) != Some("mjs")
+            || !matches!(
+                application.extension().and_then(|s| s.to_str()),
+                Some("mjs" | "js")
+            )
         {
-            return Err("Qoder SDK requires an existing absolute .mjs worker".into());
+            return Err("Qoder SDK requires an existing absolute .mjs or .js worker".into());
         }
         let agent = &input.document["spec"]["agents"][&input.target];
         if input.options.reloadable
@@ -176,6 +179,14 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/qoder-sdk/reload.mjs"),
         )?;
         for (name, bytes) in [
+            (
+                "native-configuration.mjs",
+                include_bytes!("../../native/qoder-sdk/native-configuration.mjs").as_slice(),
+            ),
+            (
+                "startup.mjs",
+                include_bytes!("../../native/qoder-sdk/startup.mjs").as_slice(),
+            ),
             (
                 "post.mjs",
                 include_bytes!("../../native/qoder-sdk/post.mjs").as_slice(),

@@ -18,6 +18,7 @@ pub(super) struct Policy {
     pub sites: Vec<String>,
     pub command_wrappers: Vec<FileGrant>,
     pub runtime_preloads: Vec<FileGrant>,
+    pub runtime_launchers: Vec<FileGrant>,
     pub declarative_plugins: bool,
 }
 
@@ -35,6 +36,7 @@ impl Policy {
             .command_wrappers
             .iter()
             .chain(&policy.runtime_preloads)
+            .chain(&policy.runtime_launchers)
         {
             let path = Path::new(&grant.path);
             if !path.is_absolute() || fs::symlink_metadata(path)?.file_type().is_symlink() {

@@ -18,6 +18,10 @@ export function query({ prompt, options }) {
   const messages = [];
   function emit(message) { messages.push({ ...message, session_id: session }); wake?.(); }
   const q = {
+    async request(request) {
+      if (request.type !== "get_settings") throw new Error("Unexpected fixture request");
+      return { effective: options.settings ?? {} };
+    },
     options,
     emit,
     async initializationResult() { return { capabilities: ["msg_lifecycle_v1"] }; },

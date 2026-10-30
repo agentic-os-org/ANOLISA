@@ -7,6 +7,12 @@ import { postTools } from "./post.mjs";
 
 const servers = new WeakMap();
 const current = new AsyncLocalStorage();
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  promise.catch(() => {});
+  return { promise, resolve, reject };
+};
 
 export function managedMcpServer(sdk, options) {
   const { parentIdentity = "query", ...nativeOptions } = options;
@@ -54,22 +60,57 @@ export function managedMcpServer(sdk, options) {
   return server;
 }
 
-export function admitMcp(options) {
+// Native schema parsing precedes registered handlers. Check parsed input here
+// while keeping Post on the native response after output validation.
+function nativeServer(server) {
+  const instance = server.instance;
+  if (!instance?._registeredTools || typeof instance._registeredTools !== "object" ||
+      typeof instance.executeToolHandler !== "function")
+    throw new Error("AW native MCP lacks the registered-handler boundary");
+  const execute = instance.executeToolHandler;
+  const record = { native: true, instance };
+  // Guard the actual executor: native dispatch can select a replacement after
+  // tools/call admission, and input schema validation can also yield.
+  Object.defineProperty(instance, "executeToolHandler", { value: function (definition, args, extra) {
+    const ticket = current.getStore();
+    if (!ticket) return execute.call(this, definition, args, extra);
+    if (ticket.native !== record || ticket.definition !== definition || ticket.entered)
+      throw new Error("AW native MCP handler identity changed");
+    if (typeof definition.handler !== "function")
+      throw new Error("AW native MCP requires a handler");
+    ticket.entered = true;
+    // Preserve native zero-input callback signatures and pin the selected handler
+    // while asynchronous policy checks run.
+    const selected = { ...definition };
+    const input = selected.inputSchema ? structuredClone(args ?? {}) : {};
+    ticket.work = ticket.resident.track(() => ticket.invoke(input, async () => ({ mcp_response: {
+      jsonrpc: "2.0", id: ticket.messageId,
+      result: await execute.call(this, selected, selected.inputSchema ? input : args, extra),
+    } })));
+    ticket.work.catch(error => ticket.handler.reject(error));
+    return ticket.handler.promise;
+  } });
+  servers.set(server, record);
+  return record;
+}
+
+export function admitMcp(options, nativeConfiguration = false) {
   const admitted = new Map();
   for (const [name, server] of Object.entries(options.mcpServers ?? {})) {
     if (server.type !== "sdk") continue;
-    const record = servers.get(server);
-    if (!record || record.claimed || !/^[A-Za-z0-9_-]+$/.test(name))
+    const record = servers.get(server) ?? (nativeConfiguration ? nativeServer(server) : undefined);
+    if (!record || (record.claimed && !record.native) || !/^[A-Za-z0-9_-]+$/.test(name))
       throw new Error("AW in-process MCP requires a fresh managed server per Query");
     admitted.set(name, record);
   }
-  for (const record of admitted.values()) record.claimed = true;
+  for (const record of admitted.values()) if (!record.native) record.claimed = true;
   return admitted;
 }
 
 export function delegatesMcp(resident, input) {
   const context = input.mcp_context;
-  return !!context && resident.mcp.get(context.server_name)?.names.has(context.tool_name);
+  const server = context && resident.mcp.get(context.server_name);
+  return !!server && (server.native || server.names.has(context.tool_name));
 }
 
 export async function dispatchMcp(resident, frame, signal, original) {
@@ -85,15 +126,47 @@ export async function dispatchMcp(resident, frame, signal, original) {
   frame = { ...frame, request };
   const server = resident.mcp.get(request.server_name);
   const name = request.message.params?.name;
+  if (server?.native) {
+    const definition = server.instance._registeredTools[name];
+    if (!definition || typeof definition.handler !== "function")
+      throw new Error("AW rejected unknown native MCP tool");
+    const ticket = { resident, native: server, definition, entered: false, messageId: message.id,
+      handler: deferred(), response: deferred() };
+    ticket.invoke = (input, handler) => invokeMcp(resident, frame, signal, server, name, input, handler, ticket);
+    try {
+      const response = await current.run(ticket, () => original(frame, signal));
+      ticket.response.resolve(response);
+      if (ticket.work) await ticket.work;
+      else {
+        // Only native rejections before handler entry lack an admitted invocation.
+        const envelope = response?.mcp_response;
+        if (ticket.entered || !(envelope?.error || envelope?.result?.isError))
+          throw new Error("AW native MCP dispatch skipped handler admission");
+        return await invokeMcp(resident, frame, signal, server, name,
+          request.message.params?.arguments ?? {}, async () => response);
+      }
+      return response;
+    } catch (error) {
+      ticket.response.reject(error);
+      throw error;
+    }
+  }
+
   const input = request.message.params?.arguments ?? {};
-  if (!server?.names.has(name) || !input || Array.isArray(input) || typeof input !== "object")
-    throw new Error("AW rejected unknown MCP server/tool dispatch");
+  if (!server?.names.has(name)) throw new Error("AW rejected unknown MCP server/tool dispatch");
+  return await invokeMcp(resident, frame, signal, server, name, input, () => original(frame, signal));
+}
+
+async function invokeMcp(resident, frame, signal, server, name, input, original, nativeTicket) {
+  const request = frame.request;
+  if (!input || Array.isArray(input) || typeof input !== "object")
+    throw new Error("AW rejected invalid MCP handler input");
   resident.scope.checkExecution();
   const id = randomUUID();
   const tool = `mcp__${request.server_name}__${name}`;
   const generation = resident.scope.execution;
   const entry = { pending: new Set() };
-  const ticket = { resident, entry, id, tool, generation, definition: server.definitions.get(name), signal,
+  const ticket = { resident, entry, id, tool, generation, definition: server.definitions?.get(name), signal,
     input: structuredClone(input), entered: false };
   const payload = { session_id: resident.identities.session ?? `query-${resident.id}`,
     tool_use_id: id, tool_name: tool, tool_input: structuredClone(input), cwd: resident.cwd,
@@ -117,7 +190,16 @@ export async function dispatchMcp(resident, frame, signal, original) {
     }
     resident.scope.checkExecution(generation);
     if (signal?.aborted) throw new Error("AW MCP dispatch was cancelled before execution");
-    const response = structuredClone(await current.run(ticket, () => original(frame, signal)));
+    let response;
+    if (nativeTicket) {
+      try {
+        const result = await current.run(ticket, () => original());
+        nativeTicket.handler.resolve(result.mcp_response.result);
+      } catch (error) { nativeTicket.handler.reject(error); }
+      // Native output-schema validation and exception conversion happen after
+      // the handler returns. Only that final envelope is eligible for Post.
+      response = structuredClone(await nativeTicket.response.promise);
+    } else response = structuredClone(await current.run(ticket, () => original()));
     await Promise.allSettled([...entry.pending]);
     resident.scope.checkExecution(generation);
     if (signal?.aborted) throw new Error("AW MCP dispatch was cancelled before delivery");

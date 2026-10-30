@@ -4,13 +4,14 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 export class Identities {
-  constructor(scope, onFailure) {
+  constructor(scope, onFailure, nativeConfiguration = false) {
     this.scope = scope;
     this.onFailure = onFailure;
     this.active = new Map();
     this.dispatch = new AsyncLocalStorage();
     this.pending = new Set();
     this.session = undefined;
+    this.nativeConfiguration = nativeConfiguration;
   }
 
   produce(message) {
@@ -53,8 +54,11 @@ export class Identities {
         throw new Error("AW rejected invalid native model input");
       entry.input = structuredClone(block.input);
       this.active.set(block.id, entry);
-      entry.admitted = this.scope.register(entry.id, entry.name, entry.input);
-      entry.admitted.catch(error => this.onFailure(error));
+      if (!this.nativeConfiguration) {
+        entry.registered = true;
+        entry.admitted = this.scope.register(entry.id, entry.name, entry.input);
+        entry.admitted.catch(error => this.onFailure(error));
+      }
       if (entry.producer) {
         clearTimeout(entry.producer.timer);
         entry.producer.resolve();
@@ -120,7 +124,7 @@ export class Identities {
     return { id: frame.request_id, kind, entry, request: structuredClone(request) };
   }
 
-  async claim(input, id, callback, signal) {
+  async claim(input, id, callback, signal, policy = false) {
     const ticket = this.dispatch.getStore();
     const entry = ticket?.entry;
     if (!entry || ticket.kind !== "hook_callback" || id !== entry.native ||
@@ -131,6 +135,18 @@ export class Identities {
     // Reserve before awaiting the producer or admission to reject concurrent replay.
     entry.callbacks.add(callback);
     await this.ready(entry, signal, input.hook_event_name === "PreToolUse");
+    if (this.nativeConfiguration && policy) {
+      if (entry.registered ||
+          !input.tool_input || Array.isArray(input.tool_input) || typeof input.tool_input !== "object")
+        throw new Error("AW rejected invalid policy Hook input");
+      entry.input = structuredClone(input.tool_input);
+      entry.registered = true;
+      entry.admitted = this.scope.register(entry.id, entry.name, entry.input);
+      await entry.admitted;
+      this.check(entry, true);
+      return entry;
+    }
+    if (this.nativeConfiguration) return entry;
     const expected = input.hook_event_name === "PreToolUse" ? entry.input :
       (entry.nativeInput ?? entry.input);
     if (!isDeepStrictEqual(input.tool_input, expected))
@@ -167,7 +183,7 @@ export class Identities {
     await entry.admitted;
     await Promise.allSettled([...entry.pending]);
     await this.beforeRetire?.(entry);
-    await this.scope.finish(entry.id);
+    if (entry.registered) await this.scope.finish(entry.id);
     this.active.delete(native);
   }
 }
