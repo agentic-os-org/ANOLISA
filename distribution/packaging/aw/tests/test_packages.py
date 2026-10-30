@@ -190,25 +190,23 @@ class ArchiveTests(Fixture):
             any(path.name in {".local-packages", "installed.json"} for path in self.repo.rglob("*"))
         )
 
-    def test_templates_require_external_backend_paths_and_rtk_digest(self) -> None:
+    def test_templates_require_external_backend_paths_without_a_separate_rtk(self) -> None:
         tokenless = (package.TEMPLATES / "tokenless.json").read_text()
         security = (package.TEMPLATES / "sec-core.json").read_text()
         self.assertIn("${TOKENLESS_CLI}", tokenless)
-        self.assertIn("${RTK_BINARY}", tokenless)
-        self.assertIn("${RTK_SHA256}", tokenless)
+        # The Tokenless CLI links RTK, so the Provider argv names no RTK program.
+        self.assertNotIn("--rtk", tokenless)
         self.assertIn("${SEC_CORE_CLI}", security)
         self.assertIn("${SOCKET}", security)
         self.assertNotIn("file_hashes", json.loads(tokenless))
         expected = {
             "sec-core": {"PROVIDERS_DIR", "SEC_CORE_CLI", "SOCKET"},
-            "tokenless": {"PROVIDERS_DIR", "TOKENLESS_CLI", "RTK_BINARY", "RTK_SHA256", "STATE"},
+            "tokenless": {"PROVIDERS_DIR", "TOKENLESS_CLI", "STATE"},
             "sec-core-tokenless": {
                 "PROVIDERS_DIR",
                 "SEC_CORE_CLI",
                 "SOCKET",
                 "TOKENLESS_CLI",
-                "RTK_BINARY",
-                "RTK_SHA256",
                 "STATE",
             },
         }

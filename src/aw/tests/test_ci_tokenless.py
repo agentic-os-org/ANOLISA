@@ -28,10 +28,12 @@ class TokenlessTests(GateFixture):
 
     def test_public_backend_and_installer_changes_select_both_checks(self):
         for path in (
-            "src/tokenless/crates/tokenless-runtime/src/entry/rtk.rs",
+            "src/tokenless/crates/tokenless-runtime/src/entry.rs",
+            "src/tokenless/crates/tokenless-cli/build.rs",
             "src/tokenless/crates/tokenless-protocol/src/lib.rs",
             "src/tokenless/crates/tokenless-cli/src/main.rs",
             "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
+            "src/tokenless/third_party/patches/rtk-library.patch",
             "src/tokenless/packaging/build/setup-rtk.sh", "src/tokenless/Cargo.lock",
             "providers/tokenless/src/pretool/retry.rs",
             "distribution/packaging/aw/integration.py",
@@ -110,7 +112,7 @@ class TokenlessTests(GateFixture):
                 gate.required({**env, key: value})
 
     def test_result_rejects_empty_ignored_and_renamed_rust_tests(self):
-        name = check_tokenless.CASES["managed_rtk"]
+        name = check_tokenless.CASES["linked_rtk"]
         good = f"test {name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 3 filtered out;\n"
         check_tokenless.verify_result(good, name)
         for bad in ("", good.replace(name, "different"),
@@ -122,9 +124,9 @@ class TokenlessTests(GateFixture):
 
     def test_consumer_build_and_tests_propagate_failure_and_bind_the_candidate(self):
         aw = self.root / "src/aw"
-        for file in (self.root / "src/tokenless/target/release/tokenless", aw / "target/release/rtk"):
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_bytes(b"fixture binary")
+        cli = self.root / "src/tokenless/target/release/tokenless"
+        cli.parent.mkdir(parents=True, exist_ok=True)
+        cli.write_bytes(b"fixture binary")
         for mode in ("pass", "empty", "failure", "build-failure"):
             calls = []
 

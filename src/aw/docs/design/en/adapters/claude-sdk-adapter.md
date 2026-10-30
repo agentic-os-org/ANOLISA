@@ -108,7 +108,7 @@ and serves deterministic Anthropic responses on an owned loopback HTTP port.
 It checks allow/block, Hook failure, original-hook veto/allow/rewrites, permission
 rewrites, rejected `PermissionRequest` matchers, native Bash failure, parallel
 calls, two turns, 34 policy/exit-9/SIGTERM fail-closed vetoes followed by an allowed call and durable AW journals.
-Optional `--tokenless` cases use a built Protocol v2 CLI and RTK on PATH to check
+Optional `--tokenless` cases use a built Protocol v2 CLI to check
 Bash model-visible replacement, original observer views, failure/report behavior,
 retry rejection, skipped managed MCP error compression and preserved HTTP MCP
 error results (`PostToolUseFailure`, uncompressed).

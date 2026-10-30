@@ -1,7 +1,6 @@
 //! Installed Provider acceptance with separately supplied AW and backend executables.
 //! Native framework adoption is validated separately through the documented user flow.
 
-use aw_package::digest;
 use aw_package::Policy;
 use aw_service::{Client, Operation};
 use serde_json::{json, Value};
@@ -15,7 +14,6 @@ fn policy(name: &str, socket: &Path) -> Policy<'static> {
     let template = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../distribution/packaging/aw/templates")
         .join(format!("{name}.json"));
-    let rtk = external("AW_TOKENLESS_TEST_RTK");
     Policy::Template {
         definition: serde_json::from_slice(&fs::read(template).unwrap()).unwrap(),
         variables: BTreeMap::from([
@@ -35,8 +33,6 @@ fn policy(name: &str, socket: &Path) -> Policy<'static> {
                 "TOKENLESS_CLI".into(),
                 external("AW_TOKENLESS_TEST_CLI").display().to_string(),
             ),
-            ("RTK_BINARY".into(), rtk.display().to_string()),
-            ("RTK_SHA256".into(), digest(&rtk).unwrap()),
         ]),
     }
 }

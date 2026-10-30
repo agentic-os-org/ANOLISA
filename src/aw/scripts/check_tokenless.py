@@ -14,7 +14,7 @@ from native_acceptance import Commands
 CASES = {
     "provider": "bundled_cli_compresses_losslessly_without_a_recovery_entry",
     "pretool": "public_cli_pretool_and_posttool_share_the_executed_wrapper",
-    "managed_rtk": "real_managed_rtk_rewrites_executes_and_preserves_attributed_after",
+    "linked_rtk": "real_linked_rtk_rewrites_executes_and_preserves_attributed_after",
     "views": "bundled_cli_statistics_exclude_dry_runs_and_match_selected_candidate_totals",
 }
 
@@ -34,7 +34,6 @@ def check(directory: Path) -> None:
         **os.environ, "TOKENLESS_COMPRESSION_ENABLED": "1",
         "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0",
         "AW_TOKENLESS_TEST_CLI": str(REPO / "src/tokenless/target/release/tokenless"),
-        "AW_TOKENLESS_TEST_RTK": str(AW / "target/release/rtk"),
     }
     commands = Commands(directory, environment)
     report = {"candidate_sha": expected, "passed": False, "cases": []}
@@ -44,8 +43,9 @@ def check(directory: Path) -> None:
              "BACKENDS=tokenless"], REPO, 2700,
         )
         report["binaries"] = {
-            name: hashlib.sha256(Path(environment[key]).read_bytes()).hexdigest()
-            for name, key in (("tokenless", "AW_TOKENLESS_TEST_CLI"), ("rtk", "AW_TOKENLESS_TEST_RTK"))
+            "tokenless": hashlib.sha256(
+                Path(environment["AW_TOKENLESS_TEST_CLI"]).read_bytes()
+            ).hexdigest()
         }
         for target, name in CASES.items():
             log = commands.run(
