@@ -25,6 +25,7 @@ from swe_runner.agents import agent_supports_run_option
 from swe_runner.common.logging_config import setup_logging
 from swe_runner.common.models import AgentConfig, DatasetConfig, OutputConfig, Settings
 from swe_runner.evaluation import run_evaluation as run_patch_evaluation
+from swe_runner.evaluation.service import EvaluationSelectionError
 from swe_runner.run.io.report import RunReport
 from swe_runner.run.session import RunSession
 from swe_runner.trace_extraction import TraceCollectionPlan, write_trace_analysis_csvs
@@ -162,6 +163,7 @@ def evaluate_patches_command(
     cache_level: str,
     namespace: str,
     verbose: bool,
+    instance_id: str | None = None,
 ) -> None:
     """Evaluate generated patches with the SWE-bench evaluator."""
     if not predictions.exists():
@@ -182,17 +184,22 @@ def evaluate_patches_command(
         workers,
         actual_run_id,
     )
-    run_patch_evaluation(
-        resolved_predictions,
-        evaluate_output,
-        subset=subset,
-        split=split,
-        workers=workers,
-        timeout=timeout,
-        run_id=actual_run_id,
-        cache_level=cache_level,
-        namespace=None if namespace.lower() == "none" else namespace,
-    )
+    instance_ids = instance_id.split(",") if instance_id is not None else None
+    try:
+        run_patch_evaluation(
+            resolved_predictions,
+            evaluate_output,
+            subset=subset,
+            split=split,
+            workers=workers,
+            timeout=timeout,
+            run_id=actual_run_id,
+            cache_level=cache_level,
+            namespace=None if namespace.lower() == "none" else namespace,
+            instance_ids=instance_ids,
+        )
+    except EvaluationSelectionError as error:
+        raise CommandUsageError(str(error)) from error
 
 
 def analyze_traces_command(

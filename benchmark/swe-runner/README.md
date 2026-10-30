@@ -363,6 +363,16 @@ the instance profile and then adds the required sandbox config.
 `evaluate` wraps the official SWE-bench evaluation flow. It reads `preds.json`
 and evaluates only instances with non-empty `model_patch` values.
 
+Use `--instance-id/-i` to re-evaluate exact comma-separated IDs from the same
+predictions file. IDs are trimmed and deduplicated in requested order. Every
+requested ID must have a non-empty patch; missing IDs, empty patches or empty
+comma-separated segments fail before evaluator/Docker setup. Omitting the option
+keeps all non-empty predictions. The predictions file remains unchanged.
+
+```bash
+swe-runner evaluate --instance-id django__django-12345,sympy__sympy-54321
+```
+
 Default evaluation:
 
 ```bash
@@ -393,6 +403,7 @@ swe-runner evaluate --namespace none
 | Option | Default | Description |
 |---|---:|---|
 | `--predictions, -p` | `./output/run/preds.json` | Predictions file |
+| `--instance-id, -i` | none | Exact comma-separated IDs with non-empty predictions |
 | `--subset, -s` | `lite` | Evaluation dataset: `lite`, `verified`, `full`, or `multilingual` |
 | `--split` | `test` | Dataset split |
 | `--output, -o` | `./output` | Output root; evaluation artifacts go under `evaluate/` |
