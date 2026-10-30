@@ -532,7 +532,7 @@ fix_dep() {
     npx)     install_via_npx "$package" && primary_ok=true ;;
     cargo)   install_via_cargo "$package" && primary_ok=true ;;
     symlink) local src; src=$(echo "$dep_json" | jq -r '.source // empty'); install_via_symlink "$binary" "$src" && primary_ok=true ;;
-    path)    local pdir; pdir=$(echo "$dep_json" | jq -r '.source // "/usr/libexec/anolisa/tokenless"'); if [ ! -d "$pdir" ]; then pdir="/usr/lib/anolisa/tokenless"; fi; install_via_path "$pdir" && primary_ok=true ;;
+    path)    local pdir; pdir=$(echo "$dep_json" | jq -r '.source // empty'); [ -n "$pdir" ] && install_via_path "$pdir" && primary_ok=true ;;
     dir)     local dpath; dpath=$(echo "$dep_json" | jq -r '.source // empty'); install_via_dir "$dpath" && primary_ok=true ;;
     curl_pipe_sh) [ -n "$url" ] && install_via_curl_pipe_sh "$url" "$args" && primary_ok=true ;;
     *)
@@ -579,7 +579,7 @@ fix_dep() {
         cargo)   [ -n "$fb_package" ] && install_via_cargo "$fb_package" && fb_ok=true ;;
         cargo_build) [ -n "$fb_manifest" ] && install_via_cargo_build "$fb_manifest" "$fb_binary" "$fb_features" && fb_ok=true ;;
         symlink) [ -n "$fb_source" ] && install_via_symlink "$fb_binary" "$fb_source" && fb_ok=true ;;
-        path)    local _fb_pdir="${fb_source:-/usr/libexec/anolisa/tokenless}"; if [ ! -d "$_fb_pdir" ]; then _fb_pdir="/usr/lib/anolisa/tokenless"; fi; install_via_path "$_fb_pdir" && fb_ok=true ;;
+        path)    [ -n "$fb_source" ] && install_via_path "$fb_source" && fb_ok=true ;;
         dir)     [ -n "$fb_source" ] && install_via_dir "$fb_source" && fb_ok=true ;;
         curl_pipe_sh) [ -n "$fb_url" ] && install_via_curl_pipe_sh "$fb_url" "$fb_args" && fb_ok=true ;;
         *) echo "[tokenless-env-fix] ${binary}: unknown fallback method '${fb_method}'" ;;

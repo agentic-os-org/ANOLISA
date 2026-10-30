@@ -67,15 +67,12 @@ if (Test-Path -LiteralPath $rtk) {
 $buildArgs = @('build', '--locked', '--target', 'x86_64-pc-windows-msvc')
 $profile = 'debug'
 if (!$Debug) { $buildArgs += '--release'; $profile = 'release' }
+# RTK is linked into tokenless.exe; its checkout is only a path dependency.
 $componentTarget = Get-CargoTargetDirectory (Join-Path $component 'Cargo.toml')
-$rtkTarget = Get-CargoTargetDirectory (Join-Path $rtk 'Cargo.toml')
 & cargo @buildArgs --manifest-path (Join-Path $component 'Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'Tokenless build failed' }
-& cargo @buildArgs --manifest-path (Join-Path $rtk 'Cargo.toml')
-if ($LASTEXITCODE -ne 0) { throw 'RTK build failed' }
 # npm packaging consumes this fixed staging path even when Cargo output is redirected.
 $output = Join-Path $component 'target/npm-prebuilt/win32-x64'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $componentTarget "x86_64-pc-windows-msvc/$profile/tokenless.exe") -Destination $output
-Copy-Item -LiteralPath (Join-Path $rtkTarget "x86_64-pc-windows-msvc/$profile/rtk.exe") -Destination $output
-Write-Output "Windows binaries: $output"
+Write-Output "Windows binary: $output"

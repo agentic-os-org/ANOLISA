@@ -157,7 +157,7 @@ Token-Less/
 Install the published component with the ANOLISA CLI:
 
 The install script places `anolisa` in `~/.local/bin`, and a user-mode
-Tokenless installation places `tokenless` and `rtk` in that same
+Tokenless installation places `tokenless` in that same
 directory. Export it once if the current shell has not picked it up yet.
 
 ```bash
@@ -182,8 +182,8 @@ system path. `adopt` then records the directly installed RPM in system state so
 adapter commands can use its component contract.
 
 Two further public routes install the CLI on their own, without an anolisa
-component record. The npm route ships the prebuilt `tokenless` and `rtk`
-binaries plus the bundled Agent adapters and needs Node.js 16.7+, the release
+component record. The npm route ships the prebuilt `tokenless` binary plus
+the bundled Agent adapters and needs Node.js 16.7+, the release
 `fs.cpSync` arrived in and the one the package postinstall requires. The curl route
 is a standalone installer that prefers npm and builds from source instead. The
 method is chosen before npm runs (npm missing, musl Linux, or
@@ -257,8 +257,9 @@ cd Token-Less
 make setup
 ```
 
-The source setup installs `tokenless` to `~/.local/bin`, places the `rtk`
-helper alongside it, and deploys all adapters for development.
+The source setup installs `tokenless` to `~/.local/bin` and deploys all
+adapters for development. RTK is linked into `tokenless`; rewritten commands run
+through `tokenless rtk`.
 
 ### Build the Python SDK
 
@@ -566,9 +567,9 @@ bypass does not read this file:
       { "binary": "jq", "package": "jq", "manager": "apt" }
     ],
     "recommended": [
-      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+      { "binary": "uv", "package": "uv", "manager": "pip", "pip_name": "uv",
         "fallback": [
-          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
+          { "method": "cargo", "binary": "uv", "package": "uv" }
         ]
       }
     ]
@@ -698,9 +699,9 @@ make qoder-install
 
 ## QwenWork Plugin (Windows x64 Local Mode)
 
-Windows x64 supports native `tokenless.exe` and `rtk.exe`, npm launchers, and
-QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. Install the published
-package with `npm install -g anolisa-tokenless`. For source builds, follow the
+Windows x64 supports native `tokenless.exe`, npm launchers, and QwenWorkCN
+PowerShell hooks. Windows ARM64 is unsupported. Install the published package
+with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Git Bash and WSL are not required.
 
@@ -1049,8 +1050,8 @@ and makes no cloud requests.
 
 | Target | Description |
 |---|---|
-| `make build` | Build `tokenless` + `rtk` and OpenClaw/DSH plugins (release mode) |
-| `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
+| `make build` | Build `tokenless` and OpenClaw/DSH plugins (release mode) |
+| `make build-tokenless` | Build `tokenless` (via justfile) |
 | `make python-wheel` | Build the native `anolisa-tokenless` wheel |
 | `make agentscope-wheel` | Build the pure-Python AgentScope integration wheel |
 | `make test-python-runtime` | Install and test the wheel in an isolated environment |
@@ -1091,8 +1092,8 @@ make install PREFIX=/usr/local
 
 ## Raw Packaging
 
-Raw packaging accepts already-built `tokenless` and `rtk`
-executables in one directory and applies the stable component payload layout:
+Raw packaging accepts an already-built `tokenless` executable
+in one directory and applies the stable component payload layout:
 
 ```bash
 make package-raw \

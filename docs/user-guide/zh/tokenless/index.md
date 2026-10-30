@@ -75,7 +75,7 @@ raw、npm 和源码安装保留原有交付格式。
 
 #### 方式 B：npm
 
-需要 Node.js 16.7+——`fs.cpSync` 从该版本起提供，而包的 postinstall 用它放置 Adapter 资源。自动安装适合当前平台的预编译二进制（`tokenless`、`rtk`）和框架 Adapter 资源：
+需要 Node.js 16.7+——`fs.cpSync` 从该版本起提供，而包的 postinstall 用它放置 Adapter 资源。自动安装适合当前平台的预编译 `tokenless` 二进制和框架 Adapter 资源：
 
 ```bash
 npm install -g anolisa-tokenless
@@ -123,7 +123,7 @@ curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tok
 
 | 路径 | 触发条件 | 依赖 | 安装内容 |
 |------|----------|------|----------|
-| npm | 存在 npm，且平台为 glibc Linux 或 macOS | `curl`、`tar`、Node.js 16.7+（含 `npm`） | `tokenless`、`rtk` 以及 Adapter 资源 |
+| npm | 存在 npm，且平台为 glibc Linux 或 macOS | `curl`、`tar`、Node.js 16.7+（含 `npm`） | `tokenless` 以及 Adapter 资源 |
 | 源码构建（仅 Linux） | 在**执行 npm 之前**选定：无 npm、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1`。调用 `npm install` 之后不再自动切换——见上文失败处理说明 | `curl`、`tar`、Rust 工具链（`cargo`）1.91 或更高版本、`git`、`patch` | 仅 `tokenless` CLI —— 不含 Adapter |
 
 脚本只支持 Linux 和 macOS；在 Windows 上会直接报错退出，请改用 WSL2。源码构建路径同样只支持 Linux：在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会调用 `cargo`。
@@ -352,7 +352,7 @@ cargo build --release --locked -p tokenless-cli
 
 ## 从源码构建并安装组件文件
 
-在 Linux 的 `src/tokenless` 中为当前用户构建并安装 CLI、RTK 和框架资源：
+在 Linux 的 `src/tokenless` 中为当前用户构建并安装 CLI 和框架资源：
 
 ```bash
 make build

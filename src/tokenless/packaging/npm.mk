@@ -8,7 +8,6 @@ prepare-npm-native-binaries: build-tokenless
 	@install -d -m 0755 "$(NATIVE_NPM_INPUT_DIR)"
 	@install -p -m 0755 \
 		target/release/tokenless \
-		third_party/rtk/target/release/rtk \
 		"$(NATIVE_NPM_INPUT_DIR)/"
 
 # Build and package the current host.

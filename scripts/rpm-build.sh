@@ -623,7 +623,7 @@ build_tokenless() {
     mkdir -p "$pkg_dir"
 
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
-    # Note: third_party/rtk must be included — it's built separately via --manifest-path
+    # Note: third_party/rtk must be included — tokenless links it as a path dependency
     # Adapter configs are generated from their versioned templates during the
     # RPM build. ANOLISA discovery contracts are delivered by ANOLISA itself.
     tar -cf - -C "$TOKEN_DIR" \

@@ -19,7 +19,7 @@
  *   node packaging/npm/package-npm.js --all               # all supported targets
  *
  * Prerequisites:
- *   - Prebuilt tokenless and rtk binaries for each selected target
+ *   - A prebuilt tokenless binary for each selected target
  *   - npm (the architecture-independent OpenClaw adapter is built here)
  *
  * Output:
@@ -98,7 +98,7 @@ function wheelFilenameVersion() {
   return normalized;
 }
 
-const BINARIES = ['tokenless', 'rtk'];
+const BINARIES = ['tokenless'];
 
 // npm registry every generated manifest and publish command is pinned to.
 // The nested dist/* package roots do NOT inherit npm/.npmrc, so without an
@@ -165,7 +165,7 @@ Target selectors also accept an OS, npm CPU, architecture, or Rust target
 triple and may select more than one matching target.
 
 Prebuilt binaries are read from:
-  target/npm-prebuilt/<target>/{tokenless,rtk}`);
+  target/npm-prebuilt/<target>/tokenless`);
 }
 
 function optionValue(args, index, option) {
@@ -368,7 +368,7 @@ function packagePlatform(target, binaryPaths) {
   // Write package.json
   //
   // Deliberately declare NO `bin` entries here: the platform packages would
-  // otherwise claim the same `tokenless`/`rtk` bin names as the root
+  // otherwise claim the same `tokenless` bin name as the root
   // package. When multiple packages in a tree claim the same bin, npm's
   // reify removes every conflicting `.bin` link instead of picking a
   // winner, leaving installs without a `tokenless` executable. esbuild ships

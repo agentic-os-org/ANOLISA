@@ -104,10 +104,8 @@ cp -R "$ROOT/packaging" "$SOURCE/packaging"
 cp "$ROOT/Makefile" "$SOURCE/Makefile"
 cp "$ROOT/Cargo.toml" "$SOURCE/Cargo.toml"
 cp "$ROOT/LICENSE" "$SOURCE/LICENSE"
-for binary in tokenless rtk; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/$binary"
-    chmod 0755 "$TMP/bin/$binary"
-done
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/tokenless"
+chmod 0755 "$TMP/bin/tokenless"
 for relative in manifest.json common/cosh-extension.json common/tool-ready-spec.json; do
     printf '{}\n' > "$ADAPTERS/$relative"
 done
@@ -133,13 +131,14 @@ test -f "$SOURCE/packaging/anolisa/component.toml.in"
 test -f "$SOURCE/Makefile"
 test ! -e "$SOURCE/.anolisa"
 make -s -C "$SOURCE" install \
-    DESTDIR="$TMP/stage" BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" PREFIX=/opt/vendor \
+    DESTDIR="$TMP/stage" BIN_DIR="$TMP/bin" PREFIX=/opt/vendor \
     BINDIR=/custom/bin LIBEXECDIR=/custom/runtime DATADIR=/custom/data \
     ADAPTERDIR=/custom/adapters EXTENSIONDIR=/custom/cosh-extension
 test -x "$TMP/stage/custom/bin/tokenless"
-test -x "$TMP/stage/custom/runtime/rtk"
+# RTK is linked into tokenless, so no helper directory or rtk link is created.
+test ! -e "$TMP/stage/custom/runtime"
+test ! -e "$TMP/stage/custom/bin/rtk"
 cmp "$SOURCE/LICENSE" "$TMP/stage/custom/data/LICENSE"
-test "$(readlink "$TMP/stage/custom/bin/rtk")" = /custom/runtime/rtk
 test -f "$TMP/stage/custom/adapters/openclaw/dist/index.js"
 test -x "$TMP/stage/custom/cosh-extension/hooks/rewrite_hook.py"
 test ! -e "$TMP/stage/custom/adapters/openclaw/node_modules"
@@ -151,25 +150,32 @@ make -s -C "$SOURCE" generate-component-contract
 test -f "$SOURCE/target/packaging/anolisa/component.toml"
 test ! -e "$SOURCE/.anolisa"
 make -s -C "$SOURCE" install \
-    DESTDIR="$TMP/distribution" BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" PREFIX=/opt/vendor AWPRJ=anolisa
-test -x "$TMP/distribution/opt/vendor/libexec/anolisa/tokenless/rtk"
+    DESTDIR="$TMP/distribution" BIN_DIR="$TMP/bin" PREFIX=/opt/vendor AWPRJ=anolisa
+test ! -e "$TMP/distribution/opt/vendor/libexec"
 cmp "$SOURCE/LICENSE" "$TMP/distribution/opt/vendor/share/anolisa/tokenless/LICENSE"
 test -f "$TMP/distribution/opt/vendor/share/anolisa/adapters/tokenless/manifest.json"
 test -f "$TMP/distribution/opt/vendor/share/anolisa/extensions/tokenless/cosh-extension.json"
 make -s -j4 -C "$SOURCE" install \
-    DESTDIR="$TMP/parallel" BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" PREFIX=/opt/vendor AWPRJ=parallel
-test "$(readlink "$TMP/parallel/opt/vendor/bin/rtk")" = /opt/vendor/libexec/parallel/tokenless/rtk
+    DESTDIR="$TMP/parallel" BIN_DIR="$TMP/bin" PREFIX=/opt/vendor AWPRJ=parallel
+test ! -e "$TMP/parallel/opt/vendor/bin/rtk"
 test -f "$TMP/parallel/opt/vendor/share/parallel/adapters/tokenless/manifest.json"
 test -f "$TMP/parallel/opt/vendor/share/parallel/extensions/tokenless/cosh-extension.json"
-make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" PREFIX="$TMP/direct"
+make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/direct"
 test -x "$TMP/direct/bin/tokenless"
-test "$(readlink "$TMP/direct/bin/rtk")" = "$TMP/direct/libexec/tokenless/rtk"
+test ! -e "$TMP/direct/bin/rtk"
 test -f "$TMP/direct/share/tokenless/adapters/manifest.json"
 test ! -L "$TMP/direct/share/tokenless/adapters/claude-code/hooks/run-hook.sh"
 test ! -L "$TMP/direct/share/tokenless/adapters/qwenwork/hooks/shared"
-make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" PREFIX="$TMP/direct"
-make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" PREFIX="$TMP/namespaced" AWPRJ=anolisa
-test -x "$TMP/namespaced/libexec/anolisa/tokenless/rtk"
+# Reinstalling over an older release removes the rtk helper and the link it owned.
+mkdir -p "$TMP/direct/libexec/tokenless"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/direct/libexec/tokenless/rtk"
+chmod 0755 "$TMP/direct/libexec/tokenless/rtk"
+ln -s "$TMP/direct/libexec/tokenless/rtk" "$TMP/direct/bin/rtk"
+make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/direct"
+test ! -L "$TMP/direct/bin/rtk"
+test ! -e "$TMP/direct/libexec/tokenless"
+make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/namespaced" AWPRJ=anolisa
+test ! -e "$TMP/namespaced/libexec"
 test -f "$TMP/namespaced/share/anolisa/adapters/tokenless/manifest.json"
 
 # Registration and uninstall follow the same resolved paths as file installation.
@@ -204,7 +210,7 @@ printf '%s\n' "$1" >> "$SETUP_LOG"
 case "$1" in
     build|adapter-install) ;;
     install) exec make -s -C "$SETUP_SOURCE" install \
-        BIN_DIR="$SETUP_BIN" RTK_BIN="$SETUP_BIN/rtk" ;;
+        BIN_DIR="$SETUP_BIN" ;;
     *) exit 1 ;;
 esac
 SETUPMAKE
@@ -222,20 +228,20 @@ done
 # Core installation must work without any built framework bundles.
 # User installation separates executable and XDG resource roots.
 make -s -C "$SOURCE" install INSTALL_PROFILE=user PREFIX="$TMP/user-prefix" \
-    BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data"
+    BIN_DIR="$TMP/bin" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data"
 test -x "$TMP/user-prefix/bin/tokenless"
 for uid in 0 1001; do
     stage="$TMP/uid-install-$uid"
     env -u INSTALL_PROFILE -u PREFIX PATH="$UID_TOOLS:$PATH" DELIVERY_TEST_UID="$uid" \
         HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" \
-        make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$stage"
+        make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" DESTDIR="$stage"
     if [ "$uid" = 0 ]; then
         test -x "$stage/usr/local/bin/tokenless"
     else
         test -x "$stage$TMP/user-home/.local/bin/tokenless"
     fi
 done
-test -L "$TMP/user-prefix/bin/rtk"
+test ! -e "$TMP/user-prefix/bin/rtk"
 test -f "$TMP/user-data/tokenless/adapters/common/tool-ready-spec.json"
 test -f "$TMP/user-data/tokenless/cosh-extension/cosh-extension.json"
 HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data" make -s -C "$SOURCE" adapter-scan \
@@ -246,21 +252,21 @@ test ! -e "$TMP/user-prefix/bin/tokenless"
 test ! -e "$TMP/user-data/tokenless/adapters"
 test ! -e "$TMP/user-data/tokenless/cosh-extension"
 mv "$ADAPTERS/openclaw/dist/index.js" "$TMP/group-plugin.saved"
-make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/core-only"
+make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" DESTDIR="$TMP/core-only"
 test -x "$TMP/core-only/usr/bin/tokenless"
-test -x "$TMP/core-only/usr/libexec/tokenless/rtk"
+test ! -e "$TMP/core-only/usr/libexec"
 test ! -e "$TMP/core-only/usr/share/tokenless/adapters"
 test ! -e "$TMP/core-only/usr/share/tokenless/cosh-extension"
 mv "$TMP/group-plugin.saved" "$ADAPTERS/openclaw/dist/index.js"
 mv "$TMP/bin" "$TMP/group-binaries.saved"
-make -s -C "$SOURCE" install-plugins BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/plugins-only"
+make -s -C "$SOURCE" install-plugins BIN_DIR="$TMP/bin" DESTDIR="$TMP/plugins-only"
 test -f "$TMP/plugins-only/usr/share/tokenless/adapters/openclaw/dist/index.js"
 test -f "$TMP/plugins-only/usr/share/tokenless/cosh-extension/cosh-extension.json"
 test ! -e "$TMP/plugins-only/usr/bin"
 test ! -e "$TMP/plugins-only/usr/libexec"
 mv "$TMP/group-binaries.saved" "$TMP/bin"
-make -s -j4 -C "$SOURCE" install-core install-plugins BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/group-union" AWPRJ=example
-make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/group-all" AWPRJ=example
+make -s -j4 -C "$SOURCE" install-core install-plugins BIN_DIR="$TMP/bin" DESTDIR="$TMP/group-union" AWPRJ=example
+make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/group-all" AWPRJ=example
 python3 - "$TMP/group-union" "$TMP/group-all" <<'PYGROUP'
 from pathlib import Path
 import sys
@@ -270,14 +276,14 @@ def inventory(root):
             for p in root.rglob('*') if p.is_file() or p.is_symlink()}
 assert inventory(Path(sys.argv[1])) == inventory(Path(sys.argv[2]))
 PYGROUP
-mv "$TMP/bin/rtk" "$TMP/bin/rtk.saved"
-if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/missing-binary" >/dev/null 2>&1; then
+mv "$TMP/bin/tokenless" "$TMP/bin/tokenless.saved"
+if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/missing-binary" >/dev/null 2>&1; then
     printf 'ERROR: install accepted a missing binary\n' >&2; exit 1
 fi
 test ! -e "$TMP/missing-binary"
-mv "$TMP/bin/rtk.saved" "$TMP/bin/rtk"
+mv "$TMP/bin/tokenless.saved" "$TMP/bin/tokenless"
 mv "$ADAPTERS/openclaw/dist/index.js" "$TMP/plugin.saved"
-if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/missing-plugin" >/dev/null 2>&1; then
+if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/missing-plugin" >/dev/null 2>&1; then
     printf 'ERROR: install accepted a missing plugin input\n' >&2; exit 1
 fi
 test ! -e "$TMP/missing-plugin"
@@ -285,22 +291,25 @@ mv "$TMP/plugin.saved" "$ADAPTERS/openclaw/dist/index.js"
 mkdir -p "$TMP/outside"
 ln -s "$TMP/outside" "$TMP/link"
 for destination in "$TMP/link" "$TMP/link/child" "$TMP/../escape" relative / //; do
-    if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$destination" >/dev/null 2>&1; then
+    if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$destination" >/dev/null 2>&1; then
         printf 'ERROR: unsafe staging root accepted: %s\n' "$destination" >&2; exit 1
     fi
 done
 mkdir -p "$TMP/unsafe/usr/share/tokenless/adapters"
 ln -s "$TMP/outside" "$TMP/unsafe/usr/share/tokenless/adapters/common"
-if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/unsafe" >/dev/null 2>&1; then
+if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/unsafe" >/dev/null 2>&1; then
     printf 'ERROR: symbolic link in target tree accepted\n' >&2; exit 1
 fi
 test -z "$(find "$TMP/outside" -mindepth 1 -print -quit)"
 mkdir -p "$TMP/shared/usr/bin" "$TMP/shared/other-component"
 ln -s "$TMP/outside" "$TMP/shared/other-component/runtime"
 ln -s /unrelated/target "$TMP/shared/usr/bin/other-command"
-make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" RTK_BIN="$TMP/bin/rtk" DESTDIR="$TMP/shared"
+# An rtk that Tokenless did not install is neither replaced nor rejected.
+ln -s /opt/rtk/bin/rtk "$TMP/shared/usr/bin/rtk"
+make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/shared"
 test -x "$TMP/shared/usr/bin/tokenless"
 test -L "$TMP/shared/usr/bin/other-command"
+test "$(readlink "$TMP/shared/usr/bin/rtk")" = /opt/rtk/bin/rtk
 if AWPRJ= bash "$ROOT/packaging/raw/package.sh" stage >"$TMP/raw-error" 2>&1; then
     printf 'ERROR: incompatible raw namespace accepted\n' >&2; exit 1
 fi

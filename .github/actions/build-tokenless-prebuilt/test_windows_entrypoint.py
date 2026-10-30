@@ -72,6 +72,8 @@ class WindowsEntrypointTests(unittest.TestCase):
             "TEST_BINARY": str(binary),
             "TEST_PYTHON_LOG": str(self.calls),
             "PACKER_MARKER": str(self.marker),
+            # build.sh selects this from the source tree; current trees link RTK.
+            "TOKENLESS_PACKAGED_EXECUTABLE": "tokenless",
         }
 
     def packer(self, relative, label):
@@ -122,6 +124,7 @@ class WindowsEntrypointTests(unittest.TestCase):
         self.assertIn("verify-wheels.py", self.calls.read_text())
 
     def test_historical_source_uses_original_packer(self):
+        self.environment["TOKENLESS_PACKAGED_EXECUTABLE"] = "rtk"
         self.packer("npm/scripts/package-npm.js", "legacy")
         result = self.run_action()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

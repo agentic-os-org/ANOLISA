@@ -82,7 +82,7 @@ record, so `anolisa adapter enable` does not apply to them.
 
 #### Method B: npm
 
-Requires Node.js 16.7+ — that is the release `fs.cpSync` arrived in, and the package postinstall uses it to place the adapter resources. Automatically installs the prebuilt binaries (`tokenless`, `rtk`) and the framework adapter resources for your platform:
+Requires Node.js 16.7+ — that is the release `fs.cpSync` arrived in, and the package postinstall uses it to place the adapter resources. Automatically installs the prebuilt `tokenless` binary and the framework adapter resources for your platform:
 
 ```bash
 npm install -g anolisa-tokenless
@@ -130,7 +130,7 @@ Prerequisites depend on which path the script takes:
 
 | Path | Taken when | Requires | Installs |
 |------|-----------|----------|----------|
-| npm | npm is present and the platform is glibc Linux or macOS | `curl`, `tar`, Node.js 16.7+ with `npm` | `tokenless`, `rtk`, and the adapter resources |
+| npm | npm is present and the platform is glibc Linux or macOS | `curl`, `tar`, Node.js 16.7+ with `npm` | `tokenless` and the adapter resources |
 | Source build (Linux only) | chosen **before** npm runs: npm is missing, the platform is musl Linux, or `TOKENLESS_FORCE_BUILD=1`. Not selected automatically once `npm install` has been invoked — see the failure note above | `curl`, `tar`, a Rust toolchain (`cargo`) 1.91 or later, `git`, `patch` | the `tokenless` CLI only — no adapters |
 
 The script supports Linux and macOS only; on Windows it exits with an error, so use WSL2 there. Its source-build path is Linux-only as well: on macOS the installer either takes the npm path or exits with an error, and never invokes `cargo`.
@@ -363,7 +363,7 @@ cargo build --release --locked -p tokenless-cli
 
 ## Build and install component files from source
 
-From `src/tokenless` on Linux, build and install the CLI, RTK and framework
+From `src/tokenless` on Linux, build and install the CLI and framework
 resources for the current user:
 
 ```bash

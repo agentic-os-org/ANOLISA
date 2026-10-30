@@ -95,7 +95,6 @@ def main() -> None:
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
         ).strip(),
         "expected_binary_sha256": sha256(ROOT / "target/release/tokenless"),
-        "expected_rtk_sha256": sha256(ROOT / "third_party/rtk/target/release/rtk"),
         "suite_sha256": {path.name: sha256(path) for path in suite.glob("*.py")},
         "project_url": "https://github.com/pillarjs/path-to-regexp",
         "project_commit": revision,

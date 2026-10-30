@@ -105,10 +105,6 @@ while [ "${root%/}" != "$root" ]; do root="${root%/}"; done
 
 check_destination() {
     local target="$1" kind="$2" current="$1"
-    # Reinstall the link we own without rejecting its expected private target.
-    if [ "$kind" = rtk-link ] && [ -L "$target" ] && [ "$(readlink "$target")" = "$LIBEXECDIR/rtk" ]; then
-        current="$(dirname "$target")"
-    fi
     while [ "$current" != / ]; do
         [ ! -L "$current" ] || { printf 'ERROR: installation path is a symbolic link: %s\n' "$current" >&2; exit 1; }
         current="$(dirname "$current")"
@@ -121,6 +117,27 @@ check_destination() {
         printf 'ERROR: installation directory is a file: %s\n' "$target" >&2
         exit 1
     fi
+}
+
+# Older releases installed standalone rtk and toon helpers; tokenless now
+# embeds both. A BINDIR link is removed only when it points into a Tokenless
+# helper layout, so an independently installed rtk or toon stays.
+remove_stale_helpers() {
+    rm -f "$root$LIBEXECDIR/rtk" "$root$LIBEXECDIR/toon"
+    if [ -L "$root$BINDIR/rtk" ]; then
+        case "$(readlink "$root$BINDIR/rtk")" in
+            "$LIBEXECDIR/rtk"|*/anolisa/tokenless/rtk|*/libexec/tokenless/rtk) rm -f "$root$BINDIR/rtk" ;;
+        esac
+    fi
+    if [ -L "$root$BINDIR/toon" ]; then
+        case "$(readlink "$root$BINDIR/toon")" in
+            */anolisa/tokenless/toon|*/anolisa/libexec/tokenless/toon) rm -f "$root$BINDIR/toon" ;;
+        esac
+    fi
+    # Only the private helper directory, never a shared libexec, and only if empty.
+    case "$LIBEXECDIR" in
+        */tokenless) rmdir "$root$LIBEXECDIR" 2>/dev/null || true ;;
+    esac
 }
 
 check_tree_destinations() {
@@ -149,26 +166,16 @@ if [ "$group" = uninstall ]; then
         check_destination "$root$directory" directory
     done
     check_destination "$root$BINDIR/tokenless" file
-    check_destination "$root$BINDIR/rtk" rtk-link
     check_destination "$root$LIBEXECDIR/rtk" file
     check_destination "$root$DATADIR/LICENSE" file
-    rm -f "$root$BINDIR/tokenless" "$root$LIBEXECDIR/rtk" "$root$LIBEXECDIR/toon" "$root$DATADIR/LICENSE"
-    if [ -L "$root$BINDIR/rtk" ] && [ "$(readlink "$root$BINDIR/rtk")" = "$LIBEXECDIR/rtk" ]; then
-        rm -f "$root$BINDIR/rtk"
-    fi
-    if [ -L "$root$BINDIR/toon" ]; then
-        case "$(readlink "$root$BINDIR/toon")" in
-            */anolisa/tokenless/toon|*/anolisa/libexec/tokenless/toon) rm -f "$root$BINDIR/toon" ;;
-        esac
-    fi
+    rm -f "$root$BINDIR/tokenless" "$root$DATADIR/LICENSE"
+    remove_stale_helpers
     rm -rf "$root$ADAPTERDIR" "$root$EXTENSIONDIR"
     exit 0
 fi
 BIN_DIR="${BIN_DIR:-$COMPONENT_ROOT/target/release}"
-RTK_BIN="${RTK_BIN:-$COMPONENT_ROOT/third_party/rtk/target/release/rtk}"
 if [ "$group" != plugins ]; then
     [ -x "$BIN_DIR/tokenless" ] || { printf 'ERROR: missing prebuilt executable: %s\n' "$BIN_DIR/tokenless" >&2; exit 1; }
-    [ -x "$RTK_BIN" ] || { printf 'ERROR: missing prebuilt executable: %s\n' "$RTK_BIN" >&2; exit 1; }
     [ -f "$COMPONENT_ROOT/LICENSE" ] || { printf 'ERROR: missing component LICENSE\n' >&2; exit 1; }
 fi
 payload=""
@@ -188,7 +195,6 @@ if [ "$group" != core ]; then
 fi
 if [ "$group" != plugins ]; then
     check_destination "$root$BINDIR/tokenless" file
-    check_destination "$root$BINDIR/rtk" rtk-link
     check_destination "$root$LIBEXECDIR/rtk" file
     check_destination "$root$DATADIR/LICENSE" file
 fi
@@ -197,11 +203,10 @@ if [ "$group" != core ]; then
     check_tree_destinations "$payload/extension" "$root$EXTENSIONDIR"
 fi
 if [ "$group" != plugins ]; then
-    install -d -m 0755 "$root$BINDIR" "$root$LIBEXECDIR" "$root$DATADIR"
+    install -d -m 0755 "$root$BINDIR" "$root$DATADIR"
     install -p -m 0755 "$BIN_DIR/tokenless" "$root$BINDIR/tokenless"
-    install -p -m 0755 "$RTK_BIN" "$root$LIBEXECDIR/rtk"
     install -p -m 0644 "$COMPONENT_ROOT/LICENSE" "$root$DATADIR/LICENSE"
-    ln -sfn "$LIBEXECDIR/rtk" "$root$BINDIR/rtk"
+    remove_stale_helpers
 fi
 if [ "$group" != core ]; then
     install -d -m 0755 "$root$ADAPTERDIR" "$root$EXTENSIONDIR"

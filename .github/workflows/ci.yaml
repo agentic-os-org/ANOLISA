@@ -1021,9 +1021,9 @@ jobs:
           set -euo pipefail
           make -C src/tokenless npm-package
           # Install root + platform tarballs into a scratch project and verify
-          # both binaries actually run. The root install omits registry
-          # optional deps (unpublished during CI); the platform tarball
-          # installed in step 1 satisfies the platform lookup instead.
+          # the binary and its embedded RTK actually run. The root install
+          # omits registry optional deps (unpublished during CI); the platform
+          # tarball installed in step 1 satisfies the platform lookup instead.
           DIST="$GITHUB_WORKSPACE/src/tokenless/npm/dist"
           SMOKE=$(mktemp -d)
           cd "$SMOKE"
@@ -1032,7 +1032,8 @@ jobs:
           npm install --no-audit --no-fund --omit=optional \
             --install-strategy=nested "$DIST"/tokenless/*.tgz
           ./node_modules/.bin/tokenless --version
-          ./node_modules/.bin/rtk --version
+          ./node_modules/.bin/tokenless rtk --version
+          test ! -e ./node_modules/.bin/rtk
           # Verify the bundled OpenClaw adapter was built and packaged
           test -f ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/dist/index.js
           # Verify adapter install scripts are executable

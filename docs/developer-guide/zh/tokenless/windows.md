@@ -70,7 +70,7 @@ $packages = Get-ChildItem npm/dist/tokenless-win32-x64/*.tgz, npm/dist/tokenless
 npm install -g $packages.FullName
 ```
 
-构建脚本拉取并修补固定版本的 RTK，将两个可执行文件写入
+构建脚本拉取并修补固定版本的 RTK，将其链接进 `tokenless.exe`，并把该可执行文件写入
 `target/npm-prebuilt/win32-x64`。添加 `-Debug` 可构建开发版本。生成的 npm 包为本地
 制品，此本地命令不会发布 Windows 软件包。
 
@@ -137,9 +137,9 @@ TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
     --profile windows-msvc-x86_64
 ```
 
-Windows ZIP 包含 `tokenless.exe`、`rtk.exe`、`LICENSE` 和 `npm/` 下的两个 npm
+Windows ZIP 包含 `tokenless.exe`、`LICENSE` 和 `npm/` 下的两个 npm
 tarball（仅面向 Windows 的根包与 `win32-x64` 平台包），附带与其他平台相同的
-SHA-256 和 CycloneDX 文件。CLI 与 RTK 静态链接 CRT，并检查导入表，拒绝依赖
+SHA-256 和 CycloneDX 文件。CLI 静态链接 CRT，并检查导入表，拒绝依赖
 外部 VC++ runtime DLL。独立 Python wheel 使用 `cp311-abi3-win_amd64`，运行库
 由 Windows Python 提供。
 发布工作流将这些产物上传 GitHub，不发布到 npm 或 PyPI。准备跨平台 npm registry

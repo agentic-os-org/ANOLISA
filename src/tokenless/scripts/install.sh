@@ -37,8 +37,11 @@
 # compares those, and leaves alone anything a newer installation has taken over.
 #
 # Installation methods and what each one produces:
-#   npm     prebuilt `tokenless` + `rtk` binaries and the bundled Agent adapters
+#   npm     the prebuilt `tokenless` binary and the bundled Agent adapters
 #   source  the `tokenless` CLI only — no adapters (CLI-only install)
+#
+# Releases before RTK was linked into tokenless also shipped an `rtk` launcher
+# through npm; the snapshot, rollback and uninstall paths still handle it.
 #
 # The npm route is transactional: everything it replaces is snapshotted first,
 # and a failure after `npm install -g` puts the global package, the launcher

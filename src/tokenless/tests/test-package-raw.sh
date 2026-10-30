@@ -181,10 +181,9 @@ if os_name == "linux":
 else:
     cpu = {"aarch64": 0x0100000C, "x86_64": 0x01000007}[arch]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
-for name in ("tokenless", "rtk"):
-    (root / name).write_bytes(content)
+(root / "tokenless").write_bytes(content)
 PY
-    chmod 0755 "$destination/tokenless" "$destination/rtk"
+    chmod 0755 "$destination/tokenless"
 }
 
 LINUX_X64="$TMP/bin-linux-x64"
@@ -279,7 +278,11 @@ mkdir -p "$EXTRACTED"
 tar -xzf "$OUT_ONE/$LINUX_ARTIFACT" -C "$EXTRACTED"
 cmp "$CONTRACT" "$EXTRACTED/.anolisa/component.toml"
 cmp "$LINUX_X64/tokenless" "$EXTRACTED/bin/tokenless"
-cmp "$LINUX_X64/rtk" "$EXTRACTED/libexec/anolisa/tokenless/rtk"
+# RTK is linked into tokenless; no standalone helper may ship.
+[ ! -e "$EXTRACTED/libexec" ] || {
+    echo "ERROR: raw package still ships libexec helpers" >&2
+    exit 1
+}
 
 # The archived QwenPaw pin keeps both spellings of the one version it was
 # stamped from: the raw workspace version in the release-tag path (the tag the
