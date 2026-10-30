@@ -458,7 +458,7 @@ output/
 │   ├── results/
 │   │   └── <instance_id>.json
 │   ├── input-manifests/
-│   │   └── <instance_id>/input_manifest.json
+│   │   └── instance-<prefix>--<id-sha256>/input_manifest.json
 │   ├── openclaw-profiles/
 │   │   └── <instance_id>/
 │   ├── openclaw-errors/
@@ -488,6 +488,13 @@ Important files:
 | `run/results/*.json` | Per-instance run summaries, written for successes and failures |
 | `run/run_metadata.json` | Run timing, agent, worker, instance, and metadata mapping information |
 | `run/input-manifests/*/input_manifest.json` | Per-instance input snapshot with dataset row, settings, prompt hash, resource records, and runner info |
+
+Manifest directories include a bounded readable prefix and the full SHA-256 of
+the raw instance ID. Different IDs remain distinct even when their display names
+normalize to the same component or differ only by case; the payload retains the
+exact ID. Use the recorded `input_manifest_path` / `manifest_path` to locate files.
+New writes use this convention; older recorded paths remain valid and no legacy
+directories are removed automatically.
 | `run/openclaw-profiles/` | OpenClaw local per-instance profiles and session artifacts |
 | `run/openclaw-errors/*.log` | stdout/stderr for non-zero OpenClaw local exits |
 | `run/openclaw-tokenless-evidence/*.json` | Configuration and runtime evidence for `--tokenless` runs |
