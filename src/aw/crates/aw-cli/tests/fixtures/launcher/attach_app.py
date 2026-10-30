@@ -64,8 +64,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             plugin_id = json.loads((Path(body["source"]) / "plugin.json").read_text())["id"]
             destination = profile / "plugins" / plugin_id
             shutil.copytree(body["source"], destination)
-            spec = importlib.util.spec_from_file_location("attach_plugin", destination / "plugin.py")
+            spec = importlib.util.spec_from_file_location("attach_plugin", destination / "plugin.py", submodule_search_locations=[str(destination)])
             plugin = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = plugin
             spec.loader.exec_module(plugin)
             startup = []
             plugin.plugin.register(SimpleNamespace(config={}, register_middleware=lambda f, **kw: factories.append(f),

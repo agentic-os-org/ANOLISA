@@ -16,6 +16,8 @@ Agent 继续管理自己的模型、界面和权限。AW 运行于 Linux。
 | 策略更新 | 向支持的空闲实例显式应用新策略，让后续任务使用新版本。 |
 
 Adapter 接通原生事件并采纳支持的效果，Provider 实现具体策略。
+sec-core Provider 可在 Qoder SDK 和 QwenPaw 加载本地 Skill 指令前校验对象，见[安全配置](../../docs/user-guide/zh/aw/security.md#加载前校验-skill)。
+
 core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
 工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
 

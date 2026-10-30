@@ -71,10 +71,11 @@ impl PreparedLaunch for Prepared {
         super::super::adapter::catalog::CLAUDE_SDK.capabilities(&self.version, "sdk-worker")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        super::sdk_tools::routes(&self.input.document, steps).map(|_| ())
+        super::sdk_tools::routes(&self.input.document, steps, "claude-sdk").map(|_| ())
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (events, hooks) = super::sdk_tools::routes(&self.input.document, context.steps)?;
+        let (events, hooks) =
+            super::sdk_tools::routes(&self.input.document, context.steps, "claude-sdk")?;
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();

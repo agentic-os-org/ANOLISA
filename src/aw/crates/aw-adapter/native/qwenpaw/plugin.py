@@ -17,6 +17,8 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
+from .aw_skill import metadata as skill_metadata, skill_context, verify as verify_skill
+
 
 
 def validate_hooks(config: dict[str, Any]) -> None:
@@ -91,8 +93,12 @@ class AwToolMiddleware(MiddlewareBase):
         return proc.returncode, stdout, stderr
 
     async def _run(self, payload: dict[str, Any]) -> ToolResponse | None:
+        payload = {**payload, **skill_metadata()}
         try:
-            return await self._evaluate(payload)
+            result = await self._evaluate(payload)
+            if self.hook["event"] == "tool.before" and result is None:
+                verify_skill()
+            return result
         except (OSError, TimeoutError, CallbackFailure) as error:
             code = str(error) if isinstance(error, CallbackFailure) else type(error).__name__
             logging.getLogger(__name__).error(
@@ -137,6 +143,7 @@ class AwToolMiddleware(MiddlewareBase):
                 raise CallbackFailure("invalid_result_replacement") from error
         return None
 
+    @skill_context
     async def on_acting(
         self,
         agent: Any,
@@ -207,6 +214,7 @@ class AwReloadMiddleware(MiddlewareBase):
             if finished:
                 await self.lifecycle("request_end", key)
 
+    @skill_context
     async def on_acting(self, agent: Any, input_kwargs: dict[str, Any], next_handler: Callable[..., AsyncGenerator[Any, None]]) -> AsyncGenerator[Any, None]:
         import hashlib
         call = input_kwargs["tool_call"]

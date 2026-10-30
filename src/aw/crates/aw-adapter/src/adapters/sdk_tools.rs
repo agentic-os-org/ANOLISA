@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 pub(crate) fn routes(
     document: &Value,
     steps: &[AdmittedStep],
+    adapter: &str,
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
@@ -28,7 +29,11 @@ pub(crate) fn routes(
             return Err("SDK hook budgets must be 1..55000 ms".into());
         }
         for step in &selected {
-            hooks.push(json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget, "replace_result": step.execution.replaces_result()}));
+            let mut hook = json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget, "replace_result": step.execution.replaces_result()});
+            if checks_skill(step, adapter) {
+                hook["skill_check"] = json!(true);
+            }
+            hooks.push(hook);
         }
         events.insert(
             event.into(),
@@ -109,4 +114,84 @@ pub(super) fn invocation_uuid(value: &str) -> bool {
             19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
             _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
         })
+}
+
+/// Select Skill resolution only for an admitted check of that native tool.
+pub(crate) fn checks_skill(step: &AdmittedStep, adapter: &str) -> bool {
+    step.event == "tool.before"
+        && matches!(&step.execution, aw_provider::admission::StepExecution::Provider { operation, .. } if operation == "check_skill")
+        && step.matches_tool(&json!({"agent":{"adapter":adapter},
+            "tool":{"name":"Skill","native_name":"Skill"}}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aw_provider::admission::StepExecution;
+
+    #[test]
+    fn skill_resolution_is_selected_only_for_its_operation_and_native_tool() {
+        let mut step = AdmittedStep {
+            event: "tool.before".into(),
+            step_id: "skill".into(),
+            provider: "security".into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["native:qoder-sdk:Skill".into()],
+            on_error: "block".into(),
+            execution: StepExecution::Provider {
+                operation: "check_skill".into(),
+                effects: vec!["observe".into(), "block".into()],
+            },
+        };
+        assert!(checks_skill(&step, "qoder-sdk"));
+        assert!(!checks_skill(&step, "qwenpaw"));
+        let document = json!({"spec":{"execution":{"default_event_budget_ms":1000}}});
+        let (_, hooks) = routes(&document, &[step.clone()], "qoder-sdk").unwrap();
+        assert_eq!(hooks[0]["skill_check"], true);
+        step.step_tools = vec!["native:qoder-sdk:Bash".into()];
+        let (_, hooks) = routes(&document, &[step.clone()], "qoder-sdk").unwrap();
+        assert!(hooks[0].get("skill_check").is_none());
+        step.step_tools = vec!["native:qwenpaw:Skill".into()];
+        let (_, hooks) =
+            super::super::qwenpaw::event_routes(&document, &[step.clone()], false).unwrap();
+        assert_eq!(hooks[0]["skill_check"], true);
+        step.execution = StepExecution::Provider {
+            operation: "scan_code".into(),
+            effects: vec!["observe".into()],
+        };
+        assert!(!checks_skill(&step, "qwenpaw"));
+    }
+
+    #[test]
+    fn reloadable_skill_checks_fail_admission_before_native_launch() {
+        let mut document: Value = serde_yaml_ng::from_str(include_str!(
+            "../../../aw-service/examples/aw.sdk-security.yaml"
+        ))
+        .unwrap();
+        document["spec"]["events"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tool.after");
+        document["spec"]["events"]
+            .as_object_mut()
+            .unwrap()
+            .remove("input.submit");
+        for (adapter, version, entrypoint) in [
+            ("qoder-sdk", "1.0.56", "sdk-worker"),
+            ("qwenpaw", "2.2.2.post1", "app"),
+        ] {
+            let capabilities = crate::adapter::catalog::PROFILES
+                .iter()
+                .find(|profile| profile.name == adapter)
+                .unwrap()
+                .capabilities(version, entrypoint);
+            let error = crate::reload::validate(&document, adapter, &capabilities).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Skill checking requires ordinary resident mode"),
+                "{error}"
+            );
+        }
+    }
 }

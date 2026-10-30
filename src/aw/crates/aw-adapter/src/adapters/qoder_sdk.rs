@@ -155,7 +155,7 @@ impl PreparedLaunch for Prepared {
                 &self.capabilities(),
             )
         } else {
-            super::sdk_tools::routes(&self.input.document, steps).map(|_| ())
+            super::sdk_tools::routes(&self.input.document, steps, "qoder-sdk").map(|_| ())
         }
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
@@ -173,7 +173,7 @@ impl PreparedLaunch for Prepared {
                     .to_vec(),
             )
         } else {
-            super::sdk_tools::routes(&self.input.document, context.steps)?
+            super::sdk_tools::routes(&self.input.document, context.steps, "qoder-sdk")?
         };
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
@@ -192,6 +192,10 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/qoder-sdk/reload.mjs"),
         )?;
         for (name, bytes) in [
+            (
+                "skills.mjs",
+                include_bytes!("../../native/qoder-sdk/skills.mjs").as_slice(),
+            ),
             (
                 "native-configuration.mjs",
                 include_bytes!("../../native/qoder-sdk/native-configuration.mjs").as_slice(),

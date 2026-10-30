@@ -53,6 +53,15 @@ Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点�
 | `security.violation` | 规划中 |
 | `coverage.changed` | 规划中 |
 
+## Skill 校验
+
+Qoder SDK 1.0.56 / Worker 1.1.78 与 QwenPaw 2.2.2.post1 / AgentScope 2.0.10
+在普通常驻模式下通过 `tool.before` 校验本地 Skill。sec-core Provider 的
+`check_skill` 检查实际解析来源，拒绝时阻止指令进入模型。该操作尚不支持
+`--reloadable` 和交互 `ask`，配置与来源限制见[安全指南](security.md#加载前校验-skill)。
+两端均在[原生矩阵](../../../../src/aw/tests/native-matrix.json)注册 `skill-ledger`，
+QwenPaw 的 `skill-objects` 另覆盖实际同名选择、来源固定与取消。
+
 ## MCP 与策略更新
 
 | 入口 | 受管 MCP | 空闲策略更新 |

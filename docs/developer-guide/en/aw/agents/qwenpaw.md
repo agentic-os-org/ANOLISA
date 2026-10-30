@@ -72,3 +72,4 @@ The native Hook output dialect and event coverage remain framework-specific.
 
 An ordinary configuration with no Providers or event steps still installs
 resident admission and cleanup middleware.
+The shared sec-core Provider also supports [Skill validation before loading](../providers/sec-core.md#validate-skills-before-loading). Configure `check_skill` on `tool.before` for the native `Skill` tool and authorize its canonical source directories in the daemon.

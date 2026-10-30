@@ -6,6 +6,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import * as bridge from "../../../../aw-adapter/native/qoder-sdk/bridge.mjs";
+import { Resident } from "../../../../aw-adapter/native/qoder-sdk/resident.mjs";
+import { resolveSkill } from "../../../../aw-adapter/native/qoder-sdk/skills.mjs";
 import "./resident.test.mjs";
 import "./resident-policy.test.mjs";
 import "./daemon.test.mjs";
@@ -394,4 +396,71 @@ test("declarative profile owns the fixed native skill execution setting", async 
   await assert.rejects(createQuery({ prompt: "override", options: { ...f.options,
     daemon, settings: { skills: { disableShellExecution: false } } } }));
   await daemon.stop();
+});
+
+test("a Skill source edit cannot downgrade a policy denial to report", async t => {
+  const f = fixture(t, "deny");
+  f.config.resident = true;
+  f.options.settingSources = ["user"];
+  const user = path.join(f.root, "native-config");
+  const directory = path.join(user, "skills/example");
+  fs.mkdirSync(directory, { recursive: true });
+  const manifest = path.join(directory, "SKILL.md");
+  fs.writeFileSync(manifest, "original instructions");
+  const sdk = f.config.sdk;
+  fs.writeFileSync(sdk, fs.readFileSync(sdk, "utf8").replace(
+    "async request(){return {sources:{flag:options.settings},effective:options.settings};}",
+    "async request(){return {effective:{},skills:[{name:'example'}]};}"));
+  fs.writeFileSync(f.config.executable, fs.readFileSync(f.config.executable, "utf8").replace(
+    "if(mode==='deny'){", `fs.writeFileSync(${JSON.stringify(manifest)},'changed');if(mode==='deny'){`));
+  // Isolate callback composition from the separately tested resident transport.
+  t.mock.method(Resident.prototype, "create", async function (_prompt, options, compose) {
+    const sdk = await import(pathToFileURL(this.config.sdk).href);
+    const query = sdk.query({ options: compose(this.config, options) });
+    this.config.skillState.query = query;
+    return query;
+  });
+  f.config.hooks[0].on_error = "report";
+  f.config.hooks[0].skill_check = true;
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const query = await createQuery({ prompt: "first", options: f.options });
+  try {
+    const input = { ...payload(), tool_name: "Skill", tool_input: { skill: "example" },
+      transcript_path: path.join(user, "projects/project/session.jsonl") };
+    const result = await query.options.hooks.PreToolUse.at(-1).hooks[0](input, "call", { signal: new AbortController().signal });
+    assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
+    assert.equal(result.hookSpecificOutput.permissionDecisionReason, "policy denied");
+    const checked = JSON.parse(fs.readFileSync(path.join(f.root, "input"), "utf8"));
+    assert.equal(checked.aw_skill.directory, directory);
+  } finally { await query.return(); }
+});
+
+test("native Read is retained while no Skill policy is selected", async t => {
+  const f = fixture(t);
+  f.config.resident = true;
+  f.config.hooks = [];
+  f.options.settingSources = ["user", "project"];
+  const user = path.join(f.root, "native-config");
+  fs.mkdirSync(path.join(user, "skills/example"), { recursive: true });
+  fs.writeFileSync(path.join(user, "skills/example/SKILL.md"), "signed user instructions");
+  t.mock.method(Resident.prototype, "create", async function (_prompt, options, compose) {
+    const sdk = await import(pathToFileURL(this.config.sdk).href);
+    const query = sdk.query({ options: compose(this.config, options) });
+    this.config.skillState.query = query;
+    query.request = async () => ({ effective: {}, skills: [{ name: "example" }] });
+    return query;
+  });
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const query = await createQuery({ prompt: "first", options: f.options });
+  const input = { ...payload(), tool_name: "Skill", tool_input: { skill: "example" },
+    transcript_path: path.join(user, "projects/project/session.jsonl") };
+  try {
+    await (await resolveSkill(input, f.options, query))();
+    const result = await query.options.hooks.PreToolUse.at(-1).hooks[0](
+      { ...payload(), tool_name: "Read", tool_input: { file_path: "nested/readme.txt" } },
+      "call", { signal: new AbortController().signal });
+    assert.deepEqual(result, {});
+    await resolveSkill(input, f.options, query);
+    assert.deepEqual(input.aw_skill, { error_code: "skill_resolution_error" });
+  } finally { await query.return(); }
 });

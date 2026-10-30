@@ -16,6 +16,8 @@ Agents retain their models, interfaces and permissions. AW runs on Linux.
 | Policy updates | Explicitly apply a new policy to a supported idle instance so subsequent tasks use the new revision. |
 
 Adapters connect native events and adopt supported effects; Providers implement policies.
+The sec-core Provider can check locally resolved Skills before Qoder SDK and QwenPaw load their instructions; see [security setup](../../docs/user-guide/en/aw/security.md#check-skills-before-loading).
+
 Core works independently. Install and enable the corresponding Providers for security checks and compression.
 Tool result replacement is limited to authorized slots, and native Agent permission checks retain precedence.
 

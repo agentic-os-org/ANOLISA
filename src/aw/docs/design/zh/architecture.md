@@ -108,6 +108,12 @@ service 继续负责运行期激活与策略代次。见[编辑合同](configura
 原生 Hook 脚本也通过 `aw-exec` 执行，保留原始输出和退出码，不经过 Provider 握手。
 AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参与 Hook 准入。
 
+Skill 校验复用 `tool.before` 与既有的 opaque `event.native` 扩展。
+Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录、来源）或
+解析错误。sec-core Provider 调用公开的只读 Ledger 检查并映射信任状态，目录授权
+和签名由后端管理员管理。Adapter 固定或刷新实际原生对象，拒绝校验期间的源文件
+变化。字段与范围见 [Skill 集成合同](../../../../../docs/developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
+
 ### 显式策略更新
 
 `aw run --reloadable` 显式预装稳定 Adapter 入口，`aw update` 定位现有实例，

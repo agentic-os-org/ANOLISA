@@ -177,7 +177,7 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 130"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 132"));
 }
 
 #[test]
@@ -306,4 +306,21 @@ fn missing_native_query_interface_rejects_other_releases_before_execution() {
         .contains("missing native seam recordInboundSessionMessage"));
     assert!(!f.root.join("executed").exists());
     service.released(&f);
+}
+
+#[test]
+fn skill_catalog_resolution_matches_native_names_and_rejects_ambiguity() {
+    let f = Fixture::new();
+    let mut command = Command::new("node");
+    command.args(["--test", "--test-reporter=tap"]).arg(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk/skills.test.mjs"),
+    );
+    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(15));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 17"));
 }

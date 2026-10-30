@@ -27,7 +27,7 @@ class GateFixture(unittest.TestCase):
         (AW / "target").mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(prefix="ci-check-", dir=AW / "target")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
 
 
 class PackageWorkflowTests(GateFixture):

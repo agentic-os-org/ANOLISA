@@ -74,6 +74,24 @@ aw stop --config /absolute/aw.yaml
 `startDaemon()` confirms prewarm readiness; `createQuery()` confirms Query readiness after the SDK handshake. [Validate native behavior](../validation.md), including allow, block, Post failure and cleanup.
 For security composition, use the [SDK example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml), replace paths and start sec-core first.
 
+The shared sec-core Provider also supports [Skill validation before loading](../providers/sec-core.md#validate-skills-before-loading). Configure `check_skill` on `tool.before` for the native `Skill` tool and authorize its canonical source directories in the daemon.
+Skill resolution respects the Query's `settingSources`: `user` and `project`
+enable their catalogs, while `local` adds no Skill catalog. Project settings can
+enable `.agents/skills`. Same-name assets in multiple enabled directories, including
+case variants and native-unloadable assets, produce `skill_resolution_error`. Use
+unique names or narrow `settingSources`. Model-only Skills remain supported even
+when absent from the refresh response's displayable list.
+Local Workflow scripts in any enabled user/project source produce a resolution
+error, including unrelated filenames and directory entrypoints (`workflow.js` or
+`index.js`). The Worker converts JavaScript metadata into Skills, and the public
+API cannot prove which signing root was selected. Remove those local Workflow
+assets or exclude their source before enabling required Skill checks.
+A Query that has attempted native `Read` cannot establish a project's selected
+Skill source: the Worker can retain dynamically discovered Skills across reloads.
+With project sources enabled, later Skill checks return `skill_resolution_error`,
+including after failed/denied reads or idle policy updates. Start a new Query or
+use `settingSources: ["user"]` from Query creation for required Skill checks.
+
 ## Native configuration
 
 Ordinary resident Queries retain native user/project/local settings, unknown keys,

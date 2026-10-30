@@ -55,3 +55,5 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 `aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
 
 零 Provider、零事件步骤的普通配置也会安装 resident 准入与清理 middleware。
+
+共用的 sec-core Provider 还提供[加载前 Skill 校验](../providers/sec-core.md#加载前校验-skill)。在 `tool.before` 为原生 `Skill` 工具配置 `check_skill`，并在 daemon 授权实际规范化来源目录。

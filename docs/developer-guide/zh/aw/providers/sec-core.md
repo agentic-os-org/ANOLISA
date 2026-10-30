@@ -112,11 +112,12 @@ Provider 的私有 `config` 接受以下字段：
 | 字段 | 含义 |
 | --- | --- |
 | `version` | 必填，固定为 `1` |
-| `mode` | 必填，`observe` 或 `block`，只影响 `scan_code` |
+| `mode` | 必填，`observe` 或 `block`，影响 `scan_code` 和 `check_skill` |
 | `unmapped_tool` | 可选，`error`（默认）或 `observe`，控制 `scan_code` 对已选中但没有映射的工具的处理 |
 | `prompt` | 可选 `{mode: observe\|block, scan_mode: fast}`，用于 `scan_prompt` |
 | `pii` | 可选 `{input_mode: observe\|block, output_mode: observe\|replace_result}`；输入模式用于用户及工具输入，输出模式用于工具结果 |
-| `tools` | 最多 128 个精确的规范化工具名；配置 `prompt` 或 `pii` 时可省略或为空 |
+| `skill` | 可选布尔值，默认 `false`；启用 `check_skill` |
+| `tools` | 最多 128 个精确的规范化代码工具名；配置 `skill`、`prompt` 或 `pii` 时可省略 |
 | `tools.<name>.language` | `bash` 或 `python` |
 | `tools.<name>.input_pointer` | 指向 `event.tool.input` 内部的 JSON Pointer，所选值必须为字符串 |
 
@@ -135,6 +136,7 @@ Provider 的私有 `config` 接受以下字段：
 | 操作 | 事件 | 结果 |
 | --- | --- | --- |
 | `scan_code` | `tool.before` | `ok: true, verdict: pass` → `observe/code_pass`；`warn` 或 `deny` 按 `mode` 返回 `observe/code_risk` 或 `block/code_risk` |
+| `check_skill` | `tool.before` | 有效签名内容返回 `observe/skill_pass`；其他已完成的信任判定按 `mode` 观察或阻断 |
 | `observe_tool` | `tool.after` | `observe/tool_observed`，不调用扫描器 |
 
 `describe`、私有配置校验和工具后观察不访问 sec-core。工具前扫描使用字面参数和
@@ -221,6 +223,69 @@ Qoder 等待公开 `UserPromptSubmit` 快照的检查结果，拒绝时返回原
 Qoder SDK 普通常驻 Query 返回原生 `updatedToolOutput` 替换指令；受限 `--reloadable` 模式在准入时拒绝替换。QwenPaw 普通 App 回复对选中替换或停止交付的工具流进行缓冲，Coordinator 的公开流同样等待最终采用。生产配置按实际工具选择范围。多文本块、媒体、托管 MCP 和后台结果交付需要分别完成原生验收；Post 回调本身不能证明这些模式采用了替换。
 
 各工具阶段明确选择 AW 或原生 PII。AW 接管时显式移除原生 PII 的 PreToolUse/PostToolUse 注册，按用户文本保护需求保留 UserPromptSubmit。AW 保留原生设置，不自动删除 Hook；同时保留两套工具检查会造成重复扫描。
+
+## 加载前校验 Skill
+
+[SDK 策略示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+为 Qoder SDK 和 QwenPaw 使用同一 Provider。设置 `config.skill: true`，
+在 `tool.before` 增加 `operation: check_skill`、`effects: [observe, block]`、
+`on_error: block`，选择 `native:qoder-sdk:Skill` 和 `native:qwenpaw:Skill`。
+共用的 `mode: block` 只允许 `pass`。`tools` 继续映射代码输入，Skill 检查无需
+输入指针；只检查 Skill 时可在启用 `skill: true` 后省略 `tools`。
+
+Adapter 在 `event.native.aw_skill` 提供请求的 `name`、规范化 `directory` 和
+`source`，解析失败时提供 `error_code`。Provider 使用这些字段调用
+`agent-sec-cli skill-ledger check DIRECTORY`，期限受剩余预算限制。
+daemon 管理员须授权实际规范化目录并保证文件可访问，AW 不扩展目录授权或签名。
+内容评审、扫描和签名通过 [Skill Ledger 指南](../../../../user-guide/zh/agent-sec-core/skill-ledger.md)单独完成。
+
+| Ledger 状态 | 原因码 | `mode: block` |
+| --- | --- | --- |
+| `pass` | `skill_pass` | 继续原生加载 |
+| `none` | `skill_unsigned` | 阻断 |
+| `drifted` | `skill_drifted` | 阻断 |
+| `warn`、`deny` | `skill_warn`、`skill_deny` | 阻断 |
+| `tampered` | `skill_tampered` | 阻断 |
+| `error`、非法或空输出、传输故障、超时 | Provider 错误 | 按 `on_error` 处置 |
+
+Ledger 退出 1 时可能携带已完成的负向信任判定，Provider 按该状态处理。
+非零退出却报告 `pass`、未知状态、信号退出或其他退出码均记为错误。
+AW 审计分别记录风险判定与检查失败。`mode: observe` 只记录信任状态，
+`ask` 尚未支持。同一项检查选择 AW 或原生 Skill Ledger Hook，避免重复执行；
+原生权限拒绝继续有效。
+
+Skill 校验使用普通常驻 `aw run`，`--reloadable` 接入会拒绝该配置。普通常驻
+策略的空闲更新沿用既有任务快照边界。仅选中 Skill 校验时执行解析与对象固定，
+其他策略保留原生 Skill 行为。
+
+Qoder SDK 1.0.56 / Worker 1.1.78 从 Query 的 `settingSources` 所启用的目录中
+校验唯一的本地对象，包括显式启用的 `.agents/skills`。frontmatter `name` 用于显示，
+嵌套目录使用末级目录名。多个目录出现同名对象时，包括仅大小写不同的名称，均返回
+`skill_resolution_error`。原生解析器可能跳过其中某个对象；控制接口没有提供最终
+选中的路径，因此这些冲突也会被拒绝。可使用唯一名称或限制启用来源来消除冲突。
+AW 在检查前刷新原生缓存，并在刷新和 Provider 执行期间核对源文件变化。刷新响应
+是 UI 列表，`user-invocable: false` 等模型专用 Skill 可正常参与检查，后续调用继续
+遵循原生准入与权限规则。已启用的 user/project 目录中存在本地 Workflow 脚本时
+返回解析错误，覆盖文件名与元数据名称不同的脚本及目录入口 `workflow.js`/`index.js`。
+JavaScript 元数据可引入竞争 Skill，公共接口无法证明最终选中的签名根目录；
+配置必需 Skill 检查时须移除这些资产或排除其来源。原生 Workflow 关闭时也采用
+这一保守边界，因为控制接口没有暴露其实际开关状态。
+原生 `Read` 可填充动态 Skill 缓存，`reload_skills` 不会清除它，控制接口也不提供
+选中的路径。Query 尝试过 `Read` 后，启用项目来源的 Skill 检查返回
+`skill_resolution_error`，Read 失败、被拒绝或后续空闲更新启用检查时也适用。
+必需检查应新建 Query，或从创建时使用 `settingSources: ["user"]`；
+再次读取来源与更新策略均不会清除此限制。
+旧命令资源、动态祖先目录冲突、附加目录或无法解析本地
+目录的来源返回解析错误；带插件命名空间的名称和内置 Skill 尚未支持。
+后续原生改参沿 Adapter 已有的公开 Hook 输入快照合同处理。
+
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10 使用实际 SkillViewer 与已激活的 Toolkit
+分组，按原生同名优先级选取对象。AW 核对内存中的 markdown 与 `SKILL.md` 一致，
+校验规范化目录，并为本次调用固定该对象。校验期间修改源文件会阻断加载。
+不可访问或仅存在于内存的来源返回解析错误；并发调用各自保留快照。
+AW 对已提供的文件沿用 AgentScope 的 UTF-8-SIG 解码，支持 BOM。原版 QwenPaw
+2.2.2.post1 App 的运行时缓存会在 AW 执行前跳过 BOM 资产，这条原生加载路径仍不支持。
+通过读文件加载、自动注入上下文和 Skill 内部命令的执行需要各自配置策略。
 
 ## Trace 关联
 

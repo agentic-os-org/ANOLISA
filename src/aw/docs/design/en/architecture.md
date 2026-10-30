@@ -140,6 +140,14 @@ Native Hook scripts also run through `aw-exec`, preserving raw output and exit
 status without a Provider handshake. AgentSight is a separate optional observation
 source; read-only `aw inspect` views do not participate in Hook admission.
 
+Skill checks reuse `tool.before` and the existing opaque `event.native` extension.
+The Qoder SDK or QwenPaw Adapter supplies `aw_skill` (requested name, canonical
+directory and source) or a resolution error. The sec-core Provider invokes the
+public read-only Ledger check and maps trust states; directory authorization and
+signing stay with the backend administrator. The Adapter pins or refreshes the
+actual native object and rejects source changes across checking. See the
+[Skill integration contract](../../../../../docs/developer-guide/en/aw/providers/sec-core.md#validate-skills-before-loading).
+
 ### Explicit policy updates
 
 Opt-in `aw run --reloadable` installs stable Adapter entrypoints. `aw update`

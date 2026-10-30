@@ -89,7 +89,7 @@ pub fn scope_policy(
         return Err("resident policy scopes do not support native evidence capture".into());
     }
     let (events, hooks) = match capabilities.adapter.as_str() {
-        "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps)?,
+        "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
         "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, false)?,
         _ => return Err("unsupported resident policy adapter".into()),
     };
@@ -106,6 +106,12 @@ pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabiliti
         .map_err(|e| e.to_string())?;
     let steps = aw_provider::admission::preflight(&config, target, capabilities)
         .map_err(|e| e.to_string())?;
+    if steps
+        .iter()
+        .any(|step| crate::adapters::sdk_tools::checks_skill(step, &capabilities.adapter))
+    {
+        return Err("Skill checking requires ordinary resident mode".into());
+    }
     for event in ["tool.before", "tool.after"] {
         plan(document, target, &steps, event)?;
     }

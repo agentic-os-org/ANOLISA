@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-通过公共 sec-core CLI 提供代码和 PII 安全检查。本目录维护桥接实现，后端由对应组件提供。
+通过公共 sec-core CLI 提供代码、PII 安全检查与 Skill 校验。本目录维护桥接实现，后端由对应组件提供。
 
 通过 Hook 步骤的 `match.tools` 选择代码工具，使用 `bash` 等标准名称或精确的
 `native:<adapter>:<name>` 选择器。Provider `config.tools` 按规范化的
@@ -16,6 +16,10 @@
 普通 resident Qoder SDK 和 QwenPaw 入口还可通过 `input.submit` 调用 `scan_prompt`
 和 `scan_user_input`。配置 Prompt、PII 阻断与 `on_error: block`，
 在模型请求前阻断注入风险、敏感用户文本及检查故障，见[提交检查配置](../../docs/developer-guide/zh/aw/providers/sec-core.md#用户提交检查)。
+
+Qoder SDK 和 QwenPaw 可在原生 `Skill` 工具加载指令前校验对象。
+设置 `config.skill: true`，在 `tool.before` 选择 `check_skill`；目录授权、
+信任状态与本地来源范围见 [Skill 校验](../../docs/developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
 
 维护人按 [CODEOWNERS](../../.github/CODEOWNERS) 由 @kongche-jbw 负责。
 桥接代码使用 [Apache-2.0](../../LICENSE)，后端来源见 [agent-sec-core](../../src/agent-sec-core/README_zh.md)。

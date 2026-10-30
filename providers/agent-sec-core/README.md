@@ -2,8 +2,8 @@
 
 [中文版](README_zh.md)
 
-Bridge public sec-core code and PII scans into AW. This directory owns the bridge; the
-corresponding component supplies the backend.
+Bridge public sec-core code, PII and Skill checks into AW. This directory owns
+the bridge; the corresponding component supplies the backend.
 
 Select code tools with each Hook step's `match.tools`, using standard names such
 as `bash` or exact `native:<adapter>:<name>` selectors. Provider `config.tools`
@@ -21,6 +21,11 @@ Ordinary resident Qoder SDK and QwenPaw launches also check submitted user text
 with `input.submit`, `scan_prompt` and `scan_user_input`. Configure prompt and
 PII blocking with `on_error: block` to stop injection risks, sensitive user text and failed checks
 before a model request. See the [submission configuration](../../docs/developer-guide/en/aw/providers/sec-core.md#user-submission-checks).
+
+Qoder SDK and QwenPaw can also check their native `Skill` tool before loading
+instructions. Enable `config.skill: true` and select `check_skill` on
+`tool.before`; see [Skill checks](../../docs/developer-guide/en/aw/providers/sec-core.md#validate-skills-before-loading)
+for directory authorization, trust states and supported local sources.
 
 Maintained by @kongche-jbw under [CODEOWNERS](../../.github/CODEOWNERS).
 Bridge code uses [Apache-2.0](../../LICENSE); backend source is

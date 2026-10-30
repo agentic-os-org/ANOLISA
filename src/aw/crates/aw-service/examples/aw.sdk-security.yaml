@@ -1,6 +1,7 @@
 # Replace all absolute paths before use. Run the sec-core daemon separately.
 # Qoder: SDK 1.0.56 / Worker 1.1.78, Node.js >=22, AW bridge factories.
 # QwenPaw: 2.2.2.post1 / AgentScope 2.0.10, initialized QWENPAW_WORKING_DIR.
+# Skill roots must be authorized and accessible in the separately managed daemon.
 # Use ordinary aw run; strict Post and private execution require resident mode.
 # Custom scripts read one normalized event and print a JSON boolean with exit 0.
 # The before script returns true to block; the after script returns true to observe.
@@ -39,6 +40,7 @@ spec:
       config:
         version: 1
         mode: block
+        skill: true
         unmapped_tool: error
         prompt: {mode: block, scan_mode: fast}
         pii: {input_mode: block, output_mode: observe}
@@ -85,6 +87,13 @@ spec:
           # Unlisted native tools and MCP calls skip this scanner.
           match:
             tools: ["native:qoder-sdk:Bash", "native:qwenpaw:execute_shell_command"]
+          effects: [observe, block]
+          on_error: block
+        - id: check-skill
+          provider: security
+          operation: check_skill
+          match:
+            tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill"]
           effects: [observe, block]
           on_error: block
         - id: custom-before

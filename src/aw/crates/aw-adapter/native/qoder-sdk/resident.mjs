@@ -10,6 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import { ExecutionOwner, checkExecutionCleanup } from "./private.mjs";
 import { postTools } from "./post.mjs";
 import { NativeCommands, supportsWrapperMode } from "./command-wrapper.mjs";
+import { bindSkillQuery } from "./skills.mjs";
 import { prepareNativeOptions, sdkEntry, verifyNativeSettings } from "./native-options.mjs";
 import { nativeConfiguration, policyCallback, isPolicyCallback } from "./native-configuration.mjs";
 
@@ -502,7 +503,8 @@ export class Resident {
     this.ownerClose = () => this.close();
     try {
       await this.preparePolicy(cwd, environment);
-      const scoped = { ...this.config, cwd, scope: this.scope };
+      this.config.skillState ??= {};
+      const scoped = { ...this.config, cwd, scope: this.scope, skillEnvironment: environment };
       this.nativeAssets = await prepareNativeOptions(scoped, { ...options, cwd });
       const composed = compose(scoped, this.nativeAssets.options);
       for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
@@ -576,6 +578,7 @@ export class Resident {
         this.detachAbort = () => signal.removeEventListener("abort", abort);
       }
       const query = sdk.query({ prompt: input(), options: decorated });
+      this.config.skillState.query = bindSkillQuery(query, this.config.hooks.some(hook => hook.skill_check === true));
       this.install(query);
       this.owner?.queries.add(this.ownerClose);
       const initialization = await (initializationOptions.initializeTimeoutMs === undefined ? query.initializationResult() :

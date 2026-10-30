@@ -74,6 +74,21 @@ aw stop --config /absolute/aw.yaml
 `startDaemon()` 确认预热就绪；`createQuery()` 在 SDK 握手后确认 Query 就绪。按[原生验收](../validation.md)检查允许、阻断、后置故障和清理。
 安全组合使用[SDK 示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)，先替换路径并启动 sec-core。
 
+共用的 sec-core Provider 还提供[加载前 Skill 校验](../providers/sec-core.md#加载前校验-skill)。在 `tool.before` 为原生 `Skill` 工具配置 `check_skill`，并在 daemon 授权实际规范化来源目录。
+Skill 解析遵循 Query 的 `settingSources`：`user` 和 `project` 启用对应目录，
+`local` 不增加 Skill 目录。项目配置可启用 `.agents/skills`。多个已启用目录出现
+同名对象时，包括大小写差异及原生无法加载的对象，均产生 `skill_resolution_error`。
+可使用唯一名称或缩小 `settingSources`。模型专用 Skill 即使没有出现在刷新响应的
+可显示列表中，仍可正常参与检查。
+已启用的 user/project 来源中存在本地 Workflow 脚本时返回解析错误，覆盖任意文件名
+及目录入口 `workflow.js`、`index.js`。Worker 使用 JavaScript 元数据把 Workflow
+转换为 Skill，公共接口无法证明选中了哪个签名根目录。启用必需 Skill 检查前，
+移除这些本地 Workflow 资产或排除其来源。
+Query 尝试过原生 `Read` 后，Worker 可能保留动态发现的 Skill，刷新不会清除缓存。
+启用项目来源时，后续 Skill 检查返回 `skill_resolution_error`，包括 Read 失败、
+被拒绝或空闲更新策略的情况。必需检查应新建 Query，或从创建时使用
+`settingSources: ["user"]`。
+
 ## 原生配置
 
 普通常驻 Query 保留原生 user/project/local 配置源、未知字段、插件路径、MCP 配置、

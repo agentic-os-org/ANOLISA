@@ -984,6 +984,10 @@
     "pii-structured-deadline": {
       "target": "aw-provider-sec-core/test/pii",
       "test": "decoded_scans_and_retained_checks_share_one_deadline"
+    },
+    "qoder-sdk-skill-resolution": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "skill_catalog_resolution_matches_native_names_and_rejects_ambiguity"
     }
   },
   "agents": {
@@ -1445,7 +1449,8 @@
         "prompt-failure",
         "pii-policy",
         "pii-completeness",
-        "pii-residual"
+        "pii-residual",
+        "qoder-sdk-skill-resolution"
       ],
       "tokenless": [
         "security-retry",

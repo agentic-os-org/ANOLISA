@@ -357,6 +357,7 @@ fn offline_methods_and_after_observation_do_not_need_the_daemon() {
     assert_eq!(
         description["operations"],
         json!([
+            {"name":"check_skill","events":["tool.before"],"effects":["observe","block"]},
             {"name":"scan_code","events":["tool.before"],"effects":["observe","block"]},
             {"name":"observe_tool","events":["tool.after"],"effects":["observe"]},
             {"name":"scan_prompt","events":["input.submit"],"effects":["observe","block"]},

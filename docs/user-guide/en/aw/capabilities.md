@@ -62,6 +62,17 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | `security.violation` | Planned |
 | `coverage.changed` | Planned |
 
+## Skill checks
+
+Qoder SDK 1.0.56 / Worker 1.1.78 and QwenPaw 2.2.2.post1 / AgentScope 2.0.10
+support local Skill checks through `tool.before` in ordinary resident mode.
+The sec-core Provider's `check_skill` validates the actual resolved source;
+refusal stops instructions before model delivery. `--reloadable` and interactive
+`ask` are unsupported for this operation. See [setup and source limits](security.md#check-skills-before-loading).
+Native acceptance is registered as `skill-ledger` for both adapters, with the
+QwenPaw `skill-objects` suite covering native duplicate selection, source pinning
+and cancellation in the [native matrix](../../../../src/aw/tests/native-matrix.json).
+
 ## MCP and policy updates
 
 | Entrypoint | Managed MCP | Idle policy updates |

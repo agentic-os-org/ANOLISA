@@ -11,6 +11,8 @@ pub(super) struct Config {
     version: u8,
     pub(super) mode: Mode,
     #[serde(default)]
+    pub(super) skill: bool,
+    #[serde(default)]
     pub(super) unmapped_tool: UnmappedTool,
     #[serde(default)]
     pub(super) tools: BTreeMap<String, Tool>,
@@ -90,7 +92,10 @@ impl Config {
     pub(super) fn parse(value: &Value) -> Result<Self, &'static str> {
         let config: Self = serde_json::from_value(value.clone()).map_err(|_| "invalid_config")?;
         if config.version != 1
-            || (config.tools.is_empty() && config.prompt.is_none() && config.pii.is_none())
+            || (config.tools.is_empty()
+                && !config.skill
+                && config.prompt.is_none()
+                && config.pii.is_none())
             || config.tools.len() > 128
         {
             return Err("invalid_config");

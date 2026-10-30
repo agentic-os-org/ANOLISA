@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import sys
 import os
 from pathlib import Path
 import tempfile
@@ -16,8 +17,10 @@ from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
 ROOT = Path(__file__).resolve().parents[5]
-SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py")
+SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py",
+    submodule_search_locations=[str(ROOT / "crates/aw-adapter/native/qwenpaw")])
 MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 

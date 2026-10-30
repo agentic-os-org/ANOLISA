@@ -1,10 +1,11 @@
-//! AW Provider projection over public agent-sec-cli security scanning commands.
+//! AW Provider projection over public agent-sec-cli scans and Skill checks.
 
 mod config;
 pub mod health;
 pub mod pii;
 mod prompt;
 mod scan;
+mod skill;
 mod tool_pii;
 mod trace_context;
 
@@ -78,6 +79,7 @@ fn dispatch(
         return Ok(serde_json::Map::from_iter([(
             "operations".to_owned(),
             json!([
+                {"name":"check_skill", "events":["tool.before"], "effects":["observe","block"]},
                 {"name":"scan_code", "events":["tool.before"], "effects":["observe","block"]},
                 {"name":"observe_tool", "events":["tool.after"], "effects":["observe"]},
                 {"name":"scan_prompt", "events":["input.submit"], "effects":["observe","block"]},
@@ -147,6 +149,24 @@ fn dispatch(
             }
         }
         (Some("observe_tool"), Some("tool.after")) => ("observe", "tool_observed"),
+        (Some("check_skill"), Some("tool.before")) => {
+            if config.mode == Mode::Block && !admitted(value, "block") {
+                return Err("block_not_admitted");
+            }
+            if !config.skill {
+                return Err("skill_check_disabled");
+            }
+            if event["tool"]["native_name"] != "Skill" {
+                return Err("skill_tool_unmapped");
+            }
+            let reason = skill::call(cli, socket, event, remaining)?;
+            let effect = if config.mode == Mode::Block && reason != "skill_pass" {
+                "block"
+            } else {
+                "observe"
+            };
+            (effect, reason)
+        }
         (Some("scan_code"), Some("tool.before")) => {
             // Admission of block is required for this configured mode, even if
             // this particular input later turns out to be harmless.

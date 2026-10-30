@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { resolveSkill, bindSkillQuery, noteSkillRead } from "./skills.mjs";
 import { invoke } from "./callback.mjs";
 import { randomUUID } from "node:crypto";
 import { Reload } from "./reload.mjs";
@@ -76,6 +77,7 @@ export async function createSdkMcpServer(options) {
 
 function compose(config, options) {
   const native = nativeConfiguration(config);
+  config.skillState ??= {};
   if (options.transport != null || (!native && (!Array.isArray(options.settingSources) || options.settingSources.length ||
       options.settings != null || !pluginsAdmitted(options.plugins) ||
       Object.keys(options.extraArgs ?? {}).length ||
@@ -102,13 +104,17 @@ function compose(config, options) {
     if (!routes.length && !(native && event === "tool.before")) continue;
     const callback = async (input, id, { signal }) => {
       const payload = copy(input);
+      noteSkillRead(payload, config.skillState.query);
       if (event === "input.submit") payload.aw_turn_id = randomUUID();
+      const verifySkill = routes.some(hook => hook.skill_check === true) ?
+        await resolveSkill(payload, { ...options, env: config.skillEnvironment ?? options.env }, config.skillState.query, signal) : undefined;
       if (event !== "input.submit" && id !== undefined && id !== payload.tool_use_id)
         return event === "tool.before" ? deny("AW tool identity mismatch") : {};
       for (const hook of routes) {
         try {
           const result = await invoke(config, hook, payload, signal);
           if (result.hookSpecificOutput || result.decision === "block") return result;
+          await verifySkill?.();
         } catch (error) {
           process.stderr.write(`AW ${event}/${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`);
           if (event === "input.submit" && (hook.on_error === "block" || signal?.aborted))
@@ -171,10 +177,12 @@ export async function createQuery({ prompt, options }, initialization = {}) {
   config = { ...config, sdk: entry, active_site: site };
   options = nativeOptions;
   const reload = config.reloadable ? new Reload(config) : undefined;
+  config.skillEnvironment = owner?.environment ?? { ...process.env, ...(options.env ?? {}) };
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);
   const query = sdk.query({ prompt: reload ? reload.input(prompt) : prompt,
     options: reload ? reload.decorate(composed) : composed });
+  config.skillState.query = bindSkillQuery(query, config.hooks.some(hook => hook.skill_check === true));
   try {
     const result = await (initialization.initializeTimeoutMs === undefined ? query.initializationResult() :
       bounded(query.initializationResult(), initialization.initializeTimeoutMs));

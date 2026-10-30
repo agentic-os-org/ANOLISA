@@ -27,7 +27,7 @@ def model_server(case):
                 output.write(
                     json.dumps(
                         {
-                            "tools": tools,
+                            "tools": tools, "messages": body["messages"],
                             "tool_result_seen": seen,
                             "stream": body.get("stream"),
                             "tool_results": [m for m in body["messages"] if m["role"] == "tool"],

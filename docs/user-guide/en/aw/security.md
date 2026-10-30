@@ -135,3 +135,36 @@ Backend services remain managed through the sec-core installation guide.
 Uninstalling AW preserves external backend configuration and data.
 
 To scan other tools, update both the [step selector](configuration.md#select-tools-for-a-hook-step) and [Provider input mapping](../../../developer-guide/en/aw/providers/sec-core.md#configure-a-provider).
+
+## Check Skills before loading
+
+Qoder SDK 1.0.56 and QwenPaw 2.2.2.post1 can validate locally resolved Skills
+through the same sec-core Provider. The daemon administrator must authorize the
+actual Skill directories, including symlink targets, and allow the daemon to
+read their files. Review and sign content separately using
+[Skill Ledger](../agent-sec-core/skill-ledger.md).
+
+In your existing AW configuration, set `spec.providers.security.config.skill: true`.
+Keep `mode: block`, then append this step to `spec.events.tool.before.steps`:
+
+```yaml
+- id: check-skill
+  provider: security
+  operation: check_skill
+  match:
+    tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill"]
+  effects: [observe, block]
+  on_error: block
+```
+
+Validate the configuration and run the configured SDK worker or QwenPaw App
+through `aw run`. Invoke a signed Skill: its instructions should load. An
+unsigned Skill, changed content or damaged signature is refused before its
+instructions enter the model. Resolution errors, missing directory permissions,
+unavailable backend and timeouts also block, with failed checks recorded
+separately from untrusted content. AW does not sign content or grant directories.
+
+Use one Skill Ledger check per tool: select AW or the native security Hook to
+avoid duplicate checks. Interactive `ask` is unavailable. Source support and
+troubleshooting are in the [integration reference](../../../developer-guide/en/aw/providers/sec-core.md#validate-skills-before-loading).
+To disable this check, remove the `check-skill` step and the `skill` setting.

@@ -63,6 +63,10 @@ impl OwnedPlugin {
         for (name, bytes) in [
             ("plugin.json", manifest.as_slice()),
             (
+                "aw_skill.py",
+                include_bytes!("../../native/qwenpaw/aw_skill.py").as_slice(),
+            ),
+            (
                 "plugin.py",
                 include_bytes!("../../native/qwenpaw/plugin.py").as_slice(),
             ),
@@ -425,10 +429,14 @@ pub(crate) fn event_routes(
                 .iter()
                 .find(|candidate| candidate.event == event && candidate.step_id == step.step_id);
             let all_tools = vec!["*".to_owned()];
-            hooks.push(json!({"event": event, "step": step.step_id,
+            let mut hook = json!({"event": event, "step": step.step_id,
                 "on_error": step.on_error, "budget_ms": budget, "replace_result": step.replaces_result,
                 "event_tools": admitted.map(|step| &step.event_tools).unwrap_or(&all_tools),
-                "step_tools": admitted.map(|step| &step.step_tools).unwrap_or(&all_tools)}));
+                "step_tools": admitted.map(|step| &step.step_tools).unwrap_or(&all_tools)});
+            if admitted.is_some_and(|step| super::sdk_tools::checks_skill(step, "qwenpaw")) {
+                hook["skill_check"] = json!(true);
+            }
+            hooks.push(hook);
         }
         events.insert(
             event.into(),

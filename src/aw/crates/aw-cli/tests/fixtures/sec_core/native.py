@@ -170,7 +170,9 @@ def collect(report, case, evidence, state):
         results = [row for request in requests for row in request["tool_results"]]
         assert len(results) == 1
         if report["case"] != "allow":
-            assert "Tool blocked by AW policy" in results[0]["content"]
+            expected = ("Tool blocked by AW policy" if report["case"] == "scan-deny"
+                else "AW hook failed; configured failure action blocked the tool")
+            assert expected in results[0]["content"]
     else:
         results = [
             json.loads(line)

@@ -126,11 +126,12 @@ The Provider's private `config` accepts:
 | Field | Meaning |
 | --- | --- |
 | `version` | Required, exactly `1` |
-| `mode` | Required, `observe` or `block`; only affects `scan_code` |
+| `mode` | Required, `observe` or `block`; affects `scan_code` and `check_skill` |
 | `unmapped_tool` | Optional, `error` (default) or `observe`; controls `scan_code` for a selected tool with no mapping |
 | `prompt` | Optional `{mode: observe\|block, scan_mode: fast}` for `scan_prompt` |
 | `pii` | Optional `{input_mode: observe\|block, output_mode: observe\|replace_result}`; input mode covers user/tool input; output mode covers tool results |
-| `tools` | Up to 128 exact normalized tool names; may be omitted when `prompt` or `pii` is configured |
+| `skill` | Optional boolean, default `false`; enables `check_skill` |
+| `tools` | Up to 128 exact normalized code tool names; may be omitted when `skill`, `prompt` or `pii` is configured |
 | `tools.<name>.language` | `bash` or `python` |
 | `tools.<name>.input_pointer` | JSON Pointer into `event.tool.input`; the selected value must be a string |
 
@@ -152,6 +153,7 @@ with `on_error: report`.
 | Operation | Event | Result |
 | --- | --- | --- |
 | `scan_code` | `tool.before` | `ok: true, verdict: pass` → `observe/code_pass`; `warn` or `deny` → `observe/code_risk` or `block/code_risk`, according to `mode` |
+| `check_skill` | `tool.before` | Valid signed content → `observe/skill_pass`; other completed trust states observe or block according to `mode` |
 | `observe_tool` | `tool.after` | `observe/tool_observed`; no scanner call |
 
 `describe`, private-config validation and after observation do not contact
@@ -280,6 +282,86 @@ Choose AW or native PII for each tool phase. Explicitly remove the native PII
 PreToolUse/PostToolUse registrations when AW owns those phases, retaining any
 UserPromptSubmit registration needed for user text. AW preserves native settings
 and does not remove Hooks. Keeping both tool registrations causes duplicate scans.
+
+## Validate Skills before loading
+
+The [SDK policy example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+uses the same Provider for Qoder SDK and QwenPaw. Set `config.skill: true` and
+add a `tool.before` step with `operation: check_skill`, `effects: [observe, block]`,
+`on_error: block`, and selectors `native:qoder-sdk:Skill` and
+`native:qwenpaw:Skill`. The shared `mode: block` allows only `pass`.
+`tools` continues to map code inputs; Skill checks do not need an input pointer.
+A Skill-only Provider may omit `tools` when `skill: true`.
+
+The Adapter supplies `event.native.aw_skill` with the requested `name`, canonical
+`directory` and `source`. Resolution failures supply an `error_code` instead.
+The Provider never derives paths from framework names: it calls
+`agent-sec-cli skill-ledger check DIRECTORY` with the remaining budget.
+The daemon administrator must authorize the actual canonical directories and
+make their files accessible. AW neither expands that authorization nor signs Skills.
+Use the [Skill Ledger guide](../../../../user-guide/en/agent-sec-core/skill-ledger.md)
+to review, scan and sign content separately.
+
+| Ledger status | Reason code | `mode: block` |
+| --- | --- | --- |
+| `pass` | `skill_pass` | Continue native loading |
+| `none` | `skill_unsigned` | Block |
+| `drifted` | `skill_drifted` | Block |
+| `warn`, `deny` | `skill_warn`, `skill_deny` | Block |
+| `tampered` | `skill_tampered` | Block |
+| `error`, malformed/empty output, transport failure or timeout | Provider error | Apply `on_error` |
+
+Ledger exit 1 can contain a completed negative trust state; it is decoded as
+such. A nonzero exit with `pass`, an unknown status, a signal, or other exit code
+is an error. Risk decisions and failed checks remain separate in AW auditing.
+`mode: observe` reports trust states without blocking; `ask` is unsupported.
+Choose either AW or the native Skill Ledger Hook for this check to avoid
+performing it twice. Existing native permission refusals retain authority.
+
+Skill checking requires ordinary resident `aw run`; `--reloadable` admission
+rejects it. Idle updates of ordinary resident policies retain their existing
+task snapshot boundary. Resolution and pinning run only when a Skill check is
+selected; other policies keep native Skill behavior.
+
+Qoder SDK 1.0.56 / Worker 1.1.78 checks a unique local asset among the catalogs
+enabled by the Query's `settingSources`, including explicitly enabled
+`.agents/skills`. Frontmatter `name` is a display name; nested directories use
+the leaf name. Same-name assets in multiple directories, including names differing
+only in case, produce `skill_resolution_error`. This also applies when the native
+parser would skip one asset: the control API exposes no selected path to prove
+which fallback would execute. Use unique names or limit the enabled sources.
+AW refreshes the native cache before checking and rejects source edits across
+refresh and Provider execution. The refresh response is a UI list and does not
+gate model-only Skills such as `user-invocable: false`; native invocation and
+permission rules continue to apply. Local Workflow scripts in any enabled
+user/project catalog produce a resolution error, including scripts whose filename
+differs from their metadata name and directory entrypoints `workflow.js`/`index.js`.
+Their JavaScript metadata can introduce a competing Skill without a provable
+selected signing root; remove these assets or exclude their source for required
+Skill checks. This conservative boundary also applies when native Workflows are
+disabled, because their effective gate is not exposed by the control API.
+Native `Read` can populate a dynamic Skill cache that survives `reload_skills`.
+The control API cannot identify its selected path. Once a Query has attempted
+`Read`, Skill checking with project sources enabled returns `skill_resolution_error`,
+even if the read failed/was denied or a later idle update enables checking.
+Use a fresh Query or select `settingSources: ["user"]` from Query creation for
+required Skill checks. Source reads and policy updates never clear this fence.
+Legacy command resources, dynamic ancestor
+conflicts, additional directories and sources without a local resolved directory
+produce resolution errors. Plugin-qualified names and built-in Skill sources
+are unsupported. The checked public Hook argument snapshot retains the Adapter's
+existing contract for subsequent native argument changes.
+
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10 uses the actual SkillViewer and activated
+Toolkit groups. Native duplicate-name precedence selects the object. AW verifies
+that its in-memory markdown matches `SKILL.md`, checks its canonical directory,
+and pins that object for this invocation. Source edits during checking block
+loading. Unavailable or memory-only sources fail resolution. Concurrent calls
+retain separate snapshots. AW decodes supplied files with AgentScope's UTF-8-SIG
+semantics, including BOM. The stock QwenPaw 2.2.2.post1 App runtime cache itself
+skips BOM assets before AW runs; that native loading path remains unsupported.
+Read-file loading, automatic context injection and
+Skill-internal commands require their own policies.
 
 ## Trace correlation
 

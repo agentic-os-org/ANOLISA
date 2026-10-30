@@ -112,3 +112,31 @@ git -c http.sslVerify=false --version
 卸载 AW 保留外部后台配置和数据。
 
 检查其他工具时，同时修改[步骤选择器](configuration.md#为-hook-步骤选择工具)和[Provider 输入映射](../../../developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
+
+## 加载前校验 Skill
+
+Qoder SDK 1.0.56 和 QwenPaw 2.2.2.post1 可通过同一 sec-core Provider 校验本地
+Skill。daemon 管理员须授权实际 Skill 目录（包括符号链接目标），并保证文件可读。
+内容评审和签名通过 [Skill Ledger](../agent-sec-core/skill-ledger.md)单独完成。
+
+在已有 AW 配置中设置 `spec.providers.security.config.skill: true`，保留
+`mode: block`，然后向 `spec.events.tool.before.steps` 追加以下步骤：
+
+```yaml
+- id: check-skill
+  provider: security
+  operation: check_skill
+  match:
+    tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill"]
+  effects: [observe, block]
+  on_error: block
+```
+
+校验配置后，通过 `aw run` 启动已配置的 SDK worker 或 QwenPaw App。
+调用已签名 Skill，预期可加载指令；未签名、内容修改或签名损坏的 Skill 会在
+指令进入模型前拒绝。解析错误、目录无权限、后端不可达和超时也会阻断，
+审计将检查失败与不可信内容分别记录。AW 不替用户签名或授予目录权限。
+
+同一个工具的 Skill Ledger 检查选择 AW 或原生安全 Hook，避免重复执行。
+交互 `ask` 尚未提供。来源支持与故障处理见[集成参考](../../../developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
+停用时移除 `check-skill` 步骤和 `skill` 设置。

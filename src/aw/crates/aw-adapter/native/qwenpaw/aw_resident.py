@@ -18,6 +18,7 @@ from agentscope.tool import ToolResponse, _toolkit
 from .aw_private import clear_execution, current_execution, public_execution, validate_execution
 from .aw_scope import Scope
 from .aw_submission import SubmissionDenied, check_submission
+from .aw_skill import skill_context
 
 
 class ResidentFailure(RuntimeError):
@@ -474,6 +475,7 @@ class ResidentMiddleware(MiddlewareBase):
         finally:
             await self.close_if_drained()
 
+    @skill_context
     async def on_acting(self, agent, input_kwargs, next_handler):
         self.check()
         call = input_kwargs["tool_call"]

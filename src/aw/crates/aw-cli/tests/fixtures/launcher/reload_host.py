@@ -85,8 +85,9 @@ else:
         module.__dict__.update(values)
         sys.modules[name] = module
     source = Path(os.environ["QWENPAW_WORKING_DIR"]) / "plugins" / json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())["plugin_id"] / "plugin.py"
-    spec = importlib.util.spec_from_file_location("reload_plugin", source)
+    spec = importlib.util.spec_from_file_location("reload_plugin", source, submodule_search_locations=[str(source.parent)])
     plugin = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = plugin
     spec.loader.exec_module(plugin)
     factories, startup = [], []
     plugin.plugin.register(SimpleNamespace(config={}, register_middleware=lambda f, **kw: factories.append(f),
