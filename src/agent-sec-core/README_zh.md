@@ -81,6 +81,8 @@ daemon 自己拥有的叶目录权限会先修复为 `0700`。
 两处都有数据库，或选址会绕过已有数据库时拒绝启动；显式 `AGENT_SEC_DATA_DIR` 仍为固定路径。
 详见 [Policy 存储](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#policy-数据库位置)。
 PolicyTemplate 是包含通用规则的可复用策略；AgentSight Adapter 当前仅执行文件删除 block 规则。
+现有 Policy create/update 命令也接受携带精确 schema 引用的 Cedar 源码封装，完成准入校验和源码保存；
+Cedar 到 AgentSight 的翻译尚未接入。原生 JSON 请求及保存快照保持原有格式。
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
 

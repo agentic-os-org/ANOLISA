@@ -2,7 +2,6 @@
 //!
 //! Only source and schema references are serializable. Source deserialization
 //! does not establish Cedar syntax, schema validity or supported semantics.
-//! These types are not yet used by PAP requests or persisted Policy snapshots.
 
 use serde::{Deserialize, Serialize};
 

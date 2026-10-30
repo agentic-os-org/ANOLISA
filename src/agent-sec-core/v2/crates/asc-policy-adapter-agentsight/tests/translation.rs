@@ -25,6 +25,15 @@ fn complete_binding_fixture() -> PreparedBinding {
     serde_json::from_str(COMPLETE_BINDING_FIXTURE).unwrap()
 }
 
+fn native_template(
+    source: &mut asc_policy_types::authoring::PolicySource,
+) -> &mut asc_policy_types::authoring::PolicyTemplate {
+    let asc_policy_types::authoring::PolicySource::SecCore(template) = source else {
+        panic!("expected native test policy");
+    };
+    template
+}
+
 fn binding_with_files(files: Vec<String>) -> PreparedBinding {
     let mut binding = complete_binding_fixture();
     binding.policy.template = file_policy(files);
@@ -142,7 +151,7 @@ fn unsupported_rule_rejects_the_entire_policy_with_its_position() {
         (Effect::Block, Action::Read, "RULE_1_UNSUPPORTED_ACTION"),
     ] {
         let mut binding = complete_binding_fixture();
-        let rule = &mut binding.policy.template.rules[1];
+        let rule = &mut native_template(&mut binding.policy.template).rules[1];
         rule.effect = effect;
         rule.action = action;
         if action == Action::Read {
@@ -169,8 +178,9 @@ fn unsupported_rule_rejects_the_entire_policy_with_its_position() {
 #[test]
 fn explanations_are_preserved_and_cannot_inject_dsl() {
     let mut binding = binding_with_files(vec!["/same".into(), "/same".into()]);
-    binding.policy.template.rules[0].because = Some("保护配置文件".into());
-    binding.policy.template.rules[1].because = Some("Independent reason".into());
+    native_template(&mut binding.policy.template).rules[0].because = Some("保护配置文件".into());
+    native_template(&mut binding.policy.template).rules[1].because =
+        Some("Independent reason".into());
     let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&binding).unwrap()
     else {
         panic!("expected a complete plan");
@@ -180,7 +190,7 @@ fn explanations_are_preserved_and_cannot_inject_dsl() {
     assert!(plan.policy.content.contains("保护配置文件"));
     assert!(plan.policy.content.contains("Independent reason"));
     for reason in ["bad\"reason", "bad\\reason", "bad\nreason"] {
-        binding.policy.template.rules[1].because = Some(reason.into());
+        native_template(&mut binding.policy.template).rules[1].because = Some(reason.into());
         binding.validate().unwrap();
         assert_eq!(
             AgentSightAdapter.translate(&binding).unwrap(),
@@ -274,14 +284,16 @@ fn rule_order_is_preserved_and_changed_rules_change_the_plan() {
     let original = complete_binding_fixture();
     let expected = AgentSightAdapter.translate(&original).unwrap();
     let mut reversed = original.clone();
-    reversed.policy.template.rules.reverse();
+    native_template(&mut reversed.policy.template)
+        .rules
+        .reverse();
     assert_ne!(AgentSightAdapter.translate(&reversed).unwrap(), expected);
     let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&reversed).unwrap()
     else {
         panic!("expected plan");
     };
     let decoded: AgentSightBindingPlan = serde_json::from_slice(&plan.content).unwrap();
-    let Resource::File { path } = &reversed.policy.template.rules[0].target;
+    let Resource::File { path } = &native_template(&mut reversed.policy.template).rules[0].target;
     assert!(decoded.policy.content.starts_with(&format!(
         "source AGENT = exec \"**\"\nrule agentseccore-unlink-0000:\n  block unlink file \"{path}\""
     )));
@@ -291,6 +303,23 @@ fn rule_order_is_preserved_and_changed_rules_change_the_plan() {
             .unwrap(),
         expected
     );
+}
+
+#[test]
+fn cedar_sources_are_explicitly_rejected_until_the_cedar_translator_is_connected() {
+    let mut binding = complete_binding_fixture();
+    binding.policy.template = serde_json::from_value(serde_json::json!({
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system","revision":1},
+            "text":"forbid(principal, action == SecCore::Action::\"file.write\", resource);"
+        }
+    }))
+    .unwrap();
+    let TranslationOutcome::Rejected(rejection) = AgentSightAdapter.translate(&binding).unwrap()
+    else {
+        panic!("Cedar must not produce a partial native plan");
+    };
+    assert_eq!(rejection.code, "UNSUPPORTED_POLICY_LANGUAGE");
 }
 
 #[test]

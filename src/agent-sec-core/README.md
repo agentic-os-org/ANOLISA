@@ -92,8 +92,11 @@ Conflicting or bypassed existing databases
 refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
 [Policy storage](../../docs/user-guide/en/agent-sec-core/policy-cli.md#policy-database-location).
 PolicyTemplates are reusable policies with general rules; the AgentSight Adapter
-currently executes only file-deletion block rules. Scopes save immutable Policy snapshots and
-own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
+currently executes only file-deletion block rules. Policy create/update also accepts Cedar
+source envelopes with an exact schema reference. Cedar admission and source persistence are
+available; AgentSight translation is not yet connected. Native JSON requests and saved
+snapshots retain their format. Scopes save immutable Policy snapshots and own automatic
+Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
 the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
 
 **Breaking change:** `scope create --cgroup-id` has been removed because cgroup

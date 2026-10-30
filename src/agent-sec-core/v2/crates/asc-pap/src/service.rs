@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView};
 use asc_policy_types::error::ValidationError;
 use asc_policy_types::policy::{PreparedPolicy, validate_policy_name};
@@ -134,7 +134,7 @@ where
     pub fn create_policy(
         &self,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PapError> {
         self.write_policy(WriteTarget::Create, policy_name, template)
     }
@@ -151,7 +151,7 @@ where
         &self,
         policy_id: &ResourceId,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PapError> {
         self.write_policy(WriteTarget::Update(policy_id), policy_name, template)
     }
@@ -160,10 +160,14 @@ where
         &self,
         target: WriteTarget<'_>,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PapError> {
         validate_policy_name(policy_name)
             .map_err(|message| PapError::InvalidPolicyName(message.to_owned()))?;
+        if let PolicySource::Cedar(cedar) = template {
+            asc_policy_cedar::validate(cedar)
+                .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?;
+        }
         let (update_existing, mut selected_id) = match target {
             WriteTarget::Create => (false, generated_resource_id()?),
             WriteTarget::Update(id) => (true, id.clone()),
@@ -193,7 +197,6 @@ where
                 revision,
                 template: template.clone(),
             };
-            candidate.validate().map_err(PapError::InvalidPolicy)?;
             match self.repository.put_policy(&candidate) {
                 Err(PapError::Conflict) => {
                     if !update_existing {

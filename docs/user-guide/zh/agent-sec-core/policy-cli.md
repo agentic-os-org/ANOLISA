@@ -97,7 +97,7 @@ AgentSight Adapter 当前只执行不带历史条件的 block + file/write + ope
 任意规则不支持，整个 Binding 失败，例如返回有界错误码 `RULE_1_UNSUPPORTED_EFFECT`，
 不发送受支持的规则子集。目标 DSL 不支持转义语法，because 包含引号、反斜杠或控制字符时
 转换失败，普通 Unicode 文本保持原样；省略理由时使用 Adapter 默认值。
-创建策略成功不代表执行后端支持这些规则。
+策略创建成功不代表目标 PEP（策略执行点）支持这些规则。
 
 生成的 DSL 表达禁止删除；真实内核是否仅阻止删除仍需单独验证，当前 ActPlane 的
 unlink/write 共用底层操作映射。旧 kind JSON 和包含该格式的开发期数据库不提供迁移，
@@ -119,6 +119,38 @@ CLI 工作目录解析。
 
 更新或删除 Policy 不改变已有 Scope 和 Binding。撤销分配应删除 Scope。已删除的已知
 Policy ID 保留 revision 计数器；update 可按下一 revision 重建内容，未知 ID 不可 update。
+
+## Cedar Policy 源码
+
+同一组 `policy create`、`policy update` 命令通过 `--file` 接受 JSON 源码封装。
+将以下示例保存为 `cedar-policy.json`：
+
+```json
+{
+  "language": "cedar",
+  "content": {
+    "schema": {"schemaId": "seccore.system", "revision": 1},
+    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/workspace/important\" };"
+  }
+}
+```
+
+```bash
+agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.json
+agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --file cedar-policy-v2.json
+```
+
+Get/list 返回保存的原文及精确 schema 引用。语法、schema 或公共子集校验失败时返回
+`invalid_argument`，不修改已保存的策略内容及 revision。未知 schema revision 直接拒绝，
+不回退到其他版本。原生模板继续使用原有形状。
+
+策略创建成功不代表目标 PEP 支持该策略。当前 AgentSight Translator 尚未接入 Cedar：
+以 AgentSight 为目标的 Cedar Binding 返回
+`UNSUPPORTED_POLICY_LANGUAGE`。Policy 更新或删除后，已有 Scope/Binding 快照仍保留原
+Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保存 AST/PST。
+旧二进制不能读取新增 Cedar 记录，需要回滚时应保留升级前的数据库备份。
+深层嵌套源码导致 SDK 栈溢出的已知限制仍未解决，应使用管理员审阅的策略，避免不可信生成输入。
 
 ## 管理 Scope
 

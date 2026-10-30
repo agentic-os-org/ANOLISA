@@ -10,6 +10,8 @@ belongs to the actual AgentSight/ActPlane deployment.
 
 | Dependency path | Purpose and review boundary |
 |---|---|
+| `asc-pap -> asc-policy-cedar -> cedar-policy / cedar-policy-core` | Cedar create/update admission and call-local PST loading. The frontend checks the exact embedded schema; policy-types and protocol crates remain independent of the SDK. No schema registry or deployment I/O. |
+| `asc-policy-cedar -> miette` | Reuses Cedar's diagnostic dependency to retain policy IDs and byte locations in RPC errors; no terminal renderer or new registry package. |
 | `asc-daemon / asc-cli -> asc-observability[runtime] -> opentelemetry_sdk / tracing-opentelemetry` | Local context and stderr diagnostics only. No OTLP exporter, HTTP client or TLS provider in this path. |
 | `asc-agentsight-client -> ureq -> rustls / rustls-webpki -> ring` | AgentSight API HTTP/TLS. ureq 2.12.1 explicitly selects the ring provider for its default TLS config. This Client is wired into the daemon through Policy Runtime. |
 | `rustls -> ring` | The AgentSight client crypto boundary contains unsafe/native code. Workspace-local unsafe prohibition does not establish a zero-unsafe dependency tree. |

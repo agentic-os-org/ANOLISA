@@ -79,3 +79,40 @@ pub enum CedarError {
     #[error("cannot obtain Cedar public syntax tree: {0}")]
     Representation(#[from] Box<cedar_policy::PolicySetError>),
 }
+
+impl CedarError {
+    /// Formats admission diagnostics with policy IDs and available byte locations.
+    pub fn diagnostic(&self) -> String {
+        let details: Vec<String> = match self {
+            Self::Validation { errors, warnings } => errors
+                .iter()
+                .map(|error| format!("{}: {}", error.policy_id(), describe(error)))
+                .chain(
+                    warnings
+                        .iter()
+                        .map(|warning| format!("{}: {}", warning.policy_id(), describe(warning))),
+                )
+                .collect(),
+            Self::Parse(error) => error.iter().map(|error| describe(error)).collect(),
+            _ => return self.to_string(),
+        };
+        format!("{self}: {}", details.join("; "))
+    }
+}
+
+fn describe(error: &dyn miette::Diagnostic) -> String {
+    let mut message = error.to_string();
+    if let Some(labels) = error.labels() {
+        for label in labels {
+            use std::fmt::Write as _;
+            // Formatting into a String cannot fail.
+            let _ = write!(
+                message,
+                " [bytes {}..{}]",
+                label.offset(),
+                label.offset() + label.len()
+            );
+        }
+    }
+    message
+}

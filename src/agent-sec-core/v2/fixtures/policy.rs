@@ -1,10 +1,10 @@
 // Shared authoring input for lifecycle tests; production accepts general rules.
-fn file_policy(files: Vec<String>) -> asc_policy_types::authoring::PolicyTemplate {
+fn file_policy(files: Vec<String>) -> asc_policy_types::authoring::PolicySource {
     use asc_policy_types::authoring::{
         Action, Category, Comparison, Condition, Effect, PolicyTemplate, Resource, Rule, Scalar,
         Value,
     };
-    PolicyTemplate {
+    asc_policy_types::authoring::PolicySource::SecCore(PolicyTemplate {
         spec_version: "0.1".into(),
         description: None,
         rules: files
@@ -21,5 +21,5 @@ fn file_policy(files: Vec<String>) -> asc_policy_types::authoring::PolicyTemplat
                 because: None,
             })
             .collect(),
-    }
+    })
 }

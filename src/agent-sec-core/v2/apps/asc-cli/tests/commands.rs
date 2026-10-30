@@ -265,6 +265,8 @@ fn file_errors_duplicate_keys_and_oversized_inputs_are_local_failures() {
         br#"{"specVersion":"0.1","specVersion":"0.1","rules":[]}"#,
         br#"{"specVersion":"0.1","rules":[{"effect":"block","category":"file","action":"write","target":{"type":"file","path":"/one","path":"/two"}}]}"#,
         br#"{"specVersion":"0.1","rules":[],"extra":true}"#,
+        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"first","text":"second"}}"#,
+        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1,"revision":2},"text":"first"}}"#,
     ] {
         std::fs::write(&path, bytes).unwrap();
         assert!(matches!(

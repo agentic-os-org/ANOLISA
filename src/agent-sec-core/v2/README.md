@@ -201,12 +201,20 @@ UDS frame -> DaemonDispatcher -> method metadata authorization
           -> PapHandler -> PolicyAdministration -> PapService<R, C>
 ```
 
-RPC reuses the domain `PolicyTemplate`, `ScopeSelector`, `PreparedPolicy`,
+RPC reuses the domain `PolicySource`, `ScopeSelector`, `PreparedPolicy`,
 `PreparedScope`, and `BindingView` types. It does not define result wrappers for
 each CRUD operation. `PolicyAdministration` intentionally mirrors the use cases
 once: it erases `R`/`C` before dispatch and repeats authorization at the
 application boundary; there is no additional `PapServiceAdapter` forwarding
 object.
+
+Policy create/update accepts native JSON templates and Cedar source envelopes.
+PAP validates Cedar against its exact schema before saving source; the shared
+source decoder reads historical native Policy, Scope and Binding snapshots.
+Native serialization and SQLite storage version 1 are retained. Saved Cedar
+source can be passed to the existing `asc-policy-cedar::pst` entrypoint to
+regenerate the official PST under its saved schema. Cedar translation/deployment is
+not yet connected; AgentSight rejects it with `UNSUPPORTED_POLICY_LANGUAGE`.
 
 The current bootstrap bounds frame read, application dispatch, rejection
 encoding, response write, connection drain, and final Tokio runtime shutdown.

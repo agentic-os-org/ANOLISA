@@ -20,6 +20,9 @@ use crate::model::{Page, PolicyRevisionState};
 pub trait PapRepository: Send + Sync {
     /// Creates or replaces the current Policy record.
     ///
+    /// Validate the complete snapshot before writing. Cedar language admission
+    /// is performed by PAP; snapshot validation checks its source envelope only.
+    ///
     /// Implementations must atomically accept a changed record only when its
     /// revision is exactly the next never-reused revision for the Policy identity.
     /// An exact replay of the current record is idempotent; every other stale,
@@ -28,7 +31,7 @@ pub trait PapRepository: Send + Sync {
     /// record remains.
     ///
     /// # Errors
-    /// Returns conflict or persistence failures.
+    /// Returns validation, conflict or persistence failures.
     fn put_policy(&self, policy: &PreparedPolicy) -> Result<PreparedPolicy, PapError>;
 
     /// Gets Policy allocation state and its optional current record.

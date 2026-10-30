@@ -448,7 +448,7 @@ fn sql_list_byte_budget_preserves_total_and_advances_every_page() {
     let repo = SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap();
     let initial = seed(&repo).binding.spec.policy;
     let mut policy = initial.clone();
-    let mut template = serde_json::to_value(&policy.template).unwrap();
+    let mut template = serde_json::to_value(&policy).unwrap()["template"].clone();
     let rule = template["rules"][0].clone();
     template["rules"] = serde_json::Value::Array(
         (0..200)
@@ -459,7 +459,9 @@ fn sql_list_byte_budget_preserves_total_and_advances_every_page() {
             })
             .collect(),
     );
-    policy.template = serde_json::from_value(template).unwrap();
+    policy.template = asc_policy_types::authoring::PolicySource::SecCore(
+        serde_json::from_value(template).unwrap(),
+    );
     let mut expected = vec![initial];
     for index in 0..7 {
         policy.policy_id = ResourceId::new(format!("large-{index}")).unwrap();
@@ -884,14 +886,14 @@ fn general_policy_rules_survive_reopen_in_current_scope_and_binding_snapshots() 
     ))
     .unwrap();
     let mut policy = binding.policy;
-    policy.template = serde_json::from_value(serde_json::json!({
+    policy.template = asc_policy_types::authoring::PolicySource::SecCore(serde_json::from_value(serde_json::json!({
         "specVersion":"0.1", "description":"Reusable policy requiring review",
         "rules":[{"effect":"require_confirmation","category":"file","action":"exec",
             "target":{"type":"file","path":"/usr/bin/git"},
             "where":{"and":[{"argsPrefix":{"eq":["push"]}},{"cwd":{"eq":"/workspace"}}]},
             "previous":{"category":"file","action":"read","target":{"type":"file","path":"/secrets/**"}},
             "because":"Review before pushing"}]
-    })).unwrap();
+    })).unwrap());
     repo.put_policy(&policy).unwrap();
     let mut scopes = Vec::new();
     let mut bindings = Vec::new();
@@ -947,6 +949,106 @@ fn general_policy_rules_survive_reopen_in_current_scope_and_binding_snapshots() 
             policy
         );
     }
+}
+
+#[test]
+fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_schema() {
+    use asc_pap::PapService;
+    use asc_policy_cedar::pst;
+    use asc_policy_types::authoring::PolicySource;
+    use std::sync::Arc;
+
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let repo = Arc::new(SqlitePolicyRepository::open(&path).unwrap());
+    let pap = PapService::new(repo.clone());
+    let source: PolicySource = serde_json::from_value(serde_json::json!({
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system","revision":1},
+            "text":"// Retain whitespace and original source.\nforbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/protected\" };\n"
+        }
+    })).unwrap();
+    let original = pap.create_policy("cedar", &source).unwrap();
+    let fixture: PreparedBinding = serde_json::from_str(include_str!(
+        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
+    ))
+    .unwrap();
+    let scope = PreparedScope {
+        scope_id: fixture.scope.scope_id,
+        selector: fixture.scope.selector,
+        policy_snapshots: vec![original.clone()],
+        status: ScopeStatus::Active,
+    };
+    repo.put_scope(&scope).unwrap();
+    let intent = repo
+        .sync_scope_instances(&scope.scope_id, &[fixture.scope.process])
+        .unwrap()
+        .remove(0);
+    let mut updated_source = source.clone();
+    let PolicySource::Cedar(cedar) = &mut updated_source else {
+        unreachable!()
+    };
+    cedar.text = cedar.text.replace("/protected", "/changed");
+    let current = pap
+        .update_policy(&original.policy_id, "renamed", &updated_source)
+        .unwrap();
+    assert_eq!(current.revision.get(), 2);
+    assert_ne!(current.template, original.template);
+    assert_eq!(repo.get_scope(&scope.scope_id).unwrap(), scope);
+    drop(pap);
+    drop(repo);
+
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    assert_eq!(
+        repo.get_policy(&current.policy_id, current.revision)
+            .unwrap(),
+        current
+    );
+    assert_eq!(repo.get_scope(&scope.scope_id).unwrap(), scope);
+    let restored = repo
+        .get_binding_state(&intent.spec.binding_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.binding.spec.policy, original);
+    let PolicySource::Cedar(saved) = &restored.binding.spec.policy.template else {
+        panic!("saved Cedar policy must produce a PST");
+    };
+    assert_eq!(saved.schema.revision.get(), 1);
+    assert_eq!(pst(saved).unwrap().policies.len(), 1);
+    repo.delete_policy_revision(&current.policy_id, current.revision)
+        .unwrap();
+    drop(repo);
+
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        1
+    );
+    let saved: String = db
+        .query_row("SELECT spec_json FROM bindings", [], |r| r.get(0))
+        .unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(
+        saved["policy"]["template"],
+        serde_json::to_value(&source).unwrap()
+    );
+    drop(db);
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let restored = repo
+        .get_binding_state(&intent.spec.binding_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.binding.spec.policy, original);
+    let PolicySource::Cedar(mut invalid) = restored.binding.spec.policy.template else {
+        unreachable!()
+    };
+    assert!(pst(&invalid).is_ok());
+    invalid.schema.revision = Revision::new(2).unwrap();
+    assert!(matches!(
+        pst(&invalid),
+        Err(asc_policy_cedar::CedarError::UnsupportedSchema { revision: 2, .. })
+    ));
 }
 
 #[test]

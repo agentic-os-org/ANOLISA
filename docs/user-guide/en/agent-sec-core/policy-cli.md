@@ -113,7 +113,8 @@ rules without history. Unsupported rules fail the entire Binding with a bounded 
 such as `RULE_1_UNSUPPORTED_EFFECT`; no supported subset is sent. Quotes, backslashes
 and control characters in `because` are rejected during translation because the target
 DSL has no escape syntax; ordinary Unicode text is preserved. An omitted reason uses
-the Adapter's default. Template creation success does not prove backend support.
+the Adapter's default. Policy creation success does not establish that the target
+PEP (Policy Enforcement Point) supports these rules.
 
 The generated DSL expresses deletion prevention. Actual delete-only kernel behavior
 requires separate validation; the current ActPlane backend shares its unlink/write
@@ -141,6 +142,42 @@ Updating or deleting a Policy does not change existing Scopes or their Bindings.
 Delete the Scope to withdraw its assignments. A known deleted Policy ID retains its
 revision counter; updating it recreates content at the next revision. An unknown ID
 cannot be updated.
+
+## Cedar Policy source
+
+The same `policy create` and `policy update` commands accept a JSON source
+envelope in `--file`. Save this example as `cedar-policy.json`:
+
+```json
+{
+  "language": "cedar",
+  "content": {
+    "schema": {"schemaId": "seccore.system", "revision": 1},
+    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/workspace/important\" };"
+  }
+}
+```
+
+```bash
+agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.json
+agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --file cedar-policy-v2.json
+```
+
+Get/list return the saved original text and exact schema reference. Invalid
+syntax, schema or common-subset constructs return `invalid_argument` without
+changing stored policy content or revisions. Unknown schema revisions are rejected
+without fallback. Native templates remain supported in their existing shape.
+
+Policy creation success does not establish target PEP support. The current
+AgentSight Translator does not yet support Cedar: Cedar Bindings targeting
+AgentSight receive `UNSUPPORTED_POLICY_LANGUAGE`. Existing
+Scope/Binding snapshots retain their saved Policy revision and schema when a
+Policy is updated or deleted. Source can be reloaded into an in-memory PST;
+neither AST nor PST is stored in SQLite. An older binary cannot read new Cedar
+records, so preserve a pre-upgrade database backup when planning rollback.
+The known SDK stack-overflow limit for deeply nested source remains unresolved;
+use administrator-reviewed policies rather than untrusted generated input.
 
 ## Manage Scopes
 
