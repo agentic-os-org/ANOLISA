@@ -271,3 +271,44 @@ def test_scan_rule_ref_resolve_error(mock_load: object) -> None:
     assert result.ok is False
     assert result.verdict == Verdict.ERROR
     assert "rule reference resolve failed" in result.summary
+
+
+class TestSensitiveDirReferenceWithoutSlash:
+    """Directory-style sensitive paths must match without a trailing slash.
+
+    The rule entries used to end with a literal ``/``, so the idiomatic
+    spelling (``cd /etc/ssh``, ``cp -r /etc/kubernetes``) evaded every
+    sensitive-path rule while the slash-suffixed form was flagged.
+    """
+
+    def _rule_ids(self, code: str) -> set:
+        from agent_sec_cli.code_scanner.models import Language
+
+        result = scan(code, Language.BASH)
+        return {f.rule_id for f in result.findings}
+
+    def test_cd_sensitive_dir_without_slash(self):
+        assert "shell-cd-sensitive-dir" in self._rule_ids("cd /etc/ssh")
+
+    def test_cd_sensitive_dir_with_slash_still_flags(self):
+        assert "shell-cd-sensitive-dir" in self._rule_ids("cd /etc/ssh/")
+
+    def test_copy_sensitive_dir_without_slash(self):
+        assert "shell-read-sensitive-file" in self._rule_ids(
+            "cp -r /etc/ssh /tmp/backup"
+        )
+
+    def test_tar_sensitive_dir_without_slash(self):
+        assert "shell-read-sensitive-file" in self._rule_ids(
+            "tar -czf /tmp/b.tgz /etc/kubernetes"
+        )
+
+    def test_copy_boot_without_slash(self):
+        assert "shell-read-sensitive-file" in self._rule_ids("cp -r /boot /tmp/x")
+
+    def test_plain_ls_boot_is_not_sensitive(self):
+        # `ls` is not a read-family command for these rules: both forms pass.
+        assert self._rule_ids("ls /boot") == set()
+
+    def test_file_inside_sensitive_dir_still_flags(self):
+        assert "shell-read-sensitive-file" in self._rule_ids("cat /etc/ssh/sshd_config")
