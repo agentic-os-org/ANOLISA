@@ -430,7 +430,18 @@ mod tests {
             let alias = other.join("alias");
             symlink(&home, &alias).unwrap();
             let program = root.path().join(adapter);
-            symlink("/bin/sleep", &program).unwrap();
+            // Distinct bytes exclude unrelated sleep jobs from copied-binary matching.
+            // Write in a child so concurrent forks cannot inherit an executable writer.
+            assert!(std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "cp /bin/sleep \"$1\" && printf '%s' \"$1\" >> \"$1\"",
+                    "fixture"
+                ])
+                .arg(&program)
+                .status()
+                .unwrap()
+                .success());
             let spawn = |home: &Path, cwd: &Path| {
                 Child::spawn(
                     std::process::Command::new(&program)

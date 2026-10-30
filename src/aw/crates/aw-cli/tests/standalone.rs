@@ -10,12 +10,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let target =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/package-fixtures");
-        fs::create_dir_all(&target).unwrap();
+        // Keep Unix socket paths within their byte limit regardless of checkout depth.
         let directory = tempfile::Builder::new()
             .prefix("standalone-cli-")
-            .tempdir_in(target)
+            .tempdir_in("/tmp")
             .unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = directory.path().canonicalize().unwrap();
