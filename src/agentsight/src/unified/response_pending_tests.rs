@@ -929,6 +929,37 @@ fn drain_fallback_counts_dashscope_native_parameter_tools() {
         "the native tool definitions must reach the template: {counted} vs {baseline}"
     );
 }
+
+/// The drain fallback's raw-message estimate used to drop the tool
+/// definitions exactly when the template render fails (a content block
+/// array, the shape multimodal clients send): the Ok path renders the
+/// definitions — the case above pins that — but the Err path summed only
+/// the serialized messages, so a tool-carrying request whose render failed
+/// was estimated without its definitions.
+#[test]
+fn drain_fallback_counts_tools_when_the_render_fails() {
+    let tokenizer = drain_fixture_tokenizer();
+    let with_tools: serde_json::Value = serde_json::from_str(
+        r#"{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"text","text":"hello there"}]}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Look up the forecast for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}"#,
+    )
+    .unwrap();
+    let without_tools: serde_json::Value = serde_json::from_str(
+        r#"{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"text","text":"hello there"}]}]}"#,
+    )
+    .unwrap();
+
+    // Sanity: the block-array content is the shape that fails the render,
+    // so both bodies take the fallback, not the template.
+    let fallback_without =
+        drain_request_input_tokens(&without_tools, &tokenizer).expect("fallback counts");
+    assert!(fallback_without > 0);
+
+    let counted = drain_request_input_tokens(&with_tools, &tokenizer).expect("fallback counts");
+    assert!(
+        counted > fallback_without,
+        "the tool definitions must reach the fallback estimate: {counted} vs {fallback_without}"
+    );
+}
 /// The #7553 clean-exit completion path: a headers-only response that the
 /// application never reads must land as a usable `complete` row through
 /// `complete_pid_partial_responses` + `persist_drained_pending`.
