@@ -30,6 +30,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import yaml
+
 from ._common import (OPENCLAW_CONFIG, _REPO_DIR, attach_log_file,
                        detach_log_file, is_sandbox_task, load_config,
                        load_task_yaml, log, make_trace_dir,
@@ -46,6 +48,42 @@ from .preflight import find_missing_fixtures, run_preflight_checks
 from .sandbox import (collect_env_snapshot, convert_and_grade_sandbox,
                       save_env_snapshot)
 from .session_trace_converter import fetch_audit_data
+
+
+def _collect_task_inputs(
+    task_dirs: list[str],
+) -> tuple[list[str], dict[str, str], dict[str, dict[str, object]]]:
+    """Validate identities before a batch allocates runtime or output state."""
+    task_yamls: list[str] = []
+    directory_map: dict[str, str] = {}
+    metadata: dict[str, dict[str, object]] = {}
+    seen_paths: dict[Path, str] = {}
+    seen_ids: dict[str, str] = {}
+    for directory in task_dirs:
+        task_yaml = os.path.join(directory, "task.yaml")
+        canonical = Path(task_yaml).resolve()
+        if canonical in seen_paths:
+            raise ValueError(
+                f"Duplicate task selection: {seen_paths[canonical]} and {task_yaml}; "
+                "use --trials for repeated executions"
+            )
+        seen_paths[canonical] = task_yaml
+        task = load_task_yaml(task_yaml)
+        if not isinstance(task, dict):
+            raise ValueError(f"{task_yaml}: expected task YAML mapping")
+        task_id = task.get("task_id")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError(f"{task_yaml}: expected a nonempty string task_id")
+        if task_id in seen_ids:
+            raise ValueError(f"Duplicate task_id {task_id!r}: {seen_ids[task_id]} and {task_yaml}")
+        seen_ids[task_id] = task_yaml
+        task_yamls.append(task_yaml)
+        directory_map[task_yaml] = directory
+        metadata[task_id] = {
+            "task_name": task.get("task_name", "") or "",
+            "difficulty": task.get("difficulty", "") or "",
+        }
+    return task_yamls, directory_map, metadata
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
@@ -145,28 +183,17 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
             log("No tasks matched the given filters.")
             sys.exit(1)
 
+    try:
+        task_yamls_unique, task_yaml_map, task_meta = _collect_task_inputs(task_dirs)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        log(f"[ERROR] Invalid batch task inputs: {error}")
+        sys.exit(1)
+
     # Check gateway
     gateway_port = check_gateway(OPENCLAW_CONFIG)
     if not gateway_port:
         log("[ERROR] openclaw gateway is not running")
         sys.exit(1)
-
-    # Build unique task list + task queue
-    task_yamls_unique = []
-    task_yaml_map = {}  # task_yaml -> task_dir
-    task_meta = {}      # task_id -> {"task_name": ..., "difficulty": ...}
-    for td in task_dirs:
-        tyaml = os.path.join(td, "task.yaml")
-        task_yamls_unique.append(tyaml)
-        task_yaml_map[tyaml] = td
-        try:
-            ty = load_task_yaml(tyaml)
-            task_meta[ty.get("task_id", os.path.basename(td))] = {
-                "task_name": ty.get("task_name", "") or "",
-                "difficulty": ty.get("difficulty", "") or "",
-            }
-        except Exception as e:
-            log(f"[WARNING] Failed to read meta from {tyaml}: {e}")
 
     total_runs = len(task_yamls_unique) * trials
     trace_dir = make_trace_dir(getattr(args, 'trace_prefix', 'openclaw'))
