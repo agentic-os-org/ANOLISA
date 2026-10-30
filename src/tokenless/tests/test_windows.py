@@ -138,7 +138,7 @@ class WindowsHookTests(unittest.TestCase):
         }
         rewritten = self.hook("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]
         self.assertEqual(rewritten["timeout"], 30)
-        self.assertIn("Set-Alias -Name rtk", rewritten["command"])
+        self.assertRegex(rewritten["command"], r"& '[^']*tokenless\.exe' rtk git status")
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", rewritten["command"]],
             cwd=workspace, capture_output=True, text=True, encoding="utf-8", timeout=20,
@@ -164,7 +164,8 @@ class WindowsHookTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"QWENWORK_PLUGIN_HOOK_COMPATIBILITY": ""}):
             rewritten = self.hook("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]["command"]
         self.assertTrue(rewritten.startswith("env TOKENLESS_AGENT_ID=qwenwork "))
-        self.assertNotIn("Set-Alias", rewritten)
+        self.assertTrue(rewritten.endswith(" rtk git status"), rewritten)
+        self.assertNotIn("[CmdletBinding()]", rewritten)
 
     @unittest.skipUnless(os.environ.get("TOKENLESS_TEST_BASH"), "optional Git Bash compatibility")
     def test_legacy_bash_execution_preserves_stats_path(self):
@@ -210,13 +211,13 @@ class WindowsHookTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("TOKENLESS_TEST_NODE"), "optional installed npm launcher runtime")
     def test_npm_launchers_support_selected_node_and_preserve_exit_code(self):
-        for binary in ("tokenless", "rtk"):
+        for arguments, expected in ((["--version"], "tokenless"), (["rtk", "--version"], "rtk")):
             result = subprocess.run(
-                [os.environ["TOKENLESS_TEST_NODE"], str(BIN / binary), "--version"],
+                [os.environ["TOKENLESS_TEST_NODE"], str(BIN / "tokenless"), *arguments],
                 capture_output=True, text=True, timeout=20,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(binary, result.stdout)
+            self.assertIn(expected, result.stdout)
         result = subprocess.run(
             [os.environ["TOKENLESS_TEST_NODE"], str(BIN / "tokenless"), "invalid-test-command"],
             capture_output=True, text=True, timeout=20,
@@ -270,7 +271,8 @@ function cargo {
     $manifestIndex = [array]::IndexOf($args, '--manifest-path')
     if ($manifestIndex -lt 0) { throw 'Missing manifest path' }
     $project = Split-Path $args[$manifestIndex + 1] -Parent
-    $binary = if ((Split-Path $project -Leaf) -eq 'rtk') { 'rtk' } else { 'tokenless' }
+    if ((Split-Path $project -Leaf) -eq 'rtk') { throw 'RTK must build as a tokenless dependency' }
+    $binary = 'tokenless'
     $target = Join-Path $project 'target'
     if ($env:CARGO_TARGET_DIR) { $target = $env:CARGO_TARGET_DIR }
     if ($env:TOKENLESS_TEST_DISTINCT_TARGETS -eq '1') {
@@ -353,10 +355,10 @@ try {
     def assert_staged(self, result: subprocess.CompletedProcess[str], profile: str) -> None:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         output = self.component / "target/npm-prebuilt/win32-x64"
-        for binary in ("tokenless", "rtk"):
-            self.assertEqual(
-                (output / f"{binary}.exe").read_text(encoding="utf-8"), f"fresh {binary} {profile}"
-            )
+        self.assertEqual(
+            (output / "tokenless.exe").read_text(encoding="utf-8"), f"fresh tokenless {profile}"
+        )
+        self.assertFalse((output / "rtk.exe").exists())
 
     def test_default_build_directories(self) -> None:
         self.assert_staged(self.run_build(), "release")
@@ -367,10 +369,9 @@ try {
         )
 
     def test_shared_target_directory_does_not_publish_stale_binaries(self) -> None:
-        for project, binary in ((self.component, "tokenless"), (self.rtk, "rtk")):
-            path = project / "target/x86_64-pc-windows-msvc/release" / f"{binary}.exe"
-            path.parent.mkdir(parents=True)
-            path.write_text("stale executable", encoding="utf-8")
+        path = self.component / "target/x86_64-pc-windows-msvc/release/tokenless.exe"
+        path.parent.mkdir(parents=True)
+        path.write_text("stale executable", encoding="utf-8")
         self.assert_staged(
             self.run_build(CARGO_TARGET_DIR=str(self.root / "shared cache")), "release"
         )
@@ -398,20 +399,16 @@ try {
         self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
 
     def test_metadata_failure_does_not_publish_binaries(self) -> None:
-        for binary in ("tokenless", "rtk"):
-            with self.subTest(binary=binary):
-                result = self.run_build(TOKENLESS_TEST_BAD_METADATA=binary)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Cargo metadata failed", result.stderr)
-                self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+        result = self.run_build(TOKENLESS_TEST_BAD_METADATA="tokenless")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cargo metadata failed", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
 
     def test_relative_metadata_does_not_publish_binaries(self) -> None:
-        for binary in ("tokenless", "rtk"):
-            with self.subTest(binary=binary):
-                result = self.run_build(TOKENLESS_TEST_RELATIVE_METADATA=binary)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Cargo metadata has no absolute target directory", result.stderr)
-                self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+        result = self.run_build(TOKENLESS_TEST_RELATIVE_METADATA="tokenless")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cargo metadata has no absolute target directory", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
 
     def test_text_symlink_materialization_excludes_build_artifacts(self):
         shared = ROOT / "adapters/tokenless/qwenwork/hooks/shared"

@@ -41,7 +41,8 @@ _HOST_TOKENLESS_EXTRA_BIN_DIRS = (
 )
 _HOST_OPENCLAW_EXTENSIONS_DIR = Path.home() / ".openclaw" / "extensions"
 _TOKENLESS_RUNTIME_BIN_DIR = f"{_RUNNER_SUPPORT_DIR}/tokenless/bin"
-_TOKENLESS_BINARY_NAMES = ("rtk", "tokenless")
+# RTK runs as `tokenless rtk`, so Tokenless is the only helper binary.
+_TOKENLESS_BINARY_NAMES = ("tokenless",)
 _TOKENLESS_PLUGIN_ID = "tokenless"
 _DEFAULT_PATH_SUFFIX = f"{_TESTBED_ENV_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _PYTEST_CACHE_DIR = "/tmp/swe-runner-pytest-cache"

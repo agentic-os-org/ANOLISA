@@ -132,8 +132,7 @@ PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Cont
 首选 ANOLISA CLI 安装已发布的组件。
 
 安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`
-和 `rtk` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
-`PATH`。
+也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入 `PATH`。
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
@@ -156,7 +155,7 @@ sudo anolisa --install-mode system adopt tokenless
 直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
 
 另外两条公开安装路径可以独立安装 CLI，但不会写入 anolisa 组件记录。npm 路径
-提供预编译的 `tokenless` 和 `rtk` 二进制以及随包分发的 Agent adapter，需要
+提供预编译的 `tokenless` 二进制以及随包分发的 Agent adapter，需要
 Node.js 16.7+（`fs.cpSync` 自该版本起提供，也是包的 postinstall 所需版本）。
 curl 路径是独立安装脚本，优先使用 npm，失败时回退到源码构建：
 
@@ -275,8 +274,8 @@ cd Token-Less
 make setup
 ```
 
-源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 辅助
-二进制也位于同一个目录，并部署开发所需的全部 adapter。
+源码安装会把 `tokenless` 放在 `~/.local/bin`，并部署开发所需的全部 adapter。
+RTK 已链接进 `tokenless`，改写后的命令通过 `tokenless rtk` 执行。
 
 ### 构建 Python SDK
 
@@ -357,7 +356,7 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 
 ### 千问办公插件（Windows x64 本地模式）
 
-Windows x64 支持原生 `tokenless.exe`、`rtk.exe`、npm 启动器和千问办公 PowerShell
+Windows x64 支持原生 `tokenless.exe`、npm 启动器和千问办公 PowerShell
 Hook，不支持 Windows ARM64。使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。
 源码构建请参阅 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，
 不需要 Git Bash 或 WSL。
@@ -550,7 +549,7 @@ Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值�
 
 ## Raw 打包
 
-Raw 打包接收同一目录中已经构建好的 `tokenless` 和 `rtk`，并按照
+Raw 打包接收同一目录中已经构建好的 `tokenless`，并按照
 组件维护的稳定目录结构生成制品：
 
 ```bash

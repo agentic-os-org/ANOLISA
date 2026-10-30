@@ -302,8 +302,9 @@ When enabled, runner:
 
 - Enables `plugins.entries.tokenless.enabled` in each OpenClaw per-case profile.
 - Exposes the host tokenless OpenClaw extension to that profile.
-- Finds and copies `rtk` and `tokenless` binaries into the instance workspace
-  under `.runner/tokenless/bin/`.
+- Finds and copies the `tokenless` binary into the instance workspace under
+  `.runner/tokenless/bin/`. RTK runs as `tokenless rtk`, so no `rtk` binary is
+  needed.
 - Prepends `/workspace/.runner/tokenless/bin` to `PATH` inside the sandbox.
 - Writes tokenless evidence into run results so the configuration and runtime
   hook state can be inspected.

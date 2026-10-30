@@ -43,12 +43,26 @@ if [ -L "$(DESTDIR)$(BINDIR)/toon" ]; then \
 fi
 endef
 
+# Same cleanup for the standalone rtk binary shipped by older releases (RTK
+# is now linked into tokenless and runs as `tokenless rtk`). Only a
+# $(BINDIR)/rtk symlink into a Tokenless helper layout is removed, so an
+# independently installed RTK is preserved.
+define clean-stale-rtk
+rm -f $(DESTDIR)$(LIBEXECDIR)/rtk
+if [ -L "$(DESTDIR)$(BINDIR)/rtk" ]; then \
+    case "$$(readlink "$(DESTDIR)$(BINDIR)/rtk")" in \
+        "$(LIBEXECDIR)/rtk"|*/anolisa/tokenless/rtk|*/libexec/tokenless/rtk) \
+            rm -f "$(DESTDIR)$(BINDIR)/rtk" ;; \
+    esac; \
+fi
+endef
+
+# No helper binaries remain: this only removes those of older releases.
 install-helpers:
-	@echo "==> Installing helpers to $(DESTDIR)$(LIBEXECDIR)..."
-	install -d -m 0755 $(DESTDIR)$(LIBEXECDIR)
-	install -p -m 0755 third_party/rtk/target/release/rtk $(DESTDIR)$(LIBEXECDIR)/
-	ln -sf $(LIBEXECDIR)/rtk $(DESTDIR)$(BINDIR)/rtk
+	@echo "==> Removing stale helpers from $(DESTDIR)$(LIBEXECDIR)..."
+	$(clean-stale-rtk)
 	$(clean-stale-toon)
+	rmdir $(DESTDIR)$(LIBEXECDIR) 2>/dev/null || true
 
 install-adapter-resources: build-openclaw-plugin build-dsh-plugin
 	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
@@ -71,7 +85,8 @@ install-cosh-extension:
 
 uninstall-legacy:
 	rm -f $(DESTDIR)$(BINDIR)/tokenless
-	rm -f $(DESTDIR)$(LIBEXECDIR)/rtk
+	$(clean-stale-rtk)
 	$(clean-stale-toon)
+	rmdir $(DESTDIR)$(LIBEXECDIR) 2>/dev/null || true
 	rm -rf $(DESTDIR)$(SHARE_DIR)
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)

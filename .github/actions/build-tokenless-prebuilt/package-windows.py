@@ -10,6 +10,8 @@ import time
 import zipfile
 from pathlib import Path
 
+from packaged_executable import packaged_executable
+
 spec = importlib.util.spec_from_file_location(
     "verify_wheels", Path(__file__).with_name("verify-wheels.py")
 )
@@ -22,7 +24,8 @@ def main() -> None:
     source, output = map(Path, sys.argv[1:3])
     version = sys.argv[3]
     binaries = source / "target/npm-prebuilt/win32-x64"
-    files = {name: binaries / name for name in ("tokenless.exe", "rtk.exe")}
+    names = {"tokenless", packaged_executable(source)}
+    files = {f"{name}.exe": binaries / f"{name}.exe" for name in names}
     for name, path in files.items():
         verifier.verify_pe(path.read_bytes(), name)
     files["LICENSE"] = source / "LICENSE"

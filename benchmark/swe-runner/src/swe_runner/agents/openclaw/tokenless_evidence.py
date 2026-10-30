@@ -249,15 +249,12 @@ def write_tokenless_evidence(
 
     config = _read_tokenless_config(config_path)
     plugin_extension = _dir_probe(plugin_extension_dir)
-    injected = {
-        "rtk": _file_probe(tokenless_bin_dir / "rtk"),
-        "tokenless": _file_probe(tokenless_bin_dir / "tokenless"),
-    }
+    injected = {"tokenless": _file_probe(tokenless_bin_dir / "tokenless")}
     raw = _raw_output_tokenless_summary(raw_output)
     session = _summarize_session_jsonl(session_file)
     trajectory = _summarize_trajectory_jsonl(trajectory_file)
 
-    sandbox_binaries_present = bool(injected["rtk"]["exists"] and injected["tokenless"]["exists"])
+    sandbox_binaries_present = bool(injected["tokenless"]["exists"])
     profile_extension_present = bool(
         plugin_extension["exists"] and (plugin_extension["manifest_exists"] or plugin_extension["package_exists"])
     )
