@@ -25,7 +25,7 @@ fn native_source_reuses_the_existing_snapshot_fixture() {
     let source_json = json!({"language": "seccore", "content": snapshot_json["template"]});
     let source: PolicySource = serde_json::from_value(source_json.clone()).unwrap();
     source.validate().unwrap();
-    assert_eq!(source, PolicySource::SecCore(snapshot.template.clone()));
+    assert_eq!(source, snapshot.template);
     assert_eq!(serde_json::to_value(source).unwrap(), source_json);
 
     assert_eq!(serde_json::to_value(snapshot).unwrap(), snapshot_json);
@@ -61,5 +61,36 @@ fn sources_reject_unknown_languages_fields_and_unpinned_schemas() {
         input["content"]["text"] = json!(text);
         let source: PolicySource = serde_json::from_value(input).unwrap();
         assert_eq!(source.validate().unwrap_err().path, "content.text");
+    }
+}
+
+#[test]
+fn policy_snapshot_source_compatibility_is_strict_and_preserves_native_wire_shape() {
+    let mut snapshot: Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reconciliation/objects.json"
+    ))
+    .unwrap();
+    let native = snapshot["policy.prevent-file-deletion"].take();
+    let mut wrapped = native.clone();
+    wrapped["template"] = json!({"language":"seccore", "content": native["template"]});
+    let parsed: PreparedPolicy = serde_json::from_value(wrapped).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), native);
+
+    let mut cedar = native;
+    cedar["template"] = cedar_source();
+    let parsed: PreparedPolicy = serde_json::from_value(cedar.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), cedar);
+    let prefix = r#"{"policyId":"p","policyName":"test","revision":1,"template":"#;
+    for source in [
+        r#"{"language":"cedar","language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"first"}}"#,
+        r#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"first","text":"second"}}"#,
+        r#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1,"revision":2},"text":"first"}}"#,
+        r#"{"language":"unknown","specVersion":"0.1","rules":[]}"#,
+        r#"{"specVersion":"0.1","rules":[],"rules":[]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<PreparedPolicy>(&format!("{prefix}{source}}}")).is_err(),
+            "{source}"
+        );
     }
 }

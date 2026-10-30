@@ -8,9 +8,10 @@ sections 5–7 retain the earlier Cedar/Dogwood import assessment. Section 8 rec
 the selected architecture, data structures, versioning and persistence contracts.
 The selected design has two frontends and no Cedar/native JSON policy converter.
 
-Design updated: 2026-10-29. The workspace contains a Cedar frontend library and
-standalone data types. PAP/RPC, SQLite, target Translators and runtime authorization
-are not yet connected; the following sections distinguish implementation from design.
+Design updated: 2026-10-30. Cedar admission and PAP/RPC source persistence
+are connected; tests reparse saved source through the existing `pst` interface.
+Target translation and runtime authorization
+remain open; the following sections distinguish implementation from design.
 
 Original native-policy and import-assessment baseline:
 `51c781fce6352fb7ff12c4d4e1d3cf3484d05cf6`. Cedar library interfaces were checked
@@ -23,8 +24,8 @@ Assignment and persistence remain governed by the existing
 
 ## 1. Current frontend and internal representation
 
-The existing PAP/RPC frontend accepts JSON that directly encodes a typed policy AST.
-The Cedar library described in section 8 is not connected to that entrypoint. `serde`
+PAP/RPC accepts native JSON and the Cedar source envelope in section 8.
+This section describes the native JSON representation. `serde`
 deserializes the JSON into Rust types; `Validate` checks the structure and
 registered attribute vocabulary. There is no standalone JSON Schema file in this
 path: the Rust types and validation code define the accepted representation.
@@ -375,8 +376,8 @@ application workflows belong to the integration. See
 
 | Logical component | Responsibility | Implementation or status |
 |---|---|---|
-| Policy frontends and shared schema | Deserialize native JSON; parse Cedar, validate types and check the common subset; define action/resource/context contracts | `asc-policy-types`, `asc-policy-cedar`; Cedar is not connected to PAP |
-| PAP policy management | Store source and revision, associate Scope and retain assignment/Binding snapshots; accept base and dynamic Cedar policies after integration | `asc-pap` and repository currently manage native JSON policies; Cedar admission and composition remain open |
+| Policy frontends and shared schema | Deserialize native JSON; parse Cedar, validate types and check the common subset; define action/resource/context contracts | `asc-policy-types`, `asc-policy-cedar`; PAP uses Cedar admission |
+| PAP policy management | Store source and revision, associate Scope and retain assignment/Binding snapshots | `asc-pap` and repository manage both source formats; composition remains open |
 | PDP request decisions | Load applicable policies, receive concrete requests, obtain PIP information as needed and authorize | Target design; may share the SecCore daemon with PAP while remaining a separate logical responsibility |
 | Deployment orchestration | Create/update Bindings, select targets and use Reconciler for installation, update, revocation and recovery | Existing Scope/Binding and `asc-pcp`; mapping authorization results to deployment inputs remains open |
 | Backend adaptation | Translator checks capabilities and translates; Deployment Client handles backend protocols and deployment calls | Existing target contracts and AgentSight implementation; no Cedar translation yet |
@@ -454,7 +455,7 @@ Unsupported semantics must reject the unit as a whole, not disappear during depl
 | D1: System protection semantics | Frontend schema, runtime request construction, Translator | File/invocation/coarse-network fields exist; trusted field sources, request mapping, backend translation and approved-constraint mapping remain to be implemented; Hook contracts are deferred |
 | D2: Multiple PEP selection and cooperation | Target planning, deployment orchestration, PEP enforcement | Match capabilities to Scope and policy needs; alternatives/cooperation, required targets and receipt aggregation remain open |
 | D3: Base and runtime composition | PAP policy assembly, PDP loading and decisions | Permission ceiling, composition, conflicts, lifetime and recovery after revocation need separate design; dynamic policies must not implicitly expand permissions |
-| D4: AST and validation placement | Frontend admission, loading, Translator | Native `PolicyTemplate` and Cedar PST; `validate` checks source, `pst` checks and converts it; Cedar source persistence and Translator integration remain open |
+| D4: AST and validation placement | Frontend admission, loading, Translator | Native `PolicyTemplate` and Cedar PST; PAP validates and saves source, `pst` reparses saved Cedar source; Cedar Translator integration remains open |
 
 Scope/Binding continues to select execution subjects. Cedar retains the principal
 syntax position, but users do not supply identity constraints; the frontend rejects
@@ -467,19 +468,17 @@ The deployment lifecycle diagram expands the deployment path.
 
 The AST route comparison shows the selected route and the earlier alternative.
 The selected route completes parsing, schema validation and common-subset checks
-before producing PST for Translator. The planned create/update path calls
+before producing PST for Translator. The create/update path calls
 `validate`; loading for translation calls `pst`.
 
 ![AST route comparison](diagrams/CEDAR_AST_ROUTES.png)
 
 ### 8.4 Policy structure, in-memory AST and SQLite
 
-Current [`PreparedPolicy`](../../v2/crates/asc-policy-types/src/policy.rs) already
-stores source in `template: PolicyTemplate`; its deserialized value is also the
-native typed AST. Keep `template` and extend its type to the existing `PolicySource`:
+Current [`PreparedPolicy`](../../v2/crates/asc-policy-types/src/policy.rs) stores
+`template: PolicySource`: native JSON or original Cedar with an exact schema reference.
 
 ```rust
-// Target design; PAP/RPC and persisted snapshots have not adopted it yet.
 pub struct PreparedPolicy {
     pub policy_id: ResourceId,
     pub policy_name: String,
@@ -488,7 +487,7 @@ pub struct PreparedPolicy {
 }
 ```
 
-| Type or field | Purpose | Planned persistence contract |
+| Type or field | Purpose | Persistence contract |
 |---|---|---|
 | `PolicySource::SecCore(PolicyTemplate)` | Preserve native JSON authoring and semantics | Store as the native `template` branch |
 | `PolicySource::Cedar(CedarPolicySource)` | `schema` + `text`: original Cedar and exact schema reference | Store as the Cedar `template` branch |
@@ -498,22 +497,24 @@ pub struct PreparedPolicy {
 Source types remain in [authoring.rs](../../v2/crates/asc-policy-types/src/authoring.rs)
 and [cedar.rs](../../v2/crates/asc-policy-types/src/cedar.rs), independent of the
 Cedar SDK. The `pst` interface returns `cedar_policy::pst::PolicySet`.
-The source union exists, but `PreparedPolicy`, create/update RPC, PAP and
-persisted snapshots still accept only `PolicyTemplate`.
+`PreparedPolicy`, create/update RPC, PAP and saved snapshots accept `PolicySource`.
+Saved Cedar source can be passed directly to the existing `asc-policy-cedar::pst`
+interface. It returns official PST after resolving the saved exact schema and
+validating the source. The Translator call path remains to be connected.
 
-The intended `template` shape below is not an enabled RPC contract:
+The Cedar `template` RPC shape is:
 
 ```json
 {
   "language": "cedar",
   "content": {
     "schema": { "schemaId": "seccore.system", "revision": 1 },
-    "text": "forbid(principal, action, resource);"
+    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource);"
   }
 }
 ```
 
-The planned create/update path calls `validate` before saving `template`.
+The create/update path calls `validate` once before conflict retries and saves `template`.
 Syntax, schema or common-subset failures reject the request before persistence.
 Loading for deployment reads the snapshot source and calls `pst`, which resolves
 the exact schema, validates the source and returns the in-memory PST. Carry the
@@ -546,10 +547,13 @@ content, not current SQLite columns, indexes or keys. Application schema evoluti
 normally leaves SQL tables unchanged, while old referenced versions still need
 explicit parsing and execution support.
 
-The first switch from bare `PolicyTemplate` to tagged `PolicySource` changes JSON
-wire format. It requires an explicit compatibility reader or data migration for
-old requests and all three snapshot locations, even if SQL columns stay unchanged.
-By contrast, SQL `phase` values appear in CHECK constraints, so changing them
+`authoring::source_serde` reads bare `PolicyTemplate` or `language/content` at
+CLI, RPC and snapshot boundaries. Native output retains its historical shape;
+Cedar uses the envelope. Typed decoding rejects duplicate fields and unknown
+languages. All three old snapshot locations remain readable without rewriting;
+SQLite storage version stays at 1. Older binaries cannot read new Cedar records,
+so rollback requires a pre-upgrade database backup. SQL `phase` values appear
+in CHECK constraints, so changing them
 requires storage migration; changing Cedar `WriteOperation` is a different contract.
 
 ### 8.5 How Strands Box organizes its schema
@@ -689,9 +693,12 @@ is unreleased and stays at revision 1. Once published, extensions must update
 the pinned schema contract and revalidate policies, including policies whose
 unconstrained actions or resources could include new domains.
 
-This is a new V2 library contract, not a V1 migration or an authorization service.
-PAP/RPC, stored snapshots, target translation and runtime request mapping remain
-unconnected. Successful validation establishes frontend acceptance only.
+This is a V2 frontend and policy-management contract. PAP/RPC and source snapshots
+are connected; tests pass restored source to `pst`. Cedar target translation and runtime request
+mapping remain open; AgentSight returns `UNSUPPORTED_POLICY_LANGUAGE` for Cedar.
+Validation establishes frontend acceptance only. The SDK stack-overflow limit
+for deeply nested input remains unresolved; use administrator-reviewed policies
+and add protection before admitting untrusted generated input.
 
 Acceptance is exercised by
 [`tests/validation.rs`](../../v2/crates/asc-policy-cedar/tests/validation.rs):
@@ -708,10 +715,10 @@ cargo clippy -p asc-policy-cedar -p asc-policy-types --all-targets --locked -- -
 cargo doc -p asc-policy-cedar -p asc-policy-types --no-deps --locked
 ```
 
-The test crate is the first direct consumer; no daemon call path is claimed.
-Rollback removes the new workspace member/dependency and its lockfile additions;
-there is no persisted-state migration or deployment to undo. The source types
-in `asc-policy-types` can remain for subsequent integration.
+PAP consumes admission for create/update; CLI process tests cover RPC round trips
+and rejection. SQLite contracts cover all three snapshots, fixed revisions after
+update/deletion and PST loading after close/reopen. Removing Cedar support
+requires handling existing Cedar snapshots; this change adds no SQL migration.
 
 ### 8.7 Schema versioning and policy loading
 
@@ -801,8 +808,8 @@ need semantic and deployment validation for the selected backends.
 | Part | Current status | Next step |
 |---|---|---|
 | Types and Cedar frontend | Source union; embedded revision 1; `validate` returns non-blocking warnings, `pst` validates and returns SDK PST | Schema-file metadata and loading; retain common-subset diagnostics |
-| Policy/PAP/RPC/SQLite | Still use native `PolicyTemplate` | `template: PolicySource`; call `validate` on Cedar create/update; compatibility for old requests and all three snapshot locations |
-| Policy loading and translation | AgentSight supports only native AST | Call `pst` on Cedar snapshot source; carry schema reference and implement/declare support per target |
+| Policy/PAP/RPC/SQLite | `template: PolicySource`; Cedar admission and source persistence; old requests and three snapshot locations remain compatible | Preserve version and snapshot contracts |
+| Policy loading and translation | Saved Cedar source can be reparsed through `pst` under its exact schema; AgentSight supports only native AST | Connect source-to-PST loading to Cedar Translator and deployment; implement/declare support per target |
 | PDP and deployment connection | Existing pipeline is asynchronous deployment, without general Cedar request authorization | Define request/decision contracts, composition, approved-constraint-to-Binding mapping and launch ordering separately |
 | Agent Hook/PIP | Not supported by the embedded schema | Define resources, actions, request fields and detection contracts separately, then publish a corresponding schema revision |
 

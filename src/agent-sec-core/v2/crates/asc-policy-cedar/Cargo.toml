@@ -12,6 +12,7 @@ publish.workspace = true
 asc-policy-types = { workspace = true }
 cedar-policy = { workspace = true }
 cedar-policy-core = { workspace = true }
+miette = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -12,7 +12,6 @@ pub use condition::{
 
 /// Authored content, independent of Policy identity and Scope/Binding assignment.
 ///
-/// This envelope is not yet used by PAP requests or persisted Policy snapshots.
 /// A frontend must derive the representation from the source rather than trust a
 /// caller-supplied AST.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +24,9 @@ pub enum PolicySource {
     #[serde(rename = "cedar")]
     Cedar(CedarPolicySource),
 }
+
+/// PAP and snapshot encoding: retain native JSON while accepting both source formats.
+pub mod source_serde;
 
 /// Reusable policy content; identity and revision belong to `PreparedPolicy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

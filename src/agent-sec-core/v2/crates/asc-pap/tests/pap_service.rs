@@ -12,7 +12,7 @@ use asc_policy_repository::{
     BindingStateRepository, BindingStateSnapshot, BindingStateWrite, WriteResult,
 };
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
 use asc_policy_types::scope::{PreparedScope, ScopeSelector};
@@ -210,7 +210,7 @@ fn service() -> (Service, Arc<FakeRepository>) {
     (PapService::new(Arc::clone(&repository)), repository)
 }
 
-fn policy_template(path: &str) -> PolicyTemplate {
+fn policy_template(path: &str) -> PolicySource {
     file_policy(vec![path.to_owned()])
 }
 

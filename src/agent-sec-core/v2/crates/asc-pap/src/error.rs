@@ -42,6 +42,9 @@ pub enum PapError {
     /// Policy template validation failed.
     #[error("invalid policy: {0}")]
     InvalidPolicy(ValidationError),
+    /// Cedar admission failed before any revision was saved.
+    #[error("invalid Cedar policy: {0}")]
+    InvalidCedar(String),
     /// Scope authoring validation failed.
     #[error("invalid scope: {0}")]
     InvalidScope(ValidationError),
