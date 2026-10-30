@@ -105,6 +105,12 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         return
 
+    # Valid JSON that is not an object (array/scalar/null) has no hook fields
+    # to read: exit silently so Codex treats it as allow, same as undecodable
+    # input above - mirroring the observability hook's payload guard.
+    if not isinstance(input_data, dict):
+        return
+
     # 2. Extract user prompt text
     prompt_text = input_data.get("prompt", "")
     if not prompt_text or not isinstance(prompt_text, str) or not prompt_text.strip():
