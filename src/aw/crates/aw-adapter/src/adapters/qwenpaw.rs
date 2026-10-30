@@ -67,6 +67,10 @@ impl OwnedPlugin {
                 include_bytes!("../../native/qwenpaw/plugin.py").as_slice(),
             ),
             (
+                "aw_submission.py",
+                include_bytes!("../../native/qwenpaw/aw_submission.py").as_slice(),
+            ),
+            (
                 "aw_private.py",
                 include_bytes!("../../native/qwenpaw/aw_private.py").as_slice(),
             ),
@@ -201,6 +205,9 @@ impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
         let mut capabilities =
             super::super::adapter::catalog::QWENPAW.capabilities(&self.version, "app");
+        if self.input.options.reloadable {
+            capabilities.events.remove("input.submit");
+        }
         if !self.input.options.reloadable {
             capabilities
                 .failure_actions
@@ -394,7 +401,7 @@ pub(crate) fn event_routes(
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
     // After wrappers are outermost, so they also observe an inner before denial.
-    for event in ["tool.after", "tool.before"] {
+    for event in ["tool.after", "tool.before", "input.submit"] {
         let selected = adapter::native_steps(steps, event, observe);
         if selected.is_empty() {
             continue;
@@ -449,6 +456,9 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 }
 
 fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+    if event == "input.submit" && native["event"] == event {
+        return super::submission::normalize(binding, native, "qwenpaw", "input_text");
+    }
     if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
         return Err("QwenPaw callback event does not match the binding".into());
     }

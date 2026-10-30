@@ -128,7 +128,9 @@ The Provider's private `config` accepts:
 | `version` | Required, exactly `1` |
 | `mode` | Required, `observe` or `block`; only affects `scan_code` |
 | `unmapped_tool` | Optional, `error` (default) or `observe`; controls `scan_code` for a selected tool with no mapping |
-| `tools` | Required object with 1–128 exact normalized tool names |
+| `prompt` | Optional `{mode: observe\|block, scan_mode: fast}` for `scan_prompt` |
+| `pii` | Optional `{input_mode: observe\|block, output_mode: observe\|replace_result}`; `scan_user_input` uses `input_mode` |
+| `tools` | Up to 128 exact normalized tool names; may be omitted for submission-only policy |
 | `tools.<name>.language` | `bash` or `python` |
 | `tools.<name>.input_pointer` | JSON Pointer into `event.tool.input`; the selected value must be a string |
 
@@ -169,6 +171,69 @@ It forwards its Host-selected environment to the CLI. Responses contain
 reason codes and the bound input digest, not source code, findings or CLI stderr.
 The CLI receives code through argv, subject to OS argument visibility and size
 limits. No stdin/file fallback is provided by this CLI contract.
+
+## User submission checks
+
+The [SDK security example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+adds `input.submit` to ordinary resident Qoder SDK 1.0.56 / Worker 1.1.78 and
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10 launches. Keep the native application's
+configuration, permissions, model and startup. Add this Provider setting and
+submit step to that configuration:
+
+```yaml
+# spec.providers.security.config
+prompt: {mode: block, scan_mode: fast}
+pii: {input_mode: block, output_mode: observe}
+# spec.events
+input.submit:
+  enabled: true
+  required: true
+  steps:
+    - id: scan-prompt
+      provider: security
+      operation: scan_prompt
+      effects: [observe, block]
+      on_error: block
+    - id: scan-user-pii
+      provider: security
+      operation: scan_user_input
+      effects: [observe, block]
+      on_error: block
+```
+
+`scan_prompt` reads `event.input.text` and calls the public V2 CLI
+`scan-prompt --mode fast --source user_input --format json`, with text on stdin.
+The CLI uses the configured daemon socket and remaining timeout. Fast mode runs
+L1 rules; `standard`, `strict`, ML model options and `multi_turn` are rejected by
+private-config validation. Whitespace-only text needs no scanner call. All other
+responses must identify a completed rule-engine scan of the entire stripped input:
+truncation, missing layers, degradation, empty/malformed output or CLI failure
+returns a Provider error. Prompt Scanner's `ok=false` plus `warn`/`deny` is a
+completed risk decision. `prompt.mode` selects observation or blocking on risk;
+`on_error` separately controls failures. Responses expose `prompt_pass` or
+`prompt_risk` without findings or raw text.
+
+`scan_user_input` reads the same complete `event.input.text` through the shared
+PII scanner transport: `scan-pii --stdin --format json --source user_input`.
+It checks the scan source, byte count and completion state, retaining the turn's
+trace context and remaining budget. `pii.input_mode` controls risk blocking;
+errors follow `on_error`. Responses contain only `pii_pass` or `pii_risk`.
+The `output_mode` field belongs to the shared PII configuration; this operation
+never replaces user text.
+
+Qoder awaits the public `UserPromptSubmit` snapshot and returns a native block
+decision on denial. Existing native Hook decisions remain effective. QwenPaw
+awaits the checks before native reply admission and memory insertion. Fresh user
+text is scanned once; confirmation, interruption and external execution-result
+events resume the native workflow without resubmitting old text. A rejected
+QwenPaw submission leaves the next fresh input usable after scope cleanup.
+Both Adapters issue a fresh turn UUID, retain session identity and share one event
+budget across all steps. Submission events contain no tool/call identity.
+
+Only text submission is covered. QwenPaw non-text user blocks are mapping errors
+subject to `on_error`. Restricted reloadable entrypoints reject this event at
+admission; use ordinary resident mode. Keep each PII/Prompt check under one chosen
+native or AW policy to avoid duplicate scans; AW does not remove user Hooks.
 
 ## Trace correlation
 

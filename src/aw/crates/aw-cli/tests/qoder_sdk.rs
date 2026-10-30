@@ -19,6 +19,9 @@ mod resident_reload;
 #[path = "qoder_sdk/shutdown.rs"]
 mod shutdown;
 
+#[path = "qoder_sdk/submission.rs"]
+mod submission;
+
 fn setup(f: &Fixture) -> Value {
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|p| p.join("node"))

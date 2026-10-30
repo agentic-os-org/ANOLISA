@@ -49,7 +49,8 @@ JSON 文档。公共信封拒绝未知字段；Provider 私有配置和原生
 
 描述最多声明 64 个操作及其支持的事件和效果，操作名不得为空或重复。声明来自 Provider，不能
 扩大 Adapter 的可信能力或证明运行时身份。词表识别配置中的全部 16 个事件，本阶段
-准入仅允许启用 `tool.before` 和 `tool.after` 的执行。
+准入支持 `input.submit`、`tool.before` 和 `tool.after`。提交检查需要普通 resident
+Qoder SDK 或 QwenPaw 入口。
 
 ### `validate_config`
 
@@ -82,7 +83,8 @@ JSON 文档。公共信封拒绝未知字段；Provider 私有配置和原生
 | `event.agent` | Adapter、配置的 `binding_id` 和可空的运行时 `instance_id` |
 | `event.session_id`、`event.tool.call_id` | 原生标识，缺失时为 null |
 | `event.tool` | `name`、`native_name`、`call_id`、`input`、`result`；工具执行前的 `result` 必须为 null |
-| `event.native` | 原始原生 JSON 对象，保留数据但不据此扩大权限 |
+| `event.turn_id`、`event.input.text` | 提交事件的轮次身份与完整用户文本；`session_id` 非空，事件不带 `tool` |
+| `event.native` | Adapter 回调快照；提交快照带 Adapter 生成的 `aw_turn_id` |
 | `input_digest` | 为完整调用生成的不透明绑定 |
 
 事件保留配置中的 Adapter 和绑定、可获得的原生会话及调用标识、任意工具名、JSON
@@ -126,17 +128,18 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 
 | 请求 | 准入结果 |
 | --- | --- |
+| `input.submit`：`observe`、`block` | Provider 与 Adapter 均支持时通过；拒绝工具选择器和原始 native-hook 步骤 |
 | `tool.before`：`observe`、`block` | 所选操作和 Adapter 均支持全部请求效果时通过 |
 | `tool.after`：`observe` | 双方均支持时通过 |
 | `tool.after`：`replace_result` | 单个结构化步骤与可信文本替换能力 |
 | `ask`、输入替换、执行后阻断 | 拒绝 |
-| 启用两个工具事件以外的事件 | 拒绝，`required: false` 也不例外 |
+| 启用提交和两个工具事件以外的事件 | 拒绝，`required: false` 也不例外 |
 | `security.violation` 等 guard | 拒绝，本模型尚未实现最后一道检查的顺序保证 |
 | 事件与步骤的 `match.tools` | 接受；Host 仅调用同时匹配两层选择器的工具 |
 | 高于 `native_hook` 的保证 | 拒绝 |
 | 缺少 Provider、操作、能力或匹配的配置校验证据 | 拒绝，并给出明确原因 |
 
-工具执行前的 `on_error` 支持 `report`；Adapter 支持阻断时，也可以使用 `block`。
+提交及工具执行前的 `on_error` 支持 `report`；Adapter 支持阻断时，也可以使用 `block`。
 工具执行后的失败支持 `report`；已准备的 Adapter 显式声明该事件失败动作时，
 还支持 `withhold_result`。目前普通 Qoder SDK 和 QwenPaw resident 入口声明该能力。其他动作拒绝。
 

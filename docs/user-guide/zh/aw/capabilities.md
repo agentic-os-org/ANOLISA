@@ -9,20 +9,24 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 ✓ 已声明且有契约测试覆盖，× 尚不支持。结果替换限于获准的文本槽，保留原生回执及失败状态。
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
-| --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | ✓ | ✓ |
-| `pi` | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | × | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
 Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点限制见各 Agent 页。
+
+普通 resident Qoder SDK 和 QwenPaw 在模型请求前支持 `input.submit` 观察与阻断，
+检查完整文本并关联会话和轮次。受限 reloadable 模式及其他 Adapter 拒绝该事件。
+配置与验收方法见[用户提交检查](security.md#检查用户提交)。
 
 ## 16 个通用 Hook
 
@@ -31,7 +35,7 @@ Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点�
 | Hook | 状态 |
 | --- | --- |
 | `session.start` | 规划中 |
-| `input.submit` | 规划中 |
+| `input.submit` | 普通 resident Qoder SDK 与 QwenPaw 文本输入已实现 |
 | `tool.before` | 已实现 |
 | `tool.after` | 已实现 |
 | `permission.request` | 规划中 |

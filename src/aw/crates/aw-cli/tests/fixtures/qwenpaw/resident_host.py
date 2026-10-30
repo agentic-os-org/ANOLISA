@@ -41,6 +41,14 @@ class Model:
         return deepcopy(self)
 
 
+class Message(Model):
+    pass
+
+
+class Resume(Model):
+    pass
+
+
 class Response(Model):
     def __init__(self, state="success", content=None, **values):
         super().__init__(state=state, content=[
@@ -172,14 +180,17 @@ class Agent:
             yield value
 
     async def reply_stream(self):
-        async def dispatch():
+        async def dispatch(**kwargs):
+            if os.environ.get("FAKE_QWENPAW_SUBMIT"):
+                (ROOT / "model-request").write_text("yes")
             for index in range(2):
                 call = Model(id=f"call-{index}", name="arbitrary-tool", input=json.dumps({
                     "deny": os.environ.get("FAKE_QWENPAW_DENY") == "1",
                 }))
                 async for value in self._acting(call):
                     yield value
-        async for value in self._reply_middlewares[0].on_reply(self, {}, dispatch):
+        inputs = {"inputs": Message(role="user", content=[Model(text="fresh user input")])} if os.environ.get("FAKE_QWENPAW_SUBMIT") else {}
+        async for value in self._reply_middlewares[0].on_reply(self, inputs, dispatch):
             yield value
 
     async def reply(self):
@@ -211,7 +222,8 @@ def parse_input(raw, schema=None):
 # These doubles expose only the installed native seam; no AW transport is mocked.
 for name, values in {
     "agentscope": {},
-    "agentscope.message": {"TextBlock": Model, "ToolResultState": SimpleNamespace(DENIED="denied", ERROR="error", INTERRUPTED="interrupted")},
+    "agentscope.message": {"Msg": Message, "TextBlock": Model, "ToolResultState": SimpleNamespace(DENIED="denied", ERROR="error", INTERRUPTED="interrupted")},
+    "agentscope.event": {"UserConfirmResultEvent": Resume, "UserInterruptEvent": Resume, "ExternalExecutionResultEvent": Resume},
     "agentscope.middleware": {"MiddlewareBase": object},
     "agentscope.tool": {"ToolResponse": Response, "ToolChunk": Chunk},
     "agentscope.tool._toolkit": {"_json_loads_with_repair": parse_input},

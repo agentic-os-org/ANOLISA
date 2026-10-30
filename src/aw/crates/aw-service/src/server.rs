@@ -194,6 +194,7 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) 
                     | Operation::Unbind { .. }
                     | Operation::CloseEvent { .. }
                     | Operation::CloseHookEvent { .. }
+                    | Operation::CloseInputEvent { .. }
                     | Operation::FinishInvocation { .. }
                     | Operation::CheckScope { .. }
             )

@@ -189,7 +189,11 @@ impl Contexts {
         Ok(Seed {
             settings: self.sources.get(target).cloned(),
             subject,
-            candidate: projection::content(&json!({"name":event["name"], "tool":event["tool"]}))?,
+            candidate: projection::content(&if event["name"] == "input.submit" {
+                json!({"name":event["name"], "turn_id":event["turn_id"], "input":event["input"]})
+            } else {
+                json!({"name":event["name"], "tool":event["tool"]})
+            })?,
             constraints,
             association,
             deadline,

@@ -11,6 +11,8 @@ root = Path(__file__).resolve().parent
 stat = Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()
 (root / "cli.pid").write_text(f"{os.getpid()} {stat[19]}")
 (root / "argv.json").write_text(json.dumps(sys.argv[1:]))
+stdin = sys.stdin.buffer.read()
+(root / "stdin.bin").write_bytes(stdin)
 case = json.loads((root / "case.json").read_text())
 if case.get("record_health_environment"):
     (root / "environment.json").write_text(json.dumps({
@@ -18,7 +20,7 @@ if case.get("record_health_environment"):
         "AGENT_SEC_HEALTH_TIMEOUT_SECONDS", "AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK"]
     }))
 if "scan-pii" in sys.argv:
-    text = sys.stdin.read()
+    text = stdin.decode()
     (root / "stdin.txt").write_text(text)
     source = sys.argv[sys.argv.index("--source") + 1]
     if case.get("pii"):

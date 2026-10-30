@@ -914,6 +914,42 @@
     "qwenpaw-native-terminal-drain": {
       "target": "aw-cli/test/qwenpaw",
       "test": "resident::native_early_terminal_consumer_observes_completed_finalizers"
+    },
+    "submit-contract": {
+      "target": "aw-provider/test/protocol",
+      "test": "submission_binds_text_and_turn_without_tool_fields"
+    },
+    "submit-host": {
+      "target": "aw-host/test/host",
+      "test": "submission::input_submission_preserves_identity_and_shares_claims_and_budget"
+    },
+    "submit-service": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::hooks::submission_tests::submission_correlates_turns_without_registering_tools_and_cancels_replays"
+    },
+    "submit-qoder-sdk": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "submission::submit_policy_runs_before_model_without_tool_identity"
+    },
+    "submit-qwenpaw": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::submit_policy_blocks_before_native_reply_and_preserves_configuration"
+    },
+    "prompt-transport": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "prompt::prompt_scans_whole_stdin_with_fast_mode_and_turn_trace"
+    },
+    "prompt-failure": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "prompt::prompt_risk_and_scan_failures_are_distinct"
+    },
+    "user-pii": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "user_pii::user_pii_uses_shared_stdin_transport_and_submission_identity"
+    },
+    "user-pii-failure": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "user_pii::user_pii_observes_risk_and_keeps_failures_separate"
     }
   },
   "agents": {
@@ -1208,6 +1244,21 @@
             "final-replacement",
             "scope-sdk-result"
           ]
+        },
+        "input.submit": {
+          "observe": [
+            "submit-contract",
+            "submit-host",
+            "submit-service",
+            "submit-qwenpaw"
+          ],
+          "block": [
+            "submit-contract",
+            "submit-host",
+            "submit-service",
+            "submit-qwenpaw",
+            "prompt-failure"
+          ]
         }
       },
       "lifecycle": [
@@ -1274,7 +1325,9 @@
         "qwenpaw-resident-registration",
         "qwenpaw-withhold-reload-rejection",
         "coverage-native-identity",
-        "qwenpaw-native-terminal-drain"
+        "qwenpaw-native-terminal-drain",
+        "submit-qwenpaw",
+        "prompt-failure"
       ],
       "tokenless": [
         "final-replacement",
@@ -1298,6 +1351,21 @@
           "observe": [
             "qoder-sdk-lifecycle",
             "qoder-sdk-strict-post"
+          ]
+        },
+        "input.submit": {
+          "observe": [
+            "submit-contract",
+            "submit-host",
+            "submit-service",
+            "submit-qoder-sdk"
+          ],
+          "block": [
+            "submit-contract",
+            "submit-host",
+            "submit-service",
+            "submit-qoder-sdk",
+            "prompt-failure"
           ]
         }
       },
@@ -1331,7 +1399,9 @@
         "scope-qoder-sdk-order",
         "qoder-sdk-strict-post",
         "qoder-sdk-private-fence",
-        "coverage-native-identity"
+        "coverage-native-identity",
+        "submit-qoder-sdk",
+        "prompt-failure"
       ],
       "tokenless": [
         "security-retry",
@@ -1350,7 +1420,9 @@
       "coverage-failures",
       "coverage-completion",
       "coverage-extraction",
-      "coverage-provider-example"
+      "coverage-provider-example",
+      "prompt-transport",
+      "prompt-failure"
     ],
     "tokenless": [
       "compression-bound",

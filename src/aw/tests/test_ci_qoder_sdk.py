@@ -54,6 +54,7 @@ class QoderSdkNativeTests(GateFixture):
                 if any(path in argv for path in (
                     "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+                    "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/daemon-native.test.mjs",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/native-profile.test.mjs",
@@ -95,8 +96,8 @@ class QoderSdkNativeTests(GateFixture):
             ) as reports:
                 if credential:
                     native_acceptance.main()
-                    self.assertEqual(observed, ["setup"] + ["native"] * 8)
-                    self.assertEqual(reports.call_count, 8)
+                    self.assertEqual(observed, ["setup"] + ["native"] * 12)
+                    self.assertEqual(reports.call_count, 12)
                 else:
                     with self.assertRaisesRegex(ValueError, "requires.*Secret"):
                         native_acceptance.main()

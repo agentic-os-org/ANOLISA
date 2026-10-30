@@ -13,6 +13,10 @@
 随附 Qoder 示例在前后两个阶段都选择原生 `Bash`。未列出的工具保留原生行为，
 步骤记录为跳过。SDK 映射与输入提取规则见[配置指南](../../docs/developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
 
+普通 resident Qoder SDK 和 QwenPaw 入口还可通过 `input.submit` 调用 `scan_prompt`
+和 `scan_user_input`。配置 Prompt、PII 阻断与 `on_error: block`，
+在模型请求前阻断注入风险、敏感用户文本及检查故障，见[提交检查配置](../../docs/developer-guide/zh/aw/providers/sec-core.md#用户提交检查)。
+
 维护人按 [CODEOWNERS](../../.github/CODEOWNERS) 由 @kongche-jbw 负责。
 桥接代码使用 [Apache-2.0](../../LICENSE)，后端来源见 [agent-sec-core](../../src/agent-sec-core/README_zh.md)。
 

@@ -9,6 +9,7 @@ import "./parser-child.test.mjs";
 import "./parser-command-wrapper.test.mjs";
 import "./parser-command-permission.test.mjs";
 import "./parser-native-config.test.mjs";
+import "./parser-submission.test.mjs";
 
 test("actual SDK parser binds model identity before native callback dispatch", { timeout: 5000 }, async t => {
   let calls = 0;

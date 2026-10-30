@@ -21,7 +21,7 @@ const stopped = () => ({ continue: false, stopReason: "AW required Hook failed" 
 export function validateHooks(config) {
   if (!Array.isArray(config.hooks)) throw new Error("Missing AW hooks");
   for (const hook of config.hooks)
-    if (!hook || typeof hook !== "object" || !["tool.before", "tool.after"].includes(hook.event) ||
+    if (!hook || typeof hook !== "object" || !["input.submit", "tool.before", "tool.after"].includes(hook.event) ||
         typeof hook.step !== "string" || !hook.step ||
         !(["block", "report"].includes(hook.on_error) ||
           (config.resident && hook.event === "tool.after" && hook.on_error === "withhold_result")) ||

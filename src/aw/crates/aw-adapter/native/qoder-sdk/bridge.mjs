@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { invoke } from "./callback.mjs";
+import { randomUUID } from "node:crypto";
 import { Reload } from "./reload.mjs";
 import { Resident, bounded, validateHooks } from "./resident.mjs";
 import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
@@ -94,20 +95,24 @@ function compose(config, options) {
         return result;
       }) }))]));
   for (const [event, nativeEvents] of [
+    ["input.submit", ["UserPromptSubmit"]],
     ["tool.before", ["PreToolUse"]], ["tool.after", ["PostToolUse", "PostToolUseFailure"]],
   ]) {
     const routes = config.hooks.filter((hook) => hook.event === event);
     if (!routes.length && !(native && event === "tool.before")) continue;
     const callback = async (input, id, { signal }) => {
       const payload = copy(input);
-      if (id !== undefined && id !== payload.tool_use_id)
+      if (event === "input.submit") payload.aw_turn_id = randomUUID();
+      if (event !== "input.submit" && id !== undefined && id !== payload.tool_use_id)
         return event === "tool.before" ? deny("AW tool identity mismatch") : {};
       for (const hook of routes) {
         try {
           const result = await invoke(config, hook, payload, signal);
-          if (result.hookSpecificOutput) return result;
+          if (result.hookSpecificOutput || result.decision === "block") return result;
         } catch (error) {
           process.stderr.write(`AW ${event}/${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`);
+          if (event === "input.submit" && (hook.on_error === "block" || signal?.aborted))
+            return { decision: "block", reason: "AW input check failed; submission blocked" };
           if (event === "tool.before" && hook.on_error === "block")
             return deny("AW hook failed; configured failure action blocked the tool");
           if (config.resident && event === "tool.after" && hook.on_error === "block")

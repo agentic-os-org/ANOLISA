@@ -17,6 +17,7 @@ from agentscope.tool import ToolResponse, _toolkit
 
 from .aw_private import clear_execution, current_execution, public_execution, validate_execution
 from .aw_scope import Scope
+from .aw_submission import SubmissionDenied, check_submission
 
 
 class ResidentFailure(RuntimeError):
@@ -281,6 +282,8 @@ class ResidentMiddleware(MiddlewareBase):
             else:
                 await self.scope.open(cwd, self.lease.hook_environment)
             self.check()
+            await check_submission(self, input_kwargs)
+            self.check()
             stream = next_handler(**input_kwargs)
             while True:
                 self.reply_task = asyncio.current_task()
@@ -290,6 +293,8 @@ class ResidentMiddleware(MiddlewareBase):
                     break
                 self.check()
                 yield value
+        except SubmissionDenied:
+            raise
         except BaseException:
             self.failed = True
             raise

@@ -113,6 +113,14 @@ impl Adapter for QoderSdk {
         }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if event == "input.submit" {
+            if native["hook_event_name"] != "UserPromptSubmit"
+                || native["cwd"].as_str() != binding.cwd.to_str()
+            {
+                return Err("Qoder submit callback differs from its binding".into());
+            }
+            return super::submission::normalize(binding, native, "qoder-sdk", "prompt");
+        }
         super::sdk_tools::normalize_tools(binding, event, native, "qoder-sdk")
     }
     fn reply(&self, blocked: bool) -> HookOutput {
@@ -127,6 +135,9 @@ impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> AdapterCapabilities {
         let mut capabilities = adapter::catalog::QODER_SDK
             .capabilities(&self.versions[&self.policy.sites[0]].version, "sdk-worker");
+        if self.input.options.reloadable {
+            capabilities.events.remove("input.submit");
+        }
         if !self.input.options.reloadable {
             capabilities
                 .failure_actions

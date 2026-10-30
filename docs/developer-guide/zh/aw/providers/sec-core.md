@@ -114,7 +114,9 @@ Provider 的私有 `config` 接受以下字段：
 | `version` | 必填，固定为 `1` |
 | `mode` | 必填，`observe` 或 `block`，只影响 `scan_code` |
 | `unmapped_tool` | 可选，`error`（默认）或 `observe`，控制 `scan_code` 对已选中但没有映射的工具的处理 |
-| `tools` | 必填，包含 1–128 个规范化工具名称的对象，按名称精确匹配 |
+| `prompt` | 可选 `{mode: observe\|block, scan_mode: fast}`，用于 `scan_prompt` |
+| `pii` | 可选 `{input_mode: observe\|block, output_mode: observe\|replace_result}`；`scan_user_input` 使用 `input_mode` |
+| `tools` | 最多 128 个精确的规范化工具名；仅检查提交时可省略 |
 | `tools.<name>.language` | `bash` 或 `python` |
 | `tools.<name>.input_pointer` | 指向 `event.tool.input` 内部的 JSON Pointer，所选值必须为字符串 |
 
@@ -149,6 +151,60 @@ EOF 到达后，桥接从 invoke 预算（最多 60 秒）中扣除读取和解�
 选定的环境。响应仅携带原因码与绑定的输入摘要，不包含源码、发现详情或 CLI stderr。
 代码经 argv 传递，受操作系统的参数可见性与大小限制；当前 CLI 合同不提供 stdin
 或文件回退路径。
+
+## 用户提交检查
+
+[SDK 安全示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+为普通 resident Qoder SDK 1.0.56 / Worker 1.1.78 和 QwenPaw 2.2.2.post1 /
+AgentScope 2.0.10 增加 `input.submit`。沿用原生应用的配置、权限、模型与初始化，
+在配置中加入以下 Provider 设置与提交步骤：
+
+```yaml
+# spec.providers.security.config
+prompt: {mode: block, scan_mode: fast}
+pii: {input_mode: block, output_mode: observe}
+# spec.events
+input.submit:
+  enabled: true
+  required: true
+  steps:
+    - id: scan-prompt
+      provider: security
+      operation: scan_prompt
+      effects: [observe, block]
+      on_error: block
+    - id: scan-user-pii
+      provider: security
+      operation: scan_user_input
+      effects: [observe, block]
+      on_error: block
+```
+
+`scan_prompt` 读取 `event.input.text`，调用公共 V2 CLI 的
+`scan-prompt --mode fast --source user_input --format json`，文本通过 stdin 传入。
+CLI 使用配置的 daemon socket 和剩余超时。fast 模式运行 L1 规则；私有配置校验
+拒绝 `standard`、`strict`、ML 模型选项和 `multi_turn`。全空白文本无需调用扫描器。
+其他响应须表明规则引擎完成了整个去除首尾空白后的输入扫描：截断、缺少检测层、
+降级、空输出、非法输出或 CLI 失败均返回 Provider 错误。Prompt Scanner 的
+`ok=false` 配合 `warn`/`deny` 表示已完成的风险判定。`prompt.mode` 决定风险的
+观察或阻断；`on_error` 单独决定故障处置。响应只携带 `prompt_pass` 或
+`prompt_risk`，不含原文与发现详情。
+
+`scan_user_input` 将完整 `event.input.text` 交给共用 PII 扫描模块，调用
+`scan-pii --stdin --format json --source user_input`，保留当前 turn 的 trace context
+和剩余预算。模块检查来源、字节数和扫描完成状态。`pii.input_mode` 控制风险阻断，
+故障按 `on_error` 处理；响应仅携带 `pii_pass` 或 `pii_risk`。`output_mode` 属于共用
+PII 配置，此操作保留用户原文。
+
+Qoder 等待公开 `UserPromptSubmit` 快照的检查结果，拒绝时返回原生 block 决定，
+已有原生 Hook 拒绝仍然有效。QwenPaw 在原生 reply 准入与记忆写入前等待检查。
+新用户文本扫描一次；确认、中断及外部工具执行结果事件按原生流程恢复，不重扫
+旧输入。QwenPaw 提交被拒绝后，清理 scope 即可继续接收下一条新输入。两端生成
+新的轮次 UUID，保留会话身份，同一事件全部步骤共享预算，提交事件不带工具或调用身份。
+
+当前覆盖文本提交。QwenPaw 的非文本用户块按映射错误交给 `on_error` 处理。
+受限 reloadable 入口在准入时拒绝该事件，使用普通 resident 模式。PII/Prompt 每项
+检查选择原生或 AW 管理，避免重复扫描；AW 保留用户 Hook。
 
 ## Trace 关联
 

@@ -45,6 +45,7 @@ pub(crate) const QODER_SDK: Profile = Profile {
     name: "qoder-sdk",
     adapter: &super::super::adapters::qoder_sdk::QoderSdk,
     events: &[
+        ("input.submit", &["observe", "block"]),
         ("tool.before", &["observe", "block"]),
         ("tool.after", &["observe"]),
     ],
@@ -65,7 +66,11 @@ pub(crate) const HERMES: Profile = Profile {
 pub(crate) const QWENPAW: Profile = Profile {
     name: "qwenpaw",
     adapter: &super::super::adapters::qwenpaw::QwenPaw,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const PI: Profile = Profile {

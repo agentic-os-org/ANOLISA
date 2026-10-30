@@ -12,7 +12,41 @@ pub(super) struct Config {
     pub(super) mode: Mode,
     #[serde(default)]
     pub(super) unmapped_tool: UnmappedTool,
+    #[serde(default)]
     pub(super) tools: BTreeMap<String, Tool>,
+    #[serde(default)]
+    pub(super) prompt: Option<Prompt>,
+    pub(super) pii: Option<Pii>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Pii {
+    pub(super) input_mode: Mode,
+    #[serde(rename = "output_mode")]
+    _output_mode: OutputMode,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OutputMode {
+    Observe,
+    ReplaceResult,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Prompt {
+    pub(super) mode: Mode,
+    // ML modes require independently verified model resources and context.
+    #[serde(rename = "scan_mode")]
+    _scan_mode: Fast,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Fast {
+    Fast,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -56,7 +90,10 @@ impl Language {
 impl Config {
     pub(super) fn parse(value: &Value) -> Result<Self, &'static str> {
         let config: Self = serde_json::from_value(value.clone()).map_err(|_| "invalid_config")?;
-        if config.version != 1 || config.tools.is_empty() || config.tools.len() > 128 {
+        if config.version != 1
+            || (config.tools.is_empty() && config.prompt.is_none() && config.pii.is_none())
+            || config.tools.len() > 128
+        {
             return Err("invalid_config");
         }
         for (name, tool) in &config.tools {

@@ -1,8 +1,9 @@
-//! AW Provider projection over the public agent-sec-cli scan-code command.
+//! AW Provider projection over public agent-sec-cli security scanning commands.
 
 mod config;
 pub mod health;
 pub mod pii;
+mod prompt;
 mod scan;
 mod trace_context;
 
@@ -77,7 +78,9 @@ fn dispatch(
             "operations".to_owned(),
             json!([
                 {"name":"scan_code", "events":["tool.before"], "effects":["observe","block"]},
-                {"name":"observe_tool", "events":["tool.after"], "effects":["observe"]}
+                {"name":"observe_tool", "events":["tool.after"], "effects":["observe"]},
+                {"name":"scan_prompt", "events":["input.submit"], "effects":["observe","block"]},
+                {"name":"scan_user_input", "events":["input.submit"], "effects":["observe","block"]}
             ]),
         )]));
     }
@@ -88,6 +91,50 @@ fn dispatch(
     let remaining = remaining_budget(value, timeout, started)?;
     let event = &value["event"];
     let (effect, reason) = match (value["operation"].as_str(), event["name"].as_str()) {
+        (Some("scan_prompt"), Some("input.submit")) => {
+            let mode = config.prompt.as_ref().ok_or("prompt_not_configured")?.mode;
+            if mode == Mode::Block && !admitted(value, "block") {
+                return Err("block_not_admitted");
+            }
+            let text = event["input"]["text"]
+                .as_str()
+                .ok_or("invalid_user_input")?;
+            let verdict = prompt::call(
+                cli,
+                socket,
+                text,
+                &trace_context::from_event(event),
+                remaining,
+            )?;
+            match (mode, verdict) {
+                (Mode::Block, scan::Verdict::Risk) => ("block", "prompt_risk"),
+                (_, scan::Verdict::Risk) => ("observe", "prompt_risk"),
+                (_, scan::Verdict::Pass) => ("observe", "prompt_pass"),
+            }
+        }
+        (Some("scan_user_input"), Some("input.submit")) => {
+            let mode = config.pii.as_ref().ok_or("pii_not_configured")?.input_mode;
+            if mode == Mode::Block && !admitted(value, "block") {
+                return Err("block_not_admitted");
+            }
+            let text = event["input"]["text"]
+                .as_str()
+                .ok_or("invalid_user_input")?;
+            let verdict = pii::call(
+                cli,
+                socket,
+                text,
+                pii::Source::UserInput,
+                &trace_context::from_event(event),
+                remaining,
+            )
+            .map_err(|error| error.code())?;
+            match (mode, verdict) {
+                (Mode::Block, pii::Verdict::Risk) => ("block", "pii_risk"),
+                (_, pii::Verdict::Risk) => ("observe", "pii_risk"),
+                (_, pii::Verdict::Pass) => ("observe", "pii_pass"),
+            }
+        }
         (Some("observe_tool"), Some("tool.after")) => ("observe", "tool_observed"),
         (Some("scan_code"), Some("tool.before")) => {
             // Admission of block is required for this configured mode, even if

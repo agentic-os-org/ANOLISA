@@ -60,7 +60,8 @@ The description declares up to 64 operations and their supported events and
 effects. Operation names must be nonempty and unique. A declaration is supplied by the Provider; it
 cannot expand the Adapter's trusted capabilities or establish runtime identity.
 The vocabulary recognizes all 16 configuration events, while this admission
-profile permits enabled execution only at `tool.before` and `tool.after`.
+profile permits `input.submit`, `tool.before` and `tool.after`.
+Submission support requires an ordinary resident Qoder SDK or QwenPaw entrypoint.
 
 ### `validate_config`
 
@@ -84,7 +85,7 @@ configuration revision, remaining budget, admitted effects, normalized event and
 an opaque input digest. A checked successful response returns that same digest
 and a list of candidate effects. An empty list imposes no additional restriction;
 `observe` requests observation and `block` requests prevention of the pending
-tool call. Both are candidate effects; the library itself writes no audit record.
+submission or tool call. Both are candidate effects; the library itself writes no audit record.
 None of these responses grants native permission.
 `Outcome::requests_block()` reports only whether that candidate effect is present.
 
@@ -97,7 +98,8 @@ None of these responses grants native permission.
 | `event.agent` | Adapter, configured `binding_id` and nullable runtime `instance_id` |
 | `event.session_id`, `event.tool.call_id` | Native identifiers, or null when unavailable |
 | `event.tool` | `name`, `native_name`, `call_id`, `input` and `result`; before-tool `result` must be null |
-| `event.native` | Original native JSON object, retained without inventing additional authority |
+| `event.turn_id`, `event.input.text` | Submission-only turn identity and complete user text; `session_id` is nonempty and `tool` is absent |
+| `event.native` | Adapter callback snapshot; submission snapshots include an Adapter-issued `aw_turn_id` |
 | `input_digest` | Opaque binding generated for the complete invocation |
 
 The event preserves the configured Adapter and binding, native session and call
@@ -155,17 +157,18 @@ preserved; admission does not schedule distinct events or choose parallelism.
 
 | Request | Admission result |
 | --- | --- |
+| `input.submit`: `observe`, `block` | Accepted with Provider and Adapter support; tool selectors and raw native-hook steps are rejected |
 | `tool.before`: `observe`, `block` | Accepted when the selected operation and Adapter both support every requested effect |
 | `tool.after`: `observe` | Accepted when both sides support it |
 | `tool.after`: `replace_result` | One structured step with trusted text-replacement capability |
 | `ask`, input replacement or a block after execution | Rejected |
-| An enabled event outside the two tool events | Rejected, including when `required: false` |
+| An enabled event outside submission and the two tool events | Rejected, including when `required: false` |
 | A guard such as `security.violation` | Rejected; final-check ordering is not implemented by this profile |
 | Event and step `match.tools` | Accepted; the Host invokes only tools matching both selectors |
 | A guarantee beyond `native_hook` | Rejected |
 | A missing Provider, operation, capability or matching configuration validation | Rejected with an explicit reason |
 
-Before-tool `on_error` may be `report`, or `block` when the Adapter supports
+Submission and before-tool `on_error` may be `report`, or `block` when the Adapter supports
 blocking. After-tool failures support `report`, or `withhold_result` when the
 prepared Adapter explicitly declares that event-scoped failure action. Currently
 ordinary Qoder SDK and QwenPaw resident entrypoints declare it. Other actions are rejected.

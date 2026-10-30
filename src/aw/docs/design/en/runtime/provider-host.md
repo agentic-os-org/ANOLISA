@@ -64,6 +64,7 @@ adopted a policy. The admitted surface remains:
 
 | Event | Candidate effects | Failure action |
 | --- | --- | --- |
+| `input.submit` | `observe`, `block` | `report`, or `block` with Adapter support |
 | `tool.before` | `observe`, `block` | `report`, or `block` with Adapter support |
 | `tool.after` | `observe`, `replace_result` | `report`, or `withhold_result` with explicit Adapter failure-action evidence |
 

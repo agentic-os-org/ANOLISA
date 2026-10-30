@@ -65,6 +65,11 @@ export async function invoke(config, hook, payload, signal) {
     ["hook", "--adapter", "qoder-sdk", "--binding", config.binding,
       "--event", hook.event, "--step", hook.step, "--on-error", hook.on_error],
     payload, signal, hook.budget_ms + 3000);
+  if (code === 2 && hook.event === "input.submit") {
+    const reason = stdout.length ? JSON.parse(stdout.toString("utf8")) : "Input blocked by AW policy";
+    if (typeof reason !== "string") throw new Error("invalid_native_response");
+    return { decision: "block", reason };
+  }
   if (code === 2 && hook.event === "tool.before") {
     const reason = stdout.length ? JSON.parse(stdout.toString("utf8")) : "Tool blocked by AW policy";
     if (typeof reason !== "string") throw new Error("invalid_native_response");

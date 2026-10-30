@@ -22,6 +22,11 @@ pub(super) fn from_event(event: &Value) -> Value {
         ),
     ];
     let mut context = json!({"agent_name": adapter});
+    if event["name"] == "input.submit" {
+        context["session_id"] = event["session_id"].clone();
+        context["run_id"] = event["turn_id"].clone();
+        return context;
+    }
     for (key, aliases) in fields {
         if let Some(value) = sources.iter().find_map(|source| {
             aliases

@@ -24,17 +24,22 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 ✓ 已声明且有契约测试覆盖，× 尚不支持。矩阵从[回归清单](tests/regression-matrix.json)生成。结果替换的原生限制与 MCP、更新范围见[完整能力表](../../docs/user-guide/zh/aw/capabilities.md)。
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
-| --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | ✓ | ✓ |
-| `pi` | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | × | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+普通 resident Qoder SDK 和 QwenPaw 可通过 `input.submit` 在模型请求前检查用户文本。
+sec-core Provider 支持 fast 提示词注入扫描，风险与故障分别按策略处理，见
+[用户提交检查](../../docs/user-guide/zh/aw/security.md#检查用户提交)。
+
 
 <a id="安装与使用"></a>
 

@@ -31,6 +31,29 @@ Fixture 门禁另覆盖有界资产读取、非法声明、快照清理和缓存
 按下方目标 runner 执行，保留各组报告，并核验原生进程和 AW scope 已退出。
 Parser 的本地 transport 测试需配合真实 Worker 验证原生授权行为。
 
+## 用户提交验收
+
+Qoder SDK 与 QwenPaw 包含 `input-submission`、`input-submission-backend-error` 和
+`input-submission-timeout-block`，使用候选 AW/Provider 与真实 V2 CLI/daemon 的
+fast 模式。基础场景检查提示词注入及用户 PII 在模型请求前被拒绝、正常输入、拒绝
+后的新输入，以及原生配置保留。Qoder 另验原生提交拒绝；QwenPaw 检查实际模型请求，
+Qoder 检查原生零轮次、零 API 时间及没有 assistant 消息。
+
+从 `src/aw` 执行，先将四个候选二进制放入 `target/native-binaries`：
+
+```bash
+python3 crates/aw-cli/tests/fixtures/sec_core/input_submission.py \
+  --agent qwenpaw --bin target/native-binaries \
+  --agent-bin "$(command -v qwenpaw)" --image ubuntu:24.04 \
+  --output target/input-submission-evidence
+```
+
+Qoder 改用 `--agent qoder-sdk --npm /absolute/path/to/private-sdk-install`，运行时提供
+`QODER_PERSONAL_ACCESS_TOKEN`。另加 `--fault backend-error` 或 `--fault timeout-block`
+可独立验证后端故障。每次使用新的输出目录；脚本保留结果、原生消息/模型请求与
+清理报告，移除自己的运行目录和 daemon 容器。固定版本的 parser/middleware 套件
+另覆盖回调取消与清理。
+
 ## 原生单目标
 
 在干净、已提交的 checkout 中准备清单要求的 Python、Node 24.16.0、uv 0.11.13 和 SDK 依赖。
@@ -72,3 +95,7 @@ python3 -B scripts/resident_container.py --candidate-sha "$(git rev-parse HEAD)"
 执行器回收所属进程、临时 profile、socket、容器和唯一镜像标签。Docker 超时或清理失败时，按报告中的精确资源和命令核对后清理。
 评审证据后删除本次创建的 `target/native-evidence/agentscope`、`target/resident-evidence`；保留共享构建缓存。
 生产 endpoint、真实负载和部署退出链路另在实际部署环境验收。
+
+提交取消验收在上述任一 runner 命令后追加 `--fault cancel`。测试暂停真实 daemon，
+观察扫描进程进入后关闭原生 Query 或停止 App turn，核对 service 取消记录、扫描进程
+退出和零模型请求。nightly 矩阵要求两端报告均通过。

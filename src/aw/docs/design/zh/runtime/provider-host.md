@@ -53,6 +53,7 @@ Agent 已采用策略。准入范围仍为：
 
 | 事件 | 候选效果 | 失败动作 |
 | --- | --- | --- |
+| `input.submit` | `observe`、`block` | `report`，或 Adapter 支持的 `block` |
 | `tool.before` | `observe`、`block` | `report`，或在 Adapter 支持时使用 `block` |
 | `tool.after` | `observe`, `replace_result` | `report`，或 Adapter 显式提供失败动作能力时使用 `withhold_result` |
 

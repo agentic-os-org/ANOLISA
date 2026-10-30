@@ -24,17 +24,23 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 ✓ Declared with contract coverage; × unsupported. Generated from the [regression manifest](tests/regression-matrix.json). See [capability support](../../docs/user-guide/en/aw/capabilities.md) for native replacement limits, MCP and policy updates.
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
-| --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | ✓ | ✓ |
-| `pi` | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | × | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Ordinary resident Qoder SDK and QwenPaw can check submitted text before model
+requests through `input.submit`. The sec-core Provider supports fast prompt
+injection scanning with separate risk and failure policies; see
+[user submission checks](../../docs/user-guide/en/aw/security.md#check-user-submissions).
+
 
 <a id="install-and-use"></a>
 

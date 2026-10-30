@@ -10,6 +10,12 @@ use serde_json::{json, Value};
 #[path = "support/fixture.rs"]
 mod support;
 
+#[path = "provider/prompt.rs"]
+mod prompt;
+
+#[path = "provider/user_pii.rs"]
+mod user_pii;
+
 fn config() -> Value {
     json!({"version":1,"mode":"block","tools":{
         "shell":{"language":"bash","input_pointer":"/command"}
@@ -352,7 +358,9 @@ fn offline_methods_and_after_observation_do_not_need_the_daemon() {
         description["operations"],
         json!([
             {"name":"scan_code","events":["tool.before"],"effects":["observe","block"]},
-            {"name":"observe_tool","events":["tool.after"],"effects":["observe"]}
+            {"name":"observe_tool","events":["tool.after"],"effects":["observe"]},
+            {"name":"scan_prompt","events":["input.submit"],"effects":["observe","block"]},
+            {"name":"scan_user_input","events":["input.submit"],"effects":["observe","block"]}
         ])
     );
     let validated = run(

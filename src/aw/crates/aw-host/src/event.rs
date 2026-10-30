@@ -20,7 +20,7 @@ use std::{
 ///
 /// Invoke configured steps serially or concurrently according to native Adapter
 /// semantics. Every step may be claimed once; failed attempts are not retried.
-/// The caller must collect all required results before dispatching a native tool.
+/// The caller must collect all required results before admitting a native submission or dispatching a tool.
 pub struct Event<'a> {
     host: &'a Host,
     value: Value,
@@ -40,7 +40,7 @@ impl Host {
     /// original callback deadline to count work performed before this call. Input
     /// is a locally constructed JSON value; invocation schema validation occurs
     /// before any step process starts. Adapter and configured binding must match.
-    /// Instance, session and tool IDs remain native data, not authenticated identity.
+    /// Instance, session, turn and tool IDs remain native data, not authenticated identity.
     ///
     /// # Errors
     /// Rejects expired/cancelled events, excessive input, mismatched Agent binding,
@@ -97,7 +97,9 @@ impl Host {
             .to_owned();
         let spec = &self.configuration.as_value()["spec"];
         let configured = &spec["events"][&name];
-        if configured["enabled"] != true || !matches!(name.as_str(), "tool.before" | "tool.after") {
+        if configured["enabled"] != true
+            || !matches!(name.as_str(), "input.submit" | "tool.before" | "tool.after")
+        {
             return Err(Error::Invalid("event was not enabled and admitted"));
         }
         if native_input.is_none()
@@ -321,7 +323,7 @@ impl Event<'_> {
                         .unwrap_or(&self.value)
                         .clone();
                     if !step.execution.replaces_result() {
-                        if let Some(tool) = event["tool"].as_object_mut() {
+                        if let Some(tool) = event.get_mut("tool").and_then(Value::as_object_mut) {
                             tool.remove("result_projection");
                         }
                     }

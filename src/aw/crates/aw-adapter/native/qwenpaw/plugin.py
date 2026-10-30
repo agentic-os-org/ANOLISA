@@ -26,7 +26,7 @@ def validate_hooks(config: dict[str, Any]) -> None:
     for hook in config["hooks"]:
         if not isinstance(hook, dict):
             raise ValueError("AW Hook route must be an object")
-        if hook.get("event") not in {"tool.before", "tool.after"}:
+        if hook.get("event") not in {"input.submit", "tool.before", "tool.after"}:
             raise ValueError("Unsupported AW native event")
         if not isinstance(hook.get("step"), str) or not hook["step"]:
             raise ValueError("AW step must be a nonempty string")

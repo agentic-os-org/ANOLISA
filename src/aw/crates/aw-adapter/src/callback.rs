@@ -236,8 +236,8 @@ pub fn response(
     }
     let blocked = effects.iter().any(|effect| effect["type"] == "block");
     if blocked {
-        if event != "tool.before" {
-            return Err("block is unsupported after a tool".into());
+        if !matches!(event, "input.submit" | "tool.before") {
+            return Err("block requires a submission or pre-tool event".into());
         }
         let mut reply = adapter.reply(true);
         if let Some(text) = effects

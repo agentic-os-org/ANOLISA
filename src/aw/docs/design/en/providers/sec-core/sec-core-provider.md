@@ -53,6 +53,21 @@ adoption and persistent AW auditing remain responsibilities of the daemon and
 adapters. Existing consumers of the earlier experimental `agent-sec-cli
 aw-provider` command must switch their Provider argv to this standalone bridge.
 
+## Submission scanning
+
+`scan_prompt` and `scan_user_input` consume the non-tool `input.submit` event. The Adapter owns the
+fresh turn identity and native decision boundary; the Host retains one deadline
+and one claim per step. The Provider sends the complete text on stdin to the
+public V2 `scan-prompt` command with explicit fast mode and user-input origin.
+It checks scan completeness as well as verdict. Prompt `ok=false` with warn/deny
+is risk, while incomplete/error output remains an invocation failure. AW keeps
+backend findings and user text out of effects and metadata audit. User PII calls
+the shared `pii::call` transport with `Source::UserInput`, the same turn context
+and remaining budget. Its risk mode is `pii.input_mode`; failures retain their
+separate Provider error path. Configuration,
+version limits and runnable native evidence are described in the
+[Provider reference](../../../../../../../docs/developer-guide/en/aw/providers/sec-core.md#user-submission-checks).
+
 ## Validation boundary
 
 Run from the repository root.

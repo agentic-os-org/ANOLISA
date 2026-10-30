@@ -33,6 +33,32 @@ Use the target runner below; preserve each suite's report and verify that native
 processes and AW scopes have retired. Local parser transport alone does not
 establish native Worker authorization behavior.
 
+## User submission acceptance
+
+The Qoder SDK and QwenPaw targets include `input-submission`,
+`input-submission-backend-error` and `input-submission-timeout-block`. They use
+the candidate AW/Provider and real V2 CLI/daemon in fast mode. The normal suite
+checks prompt and user PII denial before model requests, clean input, recovery
+after a rejected turn and preserved native configuration. Qoder also checks
+native submit refusal. QwenPaw inspects actual model requests; Qoder uses the
+native zero-turn/API-time result and absence of assistant messages.
+
+Run from `src/aw` with the four candidate binaries in `target/native-binaries`:
+
+```bash
+python3 crates/aw-cli/tests/fixtures/sec_core/input_submission.py \
+  --agent qwenpaw --bin target/native-binaries \
+  --agent-bin "$(command -v qwenpaw)" --image ubuntu:24.04 \
+  --output target/input-submission-evidence
+```
+
+For Qoder use `--agent qoder-sdk --npm /absolute/path/to/private-sdk-install`
+and the runtime `QODER_PERSONAL_ACCESS_TOKEN`. Add `--fault backend-error` or
+`--fault timeout-block` for isolated backend failures. Use a new output directory
+for each run. The runner retains results, native messages/model requests and
+cleanup reports, and removes its runtime directory and daemon container. Pinned
+parser/middleware suites separately cover callback cancellation and cleanup.
+
 ## One native target
 
 Use a clean, committed checkout with manifest-required Python, Node 24.16.0, uv 0.11.13 and SDK dependencies.
@@ -74,3 +100,8 @@ Allow and denial cases check native results, tool markers and AW audit; failure 
 Runners reclaim owned processes, temporary profiles, sockets, containers and unique image tags. On Docker timeout or cleanup failure, inspect and remove exact resources using commands in the report.
 After evidence review, remove this run's `target/native-evidence/agentscope` and `target/resident-evidence`; retain shared build caches.
 Validate production endpoints, real load and deployment shutdown in the actual deployment environment.
+
+For input-submission cancellation, add `--fault cancel` to either runner command.
+The test pauses the real daemon, observes the active scanner process, closes the
+native Query or stops the App turn, and verifies a cancelled service record,
+scanner exit and zero model requests. The nightly matrix requires both reports.

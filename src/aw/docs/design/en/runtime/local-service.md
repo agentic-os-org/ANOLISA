@@ -105,7 +105,7 @@ and never enters event input, correlation digests or audit. An invalid snapshot
 consumes the step claim and produces a visible execution failure without extending
 the event deadline. It is an RPC field, not a new `aw.yaml` option.
 
-The current service admits structured `tool.before` with `observe`/`block`,
+The current service admits structured `input.submit` and `tool.before` with `observe`/`block`,
 `tool.after` with `observe`, and explicit native steps at those tool points. It
 rejects enabled unsupported events, structured `ask`, input replacement,
 final guards and stronger execution guarantees. A successful empty effect list
@@ -232,6 +232,20 @@ Adapters continue requiring their original immutable bytes.
 It retains closed and failed-open claims until instance release; they cannot
 create a new budget. Opening an independent event per step is not valid shared
 event scheduling. The current per-instance correlation limit is 1,024 events.
+
+Submission events correlate `(input.submit, session_id, turn_id)` within the
+prepared instance, independently of the tool invocation ledger. They carry
+`input.text` and no `tool` object. Repeated step callbacks retain the first input,
+native bytes and deadline; changed text or identities are rejected. Completed,
+closed and failed-open submission claims remain until instance release, with
+an explicit 1,024-claim bound. Ordinary QwenPaw scopes end with each reply;
+Qoder releases its scope when the Query closes.
+
+`close_input_event` takes `instance_id`, `session_id` and `turn_id` and uses the
+same cancellation/drain path as tool events. It can cancel before the open wins
+and forbids reopening that turn. Instance release cancels pending submissions
+and waits for their Provider processes to exit. Metadata audit records the
+session/turn and decision, without user text.
 
 `close_hook_event` identifies a correlation by the owning `instance_id`,
 `event` (`tool.before` or `tool.after`), nonempty `session_id` and nonempty

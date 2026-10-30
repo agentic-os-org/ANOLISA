@@ -41,6 +41,17 @@ AW 响应数据返回。Host 独立处理 `on_error`。
 调度、效果采用与持久化 AW 审计仍由 daemon 和适配器负责。使用早期实验命令
 `agent-sec-cli aw-provider` 的组合分支需要将 Provider argv 改为独立桥接。
 
+## 提交扫描
+
+`scan_prompt` 与 `scan_user_input` 消费非工具事件 `input.submit`。Adapter 负责新的轮次身份与原生处置
+接点，Host 为全部步骤保留同一截止时间和单次声明。Provider 将完整文本通过 stdin
+交给公共 V2 `scan-prompt`，显式选择 fast 模式和用户输入来源，并同时校验完整性
+与判定。Prompt 的 `ok=false` 配合 warn/deny 表示风险；扫描不完整或错误输出按
+调用失败处理。用户 PII 复用 `pii::call`，传入 `Source::UserInput`、相同 turn
+上下文和剩余预算，风险按 `pii.input_mode` 处理，故障保留独立 Provider 错误路径。
+AW 效果及元数据审计不包含后端发现详情和用户原文。配置、版本范围
+及可执行原生验收入口见[Provider 参考](../../../../../../../docs/developer-guide/zh/aw/providers/sec-core.md#用户提交检查)。
+
 ## 验收边界
 
 从仓库根目录执行。

@@ -133,7 +133,23 @@ impl Runtime {
                 event,
                 session_id,
                 call_id,
-            } => self.close_hook(&instance_id, &event, &session_id, &call_id, deadline),
+            } => {
+                if !matches!(event.as_str(), "tool.before" | "tool.after") {
+                    return Err(rejected("native_tool_event_required"));
+                }
+                self.close_hook(&instance_id, &event, &session_id, &call_id, deadline)
+            }
+            Operation::CloseInputEvent {
+                instance_id,
+                session_id,
+                turn_id,
+            } => self.close_hook(
+                &instance_id,
+                "input.submit",
+                &session_id,
+                &turn_id,
+                deadline,
+            ),
             Operation::InvokeStep {
                 event_id,
                 instance_id,

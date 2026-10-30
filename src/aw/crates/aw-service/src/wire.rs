@@ -329,9 +329,9 @@ pub enum Operation {
         /// Normalized Provider event, including the matching instance ID.
         event: Value,
     },
-    /// Lease one native callback shared by all step processes for the same tool call.
+    /// Lease one native submission or tool callback shared by all its step processes.
     ///
-    /// Nonempty session/tool call IDs identify the event within this instance.
+    /// Nonempty session plus turn/tool-call IDs identify the event within this instance.
     /// Repeated opens require identical input and reuse the first deadline. Hermes
     /// completion observers and final replacement normalize only their seam name
     /// and observer-only middleware trace; the first native bytes are retained.
@@ -339,7 +339,7 @@ pub enum Operation {
     /// its pinned completion view supplies native metadata without renewing claims.
     /// Sequenced bindings require a producer registration and reclaim both phases
     /// after FinishInvocation drains them. Unknown or retired identities fail closed.
-    /// Legacy bindings retain at most 1024 claims until unbind; exhaustion is explicit.
+    /// Legacy bindings and submissions retain at most 1024 claims until unbind; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.
         instance_id: String,
@@ -362,6 +362,15 @@ pub enum Operation {
         session_id: String,
         /// Invocation-scoped normalized tool call identifier.
         call_id: String,
+    },
+    /// Cancel a submitted turn without creating a tool invocation identity.
+    CloseInputEvent {
+        /// Owning binding instance.
+        instance_id: String,
+        /// Session used by the normalized submission.
+        session_id: String,
+        /// Adapter-issued turn identity.
+        turn_id: String,
     },
     /// Execute one step; concurrent RPCs preserve caller scheduling.
     InvokeStep {

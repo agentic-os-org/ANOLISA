@@ -93,7 +93,7 @@ print(json.dumps({'ok': True, 'verdict': 'deny' if mode == 'deny' else 'pass'}))
                 "../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml"
             ))
             .unwrap();
-            // Isolate the example's security step from optional application scripts.
+            // Isolate code-tool coverage from submission and application checks.
             document["spec"]["providers"]
                 .as_object_mut()
                 .unwrap()
@@ -105,7 +105,7 @@ print(json.dumps({'ok': True, 'verdict': 'deny' if mode == 'deny' else 'pass'}))
             document["spec"]["events"]
                 .as_object_mut()
                 .unwrap()
-                .remove("tool.after");
+                .retain(|name, _| name == "tool.before");
             document["spec"]["events"]["tool.before"]["steps"][0]["id"] = json!("scan-code");
             document
         };

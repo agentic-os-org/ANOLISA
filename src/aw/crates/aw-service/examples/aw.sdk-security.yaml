@@ -40,6 +40,8 @@ spec:
         version: 1
         mode: block
         unmapped_tool: error
+        prompt: {mode: block, scan_mode: fast}
+        pii: {input_mode: block, output_mode: observe}
         # SDK Bash normalizes to bash; Qoder CLI keeps Bash instead.
         tools:
           bash: {language: bash, input_pointer: /command}
@@ -59,6 +61,20 @@ spec:
       timeout_ms: 1000
       max_output_bytes: 32
   events:
+    input.submit:
+      enabled: true
+      required: true
+      steps:
+        - id: scan-prompt
+          provider: security
+          operation: scan_prompt
+          effects: [observe, block]
+          on_error: block
+        - id: scan-user-pii
+          provider: security
+          operation: scan_user_input
+          effects: [observe, block]
+          on_error: block
     tool.before:
       enabled: true
       required: true

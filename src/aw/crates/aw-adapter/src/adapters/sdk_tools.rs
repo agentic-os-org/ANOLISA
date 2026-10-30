@@ -14,7 +14,7 @@ pub(crate) fn routes(
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
-    for event in ["tool.before", "tool.after"] {
+    for event in ["input.submit", "tool.before", "tool.after"] {
         let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
         if selected.is_empty() {
             continue;
