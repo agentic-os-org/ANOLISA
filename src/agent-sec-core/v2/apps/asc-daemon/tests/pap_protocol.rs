@@ -300,6 +300,200 @@ impl PolicyAdministration for RecordingAdministration {
     }
 }
 
+/// A PAP application whose policy listing is cut short of `limit`, the shape
+/// `asc-policy-repository-sqlite`'s response byte budget produces for large
+/// records: its contract test `sql_list_byte_budget_preserves_total_and_
+/// advances_every_page` pins that the first page holds fewer items than the
+/// window while `total` still counts every match.
+struct TruncatingListAdministration {
+    inner: RecordingAdministration,
+}
+
+impl TruncatingListAdministration {
+    fn new() -> Self {
+        Self {
+            inner: RecordingAdministration::new(),
+        }
+    }
+}
+
+impl PolicyAdministration for TruncatingListAdministration {
+    fn create_policy(
+        &self,
+        principal: &Principal,
+        policy_name: &str,
+        template: &PolicyTemplate,
+    ) -> Result<PreparedPolicy, PolicyAdministrationError> {
+        self.inner.create_policy(principal, policy_name, template)
+    }
+
+    fn update_policy(
+        &self,
+        principal: &Principal,
+        policy_id: &ResourceId,
+        policy_name: &str,
+        template: &PolicyTemplate,
+    ) -> Result<PreparedPolicy, PolicyAdministrationError> {
+        self.inner
+            .update_policy(principal, policy_id, policy_name, template)
+    }
+
+    fn get_policy(
+        &self,
+        principal: &Principal,
+        id: &ResourceId,
+        revision: Revision,
+    ) -> Result<PreparedPolicy, PolicyAdministrationError> {
+        self.inner.get_policy(principal, id, revision)
+    }
+
+    fn list_policies(
+        &self,
+        principal: &Principal,
+        _limit: u32,
+        offset: u32,
+    ) -> Result<ResourcePage<PreparedPolicy>, PolicyAdministrationError> {
+        if principal.role() != PrincipalRole::PolicyAdministrator {
+            return Err(PolicyAdministrationError::Forbidden);
+        }
+        // Five policies exist; the byte budget only let three of them into
+        // the first window, exactly as the SQLite repository does.
+        let count = if offset == 0 { 3 } else { 2 };
+        Ok(ResourcePage {
+            items: vec![self.inner.policy(); count],
+            total: 5,
+        })
+    }
+
+    fn delete_policy_revision(
+        &self,
+        principal: &Principal,
+        id: &ResourceId,
+        revision: Revision,
+    ) -> Result<PreparedPolicy, PolicyAdministrationError> {
+        self.inner.delete_policy_revision(principal, id, revision)
+    }
+
+    fn create_scope_assignment(
+        &self,
+        principal: &Principal,
+        selector: &ScopeSelector,
+        policies: &[asc_policy_types::scope::PolicyReference],
+    ) -> Result<PreparedScope, PolicyAdministrationError> {
+        self.inner
+            .create_scope_assignment(principal, selector, policies)
+    }
+
+    fn get_scope(
+        &self,
+        principal: &Principal,
+        id: &ResourceId,
+    ) -> Result<PreparedScope, PolicyAdministrationError> {
+        self.inner.get_scope(principal, id)
+    }
+
+    fn list_scopes(
+        &self,
+        principal: &Principal,
+        limit: u32,
+        offset: u32,
+    ) -> Result<ResourcePage<PreparedScope>, PolicyAdministrationError> {
+        self.inner.list_scopes(principal, limit, offset)
+    }
+
+    fn delete_scope(
+        &self,
+        principal: &Principal,
+        id: &ResourceId,
+    ) -> Result<ScopeDeletion, PolicyAdministrationError> {
+        self.inner.delete_scope(principal, id)
+    }
+
+    fn get_binding(
+        &self,
+        principal: &Principal,
+        id: &ResourceId,
+    ) -> Result<BindingView, PolicyAdministrationError> {
+        self.inner.get_binding(principal, id)
+    }
+
+    fn list_bindings(
+        &self,
+        principal: &Principal,
+        limit: u32,
+        offset: u32,
+    ) -> Result<ResourcePage<BindingView>, PolicyAdministrationError> {
+        self.inner.list_bindings(principal, limit, offset)
+    }
+
+    fn retry_scope(
+        &self,
+        principal: &Principal,
+        id: &ResourceId,
+    ) -> Result<PreparedScope, PolicyAdministrationError> {
+        self.inner.retry_scope(principal, id)
+    }
+}
+
+/// A page cut short of `limit` must tell the client where to resume.
+///
+/// `ListParams` documents a client-maintained offset, and the natural
+/// limit/offset reading advances `offset` by `limit`. When the repository's
+/// byte budget cut a page short, that reading silently skipped every record
+/// past the cut — with `total` still counting them — because the response
+/// had no way to express "this page was truncated". The resume cursor fixes
+/// that without changing exhausted pages, which stay byte-identical.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_cut_short_of_the_limit_exposes_a_resume_cursor() {
+    let daemon = RunningPapDaemon::start_with_application(
+        PrincipalRole::PolicyAdministrator,
+        4 * 1024 * 1024,
+        TruncatingListAdministration::new(),
+    )
+    .await;
+
+    let first = support::request_json(
+        &daemon.socket_path,
+        &json!({
+            "method": "policy.templates.list",
+            "params": {"limit": 100, "offset": 0}
+        }),
+    )
+    .await;
+    assert_eq!(first["result"]["total"], 5);
+    assert_eq!(
+        first["result"]["items"].as_array().map(Vec::len),
+        Some(3),
+        "the byte budget cut the first page short of limit=100"
+    );
+    assert_eq!(
+        first["result"]["nextOffset"],
+        json!(3),
+        "a truncated page must tell the client where to resume: {first}"
+    );
+
+    let second = support::request_json(
+        &daemon.socket_path,
+        &json!({
+            "method": "policy.templates.list",
+            "params": {"limit": 100, "offset": 3}
+        }),
+    )
+    .await;
+    assert_eq!(
+        second["result"]["items"].as_array().map(Vec::len),
+        Some(2),
+        "resuming at the cursor must reach the remaining records"
+    );
+    assert_eq!(second["result"]["total"], 5);
+    assert!(
+        second["result"].get("nextOffset").is_none(),
+        "an exhausted page must stay byte-identical to the pre-field form: {second}"
+    );
+
+    daemon.stop().await;
+}
+
 #[test]
 fn all_frozen_methods_route_once_and_return_domain_values_directly() {
     let application = RecordingAdministration::new();

@@ -75,4 +75,28 @@ pub struct ListResult<T> {
     pub items: Vec<T>,
     /// Total matching records before pagination.
     pub total: u64,
+    /// Offset that resumes the listing, present only when more matching
+    /// records exist beyond this page.
+    ///
+    /// A repository may return fewer records than `limit` asked for: the
+    /// response byte budget can cut a page short even though the window held
+    /// more rows, so `items.len() < limit` is not proof of end-of-list.
+    /// This cursor mirrors the observability query API's `nextOffset` field.
+    /// It is omitted when the listing is exhausted, which keeps responses
+    /// byte-identical to the pre-field wire form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+}
+
+/// Returns the offset that resumes a listing after `returned` records, or
+/// `None` when the listing is exhausted.
+///
+/// `total` counts every matching record before `offset` is applied, so the
+/// listing is exhausted exactly when nothing was returned or the cursor has
+/// reached `total`. Mirrors `asc-daemon-core`'s observability query
+/// pagination.
+#[must_use]
+pub fn next_list_offset(offset: u32, returned: usize, total: u64) -> Option<u64> {
+    let next = u64::from(offset) + u64::try_from(returned).unwrap_or(u64::MAX);
+    (returned > 0 && next < total).then_some(next)
 }
