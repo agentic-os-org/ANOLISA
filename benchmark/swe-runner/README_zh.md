@@ -399,6 +399,11 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+明细和指标 CSV 包含每个 trace 记录的总成本。用例汇总包含有效成本记录
+次数、记录成本合计及平均记录成本。缺失或无效成本保持空白，不参与成本
+均值；记录为零的成本属于已知成本。成本单位沿用源 trace。有限成本在
+聚合时溢出，会在写报告前报错并指出对应实例；源 trace 保持不变。
+
 分析已有 trace：
 
 ```bash
