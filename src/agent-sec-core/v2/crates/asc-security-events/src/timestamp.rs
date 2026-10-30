@@ -44,6 +44,9 @@ pub fn now_iso() -> String {
 
 /// Parses an ISO-8601 timestamp and applies *naive* to offset-less input.
 ///
+/// `:60` leap seconds are rejected on every date, matching v1's
+/// `datetime.fromisoformat`, even though `chrono` accepts them.
+///
 /// # Errors
 ///
 /// Returns [`TimestampError::InvalidFormat`] when the value is not ISO-8601,
@@ -56,7 +59,9 @@ pub fn parse_iso(
 ) -> Result<DateTime<Utc>, TimestampError> {
     let normalized = normalize_z_suffix(value);
 
-    if let Ok(parsed) = DateTime::<FixedOffset>::parse_from_rfc3339(&normalized) {
+    if let Ok(parsed) = DateTime::<FixedOffset>::parse_from_rfc3339(&normalized)
+        && !is_leap_second(parsed)
+    {
         return Ok(parsed.with_timezone(&Utc));
     }
 
@@ -67,7 +72,9 @@ pub fn parse_iso(
         "%Y-%m-%dT%H:%M%:z",
         "%Y-%m-%d %H:%M%:z",
     ] {
-        if let Ok(parsed) = DateTime::parse_from_str(&normalized, pattern) {
+        if let Ok(parsed) = DateTime::parse_from_str(&normalized, pattern)
+            && !is_leap_second(parsed)
+        {
             return Ok(parsed.with_timezone(&Utc));
         }
     }
@@ -102,7 +109,8 @@ pub fn normalize_iso_to_utc_iso(
 /// Converts a UTC-normalized ISO timestamp to epoch seconds.
 ///
 /// Stricter than user-facing parsing on purpose: callers must normalize before
-/// crossing the repository boundary, mirroring v1 `utc_iso_to_epoch`.
+/// crossing the repository boundary, mirroring v1 `utc_iso_to_epoch`. Leap
+/// seconds are rejected like every other v1 parser.
 ///
 /// # Errors
 ///
@@ -111,20 +119,23 @@ pub fn normalize_iso_to_utc_iso(
 /// [`TimestampError::InvalidFormat`] for unparsable input.
 pub fn utc_iso_to_epoch(value: &str, field_name: &str) -> Result<f64, TimestampError> {
     let normalized = normalize_z_suffix(value);
-    let parsed = DateTime::<FixedOffset>::parse_from_rfc3339(&normalized).map_err(|_| {
-        // Distinguish "no offset at all" from "malformed" the way v1 does: it
-        // parses first and only then checks the offset.
-        if parse_naive(&normalized).is_some() {
-            TimestampError::MissingTimezone {
-                field: field_name.to_owned(),
+    let parsed = DateTime::<FixedOffset>::parse_from_rfc3339(&normalized)
+        .ok()
+        .filter(|parsed| !is_leap_second(*parsed))
+        .ok_or_else(|| {
+            // Distinguish "no offset at all" from "malformed" the way v1 does: it
+            // parses first and only then checks the offset.
+            if parse_naive(&normalized).is_some() {
+                TimestampError::MissingTimezone {
+                    field: field_name.to_owned(),
+                }
+            } else {
+                TimestampError::InvalidFormat {
+                    field: field_name.to_owned(),
+                    value: value.to_owned(),
+                }
             }
-        } else {
-            TimestampError::InvalidFormat {
-                field: field_name.to_owned(),
-                value: value.to_owned(),
-            }
-        }
-    })?;
+        })?;
 
     if parsed.offset().local_minus_utc() != 0 {
         return Err(TimestampError::NotUtc {
@@ -181,11 +192,19 @@ fn parse_naive(value: &str) -> Option<NaiveDateTime> {
         "%Y-%m-%dT%H:%M",
         "%Y-%m-%d %H:%M",
     ] {
-        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, pattern) {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, pattern)
+            && parsed.and_utc().timestamp_subsec_nanos() < 1_000_000_000
+        {
             return Some(parsed);
         }
     }
     None
+}
+
+/// Python's `fromisoformat` rejects `:60` seconds, but `chrono` accepts RFC
+/// 3339 leap seconds and represents them as a nanosecond overflow past `:59`.
+fn is_leap_second(value: DateTime<FixedOffset>) -> bool {
+    value.timestamp_subsec_nanos() >= 1_000_000_000
 }
 
 fn normalize_z_suffix(value: &str) -> String {
@@ -281,5 +300,44 @@ mod tests {
         let err = utc_iso_to_epoch("2026-01-02T03:04:05", "timestamp")
             .expect_err("naive input must be rejected");
         assert!(matches!(err, TimestampError::MissingTimezone { .. }));
+    }
+
+    // Python's `datetime.fromisoformat` rejects `:60` on every date, so v1
+    // refuses these spellings; `chrono` accepted them, and
+    // `normalize_iso_to_utc_iso` even emitted the leap second into storage
+    // (for example `2016-12-31T23:59:60.000000+00:00`), a string v1 clients
+    // cannot parse back.
+
+    #[test]
+    fn leap_second_input_is_rejected_like_python() {
+        for value in [
+            "2016-12-31T23:59:60Z",
+            "2016-12-31T23:59:60.5Z",
+            "2026-01-02T03:04:60+00:00",
+            "2026-01-02 03:04:60+00:00",
+            "2016-12-31T23:59:60",
+        ] {
+            let err = parse_iso(value, "timestamp", NaivePolicy::Reject)
+                .expect_err("leap seconds must be rejected");
+            assert!(
+                matches!(err, TimestampError::InvalidFormat { .. }),
+                "{value}"
+            );
+        }
+        // The daemon's local-policy boundary sees the same rejection.
+        let err = parse_iso("2016-12-31T23:59:60Z", "timestamp", NaivePolicy::Local)
+            .expect_err("the naive policy never sees a leap second");
+        assert!(matches!(err, TimestampError::InvalidFormat { .. }));
+    }
+
+    #[test]
+    fn leap_seconds_do_not_reach_storage_or_the_repository_boundary() {
+        let err =
+            normalize_iso_to_utc_iso("2016-12-31T23:59:60Z", "timestamp", NaivePolicy::Reject)
+                .expect_err("ingestion must refuse leap seconds");
+        assert!(matches!(err, TimestampError::InvalidFormat { .. }));
+        let err = utc_iso_to_epoch("2016-12-31T23:59:60Z", "timestamp")
+            .expect_err("the repository boundary must refuse leap seconds");
+        assert!(matches!(err, TimestampError::InvalidFormat { .. }));
     }
 }
