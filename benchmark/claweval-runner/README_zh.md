@@ -200,6 +200,17 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 
 ## 故障排查
 
+`list_tasks.py` 支持自定义 `--tasks-dir` 与 `--format json|names`；默认分组显示保持不变。
+JSON 包含任务元数据与 `directory_name`。names 模式输出可供 `--tasks-file` 使用的精确
+目录名，即使 YAML 中的 `task_id` 与目录名不同也能正确选择。空筛选结果输出 `[]` JSON
+或空的名称流。两种机器格式均输出 UTF-8，即使控制台的默认编码无法表示任务名称。
+
+```bash
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --prefix T --format json
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --difficulty hard --format names > selected-tasks.txt
+uv run ce-runner batch --tasks-dir ./custom-tasks --tasks-file selected-tasks.txt --config claw-eval/config.yaml
+```
+
 | 问题 | 修复 |
 |---|---|
 | setup 后 `uv` 命令找不到 | `python -m pip install --upgrade uv`(重跑 setup) |
