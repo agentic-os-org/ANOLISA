@@ -40,7 +40,7 @@ def _private_candidates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tupl
     return first, second
 
 
-@pytest.mark.parametrize("name", ["rtk", "tokenless"])
+@pytest.mark.parametrize("name", sandbox._TOKENLESS_BINARY_NAMES)
 def test_nonexecutable_install_does_not_shadow_executable_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -79,7 +79,7 @@ def test_no_runnable_source_is_reported_before_copy(
     shape: str,
 ) -> None:
     first, _ = _private_candidates(monkeypatch, tmp_path)
-    candidate = first / "rtk"
+    candidate = first / "tokenless"
     candidate.parent.mkdir()
     if shape == "file":
         _binary(candidate, executable=False)
@@ -88,23 +88,22 @@ def test_no_runnable_source_is_reported_before_copy(
     else:
         candidate.symlink_to(first / "missing")
     with pytest.raises(RuntimeError) as raised:
-        sandbox._resolve_host_tokenless_binary("rtk")
+        sandbox._resolve_host_tokenless_binary("tokenless")
     assert str(candidate) in str(raised.value)
 
 
 def test_executable_priority_and_symlink_are_preserved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     first, second = _private_candidates(monkeypatch, tmp_path)
-    selected = _binary(first / "rtk", executable=True)
-    _binary(second / "rtk", executable=True)
-    assert sandbox._resolve_host_tokenless_binary("rtk") == selected
+    selected = _binary(first / "tokenless", executable=True)
+    _binary(second / "tokenless", executable=True)
+    assert sandbox._resolve_host_tokenless_binary("tokenless") == selected
     selected.unlink()
-    selected.symlink_to(second / "rtk")
-    assert sandbox._resolve_host_tokenless_binary("rtk") == selected
+    selected.symlink_to(second / "tokenless")
+    assert sandbox._resolve_host_tokenless_binary("tokenless") == selected
 
 
 def test_all_sources_are_validated_before_injection_writes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     first, _ = _private_candidates(monkeypatch, tmp_path)
-    _binary(first / "rtk", executable=True)
     _binary(first / "tokenless", executable=False)
     workspace = tmp_path / "workspace"
     workspace.mkdir()

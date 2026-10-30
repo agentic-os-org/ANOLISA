@@ -10,11 +10,12 @@ Use the component root [Makefile](Makefile) for public targets; its included
 `packaging/*.mk` files hold channel-specific rules. File installation and layout
 validation live in [packaging/install.sh](packaging/install.sh). Do not introduce
 a second public Makefile.
-`make build` produces the native CLI, RTK and framework bundles. `make install`
-copies existing outputs using `PREFIX`, `AWPRJ` and optional `DESTDIR`, without
-building, registering frameworks or activating services. `make install-core`
-copies only CLI/RTK and core resources; `make install-plugins` copies only
-framework resources, without requiring the core build outputs. Neither group
+`make build` produces the native CLI, which links RTK, and framework bundles.
+`make install` copies existing outputs using `PREFIX`, `AWPRJ` and optional
+`DESTDIR`, without building, registering frameworks or activating services.
+`make install-core` copies only the CLI and core resources;
+`make install-plugins` copies only framework resources, without requiring the
+core build outputs. Neither group
 installs or activates the other. Keep the explicit
 `install-legacy` entrypoint for the historical user/system installation profile.
 `make setup` builds, installs and registers adapters using the public layout;
@@ -37,7 +38,7 @@ for physical RPM products, dependencies, file ownership and scriptlets.
 | Package | Responsibility |
 |---------|----------------|
 | `tokenless` | Empty compatibility package selecting matching core and plugins; retains `Provides: anolisa-component(tokenless)`. |
-| `tokenless-core` | Public `tokenless` and `rtk` commands, private RTK executable, license and runtime documentation. |
+| `tokenless-core` | Public `tokenless` command, which runs RTK as `tokenless rtk`, license and runtime documentation. |
 | `tokenless-plugins` | All framework integrations, common hooks/resources, lifecycle scripts and the cosh extension. |
 
 The compatibility package requires both roles at exact `%{version}-%{release}`.

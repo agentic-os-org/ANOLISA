@@ -117,6 +117,9 @@ git archive "${HISTORICAL_SOURCE_REF}:src/tokenless" | tar -x -C "$HISTORICAL_BU
     exit 1
 }
 cp -a "$HISTORICAL_BUILD" "$HISTORICAL_DRIFT_BUILD"
+# Historical trees still ship a separate rtk binary; current trees link RTK.
+[ "$(python3 "$ACTION_DIR/packaged_executable.py" "$HISTORICAL_BUILD")" = rtk ]
+[ "$(python3 "$ACTION_DIR/packaged_executable.py" "$REPO_ROOT/src/tokenless")" = tokenless ]
 
 HISTORICAL_RTK_SETUP="$ACTION_DIR/setup-rtk.sh"
 PINNED_RTK_COMMIT="$(

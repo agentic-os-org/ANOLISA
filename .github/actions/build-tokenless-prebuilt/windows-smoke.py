@@ -31,9 +31,17 @@ def main() -> None:
     parser.add_argument("wheels", type=Path)
     parser.add_argument("version")
     parser.add_argument("--powershell", type=Path, help="execute SDK rewrites with this PowerShell")
+    parser.add_argument(
+        "--packaged-executable",
+        choices=("tokenless", "rtk"),
+        required=True,
+        help="tokenless for trees that link RTK, rtk for older tags with a separate binary",
+    )
     args = parser.parse_args()
     assert sys.platform == "win32", "this smoke test must use Windows Python"
     archives, wheels, version = args.archives, args.wheels, args.version
+    packaged = f"{args.packaged_executable}.exe"
+    binaries = sorted({"tokenless.exe", packaged})
     # Windows keeps the imported .pyd locked until Python exits; the Wine prefix owns this fixture.
     root = Path(tempfile.mkdtemp(prefix="tokenless 中文 smoke "))
     with zipfile.ZipFile(archives / f"tokenless-{version}-windows-x86_64.zip") as package:
@@ -48,8 +56,10 @@ def main() -> None:
     cli = root / "tokenless.exe"
     assert run(cli, "--version").decode().strip() == f"tokenless {version}"
     run(cli, "invalid-smoke-command", expected=2)
-    assert b"rtk" in run(root / "rtk.exe", "--version")
-    assert b"rtk git status" in run(root / "rtk.exe", "rewrite", "git status", expected=3)
+    assert sorted(path.name for path in root.glob("*.exe")) == binaries
+    rtk = [root / "rtk.exe"] if packaged == "rtk.exe" else [cli, "rtk"]
+    assert b"rtk" in run(*rtk, "--version")
+    assert b"rtk git status" in run(*rtk, "rewrite", "git status", expected=3)
     description = "中文 C:\\space path\\file.txt\r\n" + "schema details " * 500
     attribution = {"agent_id": "windows-ci", "session_id": "cli-smoke", "tool_use_id": "schema"}
 
@@ -99,9 +109,15 @@ def main() -> None:
         manifest = json.load(package.extractfile("package/package.json"))
         assert manifest["version"] == version
         assert manifest["os"] == ["win32"] and manifest["cpu"] == ["x64"]
-        for binary in ("tokenless", "rtk"):
-            payload = package.extractfile(f"package/bin/{binary}.exe").read()
-            assert payload == (root / f"{binary}.exe").read_bytes()
+        packaged_binaries = sorted(
+            name.removeprefix("package/bin/")
+            for name in package.getnames()
+            if name.startswith("package/bin/")
+        )
+        assert packaged_binaries == binaries, packaged_binaries
+        for binary in binaries:
+            payload = package.extractfile(f"package/bin/{binary}").read()
+            assert payload == (root / binary).read_bytes()
     with tarfile.open(root / "npm" / f"anolisa-tokenless-{version}.tgz") as package:
         manifest = json.load(package.extractfile("package/package.json"))
         assert manifest["optionalDependencies"]["@anolisa/tokenless-win32-x64"] == version
@@ -113,15 +129,19 @@ def main() -> None:
     with zipfile.ZipFile(wheel) as package:
         package.extractall(site)
     sys.path.insert(0, str(site))
-    asyncio.run(sdk_smoke(root, description, args.powershell))
+    asyncio.run(sdk_smoke(root, description, packaged, args.powershell))
     print("PASS: Windows Python ABI3 SDK, packaged RTK, Stash, authorization and statistics")
 
 
-async def sdk_smoke(root: Path, description: str, powershell: Path | None) -> None:
+async def sdk_smoke(
+    root: Path, description: str, packaged: str, powershell: Path | None
+) -> None:
     import anolisa_tokenless as sdk_api
 
     sdk = sdk_api.TokenlessSdk(sdk_api.TokenlessConfig(data_dir=root / "sdk-state"))
-    assert sdk._rtk_path.name == "rtk.exe", sdk._rtk_path
+    # Older SDKs launched a separate RTK; newer ones launch their own tokenless.
+    launcher = getattr(sdk, "_rtk_launcher", None) or sdk._rtk_path
+    assert launcher.name == packaged, launcher
     attribution = sdk_api.Attribution("windows-ci", "sdk-smoke", "sdk-call")
     rewritten = await sdk.pre_tool(
         sdk_api.PreToolRequest(

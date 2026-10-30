@@ -357,7 +357,6 @@ def test_run_records_tokenless_evidence_for_tokenless_runs(tmp_path: Path) -> No
     workspace_root = tmp_path / "workspace" / "openclaw-workspace"
     tokenless_bin_dir = workspace_root / ".runner" / "tokenless" / "bin"
     tokenless_bin_dir.mkdir(parents=True)
-    (tokenless_bin_dir / "rtk").write_text("#!/bin/sh\n", encoding="utf-8")
     (tokenless_bin_dir / "tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
     (workspace_root / ".runner" / "tokenless" / "injection.json").write_text(
         json.dumps(
@@ -365,11 +364,11 @@ def test_run_records_tokenless_evidence_for_tokenless_runs(tmp_path: Path) -> No
                 "schema_version": 1,
                 "binaries": [
                     {
-                        "name": "rtk",
-                        "source": "/home/user/.local/bin/rtk",
+                        "name": "tokenless",
+                        "source": "/home/user/.local/bin/tokenless",
                         "source_is_symlink": True,
-                        "source_realpath": "/home/user/.local/libexec/anolisa/tokenless/rtk",
-                        "copied": str(tokenless_bin_dir / "rtk"),
+                        "source_realpath": "/home/user/.local/libexec/anolisa/tokenless/tokenless",
+                        "copied": str(tokenless_bin_dir / "tokenless"),
                         "copied_is_symlink": False,
                     }
                 ],

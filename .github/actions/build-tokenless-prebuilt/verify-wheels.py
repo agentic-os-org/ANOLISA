@@ -14,8 +14,11 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "prebuilt-rust-common"))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / ".github/actions/prebuilt-rust-common"))
 from targets import component_targets
+
+from packaged_executable import packaged_executable
 
 RUNTIME_NAME = "anolisa-tokenless"
 RUNTIME_FILENAME = "anolisa_tokenless"
@@ -198,7 +201,7 @@ def verify_binary(payload: bytes, target: NativeTarget, member: str) -> None:
         verify_macho(payload, target.architecture, member)
 
 
-def verify_runtime(path: Path, version: str) -> NativeTarget:
+def verify_runtime(path: Path, version: str, executable: str) -> NativeTarget:
     distribution, filename_version, python_tag, abi_tag, platforms = parse_filename(path)
     if distribution != RUNTIME_FILENAME:
         fail(f"{path.name} is not a {RUNTIME_NAME} wheel")
@@ -227,16 +230,20 @@ def verify_runtime(path: Path, version: str) -> NativeTarget:
         ]
         if len(native_members) != 1:
             fail(f"{path.name} must contain exactly one native extension")
-        rtk_name = "rtk.exe" if target.os_name == "windows" else "rtk"
-        rtk_members = [
-            name for name in archive.namelist() if name == f"anolisa_tokenless/_bin/{rtk_name}"
+        if target.os_name == "windows":
+            executable += ".exe"
+        # _bin is also a Python package; any other file there is a stale binary.
+        executable_members = [
+            name
+            for name in archive.namelist()
+            if name.startswith("anolisa_tokenless/_bin/") and not name.endswith(".py")
         ]
-        if len(rtk_members) != 1:
-            fail(f"{path.name} must contain exactly one embedded {rtk_name} binary")
-        rtk_info = archive.getinfo(rtk_members[0])
-        if not ((rtk_info.external_attr >> 16) & 0o111):
-            fail(f"{path.name} embeds a non-executable RTK binary")
-        for member in (native_members[0], rtk_members[0]):
+        if executable_members != [f"anolisa_tokenless/_bin/{executable}"]:
+            fail(f"{path.name} must embed exactly {executable}, found {executable_members}")
+        executable_info = archive.getinfo(executable_members[0])
+        if not ((executable_info.external_attr >> 16) & 0o111):
+            fail(f"{path.name} embeds a non-executable {executable} binary")
+        for member in (native_members[0], executable_members[0]):
             verify_binary(archive.read(member), target, member)
     return target
 
@@ -332,6 +339,8 @@ def main() -> int:
         if not args.directory.is_dir():
             fail(f"wheel directory does not exist: {args.directory}")
         targets = expected_targets(args.layout, args.os, args.arch, args.tokenless_source_root)
+        source_root = args.tokenless_source_root or REPO_ROOT
+        executable = packaged_executable(source_root / "src/tokenless")
         wheels = sorted(args.directory.glob("*.whl"))
         expected_count = len(targets) + (1 if ("linux", "x86_64") in targets else 0)
         if len(wheels) != expected_count:
@@ -343,7 +352,7 @@ def main() -> int:
             if wheel.name.startswith(f"{AGENTSCOPE_FILENAME}-"):
                 agentscope_wheels.append(wheel)
                 continue
-            target = verify_runtime(wheel, python_version)
+            target = verify_runtime(wheel, python_version, executable)
             key = (target.os_name, target.architecture)
             if key in actual_targets:
                 fail(f"duplicate runtime wheel for {target.os_name}/{target.architecture}")

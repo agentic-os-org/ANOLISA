@@ -2,7 +2,6 @@
 %global debug_package %{nil}
 # Distribution defaults remain compatible; independent builders may override
 # these role directories using the component-owned packaging layout.
-%{!?_libexecdir_tokenless:%global _libexecdir_tokenless %{_libexecdir}/anolisa/tokenless}
 %{!?_adapterdir_tokenless:%global _adapterdir_tokenless %{_datadir}/anolisa/adapters/tokenless}
 %{!?_extensiondir_tokenless:%global _extensiondir_tokenless %{_datadir}/anolisa/extensions/tokenless}
 
@@ -18,7 +17,7 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 
 # Build dependencies
-# Tokenless and the separately built RTK require Rust 1.91.
+# Tokenless and its embedded RTK library require Rust 1.91.
 # Vendored RTK source is included in the tarball.
 # Workspace deps (including the toon-format library) come from crates.io, so
 # RPM build environments must configure a crates.io mirror (e.g. sparse+https://mirrors.aliyun.com/crates.io-index/).
@@ -58,8 +57,8 @@ Core Features:
 
 The package includes:
 - tokenless: CLI tool for schema/response compression and TOON encoding
-  (TOON is linked in via the crates.io toon-format library)
-- rtk: High-performance CLI proxy for command rewriting (vendored source, Apache-2.0, excluded from workspace)
+  (TOON is linked in via the crates.io toon-format library), with the
+  vendored RTK command proxy (Apache-2.0) linked in as `tokenless rtk`
 
 Note: OpenClaw plugin is available under /usr/share/anolisa/adapters/tokenless/openclaw/.
 Native DeepSeek Harness (dsh) plugin bundle is available under
@@ -92,8 +91,8 @@ Conflicts:      %{name} < %{version}
 Conflicts:      anolisa < 0.3.21
 
 %description core
-Tokenless native CLI and private RTK helper for token compression, command
-rewriting, environment checks, and statistics. Host integrations are delivered
+Tokenless native CLI for token compression, command rewriting through its
+embedded RTK (`tokenless rtk`), environment checks, and statistics. Host integrations are delivered
 separately by tokenless-plugins.
 
 %package plugins
@@ -113,16 +112,15 @@ framework registration scripts. Registration remains a separate user action.
 %prep
 %setup -q -n %{name}-%{version}
 
-# rtk source in tarball is already patched (rtk-tokenless-stats.patch
-# applied during tarball creation via justfile setup-rtk).
+# rtk source in tarball is already patched (third_party/patches applied
+# during tarball creation via justfile setup-rtk).
 
 # Clean any stale build artifacts from the tarball
 cargo clean --release
 
 %build
-# Build tokenless (rtk excluded from workspace — built separately)
+# Build tokenless with the vendored RTK library linked in
 cargo build --release
-cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
 # Compile the OpenClaw TS plugin via the project Makefile.
 # Produces adapters/tokenless/openclaw/dist/index.js, which package.json
@@ -133,15 +131,13 @@ make build-openclaw-plugin build-dsh-plugin
 %install
 rm -rf "%{buildroot}"
 bindir="%{buildroot}%{_bindir}"
-libexecdir="%{buildroot}%{_libexecdir_tokenless}"
 docdir="%{buildroot}%{_docdir}/tokenless"
 adapters="%{buildroot}%{_adapterdir_tokenless}"
 extension="%{buildroot}%{_extensiondir_tokenless}"
 
-install -d -m 0755 "$bindir" "$libexecdir" "$docdir"
+install -d -m 0755 "$bindir" "$docdir"
+# RTK commands run as `tokenless rtk`; no separate rtk is installed.
 install -m 0755 target/release/tokenless "$bindir/tokenless"
-install -m 0755 third_party/rtk/target/release/rtk "$libexecdir/rtk"
-ln -sf %{_libexecdir_tokenless}/rtk "$bindir/rtk"
 install -m 0644 LICENSE docs/response-compression.md "$docdir/"
 
 # Keep the runtime whitelist explicit; source and development files stay out.
@@ -238,9 +234,6 @@ done > tokenless-plugins.files
 %files core
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) %{_bindir}/tokenless
-%attr(0755,root,root) %{_bindir}/rtk
-%dir %attr(0755,root,root) %{_libexecdir_tokenless}
-%attr(0755,root,root) %{_libexecdir_tokenless}/rtk
 %license %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
 

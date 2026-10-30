@@ -294,8 +294,8 @@ swe-runner run \
 
 - 在每个 OpenClaw per-case profile 中启用 `plugins.entries.tokenless.enabled`。
 - 将 host 上的 tokenless OpenClaw extension 暴露到该 profile。
-- 查找并复制 `rtk`、`tokenless` 二进制到实例 workspace 的
-  `.runner/tokenless/bin/`。
+- 查找并复制 `tokenless` 二进制到实例 workspace 的
+  `.runner/tokenless/bin/`。RTK 以 `tokenless rtk` 运行，不再需要 `rtk` 二进制。
 - 将 sandbox 内的 `/workspace/.runner/tokenless/bin` 放到 `PATH` 前部。
 - 在运行结果中写出 tokenless evidence，用于确认配置和运行期 hook 状态。
 

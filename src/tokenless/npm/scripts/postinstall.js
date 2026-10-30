@@ -17,8 +17,8 @@
  * Platform packages follow the naming convention:
  *   @anolisa/tokenless-{os}-{arch}
  *
- * Each platform package ships two native binaries:
- *   bin/tokenless, bin/rtk
+ * Each platform package ships one native binary, bin/tokenless, which also
+ * runs RTK commands as `tokenless rtk`.
  *
  * Exit codes: on a supported platform, a missing platform package or a
  * missing binary is a hard failure (non-zero exit) so `npm install` fails
@@ -51,7 +51,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = join(__dirname, '..');
 const binDir = join(packageRoot, 'bin');
 
-const BINARIES = ['tokenless', 'rtk'];
+const BINARIES = ['tokenless'];
 
 // Ownership marker inside the shared adapter directory. Content cannot prove
 // ownership — every copy of the same release is byte-identical — so whoever
@@ -258,7 +258,7 @@ process.exit(result.status ?? 1);
     process.exit(1);
   }
 
-  console.log(`anolisa-tokenless: Linked ${BINARIES.length} binaries for ${platform()}-${arch()}`);
+  console.log(`anolisa-tokenless: Linked ${BINARIES.join(', ')} for ${platform()}-${arch()}`);
 
   installAdapters();
 }
