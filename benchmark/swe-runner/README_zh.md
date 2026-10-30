@@ -290,8 +290,8 @@ swe-runner run \
 | `--subset, -s` | `lite` | 数据集别名或 HuggingFace dataset path |
 | `--split` | `test` | 数据集 split |
 | `--output, -o` | `./output` | 输出根目录，run 结果写入其 `run/` 子目录 |
-| `--timeout` | `1200` | 单实例 agent 超时时间，单位秒 |
-| `--step-limit` | `0` | 最大步骤数；`0` 表示不限制。当前 `cosh` 会映射为 CLI turn limit |
+| `--timeout` | `1200` | 单实例 agent 超时时间，单位秒，必须为正数 |
+| `--step-limit` | `0` | 非负的最大步骤数；`0` 表示不限制。当前 `cosh` 会映射为 CLI turn limit |
 | `--slice` | 无 | 实例切片，如 `0:10`、`10:`、`:5` |
 | `--filter` | 无 | 实例 ID 正则过滤 |
 | `--instance-id, -i` | 无 | 指定实例 ID，多个用逗号分隔 |
