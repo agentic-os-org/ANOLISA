@@ -102,7 +102,7 @@ class MockServiceManager:
         health_check = _shift_url(svc.get("health_check", ""), self.port_offset)
         health_method = svc.get("health_check_method", "POST")
 
-        if self._is_healthy(health_check, health_method):
+        if health_check and self._is_healthy(health_check, health_method):
             print(f"[mcp-mock] '{name}' already running on :{port}", file=sys.stderr)
             return
 
@@ -122,6 +122,9 @@ class MockServiceManager:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         self.processes.append(proc)
+
+        if not health_check:
+            return
 
         # Give it a moment to start
         time.sleep(1)
