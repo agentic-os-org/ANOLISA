@@ -101,3 +101,21 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 必跑的确定性消费者测试覆盖未知原生字段、来源顺序、凭据引用、更新和覆盖内调用失败。
 内置 Adapter 的来源选择及原生配置限制仍以各 Agent 指南为准；通用 API 本身不解除
 这些限制，也不代表业务 SDK 已验收。用法见[配置说明](configuration.md#记录原生配置来源)。
+
+### Claude SDK 原生配置
+
+| 原生能力 | 兼容情况 | AW 边界 |
+| --- | --- | --- |
+| 默认发现、user/project/local 来源及内联或文件 settings | 沿用 SDK 加载 | 原文件及来源优先级保持原生行为 |
+| 常驻模型地址位于原生 settings | Anthropic Messages 上游沿用合并配置 | 接受 query 前确认会话中继路由，模型响应经过 AW |
+| 项目 Skills 和本地插件 | 保留，并验证原生 CLI 发现 | 内部命令需要单独核对覆盖证据 |
+| CLI 加载的 settings、项目或插件 Hook 改参 | 保留原生行为 | AW 检查公共 Hook 输入；改写后的普通工具命令可能执行，缺少最终参数的 AW 终检 |
+| SDK、HTTP 和 stdio MCP 配置 | 原样保留；HTTP 租户请求头已覆盖验收用例 | 原生工具回调支持观察和前置策略；HTTP 结果保持原样 |
+
+日常工厂回归覆盖原始选项和未知 settings 字段；固定版本原生验收覆盖 settings/Skills、
+插件命令和 HTTP MCP。Bash 文本替换及显式常驻 SDK MCP 单文本替换沿用既有范围。
+运行时与 callback 组合限制见 [Claude SDK 指南](../../../developer-guide/zh/aw/agents/claude-sdk.md)。
+
+已验收的 SDK 0.2.88 / CLI 2.1.161 中，原生 `disableAllHooks: true` 关闭 settings
+Hook，SDK 注册的 AW callbacks 仍执行。原生改参用例记录执行前终检缺口，并验证 AW
+明确拒绝时工具不会执行；这些用例不构成最终参数强制检查验收。

@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--npm", type=Path)
     parser.add_argument("--scenario", choices=["lifecycle", "stop-failure", "cancel", "startup",
-                        "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial", "boundaries"], default="lifecycle")
+                        "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial", "boundaries", "settings"], default="lifecycle")
     parser.add_argument("--evidence-mode", choices=["auto", "off"])
     parser.add_argument("--tokenless", type=Path)
     parser.add_argument("--tokenless-provider", type=Path)

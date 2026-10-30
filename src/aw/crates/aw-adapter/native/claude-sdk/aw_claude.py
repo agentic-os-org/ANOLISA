@@ -177,9 +177,7 @@ class Bridge:
         return {}
 
     def options(self, options: ClaudeAgentOptions) -> ClaudeAgentOptions:
-        """Retain existing matchers and vetoes; reject unchecked argument rewrites."""
-        if options.setting_sources != [] or options.settings is not None or options.plugins:
-            raise ValueError("AW Claude SDK requires setting_sources=[] and no settings/plugins")
+        """Compose SDK callbacks; CLI-loaded Hooks retain their native scheduling."""
         if any(
             key != "strict-mcp-config" or value is not None
             for key, value in options.extra_args.items()

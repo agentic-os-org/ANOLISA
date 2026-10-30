@@ -41,7 +41,7 @@ async def single_input(prompt: AsyncIterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 class ManagedTransport(Transport):
-    """The pinned transport interface is the only SDK-private integration seam."""
+    """Pin native transport, settings controls and callback dispatch identity."""
 
     def __init__(self, options: ClaudeAgentOptions, bridge: Any) -> None:
         if options.can_use_tool:
@@ -50,6 +50,30 @@ class ManagedTransport(Transport):
         self.bridge = bridge
         self._reader: AsyncGenerator[dict[str, Any], None] | None = None
         self._closed = False
+
+    async def model_environment(self, query: Any) -> dict[str, str]:
+        # Let the CLI resolve inline/file, filesystem and managed source precedence.
+        response = await query._send_control_request({"subtype": "get_settings"})
+        settings = response.get("effective") if isinstance(response, dict) else None
+        environment = settings.get("env", {}) if isinstance(settings, dict) else None
+        if not isinstance(environment, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in environment.items()
+        ):
+            raise CallbackFailure("AW requires the CLI effective settings environment")
+        return dict(environment)
+
+    async def route_model(self, query: Any, endpoint: str) -> None:
+        await query._send_control_request({
+            "subtype": "apply_flag_settings",
+            "settings": {"env": {
+                "ANTHROPIC_BASE_URL": endpoint,
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            }},
+        })
+        environment = await self.model_environment(query)
+        if environment.get("ANTHROPIC_BASE_URL") != endpoint:
+            raise CallbackFailure("Native settings override the required AW model relay")
 
     async def connect(self) -> None:
         if self._closed:

@@ -104,7 +104,7 @@ async def lifecycle():
     )
 
 
-async def task(index, mode, consumer="response"):
+async def task(index, mode, consumer="response", settings_origin=None):
     directory = ROOT / str(index)
     directory.mkdir()
     spec = importlib.util.spec_from_file_location(f"model_{index}", SOURCE)
@@ -114,6 +114,11 @@ async def task(index, mode, consumer="response"):
     fixture.ORIGINAL = f"private-result-{index}"
 
     class Handler(fixture.Handler):
+        def do_POST(self):
+            if settings_origin is not None:
+                assert self.headers.get("x-api-key") == "native-model-fixture"
+            super().do_POST()
+
         def reply(self, data, kind):
             (directory / "requests.json").write_text(json.dumps(fixture.REQUESTS))
             super().reply(data, kind)
@@ -137,12 +142,16 @@ async def task(index, mode, consumer="response"):
         native.append(payload["hook_event_name"])
         return {}
 
+    skill = directory / ".claude/skills/aw-resident-fixture/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: aw-resident-fixture\ndescription: Native configuration fixture\n---\nReturn fixture text.\n")
     options = ClaudeAgentOptions(
         model="claude-sonnet-4-6",
         cwd=str(directory),
         tools=["Bash"],
         allowed_tools=["Bash"],
-        setting_sources=[],
+        setting_sources=["user", "project"],
+        settings='{"env":{"AW_NATIVE_CONFIG":"retained"}}',
         max_turns=2,
         hooks={name: [HookMatcher(hooks=[hook])] for name in ("PreToolUse", "PostToolUse")},
         env={
@@ -154,10 +163,23 @@ async def task(index, mode, consumer="response"):
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         },
     )
+    native_files = {}
+    if settings_origin is not None:
+        from claude_settings import configure
+
+        options, native_files = configure(
+            options, directory, settings_origin, f"http://127.0.0.1:{server.server_port}"
+        )
     client = create_client(options)
     failed = False
     try:
         async with client:
+            if settings_origin is not None:
+                assert client._aw_relay.upstream == f"http://127.0.0.1:{server.server_port}"
+                assert client.options.settings == options.settings
+                assert options.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1"
+            info = await client.get_server_info()
+            assert any(command["name"] == "aw-resident-fixture" for command in info["commands"]), info
             cli_pid = (
                 client._transport.delegate._process.pid
             )  # Test-only process evidence; production uses public SDK methods.
@@ -184,6 +206,7 @@ async def task(index, mode, consumer="response"):
                 else:
                     raise AssertionError("failed client accepted another query")
         await client.disconnect()
+        assert all(path.read_bytes() == content for path, content in native_files.items())
         try:
             await client.connect()
         except RuntimeError:
@@ -227,6 +250,11 @@ async def main():
     config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
     assert Path(config["ready_path"]).exists()
     scenario = os.environ.get("AW_TEST_SCENARIO", "lifecycle")
+    if scenario == "settings":
+        from claude_settings import run
+
+        await run(ROOT, task, RESULTS)
+        return
     if scenario in {"messages", "eof-stop-failure"}:
         from claude_messages import run, eof_stop_failure
         if scenario == "eof-stop-failure":

@@ -157,7 +157,7 @@
         "mcp==1.26.0",
         "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -218,7 +218,16 @@
                   "bash-compress-tool-failure",
                   "bash-pretool",
                   "bash-pretool-deny",
-                  "mcp-error-compress"
+                  "mcp-error-compress",
+                  "http-mcp",
+                  "settings-disabled-hooks",
+                  "settings-native-deny",
+                  "bash-native-rewrite-inline",
+                  "bash-native-rewrite-inline-deny",
+                  "bash-native-rewrite-project",
+                  "bash-native-rewrite-project-deny",
+                  "bash-native-rewrite-plugin",
+                  "bash-native-rewrite-plugin-deny"
                 ]
               }
             }
@@ -248,6 +257,35 @@
                 "passed": true,
                 "status/bindings": 0,
                 "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-model-settings",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-model-settings",
+            "--scenario",
+            "settings"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-model-settings/result.json",
+              "values": {
+                "tasks": 8,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "concurrent_settings_clients": 2
               }
             }
           ]

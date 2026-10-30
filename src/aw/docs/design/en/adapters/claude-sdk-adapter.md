@@ -37,11 +37,16 @@ retains its defined stderr blocking reason through that transport.
 A block returns a native `permissionDecision: deny`; callback transport errors
 with before `on_error: block` also return deny. Neutral responses preserve existing
 native permissions. Existing hooks may veto execution, including while AW is
-running concurrently; an existing `allow` cannot erase an AW deny. To prevent
-unchecked final arguments, original pre callbacks receive separate input copies;
-any `updatedInput` response is replaced by an explicit deny. A `can_use_tool`
-callback retains allow/deny, but a changed `updated_input` becomes deny. Argument rewriting and
-approval are outside this contract. When a
+running concurrently; an existing `allow` cannot erase an AW deny. Original SDK
+pre callbacks receive separate input copies; their `updatedInput` responses are
+replaced by explicit deny. A wrapped `can_use_tool` callback retains allow/deny,
+but a changed `updated_input` becomes deny. These guards cover Python SDK callbacks.
+CLI-loaded settings/project/plugin Hooks run outside these wrappers. They can
+rewrite an ordinary Bash command after AW checked its public Hook input; the
+rewritten command can execute without another AW check. This Adapter provides
+public-Hook coverage and has no final-argument execution gate. Applications needing
+that guarantee require a separately verified execution boundary. AW never emits
+an approval. When a
 `tool.before` route is active, the factory rejects nonempty `PermissionRequest`
 matchers before client initialization: their nested `decision.updatedInput`
 cannot be checked by AW, and CLI 2.1.161 did not enforce their decisions in the
@@ -102,11 +107,30 @@ shutdown. Overlong socket paths fail with an explicit request for a shorter outp
 The opt-in requirements fix MCP 1.26.0 because SDK 0.2.88's dependency range can
 resolve MCP 2.x, which lacks the `Server.list_tools` method used by this SDK.
 
-The options factory requires `setting_sources=[]`, no `settings` override and no
-CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
-`strict_mcp_config` option is also preserved. Model/authentication options are
-unchanged. Applications which discover project skills through settings sources
-need an explicit integration design before using this restricted first bridge.
+The factory preserves `setting_sources` (including native default discovery), inline or
+file-based `settings`, local `plugins`, and SDK/HTTP/stdio `mcp_servers`. The SDK
+loads the original sources in their native order and discovers project Skills;
+AW does not parse, copy or translate these configuration files. Existing callback
+composition and runtime restrictions above still apply. `extra_args` continues
+to allow only `strict-mcp-config: None`; use the SDK options for settings and MCP.
+Model/authentication options are unchanged. Native configuration compatibility
+does not expand the Hook effects or certify commands executed inside Skills/plugins.
 Only one client can be created in each foreground worker.
+
+## Resident model routing
+
+After the SDK handshake and before accepting a query, the pinned native
+`get_settings` control returns the CLI's effective environment. The relay combines
+it with the process/options environment, preserving native source precedence for
+the upstream endpoint, proxy and TLS configuration. CLI authentication remains
+native. This upstream snapshot lasts for the client; changes require a new client.
+`apply_flag_settings` overlays only the session's relay endpoint and
+nonessential-traffic flag; configuration files and other settings stay intact.
+Another native read confirms the effective relay endpoint before connect returns.
+These controls and relay startup share a five-second deadline. Unsupported
+controls, an unadopted route or a non-Anthropic transport reject the connection
+and clean up the SDK, relay and scope. There is no direct model fallback.
+The `resident-model-settings` acceptance covers inline/file settings, user,
+project/local and default sources, credentials, two turns and concurrent clients.
 
 The explicit resident [MCP handler factory](claude-mcp.md) additionally supports reliable MCP success/error classification and single-text replacement. It uses Adapter-owned correlation and suppresses duplicate AW native callbacks for claimed tools.

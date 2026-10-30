@@ -213,9 +213,7 @@ def run_case(
         (case / "stderr.log").write_text(stderr)
         if mode in {
             "unready",
-            "settings",
             "cli-path",
-            "plugins",
             "extra-args",
             "permission-hook-rewrite",
             "permission-prompt",
@@ -254,6 +252,22 @@ def run_case(
             )
         )
         report = json.loads((case / "report.json").read_text())
+        if mode.startswith("bash-native-rewrite-"):
+            denied = mode.endswith("-deny")
+            policies = [json.loads(line) for line in (case / "policy-events.jsonl").read_text().splitlines()]
+            before = [event for event in policies if event["name"] == "tool.before"]
+            after = [event for event in policies if event["name"] == "tool.after"]
+            assert len(before) == 1 and len(after) == (0 if denied else 1), policies
+            assert "rewritten-effect" not in before[0]["tool"]["input"]["command"], policies
+            assert not report["effect"] and report["rewritten_effect"] == (not denied), report
+            if after:
+                assert after[0]["tool"]["input"]["command"] == "printf rewritten > rewritten-effect", policies
+                assert before[0]["tool"]["call_id"] == after[0]["tool"]["call_id"], policies
+            # Public-Hook coverage ends at its callback input; native rewrites
+            # need a separate final execution boundary before claiming coverage.
+            return {"mode": mode, "output": str(case), "events": len(policies),
+                    "session_id": before[0]["session_id"], "final_argument_check": False,
+                    "native_rewrite_executed": not denied, "aw_denied": denied}
         allowed = mode in {
             "allow",
             "failure",
@@ -262,6 +276,10 @@ def run_case(
             "before-report-failure",
             "after-report-failure",
             "strict-mcp-config",
+            "settings",
+            "settings-disabled-hooks",
+            "plugins",
+            "http-mcp",
             "many-denials",
             "bash-compress",
             "bash-compress-observer-failure",
@@ -274,6 +292,14 @@ def run_case(
             "native-hook-invalid-chain",
         }
         assert report["effect"] == allowed, report
+        if mode.startswith("settings"):
+            assert (case / "native-settings-hook").exists() == (
+                mode != "settings-disabled-hooks"
+            ), report
+        if mode == "http-mcp":
+            assert json.loads(report["tool_results"][-1]["content"]) == {
+                "tenant": "fixture-tenant"
+            }, report
         events = report["events"]
         before = [event for event in events if event["hook_event_name"] == "PreToolUse"]
         after = [
@@ -509,9 +535,18 @@ def main() -> None:
             "strict-mcp-config",
             "unready",
             "settings",
+            "settings-disabled-hooks",
+            "settings-native-deny",
             "cli-path",
             "plugins",
+            "http-mcp",
             "extra-args",
+            "bash-native-rewrite-inline",
+            "bash-native-rewrite-inline-deny",
+            "bash-native-rewrite-project",
+            "bash-native-rewrite-project-deny",
+            "bash-native-rewrite-plugin",
+            "bash-native-rewrite-plugin-deny",
         ]
     ]
     if args.tokenless is not None:

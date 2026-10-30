@@ -10,6 +10,40 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, t
 use support::{Fixture, Service, TIMEOUT};
 
 #[test]
+fn native_configuration_preserves_sources_plugins_and_http_mcp() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(root.join("tests/fixtures/claude-sdk/options_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn resident_model_settings_preserve_native_precedence_and_require_relay_adoption() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(root.join("tests/fixtures/claude-sdk/settings_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 6 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn managed_response_iterators_close_before_native_teardown() {
     let fixture = Fixture::new();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

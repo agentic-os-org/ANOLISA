@@ -996,6 +996,14 @@
     "qoder-sdk-read-pii": {
       "target": "aw-provider-sec-core/test/pii",
       "test": "qoder_read_projection_allows_replacement_only_with_a_safe_retained_envelope"
+    },
+    "claude-native-configuration": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "native_configuration_preserves_sources_plugins_and_http_mcp"
+    },
+    "claude-native-model-settings": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "resident_model_settings_preserve_native_precedence_and_require_relay_adoption"
     }
   },
   "agents": {
@@ -1081,7 +1089,9 @@
         "resident-bridge-isolation",
         "resident-bridge-expiry",
         "resident-bridge-generation",
-        "python-scope-validity"
+        "python-scope-validity",
+        "claude-native-configuration",
+        "claude-native-model-settings"
       ],
       "security": [
         "security-retry",

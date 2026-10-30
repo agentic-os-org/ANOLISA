@@ -42,6 +42,12 @@ def main() -> None:
         raise SystemExit(9)
     with (Path.cwd() / "policy-events.jsonl").open("a") as log:
         log.write(json.dumps(event) + "\n")
+    if mode.startswith("bash-native-rewrite-"):
+        blocked = event["name"] == "tool.before" and (
+            "rewritten-effect" in event["tool"]["input"]["command"] or mode.endswith("-deny")
+        )
+        print(json.dumps(blocked))
+        return
     time.sleep(0.1)
     if mode == "many-denials" and event["name"] == "tool.before":
         counter = Path.cwd() / "before-count"

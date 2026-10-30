@@ -116,3 +116,24 @@ credential references, updates and covered-call failures. Built-in Adapter
 source selection and native configuration restrictions remain documented in
 their Agent guides; this API alone does not remove them or certify business SDK
 acceptance. See [configuration](configuration.md#record-native-configuration-sources).
+
+### Claude SDK native configuration
+
+| Native capability | Compatibility | AW boundary |
+| --- | --- | --- |
+| Default discovery, user/project/local sources and inline/file settings | Preserved through the SDK loader | Existing files and source precedence stay native |
+| Resident model endpoint in native settings | Anthropic Messages upstream follows effective native settings | A confirmed session route sends model responses through AW before queries are accepted |
+| Project Skills and local plugins | Preserved; native CLI discovery tested | Internal commands require separate coverage evidence |
+| CLI-loaded settings/project/plugin argument rewrites | Native behavior retained | AW checks public Hook input; a rewritten ordinary tool command can execute without a final AW check |
+| SDK, HTTP and stdio MCP configuration | Preserved without protocol conversion; HTTP tenant header tested | Native tool callbacks support observation and before policies; HTTP results remain unchanged |
+
+The regular factory regression covers original options and unknown settings fields.
+Pinned native acceptance covers settings/Skills, plugin commands and HTTP MCP.
+Bash text replacement and explicit resident SDK MCP single-text replacement retain
+their existing limits. Runtime and callback composition restrictions are listed in
+the [Claude SDK guide](../../../developer-guide/en/aw/agents/claude-sdk.md).
+
+On the verified SDK 0.2.88 / CLI 2.1.161 baseline, native `disableAllHooks: true`
+disables settings Hooks while registered SDK AW callbacks still run. Native rewrite
+cases record the unchecked execution boundary and confirm that an AW deny still
+prevents execution. These cases do not certify final-argument enforcement.
