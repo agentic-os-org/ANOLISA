@@ -355,11 +355,22 @@ fn extract_verdict(content: &str) -> Result<bool, String> {
         }
     }
     let uppercase = text.to_uppercase();
-    match (uppercase.contains("PASS"), uppercase.contains("DENY")) {
+    match (
+        contains_standalone_word(&uppercase, "PASS"),
+        contains_standalone_word(&uppercase, "DENY"),
+    ) {
         (true, false) => Ok(false),
         (false, true) => Ok(true),
         _ => Err(text.chars().take(120).collect()),
     }
+}
+
+// Word-boundary match so that a word merely containing the verdict as a
+// substring (e.g. "bypass" containing "PASS") cannot flip the scan verdict.
+fn contains_standalone_word(haystack: &str, word: &str) -> bool {
+    haystack
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|token| token == word)
 }
 
 fn json_candidates(text: &str) -> Vec<&str> {
@@ -458,6 +469,24 @@ mod tests {
         ] {
             assert_eq!(extract_verdict(content), Ok(expected), "{content}");
         }
+    }
+
+    #[test]
+    fn v1_verdict_fallback_requires_standalone_words() {
+        // "bypass" merely contains the substring "PASS" and "denied" merely
+        // contains "DENY": neither is a verdict, so both must be unparsable
+        // (fail closed) instead of flipping the scan verdict.
+        assert!(
+            extract_verdict("the code cannot bypass the sandbox").is_err(),
+            "substring 'PASS' inside 'bypass' must not parse as a PASS verdict"
+        );
+        assert!(
+            extract_verdict("the request was denied by the filter").is_err(),
+            "substring 'DENY' inside 'denied' must not parse as a DENY verdict"
+        );
+        // Standalone verdict words still parse, even with trailing punctuation.
+        assert_eq!(extract_verdict("Verdict: PASS."), Ok(false));
+        assert_eq!(extract_verdict("Verdict: DENY!"), Ok(true));
     }
 
     #[test]
