@@ -72,9 +72,22 @@ async function componentVersion(sourcePath) {
   const cargoPath = path.join(repoRoot, sourcePath, 'Cargo.toml');
   if (await exists(cargoPath)) {
     const cargo = await readFile(cargoPath, 'utf8');
-    const workspaceVersion = cargo.match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
-    const packageVersion = cargo.match(/\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
-    if (workspaceVersion || packageVersion) return workspaceVersion || packageVersion;
+    const tables = new Map();
+    let table;
+    for (const line of cargo.split(/\r?\n/)) {
+      if (/^\s*\[/.test(line)) {
+        const name = line.match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/)?.[1];
+        table = name ? [] : undefined;
+        if (name) tables.set(name, table);
+      } else if (table) {
+        table.push(line);
+      }
+    }
+    const versionIn = (name) => tables.get(name)?.join('\n')
+      .match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+    const packageVersion = versionIn('package');
+    const workspaceVersion = versionIn('workspace.package');
+    if (packageVersion || workspaceVersion) return packageVersion || workspaceVersion;
   }
   for (const pyproject of ['pyproject.toml', 'agent-sec-cli/pyproject.toml']) {
     const pyprojectPath = path.join(repoRoot, sourcePath, pyproject);
