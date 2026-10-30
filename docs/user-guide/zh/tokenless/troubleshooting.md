@@ -189,7 +189,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 和 `rtk` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
+npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
 
 ## QwenPaw 安装提示 SDK wheel 不可用
 
@@ -231,13 +231,15 @@ curl -sIL -o /dev/null -w '%{http_code}\n' "<wheel URL from the message>"
 不是所有命令都有 RTK 重写规则。先独立测试：
 
 ```bash
-rtk rewrite "ls -la"
+tokenless rtk rewrite "ls -la"
 ```
 
-如果 `rtk` 不存在：
+RTK 已链接进 `tokenless`，不需要单独的 `rtk` 可执行文件。如果 `tokenless rtk`
+不是可识别的命令，说明当前生效的 `tokenless` 早于内嵌 RTK 的版本；检查实际运行的版本：
 
 ```bash
-command -v rtk
+command -v tokenless
+tokenless --version
 ```
 
 如果 RTK 正常但 Agent 中不生效，检查框架支持矩阵、Adapter 状态和是否已经重启会话。

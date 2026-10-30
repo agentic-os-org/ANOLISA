@@ -30,15 +30,15 @@ that invocation without requiring another dispatcher.
 
 PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`, and
 `mcp__qw-builtin__mcp_workspace_bash`; RTK decides whether to rewrite each command.
-PowerShell calls bind the native RTK executable and scope attribution variables
-to that invocation. PostTool classifies PowerShell output as command output,
+PowerShell calls run RTK through the native `tokenless.exe` and scope attribution
+variables to that invocation. PostTool classifies PowerShell output as command output,
 retains file-content protection, and avoids compressing RTK output twice.
 Unsupported commands pass through.
 
-The PowerShell wrapper uses a child-scope `rtk` alias. In a rewritten compound
-command, this also binds any pre-existing bare `rtk` invocation to the managed
-binary; POSIX binding only changes calls inserted by the rewrite. Explicit
-executable paths are unaffected. The wrapper preserves `$?` and `$LASTEXITCODE`
+The PowerShell wrapper replaces each RTK call inserted by the rewrite with
+`& '<path>\tokenless.exe' rtk`. Pre-existing bare `rtk` invocations and explicit
+executable paths are unaffected. When an inserted call does not start a PowerShell
+command, the rewrite is skipped and the original command passes through. The wrapper preserves `$?` and `$LASTEXITCODE`
 after restoring attribution variables, including nonzero native exits, without
 adding stderr output or entries to `$Error`.
 When this wrapper is the final command passed to `powershell -Command` or
@@ -67,8 +67,8 @@ that separately in a QwenWork local session.
 Native binary discovery uses the executable's sibling directory and absolute
 PATH entries. Unlike Unix, Windows discovery does not check file or directory
 ACLs, ownership, or reparse points: configured installation and PATH directories
-are trusted. RTK resolution accepts only `.exe`; general dependency discovery
-also accepts `.com`, `.bat`, and `.cmd` entries from `PATHEXT`.
+are trusted. Dependency discovery accepts `.exe` and also the `.com`, `.bat`,
+and `.cmd` entries from `PATHEXT`.
 
 Windows support covers the native CLI and QwenWork adapter. npm copies other
 adapter resources but skips Claude auto-enable; other Windows adapters are not

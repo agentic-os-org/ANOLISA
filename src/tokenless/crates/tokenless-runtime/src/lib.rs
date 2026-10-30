@@ -13,8 +13,8 @@ use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
 use tokenless_compressors::{JsonCompressionConfig, numbers_are_exact};
 use tokenless_protocol::{
     Attribution as ProtocolAttribution, BeforeModelRequest, BeforeModelResponse, ContentOrigin,
-    OutputOptimization, PostToolCapabilities, PostToolRequest, PostToolResponse, PreToolRequest,
-    PreToolResponse, ResultKind, RetrieveRequest, RetrieveResponse, ToolResultStatus,
+    OutputOptimization, PostToolCapabilities, PostToolRequest, PostToolResponse, ResultKind,
+    RetrieveRequest, RetrieveResponse, ToolResultStatus,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
@@ -27,10 +27,7 @@ mod post_tool;
 mod taxonomy;
 
 pub use entry::{EntryOptions, EntryOutcome, dispatch_with_store, response_operation};
-use entry::{
-    before_model_with_store, post_tool_with_outcomes, pre_tool_with_rtk,
-    retrieve_authorized_with_store,
-};
+use entry::{before_model_with_store, post_tool_with_outcomes, retrieve_authorized_with_store};
 use post_tool::{PostToolPipeline, PostToolPipelineConfig};
 
 /// Why a compression attempt did or did not replace the input: the protocol
@@ -242,39 +239,12 @@ pub enum RuntimeError {
     /// The PostTool domain compressor failed.
     #[error("{0}")]
     Pipeline(String),
-    /// PreTool was requested without a resolved RTK executable.
-    #[error("RTK executable is unavailable")]
-    RtkUnavailable,
+    /// PreTool was requested without the executable that runs rewritten RTK commands.
+    #[error("Tokenless executable for RTK commands is unavailable")]
+    RtkLauncherUnavailable,
     /// PreTool was requested without the state directory required by RTK.
     #[error("RTK state directory is unavailable")]
     RtkDataDirectoryUnavailable,
-    /// RTK could not be started.
-    #[error("failed to start RTK at '{}': {source}", path.display())]
-    RtkSpawn {
-        /// Executable selected by the caller.
-        path: PathBuf,
-        /// Process spawn failure.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Waiting for RTK failed.
-    #[error("failed while waiting for RTK: {0}")]
-    RtkWait(std::io::Error),
-    /// Reading RTK output failed.
-    #[error("failed to read RTK output: {0}")]
-    RtkOutput(std::io::Error),
-    /// RTK exceeded the lifecycle timeout.
-    #[error("RTK rewrite timed out after 5 seconds")]
-    RtkTimeout,
-    /// RTK terminated without an exit code.
-    #[error("RTK rewrite terminated without an exit code")]
-    RtkTerminated,
-    /// RTK returned a code outside its documented protocol.
-    #[error("RTK rewrite exited with unexpected code {code}")]
-    RtkUnexpectedExit {
-        /// Unexpected process exit code.
-        code: i32,
-    },
 }
 
 /// Stateful Tokenless service for in-process callers.
@@ -420,7 +390,7 @@ impl TokenlessRuntime {
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: None,
         };
         let outcome = before_model_with_store(request, &options, self.stash_store.as_ref())?;
@@ -435,21 +405,6 @@ impl TokenlessRuntime {
             self.config.sls_enabled,
         );
         Ok(outcome.response)
-    }
-
-    /// Runs the PreTool RTK rewrite service with a caller-resolved executable.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RuntimeError`] when RTK cannot run or violates its exit-code
-    /// contract.
-    pub fn pre_tool(
-        &self,
-        request: &PreToolRequest,
-        attribution: &ProtocolAttribution,
-        rtk_path: &Path,
-    ) -> Result<PreToolResponse, RuntimeError> {
-        pre_tool_with_rtk(request, attribution, rtk_path, &self.data_dir)
     }
 
     /// Runs PostTool routing and the content-domain pipeline.
@@ -468,7 +423,7 @@ impl TokenlessRuntime {
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: Some(self.data_dir.clone()),
         };
         let outcome =
@@ -1873,7 +1828,7 @@ mod tests {
             diff_compression_enabled: config.diff_compression_enabled,
             html_extraction_enabled: config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: None,
         }
     }

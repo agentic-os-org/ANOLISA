@@ -24,6 +24,10 @@ chrono = { workspace = true, features = ["serde"] }
 rusqlite.workspace = true
 libc.workspace = true
 regex.workspace = true
+rtk.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

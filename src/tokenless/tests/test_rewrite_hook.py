@@ -273,18 +273,15 @@ class RealCorePreToolTest(unittest.TestCase):
             home.mkdir()
             bin_dir.mkdir()
             os.symlink(corpus.DEBUG_TOKENLESS_BIN, bin_dir / "tokenless")
+            # RTK is embedded: a stray PATH rtk must neither rewrite nor run.
             rtk = bin_dir / "rtk"
-            rtk.write_text(
-                "#!/bin/sh\n"
-                'if [ "$1" = "--version" ]; then echo \'rtk 0.43.0\'; exit 0; fi\n'
-                'if [ "$1" = "rewrite" ]; then echo \'rtk grep --count error log\'; exit 0; fi\n'
-                "exit 1\n"
-            )
+            rtk.write_text("#!/bin/sh\nexit 97\n")
             rtk.chmod(rtk.stat().st_mode | stat.S_IXUSR)
             env = {
                 **os.environ,
                 "HOME": str(home),
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "TOKENLESS_DATA_DIR": str(root / "data"),
                 "TOKENLESS_AGENT_ID": "qoder-cli",
                 "TOKENLESS_STATS_ENABLED": "0",
                 "TOKENLESS_SLS_ENABLED": "0",
@@ -300,7 +297,8 @@ class RealCorePreToolTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             output = json.loads(proc.stdout)["hookSpecificOutput"]
             command = output["tool_input"]["command"]
-            self.assertIn(f" {rtk} grep --count error log", command)
+            launcher = os.path.realpath(corpus.DEBUG_TOKENLESS_BIN)
+            self.assertIn(f" {launcher} rtk grep error log", command)
             self.assertIn("TOKENLESS_AGENT_ID=qoder-cli", command)
             self.assertEqual(output["updatedInput"]["timeout"], 30)
 

@@ -194,7 +194,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-The npm/manual install script differs in *how* it consents, not *whether*: it adds `--dangerously-force-unsafe-install` automatically whenever the installer still advertises that option as effective, because the plugin launches fixed `tokenless` and `rtk` child processes. Hosts that mark the option a deprecated no-op (OpenClaw 2026.6.5+) never receive it — there the safety scan is decided by `security.installPolicy`, so a rejection must be resolved by the operator relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
+The npm/manual install script differs in *how* it consents, not *whether*: it adds `--dangerously-force-unsafe-install` automatically whenever the installer still advertises that option as effective, because the plugin launches the fixed `tokenless` child process. Hosts that mark the option a deprecated no-op (OpenClaw 2026.6.5+) never receive it — there the safety scan is decided by `security.installPolicy`, so a rejection must be resolved by the operator relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
 
 ## QwenPaw install reports an unavailable SDK wheel
 
@@ -246,13 +246,16 @@ pip and reports whatever pip reports.
 RTK does not have a rewrite rule for every command. Test it directly:
 
 ```bash
-rtk rewrite "ls -la"
+tokenless rtk rewrite "ls -la"
 ```
 
-If `rtk` is missing:
+RTK is linked into `tokenless`, so no separate `rtk` executable is needed. If
+`tokenless rtk` is not a recognized command, the active `tokenless` predates the
+embedded RTK; check which one runs:
 
 ```bash
-command -v rtk
+command -v tokenless
+tokenless --version
 ```
 
 If RTK works directly but not in the agent, inspect the framework support matrix, adapter status, and whether the session was restarted.

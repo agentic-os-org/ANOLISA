@@ -329,36 +329,29 @@ class TestBinaryFallbackPaths(unittest.TestCase):
         return module
 
     def test_supported_install_layouts_are_covered(self) -> None:
-        paths = self._hook_utils()._known_binary_paths("rtk", "/home/alice")
+        paths = self._hook_utils()._known_binary_paths("tokenless", "/home/alice")
         expected = (
-            "/home/alice/.local/bin/rtk",
-            "/home/alice/.local/libexec/tokenless/rtk",
-            "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
-            "/home/alice/.local/libexec/anolisa/tokenless/rtk",
-            "/usr/local/bin/rtk",
-            "/usr/local/libexec/tokenless/rtk",
-            "/usr/local/libexec/anolisa/tokenless/rtk",
-            "/usr/bin/rtk",
-            "/usr/libexec/tokenless/rtk",
-            "/usr/libexec/anolisa/tokenless/rtk",
-            "/usr/lib/anolisa/tokenless/rtk",
-            "/home/alice/.local/share/anolisa/tokenless/rtk",
-            "/home/alice/.local/lib/anolisa/tokenless/rtk",
+            "/home/alice/.local/bin/tokenless",
+            "/usr/local/bin/tokenless",
+            "/usr/bin/tokenless",
         )
         self.assertEqual(paths, expected)
 
-    def test_generic_binaries_skip_tokenless_helper_dirs(self) -> None:
-        paths = self._hook_utils()._known_binary_paths("docker", "/home/alice")
-        self.assertIn("/home/alice/.local/bin/docker", paths)
-        self.assertIn("/usr/local/bin/docker", paths)
-        self.assertIn("/usr/bin/docker", paths)
-        self.assertFalse(any("tokenless" in path for path in paths))
+    def test_binaries_skip_retired_tokenless_helper_dirs(self) -> None:
+        # RTK is linked into tokenless; no layout carries a standalone helper.
+        for name in ("docker", "rtk"):
+            with self.subTest(name=name):
+                paths = self._hook_utils()._known_binary_paths(name, "/home/alice")
+                self.assertIn(f"/home/alice/.local/bin/{name}", paths)
+                self.assertIn(f"/usr/local/bin/{name}", paths)
+                self.assertIn(f"/usr/bin/{name}", paths)
+                self.assertFalse(any("tokenless" in path for path in paths))
 
     def test_user_layouts_require_an_absolute_home(self) -> None:
         hook_utils = self._hook_utils()
         for home in ("", "relative/home"):
             with self.subTest(home=home):
-                paths = hook_utils._known_binary_paths("rtk", home)
+                paths = hook_utils._known_binary_paths("tokenless", home)
                 self.assertTrue(all(os.path.isabs(path) for path in paths))
                 self.assertFalse(any(".local" in path for path in paths))
 
@@ -385,24 +378,22 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                     ("/usr/local/bin/tokenless", "/usr/bin/tokenless"),
                 )
 
-    def test_resolver_finds_makefile_user_helper_without_path(self) -> None:
+    def test_resolver_finds_user_install_without_path(self) -> None:
         hook_utils = self._hook_utils()
         with tempfile.TemporaryDirectory() as home:
-            helper_dir = os.path.join(
-                home, ".local", "libexec", "tokenless"
-            )
-            os.makedirs(helper_dir)
-            rtk_path = os.path.join(helper_dir, "rtk")
-            with open(rtk_path, "w", encoding="utf-8") as handle:
+            local_bin = os.path.join(home, ".local", "bin")
+            os.makedirs(local_bin)
+            tokenless_path = os.path.join(local_bin, "tokenless")
+            with open(tokenless_path, "w", encoding="utf-8") as handle:
                 handle.write("#!/bin/sh\n")
-            os.chmod(rtk_path, 0o755)
+            os.chmod(tokenless_path, 0o755)
 
             hook_utils._resolved_cache.clear()
             with (
                 mock.patch.dict(os.environ, {"HOME": home}),
                 mock.patch.object(hook_utils.shutil, "which", return_value=None),
             ):
-                self.assertEqual(hook_utils.resolve_binary("rtk"), rtk_path)
+                self.assertEqual(hook_utils.resolve_binary("tokenless"), tokenless_path)
             hook_utils._resolved_cache.clear()
 
     def test_resolver_prefers_user_layout_to_explicit_legacy_fallback(self) -> None:
@@ -412,9 +403,9 @@ class TestBinaryFallbackPaths(unittest.TestCase):
             legacy_bin = os.path.join(home, "legacy")
             os.makedirs(local_bin)
             os.makedirs(legacy_bin)
-            user_rtk = os.path.join(local_bin, "rtk")
-            legacy_rtk = os.path.join(legacy_bin, "rtk")
-            for path in (user_rtk, legacy_rtk):
+            user_tokenless = os.path.join(local_bin, "tokenless")
+            legacy_tokenless = os.path.join(legacy_bin, "tokenless")
+            for path in (user_tokenless, legacy_tokenless):
                 with open(path, "w", encoding="utf-8") as handle:
                     handle.write("#!/bin/sh\n")
                 os.chmod(path, 0o755)
@@ -425,7 +416,7 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                 mock.patch.object(hook_utils.shutil, "which", return_value=None),
             ):
                 self.assertEqual(
-                    hook_utils.resolve_binary("rtk", legacy_rtk), user_rtk
+                    hook_utils.resolve_binary("tokenless", legacy_tokenless), user_tokenless
                 )
             hook_utils._resolved_cache.clear()
 
