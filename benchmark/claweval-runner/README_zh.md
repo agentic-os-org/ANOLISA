@@ -193,6 +193,7 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/debug_task.py` | 单任务交互式调试,输出详细信息 |
 | `scripts/analyze.py` | 分析批量 trace 产物 |
 | `scripts/summarize_results.py` | 汇总多次运行的批量结果 |
+| `scripts/compare_session_trace_tokens.py` | 对比 session/trace 的 Token 总数，流式读取大型 JSONL 日志而不缓冲整个文件 |
 | `scripts/generate_trial_reports.py` | 生成每次试验的详细报告 |
 | `scripts/prompt_task.py` | 显示指定任务的 system prompt |
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
