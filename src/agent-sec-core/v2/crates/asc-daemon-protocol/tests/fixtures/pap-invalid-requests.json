@@ -219,6 +219,11 @@
       "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.rules: requires 1..1024 rules"}
     },
     {
+      "name": "rules must not be null",
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1", "rules": null}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid type: null, expected a sequence"}
+    },
+    {
       "name": "rules must be an array",
       "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1", "rules": "bad"}}},
       "expectedError": {"code": "invalid_request", "message": "invalid type: string \"bad\", expected a sequence"}

@@ -447,3 +447,43 @@ fn broader_writes_logical_predicates_and_history_never_lower_to_unconditional_un
         assert_eq!(rejection.code, code);
     }
 }
+
+#[test]
+fn structured_operations_are_independent_and_preserve_identity_without_dsl_lowering() {
+    for (delete, ordinary_write) in [(true, false), (false, true), (true, true)] {
+        let mut binding = structured_binding();
+        let target = &mut binding
+            .policy
+            .template
+            .file_protection
+            .as_mut()
+            .unwrap()
+            .targets[0];
+        target.path = format!("/nonexistent/{}\"literal", "a".repeat(100));
+        target.protections.delete = delete;
+        target.protections.ordinary_write = ordinary_write;
+        let path = target.path.clone();
+        let outcome = AgentSightAdapter.translate(&binding).unwrap();
+        assert_eq!(outcome, AgentSightAdapter.translate(&binding).unwrap());
+        let TranslationOutcome::Translated(plan) = outcome else {
+            panic!("expected v3 plan")
+        };
+        let decoded: AgentSightStructuredBindingPlan =
+            serde_json::from_slice(&plan.content).unwrap();
+        assert_eq!(decoded.file_protection_policy.targets[0].path, path);
+        assert_eq!(
+            decoded.file_protection_policy.targets[0].protections.delete,
+            delete
+        );
+        assert_eq!(
+            decoded.file_protection_policy.targets[0]
+                .protections
+                .ordinary_write,
+            ordinary_write
+        );
+        assert_eq!(decoded.source.binding_revision, binding.binding_revision);
+        assert_eq!(decoded.source.policy_id, binding.policy.policy_id);
+        assert_eq!(decoded.source.policy_revision, binding.policy.revision);
+        assert_eq!(decoded.source.scope_id, binding.scope.scope_id);
+    }
+}

@@ -345,6 +345,101 @@ fn reopen_preserves_snapshots_versions_receipts_and_pid_pin() {
 }
 
 #[test]
+fn reopen_preserves_structured_policy_revisions_snapshots_and_receipts() {
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let binding: PreparedBinding = serde_json::from_str(include_str!(
+        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
+    ))
+    .unwrap();
+    let mut policy1 = binding.policy;
+    policy1.template = serde_json::from_value(serde_json::json!({
+        "specVersion": "0.2",
+        "fileProtection": {"topology": "static_at_apply", "targets": [
+            {"path": "/workspace/important", "kind": "directory_tree",
+             "protections": {"delete": true, "ordinaryWrite": true},
+             "exclusions": [
+                 {"path": "/workspace/important/tmp", "kind": "directory_subtree"}
+             ]},
+            {"path": "/workspace/important/tmp/keep.txt", "kind": "exact_file",
+             "protections": {"delete": true, "ordinaryWrite": true}}
+        ]}
+    }))
+    .unwrap();
+    assert_eq!(repo.put_policy(&policy1).unwrap(), policy1);
+    let scope = PreparedScope {
+        scope_id: binding.scope.scope_id.clone(),
+        selector: binding.scope.selector.clone(),
+        policy_snapshots: vec![policy1.clone()],
+        status: ScopeStatus::Active,
+    };
+    assert_eq!(repo.put_scope(&scope).unwrap(), scope);
+    let intents = repo
+        .sync_scope_instances(
+            &scope.scope_id,
+            std::slice::from_ref(&binding.scope.process),
+        )
+        .unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].status_version, 1);
+    let binding_id = &intents[0].spec.binding_id;
+    let initial = repo.get_binding_state(binding_id).unwrap().unwrap();
+    assert_eq!(initial.status_version, 1);
+    assert_eq!(initial.binding.spec.binding_revision.get(), 1);
+    assert_eq!(initial.binding.spec.policy, policy1);
+    assert_eq!(initial.binding.spec.scope, binding.scope);
+    let mut next = initial.clone();
+    next.binding.status = BindingStatus::Applying.into();
+    let write = BindingStateWrite::new(next);
+    let WriteResult::Applied(receipt) = repo
+        .compare_exchange_binding_state(&initial, &write)
+        .unwrap()
+    else {
+        panic!("structured binding transition was not applied");
+    };
+    assert_eq!(receipt.status_version, Some(2));
+    assert!(receipt.status_applied);
+    let before = repo.get_binding_state(binding_id).unwrap().unwrap();
+    assert_eq!(before.status_version, 2);
+    assert_eq!(before.binding.status, BindingStatus::Applying);
+    assert_eq!(before.binding.spec, initial.binding.spec);
+    let mut policy2 = policy1.clone();
+    policy2.revision = Revision::new(2).unwrap();
+    policy2.template.file_protection.as_mut().unwrap().targets[0]
+        .protections
+        .ordinary_write = false;
+    assert_ne!(policy2.template, policy1.template);
+    assert_eq!(repo.put_policy(&policy2).unwrap(), policy2);
+    assert_eq!(repo.get_scope(&scope.scope_id).unwrap(), scope);
+    assert_eq!(
+        repo.get_binding_state(binding_id).unwrap(),
+        Some(before.clone())
+    );
+    drop(repo);
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let head = repo
+        .get_policy_revision_state(&policy1.policy_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.last_allocated_revision, Revision::new(2).unwrap());
+    assert_eq!(head.current, Some(policy2));
+    assert_eq!(
+        repo.get_policy(&policy1.policy_id, policy1.revision),
+        Err(PapError::NotFound)
+    );
+    let seed = repo.scope_discovery_seed(&scope.scope_id).unwrap();
+    assert_eq!(seed.scope, scope);
+    assert_eq!(seed.pinned_process, Some(binding.scope.process));
+    assert_eq!(repo.get_binding_state(binding_id).unwrap(), Some(before));
+    assert_eq!(
+        repo.compare_exchange_binding_state(&initial, &write)
+            .unwrap(),
+        WriteResult::AlreadyApplied(receipt)
+    );
+}
+
+#[test]
 fn strict_open_rejects_unknown_schema_and_preserves_files() {
     let dir = private_dir();
     let path = dir.path().join("policy-state.db");

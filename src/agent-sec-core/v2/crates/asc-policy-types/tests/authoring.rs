@@ -246,14 +246,16 @@ fn structured_paths_reject_duplicate_targets_and_duplicate_or_conflicting_exclus
         "protections": {"delete": true, "ordinaryWrite": false},
         "exclusions": []
     });
-    assert!(
+    assert_eq!(
         serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([
             target.clone(),
             target.clone()
         ])))
         .unwrap()
         .validate()
-        .is_err()
+        .unwrap_err()
+        .path,
+        "fileProtection.targets[1].path"
     );
 
     for second_kind in ["exact_entry", "directory_subtree"] {
@@ -262,11 +264,116 @@ fn structured_paths_reject_duplicate_targets_and_duplicate_or_conflicting_exclus
             {"path":"/workspace/tree/cache","kind":"exact_entry"},
             {"path":"/workspace/tree/cache","kind":second_kind}
         ]);
-        assert!(
+        let error =
             serde_json::from_value::<PolicyTemplate>(structured_policy(&json!([with_exclusions])))
                 .unwrap()
                 .validate()
-                .is_err()
+                .unwrap_err();
+        assert_eq!(error.path, "fileProtection.targets[0].exclusions[1].path");
+        let classification = if second_kind == "exact_entry" {
+            "duplicates"
+        } else {
+            "conflicts with"
+        };
+        assert_eq!(
+            error.message,
+            format!("{classification} exclusion path at index 0")
         );
+    }
+}
+
+#[test]
+fn omitted_legacy_rules_parse_as_empty_but_fail_typed_validation() {
+    let decoded: PolicyTemplate = serde_json::from_value(json!({"specVersion":"0.1"})).unwrap();
+    assert!(decoded.rules.is_empty());
+    assert_eq!(
+        serde_json::to_value(&decoded).unwrap(),
+        json!({"specVersion":"0.1"})
+    );
+    let error = decoded.validate().unwrap_err();
+    assert_eq!(error.path, "rules");
+    assert_eq!(error.message, "requires 1..1024 rules");
+}
+
+#[test]
+fn structured_dtos_reject_unknown_fields_wrong_casing_and_untyped_values() {
+    let valid = structured_policy(&json!([{
+        "path":"/tree", "kind":"directory_tree",
+        "protections":{"delete":true,"ordinaryWrite":false},
+        "exclusions":[{"path":"/tree/cache","kind":"exact_entry"}]
+    }]));
+    for (pointer, replacement) in [
+        ("/fileProtection/extra", json!(true)),
+        ("/fileProtection/topology", json!("dynamic")),
+        ("/fileProtection/targets/0/extra", json!(true)),
+        ("/fileProtection/targets/0/kind", json!("ExactFile")),
+        (
+            "/fileProtection/targets/0/protections/ordinary_write",
+            json!(true),
+        ),
+        (
+            "/fileProtection/targets/0/protections/delete",
+            json!("true"),
+        ),
+        ("/fileProtection/targets/0/exclusions/0/extra", json!(true)),
+        (
+            "/fileProtection/targets/0/exclusions/0/kind",
+            json!("exact_file"),
+        ),
+        ("/fileProtection/targets", json!(["/tree"])),
+    ] {
+        let mut value = valid.clone();
+        let (parent, field) = pointer.rsplit_once('/').unwrap();
+        value.pointer_mut(parent).unwrap()[field] = replacement;
+        assert!(
+            serde_json::from_value::<PolicyTemplate>(value).is_err(),
+            "{pointer}"
+        );
+    }
+    for pointer in [
+        "/fileProtection/targets/0/protections",
+        "/fileProtection/targets/0/exclusions/0",
+    ] {
+        let mut value = valid.clone();
+        value
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(if pointer.ends_with("protections") {
+                "ordinaryWrite"
+            } else {
+                "kind"
+            });
+        assert!(serde_json::from_value::<PolicyTemplate>(value).is_err());
+    }
+}
+
+#[test]
+fn structured_exclusion_boundary_errors_retain_exact_indices() {
+    let mut value = structured_policy(&json!([{
+        "path":"/", "kind":"directory_tree",
+        "protections":{"delete":true,"ordinaryWrite":false},
+        "exclusions":[{"path":"/child","kind":"exact_entry"}]
+    }]));
+    serde_json::from_value::<PolicyTemplate>(value.clone())
+        .unwrap()
+        .validate()
+        .unwrap();
+    value["fileProtection"]["targets"][0]["path"] = json!("/tree");
+    for path in [
+        "/tree",
+        "/treehouse/child",
+        "/tree/../child",
+        "/tree/*",
+        "/tree/with\0nul",
+        &format!("/tree/{}", "a".repeat(4091)),
+    ] {
+        value["fileProtection"]["targets"][0]["exclusions"][0]["path"] = json!(path);
+        let error = serde_json::from_value::<PolicyTemplate>(value.clone())
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert_eq!(error.path, "fileProtection.targets[0].exclusions[0].path");
     }
 }
