@@ -783,17 +783,43 @@ class OpenClawExternalAgent(BaseAgent):
                 i += 1
                 continue
 
-            # Detect heredoc: "<cmd> <<'MARKER' > <file>"
-            # \S+ matches any command (cat, tee, etc.) — single pattern suffices.
-            m = re.match(r"(\S+)\s*<<\s*'(\w+)'\s*>\s*(\S+)", line)
+            # Detect heredoc in its legal forms:
+            #   "<cmd> <<'MARK' > file" / ">> file"  (redirect after)
+            #   "<cmd> [>>] file <<'MARK'"           (redirect before)
+            #   "<cmd ...> <<'MARK'"                  (bare; sudo tee and
+            #                                          friends write the file
+            #                                          themselves)
+            # Only the first form was recognized: ">>" captured the target
+            # file as literally ">", and the other forms let every body
+            # line leak into the steps as a standalone command.
             marker: str | None = None
             target_file: str | None = None
+            m = re.match(r"(\S+)\s*<<\s*'(\w+)'\s*(>>?)\s*(\S+)", line)
             if m:
                 marker = m.group(2)
-                target_file = m.group(3)
+                target_file = m.group(4)
+            else:
+                m = re.match(r"(\S+)\s*(>>?)\s*(\S+)\s*<<\s*'(\w+)'", line)
+                if m:
+                    target_file = m.group(3)
+                    marker = m.group(4)
+                else:
+                    m = re.match(r"(.+?)\s*<<\s*'(\w+)'", line)
+                    if m:
+                        marker = m.group(2)
+                        cmd_words = m.group(1).split()
+                        if len(cmd_words) > 1:
+                            # e.g. "sudo tee /etc/x.repo": the last argument
+                            # is the file the command writes.
+                            target_file = cmd_words[-1]
 
-            if marker and target_file:
-                block = [f"Write {target_file} with heredoc:"]
+            if marker:
+                label = (
+                    f"Write {target_file} with heredoc:"
+                    if target_file
+                    else "Provide heredoc input:"
+                )
+                block = [label]
                 i += 1
                 body_lines: list[str] = []
                 while i < len(lines):
