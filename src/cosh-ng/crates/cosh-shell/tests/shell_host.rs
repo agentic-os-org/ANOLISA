@@ -105,6 +105,10 @@ fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
         ("HISTSIZE", "1000"),
         ("HISTFILESIZE", "1000"),
         ("PROMPT_COMMAND", ""),
+        // glibc treats an empty LANGUAGE as unset, so this stops an inherited
+        // non-English LANGUAGE from localizing child shell output and breaking
+        // the English assertions (LC_ALL alone does not override LANGUAGE).
+        ("LANGUAGE", ""),
     ] {
         if !config
             .env_overrides
