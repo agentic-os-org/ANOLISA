@@ -57,7 +57,7 @@ fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
 /// - Unknown encoding → return body unchanged
 /// - Decompression failure → return original body (graceful fallback)
 ///
-/// Auto-detection: if `content_encoding` is None/unknown but the body starts
+/// Auto-detection: if `content_encoding` is absent (`None`) but the body starts
 /// with a known magic prefix, the codec is inferred from the bytes. This
 /// handles HTTP/2 responses where the HPACK stateless decoder can't resolve
 /// `Content-Encoding` from the dynamic table. Detected prefixes:
@@ -69,11 +69,35 @@ fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
 pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
     let encoding = content_encoding.map(|e| e.trim().to_lowercase());
 
-    // Resolve the effective encoding: trust the header for known codecs,
-    // otherwise fall back to magic-byte sniffing.
+    // RFC 9110 lists stacked codings in application order. Decode the last
+    // coding first, then work back toward the representation. A single
+    // coding keeps the existing magic-byte and graceful-fallback behavior.
+    if let Some(value) = encoding.as_deref() {
+        let codings: Vec<_> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|coding| !coding.is_empty() && *coding != "identity")
+            .collect();
+        if value.contains(',') && !codings.is_empty() {
+            let mut decoded = body.to_vec();
+            for coding in codings.iter().rev() {
+                let next = decompress_one(&decoded, coding);
+                if next == decoded {
+                    // `decompress_one` uses raw bytes as its failure signal;
+                    // preserve the original stacked representation rather
+                    // than passing a partially decoded body downstream.
+                    return body.to_vec();
+                }
+                decoded = next;
+            }
+            return decoded;
+        }
+    }
+
+    // Trust an explicit coding; sniff magic bytes only when the header is absent.
     let effective_encoding = match encoding.as_deref() {
         Some("gzip") | Some("x-gzip") | Some("deflate") | Some("zstd") | Some("br") => encoding,
-        _ => {
+        None => {
             if body.len() >= 2 && body[0] == 0x1f && body[1] == 0x8b {
                 Some("gzip".to_string())
             } else if body.len() >= 4
@@ -88,12 +112,24 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
                 encoding
             }
         }
+        Some(_) => encoding,
     };
 
     match effective_encoding.as_deref() {
-        Some("gzip") | Some("x-gzip") => decompress_gzip(body),
-        Some("deflate") => decompress_deflate(body),
-        Some("zstd") => {
+        Some("gzip") | Some("x-gzip") | Some("deflate") | Some("zstd") | Some("br") => {
+            decompress_one(body, effective_encoding.as_deref().unwrap_or_default())
+        }
+        _ => body.to_vec(),
+    }
+}
+
+/// Decode one known content coding while retaining the existing fallback
+/// contract: malformed or over-cap input is returned unchanged.
+fn decompress_one(body: &[u8], encoding: &str) -> Vec<u8> {
+    match encoding {
+        "gzip" | "x-gzip" => decompress_gzip(body),
+        "deflate" => decompress_deflate(body),
+        "zstd" => {
             // A streaming decoder (capped via `read_capped`) replaces
             // `zstd::decode_all`, which would allocate the full output up front
             // and so could not bound a bomb. `read::Decoder` still consumes the
@@ -109,7 +145,7 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
                 }
             }
         }
-        Some("br") => read_capped(brotli::Decompressor::new(body, 4096), body, "brotli"),
+        "br" => read_capped(brotli::Decompressor::new(body, 4096), body, "brotli"),
         _ => body.to_vec(),
     }
 }
@@ -503,6 +539,46 @@ mod tests {
     }
 
     #[test]
+    fn stacked_content_codings_are_decoded_in_reverse_order() {
+        let plain = b"stacked coding fixture";
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(plain).unwrap();
+        let gzip = gzip.finish().unwrap();
+        assert_eq!(decompress_body(&gzip, Some("gzip, identity")), plain);
+        assert_eq!(decompress_body(&gzip, Some("identity, gzip")), plain);
+        let mut gzip_then_brotli = Vec::new();
+        {
+            let mut outer = brotli::CompressorWriter::new(&mut gzip_then_brotli, 4096, 3, 22);
+            outer.write_all(&gzip).unwrap();
+        }
+        assert_eq!(
+            decompress_body(&gzip_then_brotli, Some("gzip, br")),
+            plain,
+            "HTTP lists codings in application order, so the last is decoded first"
+        );
+
+        let mut brotli = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut brotli, 4096, 3, 22);
+            encoder.write_all(plain).unwrap();
+        }
+        let mut outer = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        outer.write_all(&brotli).unwrap();
+        let brotli_then_gzip = outer.finish().unwrap();
+        assert_eq!(decompress_body(&brotli_then_gzip, Some("Br , GZIP")), plain);
+    }
+
+    #[test]
+    fn incomplete_content_coding_stack_keeps_the_original_body() {
+        let encoded = zstd::encode_all(b"not a gzip member".as_slice(), 1).unwrap();
+        assert_eq!(decompress_body(&encoded, Some("gzip, zstd")), encoded);
+        assert_eq!(
+            decompress_body(&encoded, Some("unsupported, zstd")),
+            encoded
+        );
+    }
+
+    #[test]
     fn deflate_decompresses_and_corrupt_falls_back() {
         let plain = b"hello deflate";
         let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -576,6 +652,18 @@ mod tests {
         let compressed = enc.finish().unwrap();
         assert_eq!(&compressed[..2], &[0x1f, 0x8b]);
         assert_eq!(decompress_body(&compressed, None), plain);
+    }
+
+    #[test]
+    fn unknown_content_encoding_is_not_magic_decoded() {
+        let plain = b"unknown encoding fixture";
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(plain).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_eq!(
+            decompress_body(&compressed, Some("future-codec")),
+            compressed
+        );
     }
 
     #[test]
