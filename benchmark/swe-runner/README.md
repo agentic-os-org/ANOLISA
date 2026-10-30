@@ -409,6 +409,9 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+Concurrent recorders targeting the same instance reserve distinct `traceN.json` files;
+an existing trace is never overwritten when another writer chooses the same number.
+
 Analyze existing traces:
 
 ```bash
