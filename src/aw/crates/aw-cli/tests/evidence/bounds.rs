@@ -141,9 +141,12 @@ fn shorter_query_timeout_freezes_an_explicit_gap_and_preserves_hook_budget() {
 fn concurrent_freeze_and_closure_do_not_wait_for_http_or_publish_late_evidence() {
     let fixture = Fixture::new();
     let source = Source::new(&fixture, trajectory(1));
-    *source.delay.lock().unwrap() = Duration::from_millis(700);
+    // Leave room for CI scheduling while keeping HTTP slower than event closure.
+    *source.delay.lock().unwrap() = Duration::from_secs(5);
     let mut document = fixture.document();
     source.configure(&mut document);
+    document["spec"]["execution"]["default_event_budget_ms"] = json!(10000);
+    document["spec"]["agents"]["target"]["evidence"]["query_timeout_ms"] = json!(8000);
     let service = Running::start(&fixture, &document);
     let binding = fixture.bind(&service.client);
     let handle = hook(
@@ -164,7 +167,11 @@ fn concurrent_freeze_and_closure_do_not_wait_for_http_or_publish_late_evidence()
             .is_err());
         let started = Instant::now();
         close(&service.client, &handle);
-        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "event closure took {:?} while HTTP was pending",
+            started.elapsed()
+        );
         assert!(pending.join().unwrap().is_err());
     });
     let chain = audit(&service.client, &handle.event_id);
