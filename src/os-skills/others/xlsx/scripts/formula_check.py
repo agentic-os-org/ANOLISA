@@ -32,6 +32,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import re
 import json
+import posixpath
 
 # OOXML SpreadsheetML namespace
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -91,9 +92,14 @@ def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
         rid = rel.get("Id", "")
         target = rel.get("Target", "")
         if "worksheets" in target:
-            # Target may be relative: "worksheets/sheet1.xml" -> "xl/worksheets/sheet1.xml"
+            # OPC relationship targets owned by xl/_rels/ are either
+            # workbook-relative ("worksheets/sheet1.xml") or package-absolute
+            # ("/xl/worksheets/sheet1.xml"). Strip the leading slash and
+            # normalize so both forms, and "./" or "../" segments, resolve to
+            # the actual archive member.
+            target = target.lstrip("/")
             if not target.startswith("xl/"):
-                target = "xl/" + target
+                target = posixpath.normpath(posixpath.join("xl", target))
             mapping[rid] = target
     return mapping
 
