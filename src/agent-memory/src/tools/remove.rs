@@ -10,7 +10,9 @@ use crate::service::MemoryService;
 const TOOL: &str = "mem_remove";
 
 /// Delete a file or directory.
-/// - For directories, `recursive` MUST be true; otherwise `InvalidArgument`.
+/// - For non-empty directories, `recursive` MUST be true; otherwise
+///   `InvalidArgument`. An empty directory may be removed without it
+///   (there is nothing to recurse over).
 /// - The mount root and `.anolisa` meta dir cannot be targets (path resolver
 ///   already rejects the meta dir).
 pub fn remove(svc: &MemoryService, path: &str, recursive: bool) -> Result<()> {
@@ -47,16 +49,34 @@ pub fn remove(svc: &MemoryService, path: &str, recursive: bool) -> Result<()> {
 
     if meta.is_dir() {
         if !recursive {
-            let err = MemoryError::InvalidArgument(format!(
-                "'{rel}' is a directory; pass recursive=true to remove"
-            ));
-            svc.audit_log(AuditEntry::new(TOOL).path(rel).error(err.to_string()));
-            return Err(err);
+            // The tool contract says recursive=true is required only for
+            // NON-EMPTY directories, so an empty directory may be removed
+            // without it — there is nothing to recurse over.
+            //
+            // The deletion is fd-anchored rather than re-resolving the
+            // absolute path: `safe_fs::remove_empty_dir` opens the parent
+            // directory against the mount fd with openat2 RESOLVE_BENEATH |
+            // RESOLVE_NO_SYMLINKS, then calls unlinkat(RemoveDir) by parent
+            // fd + final-component name. An ancestor component swapped for a
+            // symlink between `assert_no_symlink_traversal` (above) and this
+            // syscall therefore cannot redirect the rmdir outside the mount —
+            // the openat2 resolve step rejects it. unlinkat returns ENOTEMPTY
+            // for a non-empty directory, mapped precisely to the
+            // "pass recursive=true" contract instead of being hidden behind a
+            // probe, and every other error is preserved.
+            match safe_fs::remove_empty_dir(svc.mount.root_fd.as_fd(), rel_path) {
+                Ok(()) => {}
+                Err(e) => {
+                    svc.audit_log(AuditEntry::new(TOOL).path(rel).error(e.to_string()));
+                    return Err(e);
+                }
+            }
+        } else {
+            // Use sandboxed recursive delete that refuses to follow symlinks
+            // inside the directory — std::fs::remove_dir_all would follow them
+            // and could destroy targets outside the mount.
+            safe_fs::remove_dir_all_safe(svc.mount.root_fd.as_fd(), rel_path, &resolved)?;
         }
-        // Use sandboxed recursive delete that refuses to follow symlinks
-        // inside the directory — std::fs::remove_dir_all would follow them
-        // and could destroy targets outside the mount.
-        safe_fs::remove_dir_all_safe(svc.mount.root_fd.as_fd(), rel_path, &resolved)?;
     } else {
         std::fs::remove_file(&resolved)?;
     }

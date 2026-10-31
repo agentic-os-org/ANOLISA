@@ -16,14 +16,21 @@ resolve_codex() {
         fi
         return
     fi
-    for candidate in codex /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
+    # An unset HOME must neither abort (set -u) nor degenerate the last probe
+    # into "/.local/bin/codex": build the candidate list and only append the
+    # home-relative probe when HOME actually resolves (see #8692's convention).
+    local candidates=(codex /usr/local/bin/codex /usr/bin/codex)
+    if [[ -n "${HOME:-}" ]]; then
+        candidates+=("$HOME/.local/bin/codex")
+    fi
+    for candidate in "${candidates[@]}"; do
         if command -v "$candidate" &>/dev/null; then
             echo "$candidate"
             return
         fi
     done
     # Last resort: direct path check
-    for candidate in /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
+    for candidate in "${candidates[@]:1}"; do
         if [[ -x "$candidate" ]]; then
             echo "$candidate"
             return

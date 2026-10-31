@@ -297,6 +297,62 @@ pub(crate) fn remove_restore_staging(root: BorrowedFd<'_>, rel: &Path, abs: &Pat
     Ok(())
 }
 
+/// Remove an (assumed empty) directory relative to `root` using an
+/// fd-anchored `unlinkat(RemoveDir)`.
+///
+/// Unlike `std::fs::remove_dir`, the deletion is performed against a parent
+/// directory fd opened with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` against
+/// `root`, so it cannot be redirected by an ancestor symlink swapped in
+/// after `assert_no_symlink_traversal` runs (the TOCTOU the agent-memory
+/// remove tool is hardened against). The final component is removed by name,
+/// so the absolute path is never re-resolved.
+///
+/// Returns:
+/// - `Ok(())` — the directory was empty and is now removed;
+/// - `InvalidArgument` — the directory was non-empty (`ENOTEMPTY`/`EEXIST`);
+///   the caller enforces "pass recursive=true";
+/// - `NotFound` — it vanished before the syscall (`ENOENT`);
+/// - other errors are propagated as `Other`.
+pub fn remove_empty_dir(root: BorrowedFd<'_>, rel: &Path) -> Result<()> {
+    let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
+    let name = rel
+        .file_name()
+        .ok_or_else(|| MemoryError::InvalidArgument("cannot remove the mount root".into()))?;
+
+    let parent_how = OpenHow::new()
+        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+        .resolve(safe_resolve());
+
+    // When `rel` is a single component the parent is the mount root itself;
+    // "." names the dirfd we already hold without re-resolving an empty path.
+    let parent_owned: OwnedFd = if parent_rel.as_os_str().is_empty() {
+        openat2_owned(root, Path::new("."), parent_how)?
+    } else {
+        openat2_owned(root, parent_rel, parent_how)?
+    };
+    let parent_raw = parent_owned.as_raw_fd();
+
+    let name_path = Path::new(name);
+    match nix::unistd::unlinkat(
+        Some(parent_raw),
+        name_path,
+        nix::unistd::UnlinkatFlags::RemoveDir,
+    ) {
+        Ok(()) => Ok(()),
+        Err(nix::errno::Errno::ENOTEMPTY) | Err(nix::errno::Errno::EEXIST) => {
+            Err(MemoryError::InvalidArgument(format!(
+                "'{}' is a directory; pass recursive=true to remove",
+                rel.display()
+            )))
+        }
+        Err(nix::errno::Errno::ENOENT) => Err(MemoryError::NotFound(rel.display().to_string())),
+        Err(e) => Err(MemoryError::Other(format!(
+            "unlinkat dir {}: {e}",
+            rel.display()
+        ))),
+    }
+}
+
 /// Precondition invariant: no symlink should exist inside the mount at
 /// any time. The model has no symlink creation primitive, and any path
 /// capable of introducing symlinks (snapshot restore, git checkout) must

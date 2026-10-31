@@ -25,15 +25,24 @@
 #   ./install.sh --non-interactive  # CI / automated
 #
 # Environment variables:
-#   TOKENLESS_INSTALL_PREFIX   Installation prefix (default: ~/.local)
+#   TOKENLESS_INSTALL_PREFIX   Installation prefix (default: $HOME/.local
+#                              when HOME is set; without HOME this variable
+#                              must be provided or the build path refuses)
 #   TOKENLESS_SOURCE_DIR       Path to anolisa/src/tokenless (dev-only override)
 #   TOKENLESS_SKIP_BUILD       Set to "1" to skip cargo build
 #   CODEX_BIN                  Path to codex CLI (default: codex)
 
 set -euo pipefail
 
-PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
-BINDIR="$PREFIX/bin"
+# Resolve the prefix without touching $HOME unless it exists: under `set -u`
+# an eager $HOME/.local expansion aborts the script before it can report what
+# is actually missing. An empty BINDIR below means "no prefix resolved yet",
+# and every consumer decides explicitly whether it needs one.
+PREFIX="${TOKENLESS_INSTALL_PREFIX:-}"
+if [[ -z "$PREFIX" && -n "${HOME:-}" ]]; then
+    PREFIX="$HOME/.local"
+fi
+BINDIR="${PREFIX:+${PREFIX}/bin}"
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
 PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
@@ -51,9 +60,29 @@ PLUGIN_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"   # codex/ directory
 # resolved before Phase 1: the dry-run preview needs them to name what it would
 # do, and a host without the tokenless binary must see the build it would run.
 CODEX_BIN="$(resolve_codex)"
-MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
-AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
-PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
+# The marketplace layout lives under the user's home and is only consumed once
+# a codex CLI exists: the preview echoes it and Phase 2 writes it. Resolve it
+# lazily so a host without a codex CLI - and without HOME at all - reaches the
+# "codex CLI not found" exit instead of aborting on an unbound $HOME here.
+if [[ -n "$CODEX_BIN" ]]; then
+    # Same lazy-$HOME discipline as the prefix above: a HOME-less host with a
+    # codex CLI must reach a clear refusal, not an unbound-variable abort.
+    if [[ -n "${XDG_DATA_HOME:-}" ]]; then
+        MARKETPLACE_DIR="$XDG_DATA_HOME/anolisa/codex-marketplace"
+    elif [[ -n "${HOME:-}" ]]; then
+        MARKETPLACE_DIR="$HOME/.local/share/anolisa/codex-marketplace"
+    else
+        MARKETPLACE_DIR=""
+    fi
+    if [[ -n "$MARKETPLACE_DIR" ]]; then
+        AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
+        PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
+    else
+        AGENTS_DIR="" PLUGIN_LINK=""
+    fi
+else
+    MARKETPLACE_DIR="" AGENTS_DIR="" PLUGIN_LINK=""
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Ensure tokenless binary is available
@@ -62,7 +91,7 @@ PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
 TOKENLESS_BIN=""
 if command -v tokenless >/dev/null 2>&1; then
     TOKENLESS_BIN="$(command -v tokenless)"
-elif [[ -x "$BINDIR/tokenless" ]]; then
+elif [[ -n "$BINDIR" && -x "$BINDIR/tokenless" ]]; then
     TOKENLESS_BIN="$BINDIR/tokenless"
 elif [[ -x /usr/local/bin/tokenless ]]; then
     TOKENLESS_BIN="/usr/local/bin/tokenless"
@@ -98,17 +127,25 @@ if [ "$DRY_RUN" = "1" ]; then
     # neither of the last two.
     if [[ -z "$TOKENLESS_BIN" ]]; then
         echo "DRY-RUN: cargo build --release -p tokenless-cli in ${SRCDIR}"
-        echo "DRY-RUN: install the built binary to ${BINDIR}/tokenless (mode 755)"
+        if [[ -n "$BINDIR" ]]; then
+            echo "DRY-RUN: install the built binary to ${BINDIR}/tokenless (mode 755)"
+        else
+            echo "DRY-RUN: no install prefix (set TOKENLESS_INSTALL_PREFIX or HOME), so the built binary has nowhere to go"
+        fi
     else
         echo "DRY-RUN: keep the existing tokenless binary ${TOKENLESS_BIN}"
     fi
     if [[ -n "$CODEX_BIN" ]]; then
-        echo "DRY-RUN: mkdir -p ${AGENTS_DIR}"
-        echo "DRY-RUN: ln -sfn ${PLUGIN_SRC} ${PLUGIN_LINK}"
-        echo "DRY-RUN: write ${AGENTS_DIR}/marketplace.json"
-        echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is already registered)"
-        echo "DRY-RUN: ${CODEX_BIN} plugin marketplace add ${MARKETPLACE_DIR}"
-        echo "DRY-RUN: ${CODEX_BIN} plugin add tokenless@${MARKETPLACE_NAME}"
+        if [[ -n "$MARKETPLACE_DIR" ]]; then
+            echo "DRY-RUN: mkdir -p ${AGENTS_DIR}"
+            echo "DRY-RUN: ln -sfn ${PLUGIN_SRC} ${PLUGIN_LINK}"
+            echo "DRY-RUN: write ${AGENTS_DIR}/marketplace.json"
+            echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is already registered)"
+            echo "DRY-RUN: ${CODEX_BIN} plugin marketplace add ${MARKETPLACE_DIR}"
+            echo "DRY-RUN: ${CODEX_BIN} plugin add tokenless@${MARKETPLACE_NAME}"
+        else
+            echo "DRY-RUN: no marketplace location (set XDG_DATA_HOME or HOME), so the registration is refused"
+        fi
     else
         echo "DRY-RUN: no codex CLI found, so the registration and the marketplace directory are both skipped"
     fi
@@ -118,6 +155,10 @@ fi
 if [[ -z "$TOKENLESS_BIN" ]]; then
     # No binary — build from source (dev scenario). The source tree's presence
     # is already guaranteed by the precheck above, which both modes share.
+    if [[ -z "$BINDIR" ]]; then
+        echo "[tokenless] ERROR: no install prefix: set TOKENLESS_INSTALL_PREFIX (or HOME) so the built binary has a destination" >&2
+        exit 1
+    fi
     echo "[tokenless] Building tokenless from source: $SRCDIR"
     cd "$SRCDIR"
     cargo build --release -p tokenless-cli 2>&1 | tail -3
@@ -144,6 +185,10 @@ fi
 # 2a. Create marketplace directory layout in a user-local location so
 # non-root users can run this script even when the plugin source tree
 # is installed under a root-owned prefix (e.g. /usr/share/anolisa).
+if [[ -z "$MARKETPLACE_DIR" ]]; then
+    echo "[tokenless] ERROR: no marketplace location: set XDG_DATA_HOME (or HOME) so the plugin tree has a destination" >&2
+    exit 1
+fi
 mkdir -p "$AGENTS_DIR"
 
 # Symlink plugin at marketplace root (codex resolves plugin paths relative to
