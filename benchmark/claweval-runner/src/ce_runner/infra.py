@@ -442,7 +442,10 @@ def cleanup_config(context=None, config_path: str = None, skip_dirs: bool = Fals
         for k in stale_keys:
             del servers[k]
 
-        config["tools"] = {"profile": "coding"}
+        # ce-runner no longer writes the global "tools" section (tool policy
+        # lives in per-agent entries); preserve the user's existing config
+        # and only fill the default when none exists.
+        config.setdefault("tools", {"profile": "coding"})
         atomic_write_config(cleanup_path, config)
 
         for aid in removed_ids:
