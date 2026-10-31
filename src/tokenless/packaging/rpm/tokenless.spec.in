@@ -82,6 +82,10 @@ Register it with `qwen extensions link`, or run the install script: qwencode/scr
 OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and Tool
 Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
 Register it by running the install script: opencode/scripts/install.sh
+Trae (TraeCode) adapter (RTK command rewriting on the standardized RunCommand tool,
+response/TOON compression via additionalContext, and Tool Ready) is available under
+/usr/share/anolisa/adapters/tokenless/trae/. Register it by running the install
+script: trae/scripts/install.sh
 
 %package core
 Summary:        Tokenless CLI and RTK command rewriting runtime
@@ -107,7 +111,7 @@ Conflicts:      %{name} < %{version}
 
 %description plugins
 OpenClaw, DSH, Hermes, Qoder, QwenWork, Claude Code, Codex, OpenCode,
-Qwen Code, QwenPaw, and cosh integrations, including shared hooks and
+Qwen Code, QwenPaw, Trae, and cosh integrations, including shared hooks and
 framework registration scripts. Registration remains a separate user action.
 
 %prep
@@ -149,10 +153,11 @@ for directory in common/hooks common/commands openclaw/dist dsh/dist \
     qoder/.qoder-plugin qoder/commands qoder/hooks \
     qwenwork/.qoder-plugin qwenwork/hooks/shared \
     claude-code/.claude-plugin claude-code/hooks \
-    codex/.codex-plugin codex/hooks qwencode/hooks; do
+    codex/.codex-plugin codex/hooks qwencode/hooks \
+    trae/hooks; do
     install -d -m 0755 "$adapters/$directory"
 done
-for framework in openclaw hermes qwenpaw qoder qwenwork claude-code codex opencode qwencode; do
+for framework in openclaw hermes qwenpaw qoder qwenwork claude-code codex opencode qwencode trae; do
     install -d -m 0755 "$adapters/$framework/scripts"
     install -m 0755 \
         "adapters/tokenless/$framework/scripts/detect.sh" \
@@ -210,6 +215,11 @@ install -m 0644 adapters/tokenless/codex/scripts/_common.sh "$adapters/codex/scr
 install -m 0644 adapters/tokenless/opencode/plugin.js "$adapters/opencode/"
 install -m 0644 adapters/tokenless/qwencode/qwen-extension.json "$adapters/qwencode/"
 install -m 0755 adapters/tokenless/qwencode/hooks/run-hook.sh "$adapters/qwencode/hooks/"
+
+# Trae ships no plugin manifest: the hooks template is merged into the
+# edition's global hooks.json by trae/scripts/install.sh at registration time.
+install -m 0644 adapters/tokenless/trae/hooks/hooks.json "$adapters/trae/hooks/"
+install -m 0755 adapters/tokenless/trae/hooks/run-hook.sh "$adapters/trae/hooks/"
 
 install -d -m 0755 "$extension/hooks" "$extension/commands"
 install -m 0644 adapters/tokenless/common/cosh-extension.json \
@@ -332,6 +342,15 @@ if [ $1 -eq 0 ]; then
     OPENCODE_SCRIPT="%{_adapterdir_tokenless}/opencode/scripts/uninstall.sh"
     if [ -x "$OPENCODE_SCRIPT" ]; then
         bash "$OPENCODE_SCRIPT" || true
+    fi
+
+    # --- Trae hooks cleanup ---
+    # Note: %preun runs as root so this only touches root's ~/.trae-cn /
+    # ~/.trae hooks.json; per-user installations must run the uninstall
+    # script themselves.
+    TRAE_SCRIPT="%{_adapterdir_tokenless}/trae/scripts/uninstall.sh"
+    if [ -x "$TRAE_SCRIPT" ]; then
+        bash "$TRAE_SCRIPT" || true
     fi
 
     # --- Qwen Code plugin cleanup ---

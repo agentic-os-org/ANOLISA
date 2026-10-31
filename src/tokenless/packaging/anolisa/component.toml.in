@@ -221,3 +221,21 @@ dest = "{datadir}/adapters/{component}/qwencode/"
 
 [adapters.bundle]
 entry = "qwen-extension.json"
+
+# Trae (TraeCode) has no plugin system: its bundled lifecycle scripts merge the
+# tokenless hook groups into the edition's global hooks.json (~/.trae-cn for the
+# CN edition, ~/.trae for the international one). The declaration keeps the raw
+# and RPM payloads from dropping the shipped bundle — verify-release.py and
+# tests/test-package-raw.sh require every manifest target to have an
+# [[adapters]] entry. No built-in ANOLISA driver claims this framework yet, so
+# `anolisa adapter enable trae` reports an unknown framework while
+# `anolisa adapter scan` lists the bundle as shipped without a driver.
+[[adapters]]
+framework = "trae"
+adapter_type = "extension"
+plugin_id = "tokenless"
+source = "adapters/trae"
+dest = "{datadir}/adapters/{component}/trae/"
+
+[adapters.bundle]
+entry = "hooks/hooks.json"

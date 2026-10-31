@@ -589,6 +589,7 @@ assert {'grep_code', 'search_file', 'list_dir'} <= SKIP_TOOLS, 'Qoder read tools
 assert 'Bash' not in SKIP_TOOLS, 'Bash wrongly in SKIP_TOOLS (should be layer 2)'
 assert 'Bash' in SHELL_TOOLS, 'Bash missing from SHELL_TOOLS'
 assert {'run_in_terminal', 'get_terminal_output'} <= SHELL_TOOLS, 'Qoder shell tools missing from SHELL_TOOLS'
+assert 'RunCommand' in SHELL_TOOLS, 'Trae RunCommand missing from SHELL_TOOLS'
 # Thresholds: Bash gets layer 2 (64K/128/8), Write gets layer 3 (1M/64K/32)
 bash_thr = get_thresholds('Bash')
 write_thr = get_thresholds('Write')

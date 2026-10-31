@@ -7,7 +7,8 @@ HookOutput envelope.
 
 Hook point: **PreToolUse** — matcher: shell-family tool names
 (``Bash``, ``run_shell_command``, ``terminal``, ``Shell``, ``shell``,
-``exec``, ``process``).
+``exec``, ``process``, ``RunCommand``).  ``RunCommand`` is Trae's
+normalized terminal tool name.
 
 The agent ID is resolved from the host runtime, ``--agent-id`` argument, or
 TOKENLESS_AGENT_ID environment variable. Fallback paths follow the ANOLISA
