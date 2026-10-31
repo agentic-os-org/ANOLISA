@@ -163,6 +163,9 @@ impl AnthropicParser {
                 name: String,
                 input_json: String,
             },
+            // A server-tool result arrives complete on its start event; the
+            // deserialized block is parked here until the block is finished.
+            ToolResult(AnthropicContentBlock),
         }
         let mut current_block: Option<CurrentBlock> = None;
         // Finish a streamed block, pushing it when it carries content. Called
@@ -202,6 +205,7 @@ impl AnthropicParser {
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 out.push(AnthropicContentBlock::ToolUse { id, name, input });
             }
+            CurrentBlock::ToolResult(block) => out.push(block),
         };
 
         for event_value in events {
@@ -250,6 +254,20 @@ impl AnthropicParser {
                             }),
                             AnthropicContentBlock::Text { text, .. } => {
                                 Some(CurrentBlock::Text { text: text.clone() })
+                            }
+                            // The server-tool results (`web_search_tool_result`,
+                            // `web_fetch_tool_result`, the code-execution
+                            // results, `tool_search_tool_result`,
+                            // `mcp_tool_result`) carry the finished payload on
+                            // the start event — the provider ran the tool on
+                            // its side and streams the block whole, with no
+                            // deltas after it. The catch-all used to open an
+                            // empty text accumulator for them, and an empty
+                            // text block is dropped at finish, so a streamed
+                            // search/fetch turn lost the result the answer was
+                            // built from.
+                            AnthropicContentBlock::ToolResult { .. } => {
+                                Some(CurrentBlock::ToolResult(content_block.clone()))
                             }
                             _ => {
                                 // Any other block type
@@ -720,6 +738,84 @@ mod tests {
                 assert_eq!(input, &serde_json::json!({"query": "rust"}));
             }
             other => panic!("a server_tool_use stream must keep the call, got {other:?}"),
+        }
+    }
+
+    /// The result block of the same turn: the provider streams
+    /// `web_search_tool_result` complete on its start event and sends no
+    /// deltas for it, so the catch-all used to open an empty text accumulator
+    /// that finish then dropped — a streamed search turn kept the call but
+    /// lost the result the answer was built from. The non-streaming body of
+    /// the very same turn keeps the result (see
+    /// `test_parse_response_keeps_server_tool_blocks`); both paths must agree.
+    #[test]
+    fn test_aggregate_sse_keeps_the_streamed_server_tool_result() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_ws", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "server_tool_use", "id": "srvtoolu_1",
+                               "name": "web_search", "input": {}}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"rust 2026\"}"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+                               "content": [{"type": "web_search_result",
+                                            "url": "https://example.com/rust",
+                                            "title": "Rust",
+                                            "text": "A systems language."}]}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "content_block_start", "index": 2,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 2,
+             "delta": {"type": "text_delta", "text": "Here is what I found."}},
+            {"type": "content_block_stop", "index": 2},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 5}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.content.len(),
+            3,
+            "every block of the turn must survive: {:?}",
+            resp.content
+        );
+        match &resp.content[0] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "srvtoolu_1");
+                assert_eq!(name, "web_search");
+                assert_eq!(input, &serde_json::json!({"query": "rust 2026"}));
+            }
+            other => panic!("the streamed call must come first, got {other:?}"),
+        }
+        match &resp.content[1] {
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "srvtoolu_1");
+                assert_eq!(
+                    content.as_ref(),
+                    Some(&serde_json::json!([
+                        {"type": "web_search_result", "url": "https://example.com/rust",
+                         "title": "Rust", "text": "A systems language."}
+                    ])),
+                    "the streamed result payload must reach the block unchanged"
+                );
+                assert_eq!(*is_error, None);
+            }
+            other => panic!("the streamed result must be read as a tool result, got {other:?}"),
+        }
+        match &resp.content[2] {
+            AnthropicContentBlock::Text { text, .. } => {
+                assert_eq!(text, "Here is what I found.")
+            }
+            other => panic!("the answer text must keep its own block, got {other:?}"),
         }
     }
 
