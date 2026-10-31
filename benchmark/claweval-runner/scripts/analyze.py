@@ -702,7 +702,7 @@ Examples:
     json_path = os.path.join(output_dir, "report.json")
     with open(txt_path, "w") as f:
         f.write(summary_text)
-    with open(csv_path, "w") as f:
+    with open(csv_path, "w", newline="") as f:
         f.write(summary_csv)
     with open(json_path, "w") as f:
         json.dump(structured, f, indent=2, ensure_ascii=False)
