@@ -436,22 +436,22 @@ pub fn render_trimmed(traj: &AtifTrajectory) -> String {
                         call.command_summary(200)
                     ));
                 }
-                for result in step.results() {
-                    let content = result.content.as_deref().unwrap_or("");
-                    let total = content.chars().count();
-                    if total > OBSERVATION_TRIM_CHARS {
-                        out.push_str(&format!(
-                            "  tool_result: {}…[trimmed, {} chars total]\n",
-                            content
-                                .chars()
-                                .take(OBSERVATION_TRIM_CHARS)
-                                .collect::<String>(),
-                            total
-                        ));
-                    } else {
-                        out.push_str(&format!("  tool_result: {content}\n"));
-                    }
-                }
+            }
+        }
+        for result in step.results() {
+            let content = result.content.as_deref().unwrap_or("");
+            let total = content.chars().count();
+            if total > OBSERVATION_TRIM_CHARS {
+                out.push_str(&format!(
+                    "  tool_result: {}…[trimmed, {} chars total]\n",
+                    content
+                        .chars()
+                        .take(OBSERVATION_TRIM_CHARS)
+                        .collect::<String>(),
+                    total
+                ));
+            } else {
+                out.push_str(&format!("  tool_result: {content}\n"));
             }
         }
     }
