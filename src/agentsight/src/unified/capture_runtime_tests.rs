@@ -11,6 +11,7 @@ pub(super) struct TestProbes {
     events: RefCell<VecDeque<Event>>,
     /// Pids handed to `attach_process` by the production handlers.
     attached_pids: RefCell<Vec<i32>>,
+    cpu_budget: RefCell<Option<Arc<crate::utils::cpu_budget::CpuBudget>>>,
     failed_registration_pid: Option<u32>,
 }
 
@@ -32,6 +33,24 @@ impl DerefMut for TestProbes {
 }
 
 impl TestProbes {
+    pub(super) fn poll_pending_ssl(&mut self) {
+        if let Some(live) = self.live.as_mut() {
+            live.poll_pending_ssl();
+        }
+    }
+
+    pub(super) fn set_cpu_budget(&self, budget: Option<Arc<crate::utils::cpu_budget::CpuBudget>>) {
+        if let Some(live) = self.live.as_ref() {
+            live.set_cpu_budget(budget.clone());
+        }
+        *self.cpu_budget.borrow_mut() = budget;
+    }
+
+    pub(super) fn detach_ssl_probes(&mut self, pid: u32) {
+        if let Some(live) = self.live.as_mut() {
+            live.detach_ssl_probes(pid);
+        }
+    }
     pub(super) fn new_with_cgroup_filter(
         pids: &[u32],
         uid: Option<u32>,
@@ -47,6 +66,7 @@ impl TestProbes {
             )?),
             events: RefCell::new(VecDeque::new()),
             attached_pids: RefCell::new(Vec::new()),
+            cpu_budget: RefCell::new(None),
             failed_registration_pid: None,
         })
     }
@@ -157,18 +177,19 @@ impl RuntimeFixture {
             )
             .unwrap(),
         );
-        let budget = (percent != 0)
-            .then(|| Arc::new(crate::utils::cpu_budget::CpuBudget::new(percent).unwrap()));
+        let probes = TestProbes {
+            live: None,
+            events: RefCell::new(VecDeque::new()),
+            attached_pids: RefCell::new(Vec::new()),
+            cpu_budget: RefCell::new(None),
+            failed_registration_pid: None,
+        };
+        let budget = maintenance::configure_cpu_budget(&probes, percent).unwrap();
         let storage = AgentSight::create_storage(&config.storage.primary_path(), &config).unwrap();
         Self {
             directory,
             sight: Some(AgentSight {
-                probes: TestProbes {
-                    live: None,
-                    events: RefCell::new(VecDeque::new()),
-                    attached_pids: RefCell::new(Vec::new()),
-                    failed_registration_pid: None,
-                },
+                probes,
                 core: PipelineCore::new(&config, Analyzer::new()),
                 genai_builder: GenAIBuilder::new(),
                 genai_exporters: vec![Box::new(Arc::clone(&store))],
@@ -231,6 +252,38 @@ impl Drop for RuntimeFixture {
         drop(self.sight.take());
         std::fs::remove_dir_all(&self.directory).unwrap();
     }
+}
+
+#[test]
+fn cpu_budget_is_shared_by_probe_scans_and_capture() {
+    for percent in [1, 25, 100] {
+        let fixture = RuntimeFixture::new(percent);
+        let probe_budget = fixture.probes.cpu_budget.borrow();
+        assert!(Arc::ptr_eq(
+            probe_budget.as_ref().unwrap(),
+            fixture.completions.budget.as_ref().unwrap(),
+        ));
+    }
+}
+
+#[test]
+fn cpu_budget_zero_disables_probe_and_capture_pacing() {
+    let fixture = RuntimeFixture::new(0);
+    assert!(fixture.probes.cpu_budget.borrow().is_none());
+    assert!(fixture.completions.budget.is_none());
+}
+
+#[test]
+fn cpu_budget_invalid_target_preserves_installed_probe_budget() {
+    let fixture = RuntimeFixture::new(25);
+    let error = maintenance::configure_cpu_budget(&fixture.probes, 101)
+        .err()
+        .expect("invalid CPU target must fail");
+    assert!(error.to_string().contains("between 1 and 100"));
+    assert!(Arc::ptr_eq(
+        fixture.probes.cpu_budget.borrow().as_ref().unwrap(),
+        fixture.completions.budget.as_ref().unwrap(),
+    ));
 }
 
 #[test]

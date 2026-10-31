@@ -571,6 +571,8 @@ impl AgentSight {
             &config.runtime_limits,
         )
         .context("Failed to create probes")?;
+        let cpu_budget =
+            maintenance::configure_cpu_budget(&probes, config.runtime_limits.cpu_budget_percent)?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -850,12 +852,6 @@ impl AgentSight {
         };
 
         let mut maintenance_jobs = Vec::new();
-        let cpu_budget = (config.runtime_limits.cpu_budget_percent != 0)
-            .then(|| {
-                crate::utils::cpu_budget::CpuBudget::new(config.runtime_limits.cpu_budget_percent)
-            })
-            .transpose()?
-            .map(Arc::new);
         // Global capacity budget shared by every maintenance job: each job
         // re-evaluates its effective size limit right before running.
         let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
@@ -1500,10 +1496,11 @@ impl AgentSight {
                 if let Ok(mut targets) = self.resource_targets.write() {
                     targets.remove(pid);
                 }
+                // Unknown-process scans also retain inode references until exit.
+                self.probes.detach_ssl_probes(*pid);
                 // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
-                    self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
                 } else {
                     self.flush_deferred_genai_for_pid(*pid);
