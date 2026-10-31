@@ -218,6 +218,36 @@ test-hooks: test-hook-scripts
 	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
 
+# The adapter installers and uninstallers derive their user-scope paths from
+# HOME while running under `set -euo pipefail`. A host that invokes one of
+# them without HOME -- a minimal runner, a service manager unit without
+# `Environment=HOME=`, a runner started with `env -i` -- therefore aborted on
+# an unbound variable, with exit 1, which is also the status these scripts use
+# for a real failure. The crash reached the caller dressed as a verdict, and
+# it landed before the script had said whether anything had been written or
+# removed. A HOME that is set to the empty string is the quieter case: no
+# abort fires, `$HOME/.local` expands to `/.local`, and the script proceeds to
+# write or remove paths directly under the filesystem root.
+#
+# This suite pins the contract: HOME-less detection and installation must land
+# on the same status as an empty HOME, must not print bash's unbound-variable
+# diagnostic, must not name a path under /, and must keep working when an
+# explicit override names the destination. Plain bash over the checked-out
+# adapter tree with every agent CLI pinned to a path that does not exist -- no
+# cargo build output, node, jq, rtk, python3 or network, and no host agent is
+# ever executed -- so it costs well under a second.
+#
+# It is declared separately from the .PHONY list at the top of this file on
+# purpose: that list is extended by other components' targets as well, and a
+# shared line is a merge conflict waiting to happen. It joins
+# `test-integration` through a recipe call rather than through that target's
+# prerequisite line, which the detector suites also extend.
+.PHONY: test-lifecycle-home-safe
+
+test-lifecycle-home-safe:
+	@echo "==> Testing tokenless adapter lifecycle scripts without HOME (no external dependencies)..."
+	bash tests/test-lifecycle-home-safe.sh
+
 test-claude-code-detect:
 	@echo "==> Testing claude-code detect.sh first-run retry..."
 	bash tests/test-claude-code-detect-retry.sh
@@ -271,6 +301,7 @@ test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup tes
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
 	python3 tests/test_stats_http.py
+	$(MAKE) test-lifecycle-home-safe
 
 .PHONY: test-headroom-pipeline-worker
 test-headroom-pipeline-worker:

@@ -16,6 +16,15 @@
 # changes to the adapter directory are reflected immediately without reinstall.
 set -euo pipefail
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this installer with exit 1 -- the same status it otherwise reports for "not installed but installable",
+# so the crash would reach the caller as a verdict instead of as an error.
+# Resolve HOME once and derive every user-scope path from it; an empty value
+# leaves the destination unresolved and the script refuses to act on a path
+# under /.
+
+HOME_DIR="${HOME:-}"
+
 AGENT="${ANOLISA_TARGET:-qwencode}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
@@ -24,7 +33,26 @@ PLUGIN_SRC="$ADAPTER_DIR/qwencode"
 EXTENSION_NAME="tokenless"
 
 QWEN_BIN="${QWEN_BIN:-}"
-export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+export PATH="${USER_LOCAL_BIN}/usr/local/bin:$PATH"
+
+# Qwen Code resolves its home the way the Rust adapter driver does: the
+# QWEN_HOME environment variable wins, then a QWEN_HOME entry in the user's
+# .env file, and only then the home directory itself. Reading the two in the
+# same order keeps the shell scripts and the driver pointed at the same
+# directory on a host that sets any of them.
+QWEN_HOME="${QWEN_HOME:-}"
+if [ -z "$QWEN_HOME" ] && [ -n "$HOME_DIR" ]; then
+    QWEN_HOME="$HOME_DIR/.qwen"
+    for qwen_env_file in "$HOME_DIR/.qwen/.env" "$HOME_DIR/.env"; do
+        [ -f "$qwen_env_file" ] || continue
+        qwen_env_value="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?QWEN_HOME[[:space:]]*=[[:space:]]*//p' \
+            "$qwen_env_file" | tail -1)"
+        [ -n "$qwen_env_value" ] || continue
+        QWEN_HOME="$qwen_env_value"
+        break
+    done
+fi
 if [ -z "$QWEN_BIN" ]; then
     QWEN_BIN="$(command -v qwen 2>/dev/null || true)"
 fi
@@ -100,7 +128,7 @@ fi
 # event). Only remove hook entries whose name starts with "tokenless-",
 # preserving any user-defined hooks that may also exist.
 # Qwen Code stores global settings under ~/.qwen/settings.json.
-SETTINGS_JSON="$HOME/.qwen/settings.json"
+SETTINGS_JSON="${QWEN_HOME:+$QWEN_HOME/settings.json}"
 if [ -f "$SETTINGS_JSON" ] && command -v python3 &>/dev/null; then
     if python3 -c "
 import json, sys
