@@ -172,16 +172,14 @@ def ensure_numfmt_style(work_dir: str, ref_style_idx: int, numfmt_code: str) -> 
     xf_list = list(cellxfs)
     ref_xf = xf_list[min(ref_style_idx, len(xf_list) - 1)]
 
-    for i, xf in enumerate(xf_list):
-        if (xf.get("numFmtId") == str(numfmt_id) and
-                xf.get("fontId") == ref_xf.get("fontId") and
-                xf.get("fillId") == ref_xf.get("fillId") and
-                xf.get("borderId") == ref_xf.get("borderId")):
-            return i
-
     new_xf = copy.deepcopy(ref_xf)
     new_xf.set("numFmtId", str(numfmt_id))
     new_xf.set("applyNumberFormat", "true")
+    expected_style = ET.canonicalize(ET.tostring(new_xf, encoding="unicode"), strip_text=True)
+    for i, xf in enumerate(xf_list):
+        if ET.canonicalize(ET.tostring(xf, encoding="unicode"), strip_text=True) == expected_style:
+            return i
+
     cellxfs.append(new_xf)
     cellxfs.set("count", str(len(list(cellxfs))))
 
