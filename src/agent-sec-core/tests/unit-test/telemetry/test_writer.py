@@ -128,6 +128,31 @@ def test_writer_handles_short_os_writes(monkeypatch, tmp_path: Path) -> None:
     }
 
 
+def test_writer_retries_interrupted_os_write(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    writer = TelemetryWriter(path=path)
+    original_write = telemetry_writer.os.write
+    calls = 0
+
+    def interrupt_once(fd: int, payload: bytes) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise InterruptedError
+        return original_write(fd, payload)
+
+    monkeypatch.setattr(telemetry_writer.os, "write", interrupt_once)
+
+    writer.write({"component.name": "agent-sec-core", "seq": 1})
+
+    assert calls == 2
+    assert json.loads(path.read_text(encoding="utf-8").splitlines()[0]) == {
+        "component.name": "agent-sec-core",
+        "seq": 1,
+    }
+
+
 def test_writer_uses_short_lived_flock_on_target_fd(
     monkeypatch, tmp_path: Path
 ) -> None:
