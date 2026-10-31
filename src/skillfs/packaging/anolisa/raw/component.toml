@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.3.21"
 
 [backends.rpm]
 package = "skillfs"
@@ -27,11 +27,6 @@ packages = { rpm = "fuse3", deb = "fuse3" }
 
 [component.layout]
 modes = ["system"]
-
-[[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/skillfs/component.toml"
-mode = "0644"
 
 [[component.layout.files]]
 source = "bin/skillfs"

@@ -3,7 +3,7 @@
 # This is publishing/plugin metadata only — framework execution (config
 # writes, skill delivery, CLI argv, scripts) belongs to built-in framework
 # drivers, not generic manifest keys.
-# Installed to: %{_datadir}/anolisa/components/agent-memory/component.toml
+# Legacy generation input; native component RPMs do not install this contract.
 [component]
 name = "agent-memory"
 version = "@VERSION@"

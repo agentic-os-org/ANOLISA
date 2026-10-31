@@ -367,6 +367,11 @@ test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/plugin.js")" = 644
 test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/scripts/install.sh")" = 755
 
 grep -Fq 'source = "bin/tokenless"' "$ROOT/packaging/anolisa/component.toml.in"
+if grep -Fq 'target = "{datadir}/components/tokenless/component.toml"' \
+    "$ROOT/packaging/anolisa/component.toml.in"; then
+    echo "ERROR: raw layout must leave the discovery registry to ANOLISA" >&2
+    exit 1
+fi
 grep -Fq 'source = "extensions/tokenless"' "$ROOT/packaging/anolisa/component.toml.in"
 test "$(grep -o '@VERSION@' "$ROOT/packaging/anolisa/component.toml.in" | wc -l)" = 1
 grep -Fq 'framework = "opencode"' "$ROOT/packaging/anolisa/component.toml.in"

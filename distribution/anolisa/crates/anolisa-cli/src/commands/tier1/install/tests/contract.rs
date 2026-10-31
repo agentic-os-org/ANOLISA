@@ -9,15 +9,7 @@ use tempfile::tempdir;
 fn distribution_registry_contracts_parse_with_complete_layouts() {
     let registry =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/components");
-    for component in [
-        "cosh-ng",
-        "sec-core",
-        "agentsight",
-        "tokenless",
-        "skillfs",
-        "ws-ckpt",
-        "agent-memory",
-    ] {
+    for component in anolisa_core::manifest::DISTRIBUTION_REGISTRY_COMPONENTS {
         let manifest = anolisa_core::ComponentManifest::from_file(
             &registry.join(component).join("component.toml"),
         )
