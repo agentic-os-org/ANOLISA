@@ -83,8 +83,12 @@ def merge_run_metadata(existing: dict[str, Any] | None, current: dict[str, Any])
     if existing is None:
         return current
 
-    started_at_ns = min(_safe_int(existing.get("started_at_ns")), _safe_int(current.get("started_at_ns")))
-    ended_at_ns = max(_safe_int(existing.get("ended_at_ns")), _safe_int(current.get("ended_at_ns")))
+    # ``_safe_int`` maps an absent timestamp to 0, so a plain min/max would
+    # drag the whole window to the Unix epoch whenever one side predates this
+    # key (an older runner's file, or a hand-edited one) and widen the trace
+    # window to every file on disk.
+    started_at_ns = _earliest_timestamp(existing.get("started_at_ns"), current.get("started_at_ns"))
+    ended_at_ns = _latest_timestamp(existing.get("ended_at_ns"), current.get("ended_at_ns"))
     instance_ids = _ordered_unique_strings(
         [
             item
@@ -130,6 +134,18 @@ def merge_run_metadata(existing: dict[str, Any] | None, current: dict[str, Any])
         if metadata_mapping:
             merged[key] = metadata_mapping
     return merged
+
+
+def _earliest_timestamp(*values: object) -> int:
+    """Return the smallest *known* timestamp, ignoring absent ones."""
+    known = [candidate for candidate in map(_safe_int, values) if candidate]
+    return min(known) if known else 0
+
+
+def _latest_timestamp(*values: object) -> int:
+    """Return the largest *known* timestamp, ignoring absent ones."""
+    known = [candidate for candidate in map(_safe_int, values) if candidate]
+    return max(known) if known else 0
 
 
 def _ordered_unique_strings(values: list[str]) -> list[str]:
