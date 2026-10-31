@@ -164,7 +164,14 @@ fn is_sudo_option_token(token: &str, skip_next_arg: &mut bool) -> bool {
     {
         return true;
     }
-    if token.len() > 2 && matches!(&token[..2], "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+    // Byte slicing here would panic when byte 2 falls inside a multibyte
+    // character (e.g. an option-like token such as `-选项` after sudo);
+    // prefix checks are boundary-safe and keep the same matching set.
+    if token.len() > 2
+        && ["-u", "-g", "-h", "-p", "-C", "-T"]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+    {
         return true;
     }
     token
@@ -395,6 +402,21 @@ mod tests {
     #[test]
     fn first_program_token_with_sudo() {
         assert_eq!(first_program_token("sudo apt install foo"), "apt");
+    }
+
+    #[test]
+    fn first_program_token_survives_multibyte_option_like_tokens() {
+        // `-选项` is not a sudo option; classification must fall through to
+        // treating it as the program token instead of panicking on a
+        // non-char-boundary slice.
+        assert_eq!(first_program_token("sudo -选项 ls"), "-选项");
+        assert_eq!(first_program_token("sudo -你 free -m"), "-你");
+    }
+
+    #[test]
+    fn first_program_token_keeps_attached_short_option_values() {
+        assert_eq!(first_program_token("sudo -uroot grep -n foo"), "grep");
+        assert_eq!(first_program_token("sudo -p中 ls"), "ls");
     }
 
     #[test]
