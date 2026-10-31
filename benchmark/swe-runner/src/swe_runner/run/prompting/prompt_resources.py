@@ -56,7 +56,7 @@ def load_custom_prompt(instance_id: str, *, prompts_dir: Path | None = None) -> 
             return content
         logger.info("CUSTOM_PROMPT_EMPTY instance=%s file=%s", instance_id, prompt_file)
         return None
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         logger.warning("CUSTOM_PROMPT_LOAD_FAILED instance=%s file=%s error=%s", instance_id, prompt_file, exc)
         return None
 
@@ -69,7 +69,7 @@ def load_required_custom_prompt(instance_id: str, *, prompts_dir: Path | None = 
 
     try:
         content = prompt_file.read_text(encoding="utf-8").strip()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise RuntimeError(f"Failed to load per-case prompt for {instance_id}: {prompt_file}") from exc
 
     if not content:
@@ -92,7 +92,7 @@ def load_builtin_skill_text(*, skills_dir: Path | None = None) -> str:
 
     try:
         content = skill_path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise RuntimeError(f"Failed to load SWE-bench skill from {skill_path}") from exc
 
     if not content:
