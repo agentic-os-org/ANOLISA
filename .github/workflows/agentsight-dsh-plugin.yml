@@ -1,0 +1,45 @@
+name: CI / AgentSight DSH plugin
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'src/agentsight/dsh-plugin/**'
+      - '.github/workflows/agentsight-dsh-plugin.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'src/agentsight/dsh-plugin/**'
+      - '.github/workflows/agentsight-dsh-plugin.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-dsh-plugin:
+    name: Test AgentSight DSH plugin
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src/agentsight/dsh-plugin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: src/agentsight/dsh-plugin
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.25.0'
+
+      - name: Install plugin dependencies
+        run: pnpm install --no-frozen-lockfile --ignore-scripts
+
+      - name: Run plugin regression tests
+        run: pnpm test
