@@ -116,8 +116,31 @@ async fn handle_connection(
         .await
         .context("Failed to read frame payload")?;
 
-    // Decode request
-    let request: Request = decode_payload(&payload).context("Failed to decode request")?;
+    // Decode request. An undecodable payload is a protocol error, not a
+    // reason to drop the socket silently: the frame-size guard above replies
+    // with a structured Response::Error, and this path must too — otherwise
+    // a version-skewed client (newer Request variant, older daemon) only
+    // ever sees an unexpected EOF on its response read, with no hint that
+    // the two binaries disagree.
+    let request: Request = match decode_payload(&payload) {
+        Ok(request) => request,
+        Err(error) => {
+            let err_resp = Response::Error {
+                code: ErrorCode::InternalError,
+                message: format!(
+                    "failed to decode request frame: {error}; the client and daemon \
+                     may be different ws-ckpt versions — upgrade both to the same \
+                     version"
+                ),
+            };
+            // Best-effort: the client may already be gone; a failed write
+            // only means the error frame could not be delivered.
+            if let Ok(frame) = encode_frame(&err_resp) {
+                let _ = stream.write_all(&frame).await;
+            }
+            return Err(error).context("failed to decode request frame");
+        }
+    };
 
     let peer_cred = stream.peer_cred().ok();
     let agent_name = peer_cred
@@ -187,6 +210,148 @@ mod tests {
         })
         .await
         .expect("IPC round trip timed out")
+    }
+
+    /// Drive the real handle_connection with raw client bytes (not
+    /// encode_frame(&Request)) and capture whatever response frame comes
+    /// back — None when the server closes without replying.
+    async fn raw_exchange(
+        state: &Arc<DaemonState>,
+        bytes: &[u8],
+    ) -> Option<Result<Response, anyhow::Error>> {
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        let client_io = async {
+            client.write_all(bytes).await.unwrap();
+            // Try to read a response frame; EOF maps to None.
+            match client.read_u32_le().await {
+                Ok(len) => {
+                    let mut payload = vec![0u8; len as usize];
+                    client.read_exact(&mut payload).await.unwrap();
+                    Some(Ok(decode_payload(&payload).unwrap()))
+                }
+                Err(_) => None,
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (server, response) =
+                tokio::join!(handle_connection(server, state.clone()), client_io);
+            // The server's Err is expected on malformed frames; surface the
+            // client's view alongside it.
+            let _ = server;
+            response
+        })
+        .await
+        .expect("IPC round trip timed out")
+    }
+
+    fn frame_state() -> Arc<DaemonState> {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            temp.path().join("data"),
+            temp.path().join("test.img"),
+        ));
+        let state_dir = temp.path().join("state");
+        // Leak the tempdir: DaemonState only needs the paths to exist for
+        // this test's lifetime and the state is read-only here.
+        let _keep = temp.keep();
+        Arc::new(DaemonState::new(
+            DaemonConfig::default(),
+            backend,
+            state_dir,
+        ))
+    }
+
+    fn prefixed(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + payload.len());
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[tokio::test]
+    async fn malformed_payload_gets_structured_error_reply() {
+        // A payload that fails bincode decoding must produce a structured
+        // Response::Error frame, not a silent close — a version-skewed
+        // client otherwise only sees an unexpected EOF.
+        let state = frame_state();
+        // 0xFF is not a valid Request variant tag.
+        let response =
+            raw_exchange(&state, &prefixed(&[0xFF, 0xFF, 0xFF, 0xFF])).await;
+        let response = response.expect("a response frame must be written");
+        let response = response.expect("response decodes");
+        match response {
+            Response::Error { message, .. } => {
+                assert!(
+                    message.contains("failed to decode request frame"),
+                    "message should name the decode failure: {message}"
+                );
+                assert!(
+                    message.contains("versions"),
+                    "message should hint at version skew: {message}"
+                );
+            }
+            other => panic!("expected Response::Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_length_frame_gets_structured_error_reply() {
+        // len == 0: read_exact succeeds on an empty buffer, decode of &[]
+        // fails — must also reply, not close.
+        let state = frame_state();
+        let response = raw_exchange(&state, &prefixed(&[])).await;
+        let response = response.expect("a response frame must be written");
+        assert!(matches!(
+            response.expect("decodes"),
+            Response::Error { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_gets_structured_error_reply() {
+        // The pre-existing frame-size guard: pin that it also replies with a
+        // structured error (previously untested).
+        let state = frame_state();
+        let mut bytes = (MAX_FRAME_SIZE as u32 + 1).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; 8]);
+        let response = raw_exchange(&state, &bytes).await;
+        let response = response.expect("a response frame must be written");
+        match response.expect("decodes") {
+            Response::Error { message, .. } => {
+                assert!(message.contains("Frame too large"), "message: {message}")
+            }
+            other => panic!("expected Response::Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_frame_closes_without_reply() {
+        // A client that disconnects mid-payload: the server reads EOF on
+        // read_exact and closes with no reply. The client half-closes its
+        // side after the partial write so the server's read_exact sees EOF
+        // (keeping the socket open would block the server forever).
+        let state = frame_state();
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        let client_io = async {
+            let mut bytes = (64u32).to_le_bytes().to_vec();
+            bytes.extend_from_slice(&[0u8; 4]); // only 4 of 64 payload bytes
+            client.write_all(&bytes).await.unwrap();
+            client.shutdown().await.unwrap();
+            // The server must not write a response frame: read to EOF.
+            match client.read_u32_le().await {
+                Ok(_) => panic!("mid-frame disconnect must not produce a reply"),
+                Err(_) => None::<Result<Response, anyhow::Error>>,
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (server, response) =
+                tokio::join!(handle_connection(server, state.clone()), client_io);
+            // The server errors on the truncated read; the client saw EOF.
+            assert!(server.is_err(), "server must fail on a truncated frame");
+            response
+        })
+        .await
+        .expect("IPC round trip timed out");
     }
 
     #[tokio::test]
