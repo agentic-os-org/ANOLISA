@@ -86,11 +86,10 @@ def install_fixture(
         entry.parent.mkdir(parents=True, exist_ok=True)
         entry.write_text("export default {};\n")
     (source / "adapters/tokenless/openclaw/dist/unlisted.js").write_text("export default {};\n")
-    for relative in ("target/release/tokenless", "third_party/rtk/target/release/rtk"):
-        binary = source / relative
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        binary.write_text("#!/bin/sh\nexit 0\n")
-        binary.chmod(0o755)
+    binary = source / "target/release/tokenless"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
     for relative in ("LICENSE", "docs/response-compression.md"):
         target = source / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -101,9 +100,6 @@ def install_fixture(
         "_bindir": "/usr/bin",
         "_docdir": "/usr/share/doc",
         "_datadir": "/usr/share",
-        "_libexecdir_tokenless": (
-            "/opt/tokenless/runtime" if custom else "/usr/libexec/anolisa/tokenless"
-        ),
         "_adapterdir_tokenless": (
             "/opt/tokenless/plugins" if custom else "/usr/share/anolisa/adapters/tokenless"
         ),
@@ -205,11 +201,11 @@ class RpmSplitTests(unittest.TestCase):
                     counts[owners[0]] += 1
                 self.assertEqual(counts[""], 0)
                 self.assertFalse((stage / "usr/share/anolisa/components").exists())
-                self.assertEqual(counts["core"], 5)
+                self.assertEqual(counts["core"], 3)
                 self.assertGreater(counts["plugins"], 70)
-                self.assertEqual(
-                    os.readlink(stage / "usr/bin/rtk"), macros["_libexecdir_tokenless"] + "/rtk"
-                )
+                # RTK is linked into tokenless; no standalone helper may ship.
+                self.assertFalse((stage / "usr/bin/rtk").is_symlink())
+                self.assertFalse((stage / "usr/libexec").exists())
                 plugin_root = stage / macros["_adapterdir_tokenless"].lstrip("/")
                 manifest = (source / "tokenless-plugins.files").read_text().splitlines()
                 for relative in (

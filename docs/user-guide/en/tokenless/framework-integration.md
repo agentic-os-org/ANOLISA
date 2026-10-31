@@ -451,7 +451,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 The scripts call the framework's own plugin or extension mechanism. Follow their restart instructions. If a script is missing, fails, or reports an incompatible framework version, prefer an anolisa-managed installation.
 
-On hosts whose installer still enforces the safety scan, the OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` and `rtk` binaries through Node.js child-process APIs. Hosts that advertise the option as a deprecated no-op no longer receive it; there the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
+On hosts whose installer still enforces the safety scan, the OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` binary through Node.js child-process APIs. Hosts that advertise the option as a deprecated no-op no longer receive it; there the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
 
 ### npm with Cosh-NG
 

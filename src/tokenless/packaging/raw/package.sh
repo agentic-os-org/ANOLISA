@@ -55,9 +55,7 @@ normalize_modes() {
 
     find "$stage" -type d -exec chmod 0755 {} +
     find "$stage" -type f -exec chmod 0644 {} +
-    chmod 0755 \
-        "$stage/bin/tokenless" \
-        "$stage/libexec/anolisa/tokenless/rtk"
+    chmod 0755 "$stage/bin/tokenless"
     find "$stage/adapters" "$stage/extensions/tokenless" \
         -type f \( -name '*.py' -o -name '*.sh' -o \
         -path '*/codex/scripts/*' \) -exec chmod 0755 {} +
@@ -127,14 +125,11 @@ stage_payload() {
     install -d -m 0755 \
         "$stage/.anolisa" \
         "$stage/bin" \
-        "$stage/libexec/anolisa/tokenless" \
         "$stage/adapters" \
         "$stage/extensions/tokenless/hooks" \
         "$stage/extensions/tokenless/commands"
     install -p -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
     install -p -m 0755 "$BIN_DIR/tokenless" "$stage/bin/tokenless"
-    install -p -m 0755 "$BIN_DIR/rtk" \
-        "$stage/libexec/anolisa/tokenless/"
     tokenless_copy_adapters "$adapters" "$stage/adapters" raw
 
     # ANOLISA intentionally ignores archive symlinks. The source tree shares
@@ -191,17 +186,15 @@ TARGET_OS="$(normalize_os "${TARGET_OS:-$(detect_os)}")"
 TARGET_ARCH="$(normalize_arch "${TARGET_ARCH:-$(detect_arch)}")"
 
 validate_target
-[ -n "$BIN_DIR" ] || die "BIN_DIR must contain prebuilt tokenless and rtk binaries"
-for binary in tokenless rtk; do
-    [ -x "$BIN_DIR/$binary" ] || die "missing executable: $BIN_DIR/$binary"
-done
+[ -n "$BIN_DIR" ] || die "BIN_DIR must contain the prebuilt tokenless binary"
+[ -x "$BIN_DIR/tokenless" ] || die "missing executable: $BIN_DIR/tokenless"
 require_file "$CONTRACT"
 
 VERSION="$(python3 "$SCRIPT_DIR/verify-release.py" "$SOURCE_ROOT" "$CONTRACT")"
 python3 "$SCRIPT_DIR/verify-binaries.py" \
     --os "$TARGET_OS" \
     --arch "$TARGET_ARCH" \
-    "$BIN_DIR/tokenless" "$BIN_DIR/rtk"
+    "$BIN_DIR/tokenless"
 
 if [ "$COMMAND" = "stage" ]; then
     [ -n "${DESTDIR:-}" ] || die "DESTDIR is required by stage"

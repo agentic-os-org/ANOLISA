@@ -220,7 +220,7 @@ fn main() -> Result<()> {
             None
         }
     };
-    let rtk_bin = match rtk_side::locate_rtk() {
+    let tokenless_bin = match rtk_side::locate_tokenless() {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("[l2] rtk degraded: {e}");
@@ -253,7 +253,7 @@ fn main() -> Result<()> {
                 category,
                 &command_specs,
                 &repo_root,
-                rtk_bin.as_deref(),
+                tokenless_bin.as_deref(),
                 worker.as_mut(),
                 opts.n,
                 &mut degradations,
@@ -352,11 +352,11 @@ fn main() -> Result<()> {
         .as_ref()
         .map(|w| w.provenance().clone())
         .unwrap_or_default();
-    // rtk provenance: the binary lives at <rtk>/target/release/rtk, so its
-    // source tree is three levels up. Recorded because that tree is a pinned
-    // clone kept out of version control — without it a run reads no rtk revision
-    // at all.
-    let (rtk_revision, rtk_dirty) = match rtk_bin.as_deref() {
+    // rtk provenance: tokenless lives at <root>/target/release/tokenless and
+    // links the RTK checkout at <root>/third_party/rtk. Recorded because that
+    // tree is a pinned clone kept out of version control — without it a run
+    // reads no rtk revision at all.
+    let (rtk_revision, rtk_dirty) = match tokenless_bin.as_deref() {
         Some(bin) => rtk_provenance(bin),
         None => (None, None),
     };
@@ -373,7 +373,7 @@ fn main() -> Result<()> {
             rtk_dirty,
             platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
             headroom_available: worker.is_some(),
-            rtk_available: rtk_bin.is_some(),
+            rtk_available: tokenless_bin.is_some(),
             probe_model: probe_client.as_ref().map(|c| c.model().to_string()),
             degradations,
         },
@@ -472,7 +472,7 @@ fn collect_dynamic(
     category: Category,
     specs: &[CommandSpec],
     repo_root: &Path,
-    rtk_bin: Option<&Path>,
+    tokenless_bin: Option<&Path>,
     mut worker: Option<&mut headroom_side::HeadroomWorker>,
     fixed_n: Option<usize>,
     degradations: &mut Vec<String>,
@@ -499,7 +499,7 @@ fn collect_dynamic(
         let mut rep_latency = Vec::new();
         for spec in &specs {
             let cwd = repo_root.join(&spec.cwd_rel);
-            let (raw_text, rtk_result) = match rtk_bin {
+            let (raw_text, rtk_result) = match tokenless_bin {
                 Some(bin) => {
                     match rtk_side::run_paired(bin, &spec.argv, spec.rtk_invocation(), &cwd) {
                         Ok(pair) => (pair.raw_text.clone(), Some(pair)),
@@ -986,21 +986,23 @@ fn untracked_build_inputs(repo_root: &Path) -> Option<usize> {
     )
 }
 
-/// Revision and tracked-dirty state of the rtk source tree a binary was built
-/// from, or `(None, None)` when it cannot be resolved.
+/// Revision and tracked-dirty state of the RTK checkout a `tokenless` binary
+/// links, or `(None, None)` when it cannot be resolved.
 ///
-/// Resolves `<rtk>/target/release/rtk` back to `<rtk>` (three parents) and
-/// queries git there. A `$RTK_BIN` pointing somewhere else, or a `PATH` rtk,
-/// yields `None` rather than a wrong attribution. `safe.directory` is passed
-/// per-invocation because the tree is rsynced in and owned by another uid.
-fn rtk_provenance(rtk_bin: &Path) -> (Option<String>, Option<bool>) {
-    let Some(src) = rtk_bin
+/// Resolves `<root>/target/release/tokenless` back to `<root>` (three parents)
+/// and queries git in `<root>/third_party/rtk`. A tokenless outside a Tokenless
+/// build tree, such as one on `PATH`, yields `None` rather than a wrong
+/// attribution. `safe.directory` is passed per-invocation because the tree is
+/// rsynced in and owned by another uid.
+fn rtk_provenance(tokenless_bin: &Path) -> (Option<String>, Option<bool>) {
+    let Some(root) = tokenless_bin
         .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
     else {
         return (None, None);
     };
+    let src = root.join("third_party/rtk");
     if !src.join(".git").exists() {
         return (None, None);
     }
@@ -1009,7 +1011,7 @@ fn rtk_provenance(rtk_bin: &Path) -> (Option<String>, Option<bool>) {
             .arg("-c")
             .arg(format!("safe.directory={}", src.display()))
             .args(args)
-            .current_dir(src)
+            .current_dir(&src)
             .output()
             .ok()
             .filter(|o| o.status.success())

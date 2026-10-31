@@ -45,17 +45,6 @@ target = "{bindir}/tokenless"
 mode = "0755"
 type = "executable"
 
-[[component.layout.files]]
-source = "libexec/anolisa/tokenless/rtk"
-target = "{libexecdir}/tokenless/rtk"
-mode = "0755"
-type = "executable"
-
-[[component.layout.files]]
-source = "{libexecdir}/tokenless/rtk"
-target = "{bindir}/rtk"
-type = "symlink"
-
 # Shared hooks are interpreter-loaded resources, so the common tree stays
 # non-executable. Cosh uses its separately staged extension bundle.
 [[component.layout.files]]

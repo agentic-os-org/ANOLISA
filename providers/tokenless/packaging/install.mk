@@ -27,7 +27,7 @@ check-install-inputs:
 		test -f "$$file" || { echo "Missing installation input: $$file" >&2; exit 1; }; \
 	done
 
-# Tokenless and RTK remain independently installed backend executables.
+# The Tokenless CLI remains an independently installed backend.
 install: check-install-inputs
 	install -d $(call packaging_quote,$(DESTDIR)$(LIBEXECDIR)) $(call packaging_quote,$(DESTDIR)$(DATADIR)/examples) $(call packaging_quote,$(DESTDIR)$(DOCDIR))
 	install -m 0755 $(call packaging_quote,$(BINARY)) $(call packaging_quote,$(DESTDIR)$(LIBEXECDIR)/aw-provider-tokenless)

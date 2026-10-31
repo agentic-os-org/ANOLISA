@@ -21,7 +21,7 @@
     "aw-cli/test/installation",
     "aw-package/lib/aw_package",
     "aw-provider-sec-core/test/provider",
-    "aw-provider-tokenless/test/managed_rtk",
+    "aw-provider-tokenless/test/linked_rtk",
     "aw-provider-tokenless/test/pretool",
     "aw-provider-tokenless/test/provider",
     "aw-provider-tokenless/test/views",
@@ -174,8 +174,8 @@
       "test": "pretool_rejects_direct_mutations_and_keeps_execution_errors_visible"
     },
     "rtk-isolation": {
-      "target": "aw-provider-tokenless/test/managed_rtk",
-      "test": "managed_path_is_child_only_and_rejects_missing_corrupt_or_unusable_payloads"
+      "target": "aw-provider-tokenless/test/linked_rtk",
+      "test": "legacy_rtk_arguments_are_accepted_but_never_read_or_executed"
     },
     "view-isolation": {
       "target": "aw-provider-tokenless/test/views",

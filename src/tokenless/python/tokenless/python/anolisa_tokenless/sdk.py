@@ -335,7 +335,7 @@ class TokenlessSdk:
             diff_compression_enabled=self.config.diff_compression_enabled,
             html_extraction_enabled=self.config.html_extraction_enabled,
         )
-        self._rtk_path = self._resolve_rtk() if self.config.rtk_enabled else None
+        self._rtk_launcher = self._resolve_launcher() if self.config.rtk_enabled else None
         self._stats: TokenlessStats | None = None
 
     @property
@@ -364,8 +364,8 @@ class TokenlessSdk:
         return _before_model_response(response)
 
     async def pre_tool(self, request: PreToolRequest) -> PreToolResponse:
-        """Runs the Core PreTool service with the packaged RTK executable."""
-        if self._rtk_path is None:
+        """Runs the Core PreTool service; rewrites run as the packaged `tokenless rtk`."""
+        if self._rtk_launcher is None:
             raise RuntimeError("Tokenless RTK is disabled")
         response = await asyncio.to_thread(
             self.runtime._pre_tool_json,
@@ -380,7 +380,7 @@ class TokenlessSdk:
                     },
                 }
             ),
-            self._rtk_path,
+            self._rtk_launcher,
             **_attribution_kwargs(request.attribution),
         )
         value = _json_object(response)
@@ -447,17 +447,17 @@ class TokenlessSdk:
         value = _json_object(response)
         return RetrieveResponse(hash=value["hash"], payload=value["payload"])
 
-    def _resolve_rtk(self) -> Path:
-        name = "rtk.exe" if sys.platform == "win32" else "rtk"
+    def _resolve_launcher(self) -> Path:
+        name = "tokenless.exe" if sys.platform == "win32" else "tokenless"
         resource = files("anolisa_tokenless").joinpath("_bin", name)
         if not isinstance(resource, Path):
             raise RuntimeError(
-                "anolisa-tokenless must be installed as an unpacked wheel so packaged "
-                "RTK has a stable executable path"
+                "anolisa-tokenless must be installed as an unpacked wheel so the packaged "
+                "tokenless executable has a stable path for RTK commands"
             )
         if not resource.is_file() or not os.access(resource, os.X_OK):
             raise RuntimeError(
-                "anolisa-tokenless installation is missing its executable packaged RTK"
+                "anolisa-tokenless installation is missing its packaged tokenless executable"
             )
         return resource
 

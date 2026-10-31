@@ -2649,32 +2649,47 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 
 #[test]
 #[cfg(unix)]
-fn compress_pre_tool_resolves_the_independent_rtk_binary() {
+fn compress_pre_tool_runs_rewrites_through_the_embedded_rtk() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
+    // A stray `rtk` on PATH must play no part: RTK is linked into tokenless.
     let bin_dir = tempfile::tempdir().unwrap();
-    let rtk = bin_dir.path().join("rtk");
-    std::fs::write(
-        &rtk,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'rtk 0.43.0'; exit 0; fi\nprintf 'rtk grep --count error log'\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
+    let stray = bin_dir.path().join("rtk");
+    std::fs::write(&stray, "#!/bin/sh\nexit 97\n").unwrap();
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = std::fs::metadata(&rtk).unwrap().permissions();
+        let mut permissions = std::fs::metadata(&stray).unwrap().permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&rtk, permissions).unwrap();
+        std::fs::set_permissions(&stray, permissions).unwrap();
     }
+    let path = std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    // RTK reads permission rules and its own configuration from the home directory.
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("alpha.txt"), "").unwrap();
+    let isolate = |command: &mut Command| {
+        command
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("TOKENLESS_STATS_ENABLED", "0");
+    };
+
     let request = serde_json::json!({
         "protocol_version": 2,
         "operation": "pre_tool",
         "attribution": {"agent_id": "integration-agent"},
         "input": {
             "tool_name": "Bash",
-            "arguments": {"command": "grep error log"},
+            "arguments": {"command": "ls", "timeout": 30},
             "command_field": "command",
             "capabilities": {
                 "replace_arguments": true,
@@ -2682,24 +2697,48 @@ fn compress_pre_tool_resolves_the_independent_rtk_binary() {
             }
         }
     });
-    let output = spawn_with_stdin(
-        fixture
-            .command()
-            .env(
-                "PATH",
-                std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
-                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-                ))
-                .unwrap(),
-            )
-            .env("TOKENLESS_STATS_ENABLED", "0"),
-        &["compress"],
-        &request.to_string(),
+    let mut compress = fixture.command();
+    isolate(&mut compress);
+    let output = spawn_with_stdin(&mut compress, &["compress"], &request.to_string());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success());
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["action"], "replace_arguments");
     assert_eq!(response["result"]["output_optimization"], "rtk");
+    assert_eq!(response["result"]["arguments"]["timeout"], 30);
+    let rewritten = response["result"]["arguments"]["command"].as_str().unwrap();
+    assert!(rewritten.ends_with(" rtk ls"), "{rewritten}");
+    assert!(rewritten.contains("tokenless"), "{rewritten}");
+
+    // The rewritten command is self-contained: this binary runs RTK's `ls`.
+    let mut shell = Command::new("sh");
+    isolate(&mut shell);
+    let executed = shell
+        .args(["-c", rewritten])
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&executed.stdout).contains("alpha.txt"));
+}
+
+#[test]
+fn rtk_subcommand_passes_arguments_through_verbatim() {
+    let output = tokenless_bin().args(["rtk", "--version"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("rtk "));
+
+    // Usage names the embedding command, so pasted hints stay runnable.
+    let output = tokenless_bin().args(["rtk", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: tokenless rtk"));
 }
 
 #[test]

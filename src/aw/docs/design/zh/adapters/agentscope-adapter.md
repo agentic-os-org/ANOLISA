@@ -138,7 +138,7 @@ block、未成功结果及中间 chunk 不压缩；无效替换报告故障并�
 sec-core 的 `scan_code`/`observe_tool` 和 Tokenless 的 `pre_tool`/`post_tool`。
 PreTool 拒绝原始尝试，把完整重试参数交给模型；新调用必须重新通过原生权限和
 sec-core。RTK 归属来自新执行参数，与被拒绝调用的 ID 无关，可避免重复压缩。
-sec-core 映射必须匹配 Toolkit 的准确工具名和参数指针。RTK 需独立安装；
+sec-core 映射必须匹配 Toolkit 的准确工具名和参数指针。
 `aw config init` 仍面向 Qoder/OpenClaw。
 
 ## 验证

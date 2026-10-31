@@ -53,11 +53,7 @@
           "--cli",
           "${TOKENLESS_CLI}",
           "--data-dir",
-          "${STATE}/tokenless",
-          "--rtk",
-          "${RTK_BINARY}",
-          "--rtk-sha256",
-          "${RTK_SHA256}"
+          "${STATE}/tokenless"
         ]
       },
       "timeout_ms": 2000,

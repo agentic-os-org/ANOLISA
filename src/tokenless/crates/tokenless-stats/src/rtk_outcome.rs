@@ -3,7 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+// RTK also compiles this file through `#[path]`, so `cargo fmt --all` checks it
+// under RTK's 2021 style as well. Avoid shapes the two style editions format
+// differently: lowercase names in brace imports and single-argument `assert!`
+// chains.
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use thiserror::Error;
 
 use super::path_policy;
@@ -96,7 +100,7 @@ impl OutcomeStore {
         transaction.execute("DELETE FROM calls WHERE created < unixepoch() - 86400", [])?;
         transaction.execute(
             "DELETE FROM calls WHERE agent = ?1 AND session = ?2 AND tool = ?3",
-            params![agent, session, tool],
+            rusqlite::params![agent, session, tool],
         )?;
         if expected == 0 {
             transaction.commit()?;
@@ -108,7 +112,7 @@ impl OutcomeStore {
         transaction.execute(
             "INSERT INTO calls (agent, session, tool, run, expected, command, executed_command)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
+            rusqlite::params![
                 agent,
                 session,
                 tool,
@@ -134,7 +138,7 @@ impl OutcomeStore {
              SELECT run, ?2, ?3 FROM calls
              WHERE run = ?1 AND ?2 < expected AND created >= unixepoch() - 86400
              ON CONFLICT (run, ordinal) DO UPDATE SET changed = max(changed, excluded.changed)",
-            params![run, ordinal, changed],
+            rusqlite::params![run, ordinal, changed],
         )?;
         Ok(())
     }
@@ -156,7 +160,7 @@ impl OutcomeStore {
         // Legacy RTK and untracked calls have no row and need no write transaction.
         let exists: bool = self.0.query_row(
             "SELECT EXISTS (SELECT 1 FROM calls WHERE agent = ?1 AND session = ?2 AND tool = ?3 AND executed_command = ?4)",
-            params![agent, session, tool, executed_command],
+            rusqlite::params![agent, session, tool, executed_command],
             |row| row.get(0),
         )?;
         if !exists {
@@ -170,13 +174,13 @@ impl OutcomeStore {
                     AND created >= unixepoch() - 86400
                     AND expected = (SELECT count(*) FROM outcomes WHERE run = calls.run)
                     AND NOT EXISTS (SELECT 1 FROM outcomes WHERE run = calls.run AND changed != 0)",
-                params![agent, session, tool, executed_command],
+                rusqlite::params![agent, session, tool, executed_command],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
         transaction.execute(
             "DELETE FROM calls WHERE agent = ?1 AND session = ?2 AND tool = ?3 AND executed_command = ?4",
-            params![agent, session, tool, executed_command],
+            rusqlite::params![agent, session, tool, executed_command],
         )?;
         transaction.commit()?;
         Ok(original_command)
@@ -218,11 +222,11 @@ mod tests {
                     .as_deref(),
                 expected.then_some("git log && git show")
             );
-            assert!(
+            assert_eq!(
                 store
                     .consume_unchanged("agent", "session", "tool", &run)
-                    .unwrap()
-                    .is_none()
+                    .unwrap(),
+                None
             );
         }
     }
@@ -241,11 +245,11 @@ mod tests {
             .unwrap();
         store.record(&old, 0, false).unwrap();
         store.record(&current, 1, false).unwrap();
-        assert!(
+        assert_eq!(
             store
                 .consume_unchanged("agent", "session", "tool", &current)
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            None
         );
 
         let run = store
@@ -254,11 +258,11 @@ mod tests {
             .unwrap();
         store.record(&run, 0, true).unwrap();
         store.record(&run, 0, false).unwrap();
-        assert!(
+        assert_eq!(
             store
                 .consume_unchanged("agent", "session", "tool", &run)
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            None
         );
     }
 
@@ -272,11 +276,11 @@ mod tests {
             .unwrap();
         store.record(&run, 0, false).unwrap();
         for command in ["", "cat data", "previous-generation"] {
-            assert!(
+            assert_eq!(
                 store
                     .consume_unchanged("agent", "session", "tool", command)
-                    .unwrap()
-                    .is_none()
+                    .unwrap(),
+                None
             );
         }
         assert_eq!(
@@ -304,7 +308,7 @@ mod tests {
             .unwrap()
             .unwrap();
         store.record(&run, 0, false).unwrap();
-        assert!(
+        assert_eq!(
             store
                 .begin(
                     "agent",
@@ -314,15 +318,15 @@ mod tests {
                     "rtk read file && cat empty",
                     str::to_owned
                 )
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            None
         );
         store.record(&run, 0, false).unwrap();
-        assert!(
+        assert_eq!(
             store
                 .consume_unchanged("agent", "session", "tool", &run)
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            None
         );
     }
 
@@ -330,29 +334,29 @@ mod tests {
     fn session_isolation_expiry_and_missing_attribution_are_conservative() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = OutcomeStore::open(directory.path(), true).unwrap();
-        assert!(
+        assert_eq!(
             store
                 .begin("agent", "", "tool", 1, "git log", str::to_owned)
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            None
         );
         let run = store
             .begin("agent", "session", "tool", 1, "git log", str::to_owned)
             .unwrap()
             .unwrap();
         store.record(&run, 0, false).unwrap();
-        assert!(
+        assert_eq!(
             store
                 .consume_unchanged("agent", "other", "tool", &run)
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            None
         );
         store.0.execute("UPDATE calls SET created = 0", []).unwrap();
-        assert!(
+        assert_eq!(
             store
                 .consume_unchanged("agent", "session", "tool", &run)
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            None
         );
     }
 }

@@ -4,9 +4,9 @@
 
 ## 目标
 
-`anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含 PyO3
-Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk`
-出现在 `PATH` 中。
+`anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含链接了
+固定版本 RTK 的 PyO3 Runtime，以及运行改写后命令的匹配 `tokenless` 可执行文件，因此
+Python 应用不要求 `tokenless` 或 `rtk` 出现在 `PATH` 中。
 
 公开的 `TokenlessSdk` 把宿主框架的四个生命周期映射为 Tokenless 行为：
 
@@ -27,9 +27,9 @@ Session 标识；PreTool 与普通 PostTool 还必须提供 Tool Use 标识。�
 OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约，不是 OpenAI 请求。
 
 `tokenless-runtime` 统一持有 SQLite Stash 和统计记录器。Schema 与响应压缩共享 Stash，
-候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
-提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
-携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
+候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。RTK 同样作为库
+链接并在进程内改写，且只在 Adapter 提供 `command_field` 时调用；每个改写后的 wrapper
+都以 `tokenless rtk` 形式调用 Wheel 内置的 `tokenless`，并携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
 Rust Core，而不是 Python 配置中。Shell 工具的 `PostToolRequest` 在 `command` 字段携带实际
 执行的命令行；由 Core 而非 Adapter 把只打印本地文件的结果报告为 `file_read`，打印出的
 HTML 页面因此保持原样，输出中的数据仍照常压缩。
@@ -53,7 +53,7 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 及结构化响应处理。插件私有二进制也由 Adapter 解析；私有 PATH 或工作区状态不代表
 模型可以调用恢复命令，因此这些路径声明 `recovery.kind = none`。
 
-非法输入、内置 RTK 缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
+非法输入、内置 `tokenless` 可执行文件缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
@@ -189,10 +189,10 @@ Session；客户端不会推断或强制这两种模式。Python API 不清空�
 
 ## 打包与验证
 
-`make python-wheel` 会构建固定版本 RTK，把它暂存为
-`anolisa_tokenless/_bin/rtk`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
-可以通过 `PYTHON_RTK_BINARY` 指定为同一 Wheel 目标构建的 RTK 文件。
-`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 RTK 的条件下验证
+`make python-wheel` 会构建 `tokenless`，把它暂存为
+`anolisa_tokenless/_bin/tokenless`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
+可以通过 `PYTHON_TOKENLESS_BINARY` 指定为同一 Wheel 目标构建的 `tokenless` 文件。
+`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 `tokenless` 或 RTK 的条件下验证
 四个生命周期和 Stats 查询。
 
 `anolisa-tokenless-agentscope` 支持 AgentScope 1.0.11 至 1.0.x 和 2.0.x。1.x Adapter

@@ -26,7 +26,7 @@ aw/
 ├── common.py                     # 有界子进程、取消与复制
 ├── core.Makefile                 # 归档安装入口，复用 AW install.mk
 ├── build-integration.sh          # 验收时显式构建后端的入口
-├── integration.py                # 构建 sec-core、Tokenless 和固定版本 RTK
+├── integration.py                # 构建 sec-core 和 Tokenless
 ├── templates/                    # 使用显式程序路径的策略数据
 └── tests/                        # 构建选择、归档及安装夹具
 ```
@@ -37,8 +37,8 @@ core 交付 `bin/aw`、普通安装 Makefile 和许可证／来源文档，使�
 Provider 安装使用已经装好的 AW CLI；Provider 归档不包含后端可执行文件。
 
 模板的 `PROVIDERS_DIR` 是实际包含 `sec-core`、`tokenless` Provider 目录的根。
-按所选策略显式传递后端路径 `SEC_CORE_CLI`、`TOKENLESS_CLI`、`RTK_BINARY`、
-`RTK_SHA256` 和 `SOCKET`，因此支持 `AWPRJ` 命名空间及不同的 core／Provider 前缀。
+按所选策略显式传递后端路径 `SEC_CORE_CLI`、`TOKENLESS_CLI` 和 `SOCKET`，因此
+支持 `AWPRJ` 命名空间及不同的 core／Provider 前缀。
 
 原生集成验收通过单独入口准备后端，普通组包不调用它：
 

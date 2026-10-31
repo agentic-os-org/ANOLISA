@@ -15,25 +15,27 @@
 //! RTK command-rewrite latency benchmarks.
 //!
 //! METHODOLOGY NOTE — not comparable with the in-process compressor benches:
-//! rtk is an external binary, so every measurement here is a full subprocess
-//! round-trip (`rtk rewrite <cmd>`) INCLUDING process spawn/teardown overhead,
-//! which puts these numbers in the millisecond range. The response/schema/TOON
-//! benches call library code in-process and land in the microsecond range.
-//! The two latency classes must not be added together or compared directly.
+//! RTK runs as an external process (`tokenless rtk rewrite <cmd>`), so every
+//! measurement here is a full subprocess round-trip INCLUDING process
+//! spawn/teardown overhead, which puts these numbers in the millisecond range.
+//! The response/schema/TOON benches call library code in-process and land in
+//! the microsecond range. The two latency classes must not be added together
+//! or compared directly. PreTool itself rewrites in process; this measures the
+//! RTK command line.
 //!
-//! When the rtk binary is unavailable the bench prints a skip notice and
+//! When tokenless is unavailable the bench prints a skip notice and
 //! returns without registering measurement points — never panics — so
-//! `cargo bench` stays green on machines without rtk.
+//! `cargo bench` stays green on machines without tokenless.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::time::Duration;
-use tokenless_bench::metrics::{TimedRun, find_rtk_binary, run_rewrite_with_timeout};
+use tokenless_bench::metrics::{TimedRun, find_tokenless_binary, run_rewrite_with_timeout};
 use tokenless_bench::rtk_command_samples;
 
 fn bench_rtk(c: &mut Criterion) {
-    let Some(bin) = find_rtk_binary() else {
-        eprintln!("[skip] rtk_latency: rtk binary not available (set RTK_BIN or install rtk)");
+    let Some(tokenless) = find_tokenless_binary() else {
+        eprintln!("[skip] rtk_latency: tokenless not available (build it or set TOKENLESS_BIN)");
         return;
     };
 
@@ -58,7 +60,7 @@ fn bench_rtk(c: &mut Criterion) {
                 // valid here (0/1/2/3 protocol) — we measure latency only. A
                 // timeout or spawn failure invalidates the measurement, so it
                 // panics rather than being silently recorded as a data point.
-                match run_rewrite_with_timeout(&bin, black_box(cmd), Duration::from_secs(5)) {
+                match run_rewrite_with_timeout(&tokenless, black_box(cmd), Duration::from_secs(5)) {
                     TimedRun::Completed(output) => output,
                     _ => panic!("rtk rewrite {label:?} timed out or failed to run"),
                 }

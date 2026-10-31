@@ -15,20 +15,17 @@ compression. Schema compression and authorized retrieval remain separate.
 
 Use the [AW delivery archives](../../../../user-guide/en/aw/installation.md).
 The Provider archive contains the bridge, examples and template only.
-Install the Tokenless backend CLI and patched RTK 0.49.0 separately through the
-backend owner. The Provider prefix does not contain backend executables or RTK
-source/provenance receipts.
+Install the Tokenless backend CLI separately through the backend owner. The CLI
+links RTK v0.49.0 with Tokenless's statistics, pytest and library patches, so no
+separate `rtk` executable is needed. The Provider prefix does not contain backend
+executables or RTK source/provenance receipts.
 
-Supply an absolute regular RTK executable and its SHA-256 through `RTK_BINARY`
-and `RTK_SHA256`; these values do not transfer backend ownership to AW. Its
-parent directory cannot contain `:`. PreTool validates the executable, digest
-and trusted parent; failure follows `on_error` without falling back to user RTK.
-PostTool and the read-only view work independently of RTK.
+Retry suggestions launch the configured CLI by absolute path as `tokenless rtk`;
+AW discovers no RTK from PATH or HOME.
 
 Install the AW CLI through its ordinary Makefile and optional Provider bridge
 through the Provider API into a separate extension prefix. Initialize with the
-explicit Tokenless template and `PROVIDERS_DIR`, `TOKENLESS_CLI`, `RTK_BINARY`,
-`RTK_SHA256` values.
+explicit Tokenless template and `PROVIDERS_DIR` and `TOKENLESS_CLI` values.
 The combined template additionally requires `SEC_CORE_CLI` and `SOCKET`.
 Templates contain no package requirements; a native Provider prefix works without
 AW records. See the [complete user commands](../../../../user-guide/en/aw/tokenless.md).
@@ -36,9 +33,8 @@ Installing files does not enable the Provider.
 
 For supported targets, copy the
 [shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml),
-replace its executable paths and `RTK_SHA256_OF_EXECUTABLE` with the SHA-256 of
-the actual separately installed RTK executable, and keep both state
-directories outside the immutable installation prefix. Use the framework-specific profile and launch flags from the
+replace its executable paths, and keep both state directories outside the
+immutable installation prefix. Use the framework-specific profile and launch flags from the
 [AW guide](../validation.md).
 
 Pi uses the SDK application factory described in the [Pi launch guide](../agents/pi.md);
@@ -50,10 +46,10 @@ combines sec-core checks/observation with both Tokenless operations. Follow the
 [SDK launch contract](../agents/agentscope.md) for Python and factory setup.
 
 The Provider accepts only private configuration `{version: 1}`. Its fixed argv is
-`aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`, optionally followed by
-`--rtk ABS_FILE --rtk-sha256 HEX`. The distribution template fills both managed arguments
-from the explicit backend path and checksum; hand-written configurations without them
-retain native Tokenless dependency discovery. The view command omits them.
+`aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`. Configurations generated
+from earlier templates may append `--rtk ABS_FILE --rtk-sha256 HEX`; the Provider still
+accepts that pair but no longer reads or executes it, because the CLI rewrites to
+itself. The view command rejects the pair.
 The bridge calls `tokenless compress` using Protocol v2 and sets
 `TOKENLESS_DATA_DIR` for that child.
 CLI statistics use the Agent, session and tool-call identifiers supplied by AW.
@@ -74,14 +70,15 @@ checks again. A scanner denial/failure remains authoritative even when PreTool i
 neutral. Existing external Hook scheduling is unchanged.
 
 The Tokenless integration recognizes a standalone attributed RTK wrapper in executed
-arguments and supplies `output_optimization: rtk` to PostTool. The retry's call ID may
+arguments, in which an absolute `tokenless` executable runs its `rtk` subcommand,
+and supplies `output_optimization: rtk` to PostTool. The retry's call ID may
 differ from the blocked attempt. Quoted or escaped argument literals and symlinked
 state directories preserve this ownership. Supported execution prefixes are literal
 environment assignments, `env NAME=value ...`, bare `sudo`, `noglob`, `command`,
 `exec`, and `shadowenv exec --`; these forms may be combined. Other wrapper forms
 (including extra flags), bare RTK commands, foreign attribution and compound shell
-commands are not inferred as RTK-owned. Unavailable RTK, CLI errors, invalid
-responses or timeouts are reported under `on_error: report`; they do not disable
+commands are not inferred as RTK-owned. CLI errors, invalid responses or timeouts
+are reported under `on_error: report`; they do not disable
 sec-core's `on_error: block` or grant native approval. To keep PostTool alone, remove
 only the `rewrite-command` before step and retain the shared Provider and after chain.
 
@@ -255,12 +252,15 @@ From the repository root on Linux:
 
 ```bash
 cargo build --locked --manifest-path providers/tokenless/Cargo.toml
+bash src/tokenless/packaging/build/setup-rtk.sh
 cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
 ```
+
+The setup script fetches and patches the pinned RTK source that the CLI links.
 
 Use the resulting `providers/tokenless/target/debug/aw-provider-tokenless` and
 `src/tokenless/target/debug/tokenless` paths in the shared example. To build an independent
 bridge archive, select `COMPONENTS=tokenless` with the distribution `aw-packages` target.
-The Tokenless backend and RTK remain independently delivered core components.
+The Tokenless backend remains an independently delivered core component.
 
 Resident Claude clients can use `aw_claude.create_sdk_mcp_server` for in-process MCP results. The public handler seam supplies reliable `is_error`; successful single text blocks can be compressed, while error, multi-block, media and structured results retain their envelope. See the [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md). Schema/BeforeModel and Retrieve remain separate admitted-capability work.

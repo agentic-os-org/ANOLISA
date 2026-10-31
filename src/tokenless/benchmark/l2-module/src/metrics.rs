@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! rtk binary discovery, shared by the L2 harness (`l2::rtk_side`) so it
-//! reuses the same `$RTK_BIN` → vendored release build → `PATH` order as the
-//! L1 suite, keeping discovery consistent across layers.
+//! tokenless discovery, shared by the L2 harness (`l2::rtk_side`) so it
+//! reuses the same `$TOKENLESS_BIN` → Tokenless release build → `PATH` order
+//! as the L1 suite, keeping discovery consistent across layers.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,28 +34,44 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// Locate the rtk binary: `$RTK_BIN`, the vendored release build next to this
-/// crate, or `rtk` on `PATH`. Returns `None` when none is runnable.
+/// Locate the `tokenless` whose `rtk` subcommand runs RTK: `$TOKENLESS_BIN`
+/// when set, else the release build of the enclosing Tokenless workspace, then
+/// `tokenless` on `PATH`. Returns `None` when none is runnable.
 ///
-/// Kept byte-identical to `l1-compressor/src/metrics.rs::find_rtk_binary` so
-/// the two suites agree on where `rtk` comes from. The workspaces are
-/// independent, so this is a manual sync obligation, not a shared function:
-/// change one side and you must change the other.
-pub fn find_rtk_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("RTK_BIN") {
-        let pb = PathBuf::from(p);
-        if is_executable(&pb) {
-            return Some(pb);
-        }
+/// Kept byte-identical, with [`rtk_command`] and `is_runnable`, to
+/// `l1-compressor/src/metrics.rs::find_tokenless_binary` so the two suites
+/// agree on where RTK comes from. The workspaces are independent, so this is a
+/// manual sync obligation, not a shared function: change one side and you must
+/// change the other.
+pub fn find_tokenless_binary() -> Option<PathBuf> {
+    // An explicit choice is final: falling back would measure another build.
+    if let Some(program) = std::env::var_os("TOKENLESS_BIN").filter(|p| !p.is_empty()) {
+        let program = PathBuf::from(program);
+        return is_runnable(&program).then_some(program);
     }
-    let vendored =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/rtk/target/release/rtk");
-    if is_executable(&vendored) {
-        return Some(vendored);
+    [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/tokenless"),
+        PathBuf::from("tokenless"),
+    ]
+    .into_iter()
+    .find(|program| is_runnable(program))
+}
+
+/// Starts `<tokenless> rtk`; callers append RTK's own arguments.
+pub fn rtk_command(tokenless: &Path) -> Command {
+    let mut command = Command::new(tokenless);
+    command.arg("rtk");
+    command
+}
+
+/// A path must be executable; a bare name must answer `rtk --version` from
+/// `PATH`, which also rejects a `tokenless` older than `tokenless rtk`.
+fn is_runnable(program: &Path) -> bool {
+    if program.components().count() > 1 {
+        return is_executable(program);
     }
-    // Fall back to PATH: only accept it if `--version` actually runs.
-    if Command::new("rtk").arg("--version").output().is_ok() {
-        return Some(PathBuf::from("rtk"));
-    }
-    None
+    rtk_command(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }

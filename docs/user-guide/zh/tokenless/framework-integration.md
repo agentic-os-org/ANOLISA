@@ -399,7 +399,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 脚本会调用框架自身的 Plugin/Extension 机制；按照脚本输出完成重启。安装脚本缺失、失败或框架版本不兼容时，优先改用 anolisa 管理的安装方式。
 
-在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会带 `--dangerously-force-unsafe-install` 调用 `plugins install`，因为 Plugin 通过 Node.js 子进程 API 启动 `tokenless` 和 `rtk` 二进制；将该参数列为 deprecated no-op 的宿主不再收到该参数，安全扫描由 `security.installPolicy` 决定。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略。如果策略不允许该覆盖参数，就不要安装此 Plugin。
+在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会带 `--dangerously-force-unsafe-install` 调用 `plugins install`，因为 Plugin 通过 Node.js 子进程 API 启动 `tokenless` 二进制；将该参数列为 deprecated no-op 的宿主不再收到该参数，安全扫描由 `security.installPolicy` 决定。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略。如果策略不允许该覆盖参数，就不要安装此 Plugin。
 
 ### npm + Cosh-NG
 

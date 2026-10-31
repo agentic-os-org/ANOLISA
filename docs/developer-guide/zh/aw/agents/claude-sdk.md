@@ -75,7 +75,7 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
 选择 `claude` target，替换 executable、worker 与状态目录的绝对路径。源码示例
 `claude-worker.py` 除 echo 工具外显式开放并允许原生 Bash；组合业务工厂时保留应用
-自己的权限策略。Provider 安装、RTK 要求与统计设置见 [Tokenless 指南](../../../../user-guide/zh/aw/tokenless.md)。
+自己的权限策略。Provider 安装与统计设置见 [Tokenless 指南](../../../../user-guide/zh/aw/tokenless.md)。
 
 PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
 PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一

@@ -75,7 +75,7 @@ raw、npm 和源码安装保留原有交付格式。
 
 #### 方式 B：npm
 
-需要 Node.js 16.7+——`fs.cpSync` 从该版本起提供，而包的 postinstall 用它放置 Adapter 资源。自动安装适合当前平台的预编译二进制（`tokenless`、`rtk`）和框架 Adapter 资源：
+需要 Node.js 16.7+——`fs.cpSync` 从该版本起提供，而包的 postinstall 用它放置 Adapter 资源。自动安装适合当前平台的预编译 `tokenless` 二进制和框架 Adapter 资源：
 
 ```bash
 npm install -g anolisa-tokenless
@@ -123,8 +123,8 @@ curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tok
 
 | 路径 | 触发条件 | 依赖 | 安装内容 |
 |------|----------|------|----------|
-| npm | 存在 npm，且平台为 glibc Linux 或 macOS | `curl`、`tar`、Node.js 16.7+（含 `npm`） | `tokenless`、`rtk` 以及 Adapter 资源 |
-| 源码构建（仅 Linux） | 在**执行 npm 之前**选定：无 npm、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1`。调用 `npm install` 之后不再自动切换——见上文失败处理说明 | `curl`、`tar`、Rust 工具链（`cargo`）1.91 或更高版本 | 仅 `tokenless` CLI —— 不含 `rtk`，也不含 Adapter |
+| npm | 存在 npm，且平台为 glibc Linux 或 macOS | `curl`、`tar`、Node.js 16.7+（含 `npm`） | `tokenless` 以及 Adapter 资源 |
+| 源码构建（仅 Linux） | 在**执行 npm 之前**选定：无 npm、平台为 musl Linux，或设置了 `TOKENLESS_FORCE_BUILD=1`。调用 `npm install` 之后不再自动切换——见上文失败处理说明 | `curl`、`tar`、Rust 工具链（`cargo`）1.91 或更高版本、`git`、`patch` | 仅 `tokenless` CLI —— 不含 Adapter |
 
 脚本只支持 Linux 和 macOS；在 Windows 上会直接报错退出，请改用 WSL2。源码构建路径同样只支持 Linux：在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会调用 `cargo`。
 
@@ -343,15 +343,16 @@ tokenless stats list --limit 1
 ```bash
 git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/tokenless
+bash packaging/build/setup-rtk.sh
 cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-构建需要 Rust 1.91 或更高版本。这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](index.md)通过 anolisa CLI、npm、curl 或 Skill 安装。
+`packaging/build/setup-rtk.sh` 通过 Git 下载固定版本的 RTK 源码并应用 Tokenless Patch；构建会把 RTK 链接进 `tokenless`，需要 Rust 1.91 或更高版本。这条路径只生成独立的 `tokenless` CLI，不会安装 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](index.md)通过 anolisa CLI、npm、curl 或 Skill 安装。
 
 ## 从源码构建并安装组件文件
 
-在 Linux 的 `src/tokenless` 中为当前用户构建并安装 CLI、RTK 和框架资源：
+在 Linux 的 `src/tokenless` 中为当前用户构建并安装 CLI 和框架资源：
 
 ```bash
 make build
@@ -386,7 +387,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
-| 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
+| 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
 | Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容、Record Reduction 背后的完整原始数组，被省略的 Build Log 进度区间 | 默认 TTL 一小时、最多 10,000 个有效条目；JSON 字段名称和空值本身不会触发 Stash 写入 |
 
@@ -558,8 +559,8 @@ JSON 响应压缩保留诊断类名称的字段、`null` 和空值。Stash 并�
 
 ### 普通处理错误通常 fail-open
 
-缺少 `tokenless` 或 `rtk`、压缩无收益时，压缩和重写 Hook 通常不返回修改。Protocol v2
-`compress` 的正常未应用结果使用退出码 `0`；Transport 格式错误退出 `2`；RTK Timeout、
+缺少 `tokenless`、压缩无收益时，压缩和重写 Hook 通常不返回修改。Protocol v2
+`compress` 的正常未应用结果使用退出码 `0`；Transport 格式错误退出 `2`；缺少 RTK 启动程序、
 未授权 Retrieve、Stash 或 Pipeline 失败退出 `1`，且不输出 Response JSON。Tool Ready 会在
 旧版检查、修复和阻断逻辑之前硬退出；工具执行后的失败归因是独立能力，保持不变。
 

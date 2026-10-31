@@ -242,39 +242,12 @@ pub enum RuntimeError {
     /// The PostTool domain compressor failed.
     #[error("{0}")]
     Pipeline(String),
-    /// PreTool was requested without a resolved RTK executable.
-    #[error("RTK executable is unavailable")]
-    RtkUnavailable,
+    /// PreTool was requested without the executable that runs rewritten RTK commands.
+    #[error("Tokenless executable for RTK commands is unavailable")]
+    RtkLauncherUnavailable,
     /// PreTool was requested without the state directory required by RTK.
     #[error("RTK state directory is unavailable")]
     RtkDataDirectoryUnavailable,
-    /// RTK could not be started.
-    #[error("failed to start RTK at '{}': {source}", path.display())]
-    RtkSpawn {
-        /// Executable selected by the caller.
-        path: PathBuf,
-        /// Process spawn failure.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Waiting for RTK failed.
-    #[error("failed while waiting for RTK: {0}")]
-    RtkWait(std::io::Error),
-    /// Reading RTK output failed.
-    #[error("failed to read RTK output: {0}")]
-    RtkOutput(std::io::Error),
-    /// RTK exceeded the lifecycle timeout.
-    #[error("RTK rewrite timed out after 5 seconds")]
-    RtkTimeout,
-    /// RTK terminated without an exit code.
-    #[error("RTK rewrite terminated without an exit code")]
-    RtkTerminated,
-    /// RTK returned a code outside its documented protocol.
-    #[error("RTK rewrite exited with unexpected code {code}")]
-    RtkUnexpectedExit {
-        /// Unexpected process exit code.
-        code: i32,
-    },
 }
 
 /// Stateful Tokenless service for in-process callers.
@@ -420,7 +393,7 @@ impl TokenlessRuntime {
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: None,
         };
         let outcome = before_model_with_store(request, &options, self.stash_store.as_ref())?;
@@ -437,19 +410,22 @@ impl TokenlessRuntime {
         Ok(outcome.response)
     }
 
-    /// Runs the PreTool RTK rewrite service with a caller-resolved executable.
+    /// Runs the PreTool RTK rewrite service.
+    ///
+    /// The rewrite runs in process; `rtk_launcher` is the Tokenless executable
+    /// whose `rtk` subcommand the rewritten command invokes.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError`] when RTK cannot run or violates its exit-code
-    /// contract.
+    /// None at present; the `Result` keeps the signature shared with the other
+    /// lifecycle services.
     pub fn pre_tool(
         &self,
         request: &PreToolRequest,
         attribution: &ProtocolAttribution,
-        rtk_path: &Path,
+        rtk_launcher: &Path,
     ) -> Result<PreToolResponse, RuntimeError> {
-        pre_tool_with_rtk(request, attribution, rtk_path, &self.data_dir)
+        pre_tool_with_rtk(request, attribution, rtk_launcher, &self.data_dir)
     }
 
     /// Runs PostTool routing and the content-domain pipeline.
@@ -468,7 +444,7 @@ impl TokenlessRuntime {
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: Some(self.data_dir.clone()),
         };
         let outcome =
@@ -1873,7 +1849,7 @@ mod tests {
             diff_compression_enabled: config.diff_compression_enabled,
             html_extraction_enabled: config.html_extraction_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: None,
         }
     }

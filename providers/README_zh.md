@@ -8,7 +8,7 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 | Provider | 能力 | 来源 |
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README_zh.md) | 命令安全检查 | 第一方 sec-core CLI 与后端 |
-| [Tokenless](tokenless/README_zh.md) | 工具输出压缩和命令建议 | 单独安装的 Tokenless CLI 与兼容 RTK |
+| [Tokenless](tokenless/README_zh.md) | 工具输出压缩和命令建议 | 单独安装的 Tokenless CLI |
 
 ## 协作与分发
 

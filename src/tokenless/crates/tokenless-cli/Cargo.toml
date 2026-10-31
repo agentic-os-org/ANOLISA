@@ -24,6 +24,7 @@ chrono = { workspace = true, features = ["serde"] }
 rusqlite.workspace = true
 libc.workspace = true
 regex.workspace = true
+rtk.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

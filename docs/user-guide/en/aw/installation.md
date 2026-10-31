@@ -25,7 +25,7 @@ For Linux aarch64 or a different build environment, follow the source build guid
 | `aw-provider-sec-core` | Tool safety checks Provider |
 | `aw-provider-tokenless` | Tool output compression and command rewriting Provider |
 
-Provider archives contain bridge programs only. Install Tokenless CLI/RTK and
+Provider archives contain bridge programs only. Install the Tokenless CLI and the
 sec-core CLI/daemon from their backend owner's release or native core package.
 
 ## Install

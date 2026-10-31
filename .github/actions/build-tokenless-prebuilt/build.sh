@@ -144,9 +144,18 @@ SOURCE_VERSION="$(
     bash "$ACTION_DIR/setup-rtk.sh" "$COMPONENT_ROOT"
 )
 RTK_ROOT="$COMPONENT_ROOT/third_party/rtk"
-# RTK is excluded from Tokenless's workspace; make its cloned source an explicit
-# workspace root so Cargo never searches the persistent /tmp parent hierarchy.
-printf '\n[workspace]\n' >> "$RTK_ROOT/Cargo.toml"
+# Trees that link RTK into tokenless ship that one executable; older tags still
+# build and ship the separate rtk binary.
+PACKAGED_EXECUTABLE="$(python3 "$ACTION_DIR/packaged_executable.py" "$COMPONENT_ROOT")"
+if [ "$PACKAGED_EXECUTABLE" = tokenless ]; then
+    RUST_PROJECTS=("$COMPONENT_ROOT")
+else
+    RUST_PROJECTS=("$COMPONENT_ROOT" "$RTK_ROOT")
+    # RTK is excluded from Tokenless's workspace; make its cloned source an explicit
+    # workspace root so Cargo never searches the persistent /tmp parent hierarchy.
+    printf '\n[workspace]\n' >> "$RTK_ROOT/Cargo.toml"
+fi
+export TOKENLESS_PACKAGED_EXECUTABLE="$PACKAGED_EXECUTABLE"
 
 if [ -e "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
     die "output directory must be empty: $OUTPUT_DIR"
@@ -169,44 +178,42 @@ if [ "$TARGET_OS" = windows ]; then
     exit 0
 fi
 
-for manifest in "$COMPONENT_ROOT/Cargo.toml" "$RTK_ROOT/Cargo.toml"; do
+for project in "${RUST_PROJECTS[@]}"; do
     cargo metadata \
         --format-version 1 \
         --locked \
         --filter-platform "$RUST_TARGET" \
-        --manifest-path "$manifest" >/dev/null
+        --manifest-path "$project/Cargo.toml" >/dev/null
 done
 
 (
     cd "$FIXED_WORKTREE"
-    python3 "$COMMON_DIR/reproducible-build.py" \
-        --source-root "$COMPONENT_ROOT" \
-        --source-date-epoch "$SOURCE_DATE_EPOCH" \
-        -- "$COMMON_DIR/cross-profile.sh" "$PROFILE" build \
-        --release \
-        --locked \
-        --manifest-path src/tokenless/Cargo.toml
-    python3 "$COMMON_DIR/reproducible-build.py" \
-        --source-root "$COMPONENT_ROOT" \
-        --source-date-epoch "$SOURCE_DATE_EPOCH" \
-        -- "$COMMON_DIR/cross-profile.sh" "$PROFILE" build \
-        --release \
-        --locked \
-        --manifest-path src/tokenless/third_party/rtk/Cargo.toml
+    for project in "${RUST_PROJECTS[@]}"; do
+        python3 "$COMMON_DIR/reproducible-build.py" \
+            --source-root "$COMPONENT_ROOT" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            -- "$COMMON_DIR/cross-profile.sh" "$PROFILE" build \
+            --release \
+            --locked \
+            --manifest-path "${project#"$FIXED_WORKTREE"/}/Cargo.toml"
+    done
 )
 
 HOST_CARGO="$(command -v cargo)"
 CARGO_SHIM_DIR="$COMPONENT_ROOT/target/maturin-cargo-shim"
 install -d -m 0755 "$CARGO_SHIM_DIR"
 ln -s "$ACTION_DIR/cargo-shim.sh" "$CARGO_SHIM_DIR/cargo"
-PYTHON_RTK_DIR="$COMPONENT_ROOT/python/tokenless/python/anolisa_tokenless/_bin"
+PYTHON_BIN_DIR="$COMPONENT_ROOT/python/tokenless/python/anolisa_tokenless/_bin"
+if [ "$PACKAGED_EXECUTABLE" = rtk ]; then
+    PACKAGED_BINARY="$RTK_ROOT/target/$RUST_TARGET/release/rtk"
+else
+    PACKAGED_BINARY="$COMPONENT_ROOT/target/$RUST_TARGET/release/tokenless"
+fi
 (
     set -e
-    install -d -m 0755 "$PYTHON_RTK_DIR"
-    install -p -m 0755 \
-        "$RTK_ROOT/target/$RUST_TARGET/release/rtk" \
-        "$PYTHON_RTK_DIR/rtk"
-    trap 'rm -f "$PYTHON_RTK_DIR/rtk"' EXIT
+    install -d -m 0755 "$PYTHON_BIN_DIR"
+    install -p -m 0755 "$PACKAGED_BINARY" "$PYTHON_BIN_DIR/$PACKAGED_EXECUTABLE"
+    trap 'rm -f "$PYTHON_BIN_DIR/$PACKAGED_EXECUTABLE"' EXIT
     cd "$COMPONENT_ROOT/python/tokenless"
     compatibility=(--compatibility pypi)
     if [ "$TARGET_OS" = linux ]; then
@@ -243,6 +250,7 @@ fi
 python3 "$ACTION_DIR/verify-wheels.py" \
     --directory "$WHEEL_OUTPUT_DIR" \
     --version "$VERSION" \
+    --tokenless-source-root "$FIXED_WORKTREE" \
     --layout flat \
     --os "$TARGET_OS" \
     --arch "$TARGET_ARCH"
@@ -252,10 +260,12 @@ install -d -m 0755 "$BIN_DIR"
 install -p -m 0755 \
     "$COMPONENT_ROOT/target/$RUST_TARGET/release/tokenless" \
     "$BIN_DIR/tokenless"
-install -p -m 0755 \
-    "$RTK_ROOT/target/$RUST_TARGET/release/rtk" \
-    "$BIN_DIR/rtk"
-for binary in tokenless rtk; do
+BINARIES=(tokenless)
+if [ "$PACKAGED_EXECUTABLE" = rtk ]; then
+    install -p -m 0755 "$PACKAGED_BINARY" "$BIN_DIR/rtk"
+    BINARIES+=(rtk)
+fi
+for binary in "${BINARIES[@]}"; do
     if [ "$TARGET_OS" = macos ]; then
         python3 "$COMMON_DIR/verify-macho.py" \
             --arch "$TARGET_ARCH" --min 11.0 "$BIN_DIR/$binary"
@@ -279,6 +289,10 @@ ARCHIVE="tokenless-$VERSION-$TARGET_OS-$TARGET_ARCH.tar.gz"
     cd "$OUTPUT_DIR"
     sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 )
+SBOM_PROJECTS=()
+for project in "${RUST_PROJECTS[@]}"; do
+    SBOM_PROJECTS+=(--project-dir "$project")
+done
 python3 "$COMMON_DIR/generate-sbom.py" \
     --artifact "$OUTPUT_DIR/$ARCHIVE" \
     --component tokenless \
@@ -286,8 +300,7 @@ python3 "$COMMON_DIR/generate-sbom.py" \
     --os "$TARGET_OS" \
     --arch "$TARGET_ARCH" \
     --target "$RUST_TARGET" \
-    --project-dir "$COMPONENT_ROOT" \
-    --project-dir "$RTK_ROOT" \
+    "${SBOM_PROJECTS[@]}" \
     --source-date-epoch "$SOURCE_DATE_EPOCH" >/dev/null
 python3 "$COMMON_DIR/verify-artifacts.py" \
     --directory "$OUTPUT_DIR" \

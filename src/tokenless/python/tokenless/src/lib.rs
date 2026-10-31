@@ -335,7 +335,7 @@ impl PyTokenlessRuntime {
 
     #[pyo3(signature = (
         request_json,
-        rtk_path,
+        rtk_launcher,
         *,
         agent_id="python",
         session_id=None,
@@ -345,7 +345,7 @@ impl PyTokenlessRuntime {
         &self,
         py: Python<'_>,
         request_json: &str,
-        rtk_path: PathBuf,
+        rtk_launcher: PathBuf,
         agent_id: &str,
         session_id: Option<String>,
         tool_use_id: Option<String>,
@@ -354,7 +354,7 @@ impl PyTokenlessRuntime {
         let attribution = protocol_attribution(agent_id, session_id, tool_use_id);
         py.allow_threads(|| {
             self.inner
-                .pre_tool(&request, &attribution, &rtk_path)
+                .pre_tool(&request, &attribution, &rtk_launcher)
                 .map_err(to_python_error)
                 .and_then(encode_lifecycle_payload)
         })

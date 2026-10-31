@@ -135,9 +135,9 @@ python3 crates/aw-cli/tests/fixtures/pi/tokenless-smoke.py \
   --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core
 ```
 
-This runs the real SDK, AW, Tokenless Provider and Protocol v2 CLI. The model
-stream, bash tool, RTK rewrite command and scanner backend are deterministic
-fixtures; the test does not execute a suggested shell command. It checks selected
+This runs the real SDK, AW, Tokenless Provider and Protocol v2 CLI, whose linked
+RTK produces the rewrite. The model stream, bash tool and scanner backend are
+deterministic fixtures; the test does not execute a suggested shell command. It checks selected
 compression reaching model context, a fresh retry passing through sec-core again,
 and RTK-owned output remaining unchanged. Both telemetry sinks are disabled and
 all state is local to the supplied test root. The eight bridge authority/envelope

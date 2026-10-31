@@ -104,6 +104,7 @@ def tokenless_input(path: str) -> bool:
         "providers/tokenless/rust-toolchain.toml", "src/tokenless/rust-toolchain.toml",
         "src/tokenless/Cargo.toml", "src/tokenless/Cargo.lock",
         "src/tokenless/crates/tokenless-cli/Cargo.toml",
+        "src/tokenless/crates/tokenless-cli/build.rs",
         "src/tokenless/crates/tokenless-protocol/Cargo.toml",
         "src/tokenless/crates/tokenless-runtime/Cargo.toml",
         "src/tokenless/crates/tokenless-stats/Cargo.toml",

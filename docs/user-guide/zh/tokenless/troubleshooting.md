@@ -189,7 +189,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 和 `rtk` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
+npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
 
 ## QwenPaw 安装提示 SDK wheel 不可用
 
@@ -231,13 +231,15 @@ curl -sIL -o /dev/null -w '%{http_code}\n' "<wheel URL from the message>"
 不是所有命令都有 RTK 重写规则。先独立测试：
 
 ```bash
-rtk rewrite "ls -la"
+tokenless rtk rewrite "ls -la"
 ```
 
-如果 `rtk` 不存在：
+RTK 已链接进 `tokenless`，不需要单独的 `rtk` 可执行文件。如果 `tokenless rtk`
+不是可识别的命令，说明当前生效的 `tokenless` 早于内嵌 RTK 的版本；检查实际运行的版本：
 
 ```bash
-command -v rtk
+command -v tokenless
+tokenless --version
 ```
 
 如果 RTK 正常但 Agent 中不生效，检查框架支持矩阵、Adapter 状态和是否已经重启会话。
@@ -427,7 +429,7 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | bash
 ```
 
-在同一台机器上切换安装方式——例如 npm 安装之后再用 `TOKENLESS_FORCE_BUILD=1` 重跑——会回收上一种方式创建的内容，因此不会残留新 receipt 不再记录的 `rtk` 启动器、npm 全局包或 Adapter 目录。回收只在新安装验证通过之后发生：脚本先把原安装挪到一边，新安装失败时再原样放回，因此 tag 缺失、构建失败或目录不可写都不会破坏原本可用的 CLI，receipt 也仍然与现实一致。若某个记录路径的身份已不再匹配，说明它已被另一种安装接管，脚本会保留它。
+在同一台机器上切换安装方式——例如 npm 安装之后再用 `TOKENLESS_FORCE_BUILD=1` 重跑——会回收上一种方式创建的内容，因此不会残留新 receipt 不再记录的启动器链接、npm 全局包或 Adapter 目录。回收只在新安装验证通过之后发生：脚本先把原安装挪到一边，新安装失败时再原样放回，因此 tag 缺失、构建失败或目录不可写都不会破坏原本可用的 CLI，receipt 也仍然与现实一致。若某个记录路径的身份已不再匹配，说明它已被另一种安装接管，脚本会保留它。
 
 npm 到 npm 的升级同样在事务内。升级会就地替换软件包载荷，而启动器链接解析到的正是该载荷，因此在新 CLI 验证通过之前，脚本会保留旧模块目录、它的 `@anolisa` 平台包以及该 prefix 自己的 bin 链接的副本；新二进制损坏时会把旧的放回去，而不是留下一个仍解析到坏载荷的启动器。
 
@@ -462,9 +464,9 @@ bash src/tokenless/scripts/uninstall.sh --purge
 
 重装到不同的 `TOKENLESS_INSTALL_DIR` 时，安装脚本还会回收它为上一个目录追加的 PATH 条目。回执只记录一个 rc 文件和一个目录，否则旧目录那一块会在每次卸载之后都残留下来。
 
-删除范围取决于记录的方式。走 npm 路径时，脚本会从记录的安装目录删除记录的启动器二进制（包括自定义的 `TOKENLESS_INSTALL_DIR`），对记录的 prefix 执行 `npm uninstall -g anolisa-tokenless`，并且只在该次 npm 安装创建了 Adapter 资源副本时才删除它——删除前会先执行每个内置框架自己的 `scripts/uninstall.sh`，因此已启用的 OpenClaw、Hermes 或 Qwen Code 注册会被解除，而不是留下指向已删除目录的引用。走源码构建时只删除 `tokenless` CLI，因为这条路径不安装 `rtk`，也不安装 Adapter 资源。两种方式下，共享同一目录的 anolisa CLI 安装或手动 npm 安装都不会受影响。
+删除范围取决于记录的方式。走 npm 路径时，脚本会从记录的安装目录删除记录的启动器二进制（包括自定义的 `TOKENLESS_INSTALL_DIR`），对记录的 prefix 执行 `npm uninstall -g anolisa-tokenless`，并且只在该次 npm 安装创建了 Adapter 资源副本时才删除它——删除前会先执行每个内置框架自己的 `scripts/uninstall.sh`，因此已启用的 OpenClaw、Hermes 或 Qwen Code 注册会被解除，而不是留下指向已删除目录的引用。走源码构建时只删除 `tokenless` CLI，因为这条路径不安装 Adapter 资源。两种方式下，共享同一目录的 anolisa CLI 安装或手动 npm 安装都不会受影响。
 
-不要改用固定的 `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` 列表：它会漏掉自定义的 `TOKENLESS_INSTALL_DIR` 和 npm 全局包，而在源码构建安装之后，它删除的正是那条路径从未创建过的 `rtk` 和 Adapter 资源。
+不要改用固定的 `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` 列表：它会漏掉自定义的 `TOKENLESS_INSTALL_DIR` 和 npm 全局包，还可能删除并非本次安装创建的 `rtk` 启动器或 Adapter 资源。
 
 没有 receipt 时，卸载脚本会拒绝猜测，改为打印按方式区分的手动步骤。请改用实际使用的方式卸载：[anolisa 安装](#anolisa-安装)、[npm 安装](#npm-安装)，或下面的 YUM/RPM 流程。
 

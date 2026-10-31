@@ -39,10 +39,7 @@ class PackageWorkflowTests(GateFixture):
         step = step.split("      - name:", 1)[0]
         script = textwrap.dedent(step.split("        run: |\n", 1)[1])
         workspace = self.root / "container workspace"
-        expected = [
-            workspace / "src/tokenless/target/release/tokenless",
-            workspace / "src/aw/target/release/rtk",
-        ]
+        expected = [workspace / "src/tokenless/target/release/tokenless"]
         for executable in expected:
             executable.parent.mkdir(parents=True, exist_ok=True)
             executable.write_text("#!/bin/sh\nexit 0\n")
@@ -52,7 +49,7 @@ class PackageWorkflowTests(GateFixture):
         cargo = binary / "cargo"
         cargo.write_text(
             "#!/bin/sh\nprintf '%s\\n' \"$AW_TOKENLESS_TEST_CLI\" "
-            '"$AW_TOKENLESS_TEST_RTK" >> "$AW_PACKAGE_CAPTURE"\n'
+            '>> "$AW_PACKAGE_CAPTURE"\n'
         )
         cargo.chmod(0o700)
         capture = self.root / "paths"
@@ -62,7 +59,6 @@ class PackageWorkflowTests(GateFixture):
             "GITHUB_WORKSPACE": str(workspace),
             "AW_PACKAGE_CAPTURE": str(capture),
             "AW_TOKENLESS_TEST_CLI": "/host/runner/src/tokenless/target/release/tokenless",
-            "AW_TOKENLESS_TEST_RTK": "/host/runner/src/aw/target/release/rtk",
         }
         subprocess.run(
             ["/bin/sh", "-eu", "-c", script],

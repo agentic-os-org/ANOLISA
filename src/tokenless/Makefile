@@ -1,6 +1,6 @@
 # Token-Less Unified Build System
 # Builds tokenless (schema/response compression, TOON encoding via the
-# toon-format library) and rtk (command rewriting)
+# toon-format library, and command rewriting through the embedded RTK library)
 
 # Public entrypoint; implementation modules never select a default goal.
 .DEFAULT_GOAL := all
@@ -28,7 +28,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
 .PHONY: build build-tokenless build-openclaw-plugin build-dsh-plugin \
         stamp-adapter-templates stamp-python-packages generate-component-contract \
         install uninstall test lint clean package-raw stage-raw \
-        test-raw-package test-npm-package test-toon-cleanup \
+        test-raw-package test-npm-package test-stale-helper-cleanup \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
         cosh-extension-install cosh-extension-uninstall \
@@ -62,10 +62,9 @@ all: build
 build: build-tokenless build-openclaw-plugin build-dsh-plugin
 
 build-tokenless:
-	@echo "==> Building tokenless + rtk..."
+	@echo "==> Building tokenless..."
 	just setup-rtk
 	cargo build --release
-	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 
 # ANOLISA integration metadata is generated only by distribution entrypoints.
 COMPONENT_CONTRACT_TEMPLATE := packaging/anolisa/component.toml.in
@@ -182,7 +181,7 @@ build-dsh-plugin: stamp-adapter-templates
 # Run tests
 test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
-      test-npm-package test-toon-cleanup test-benchmark-rtk-probe
+      test-npm-package test-stale-helper-cleanup test-benchmark-rtk-probe
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -207,7 +206,7 @@ test-tokenless:
 # network, verified by running them under a PATH that holds only bash and
 # coreutils -- so they cost well under a second. They ride on
 # `test-integration` for the same reason test-claude-code-detect and
-# test-toon-cleanup do: that is the hook-contract target the Test tokenless job
+# test-stale-helper-cleanup do: that is the hook-contract target the Test tokenless job
 # already calls, so the pair reaches CI with no workflow edit and no new setup.
 test-hook-scripts:
 	@echo "==> Testing tokenless hook scripts (no external dependencies)..."
@@ -232,14 +231,14 @@ test-claude-code-detect:
 # The shell suites ride along for the same reason: they are members of the
 # `make test` aggregate that no workflow ever called (grepping .github/ for the
 # targets and for the script names behind them returns nothing), so detect.sh's
-# first-run plugin re-list retry, the stale-toon ownership rules in
+# first-run plugin re-list retry, the stale-helper ownership rules in
 # install-helpers/uninstall and the hook-script pair above only ran on developer
 # machines. All of them are plain bash over a mktemp sandbox with stub binaries
 # (the two older ones also recurse into make) -- no cargo, node or jq, and no
 # rtk build -- so they cost about a second and are safe to run ahead of the
 # Python contract below. They cannot
 # go on `test-rtk-integration` instead: that target's own recipe is what fetches
-# and builds the vendored rtk, and this one runs earlier in the CI job.
+# the vendored rtk, and this one runs earlier in the CI job.
 # tests/test_verify_release_versions.py guards the PEP 440 wheel-version
 # contract of packaging/raw/verify-release.py: a normalized wheel filename
 # (0.9.0rc1) must match a Cargo 0.9.0-rc.1, a filename keeping the
@@ -254,7 +253,7 @@ test-claude-code-detect:
 # Keep the worker protocol suite as a prerequisite so test-integration and
 # its aggregate callers cannot omit it. It is stdlib-only: the subprocess
 # fixture supplies Headroom stubs on PYTHONPATH, without a Headroom venv.
-test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts \
+test-integration: test-hook-parity test-claude-code-detect test-stale-helper-cleanup test-hook-scripts \
                   test-qwenwork-hooks test-headroom-pipeline-worker
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_codex_response_diagnostics.py
@@ -291,7 +290,7 @@ test-qwenwork-install:
 	python3 tests/test_qwenwork_install.py
 
 # The L1 runner records an `rtk_version` in benchmark_identity.json through a
-# best-effort probe that must never stall the suite: a bare `$RTK_BIN` is
+# best-effort probe that must never stall the suite: a bare `$TOKENLESS_BIN` is
 # resolved through PATH, the probe runs under a timeout(1) deadline whose child
 # is reaped, and only a successful probe records a version (everything else
 # collapses to "unavailable"). tests/test-benchmark-rtk-version-probe.sh guards
@@ -305,13 +304,11 @@ test-benchmark-rtk-probe:
 	@echo "==> Testing benchmark RTK version probe..."
 	bash tests/test-benchmark-rtk-version-probe.sh
 
-# Hook counterfactuals need both real binaries to rule out fail-open success.
+# Hook counterfactuals need the real binary to rule out fail-open success.
 test-rtk-integration: test-benchmark-rtk-probe
-	cargo build --locked -p tokenless-cli
 	bash packaging/build/setup-rtk.sh
-	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
-	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \
-		python3 tests/test_rtk_integration.py
+	cargo build --locked -p tokenless-cli
+	python3 tests/test_rtk_integration.py
 
 # Protocol v2 Common Hook parity: replay the contract corpus through the
 # current hooks and real debug binary, then compare with the v2 goldens.
@@ -410,8 +407,8 @@ test-raw-package:
 test-npm-package: build-openclaw-plugin build-dsh-plugin
 	@bash tests/test-package-npm-prebuilt.sh
 
-test-toon-cleanup:
-	@bash tests/test-toon-cleanup.sh
+test-stale-helper-cleanup:
+	@bash tests/test-stale-helper-cleanup.sh
 
 # Standalone curl installer/uninstaller behaviour plus the install-method docs
 # that describe it. Offline: curl, npm and cargo are stubbed by the test.
@@ -457,18 +454,17 @@ fmt:
 	@echo "==> Formatting..."
 	cargo fmt --all
 
-# Clean (rtk excluded from workspace — needs explicit clean)
+# Clean
 clean:
 	@echo "==> Cleaning..."
 	cargo clean
-	cargo clean --release --manifest-path third_party/rtk/Cargo.toml 2>/dev/null || true
 	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
 	rm -rf $(ADAPTER_SRC_DIR)/agentscope
 	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 	rm -f  $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml
 
 # Raw and source packaging
-# These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk} files
+# These targets only assemble the prebuilt BIN_DIR/tokenless file
 # into the portable raw-package contract maintained by this component.
 package-raw:
 	@$(MAKE) -B stamp-adapter-templates generate-component-contract
@@ -664,7 +660,6 @@ setup:
 	@echo "============================================"
 	@echo "  Binaries (FHS):"
 	@echo "    tokenless -> $(TOKENLESS_BINDIR)/tokenless"
-	@echo "    rtk       -> $(TOKENLESS_LIBEXECDIR)/rtk"
 	@echo "  Extension (cosh):"
 	@echo "    $(TOKENLESS_COSH_EXTENSION_DIR)/"
 	@echo "  Adapter (FHS):"
@@ -674,7 +669,7 @@ setup:
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
-	@echo "  rtk --version"
+	@echo "  tokenless rtk --version"
 	@echo "  make adapter-scan"
 
 # Help
@@ -682,8 +677,8 @@ help:
 	@echo "Token-Less Build System"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build             Build tokenless + rtk + openclaw plugin"
-	@echo "  build-tokenless   Build tokenless + rtk (via justfile)"
+	@echo "  build             Build tokenless + openclaw plugin"
+	@echo "  build-tokenless   Build tokenless with the embedded RTK (via justfile)"
 	@echo "  build-core        Build core binaries using build-tokenless"
 	@echo "  build-plugin      Build OpenClaw and DSH plugins"
 	@echo "  layout            Show resolved installation paths"
@@ -693,7 +688,7 @@ help:
 	@echo "  install-legacy    Build and install using the legacy user/system profile"
 	@echo "  uninstall         Remove files installed by make install"
 	@echo "  test              Run all tests"
-	@echo "  test-rtk-integration  Build pinned RTK and test its Tokenless patches"
+	@echo "  test-rtk-integration  Test the embedded RTK's Tokenless patches"
 	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
 	@echo "  test-hook-scripts  Test the dependency-free hook bash suites (run in CI)"
 	@echo "  lint              Run clippy checks"
@@ -740,10 +735,10 @@ help:
 	@echo "  DESTDIR          Optional temporary root (default: direct file installation)"
 	@echo "  PREFIX           Install prefix (system: /usr/local; user: owned HOME/.local)"
 	@echo "  BINDIR           Binary install path"
-	@echo "  LIBEXECDIR       Helper binary install path"
+	@echo "  LIBEXECDIR       Legacy helper path cleaned on install"
 	@echo "  SHARE_DIR        Override adapter resources for framework registration"
 	@echo "  COSH_EXTENSION_DIR  Override the Cosh registration directory"
-	@echo "  BIN_DIR          Prebuilt tokenless directory (raw packages also require rtk)"
+	@echo "  BIN_DIR          Prebuilt tokenless directory"
 	@echo "  TARGET_OS        Raw target OS: linux or macos"
 	@echo "  TARGET_ARCH      Raw target arch: x86_64 or aarch64"
 	@echo "  OUTPUT_DIR       Raw artifact output directory (default: target/raw)"
@@ -756,7 +751,7 @@ build-plugin: build-openclaw-plugin build-dsh-plugin
 DELIVERY_COMPONENT_ROOT := $(abspath $(dir $(firstword $(MAKEFILE_LIST))))
 delivery_quote = '$(subst ','"'"',$(1))'
 # Clear legacy file-origin defaults; the file installer resolves paths once.
-DELIVERY_INPUTS := AWPRJ PREFIX INSTALL_PROFILE BINDIR LIBDIR LIBEXECDIR DATADIR ADAPTERDIR EXTENSIONDIR UNITDIR BIN_DIR RTK_BIN DESTDIR
+DELIVERY_INPUTS := AWPRJ PREFIX INSTALL_PROFILE BINDIR LIBDIR LIBEXECDIR DATADIR ADAPTERDIR EXTENSIONDIR UNITDIR BIN_DIR DESTDIR
 DELIVERY_ENV = env $(foreach name,$(DELIVERY_INPUTS) COMPONENT_ROOT,-u $(name)) \
 	$(call delivery_quote,COMPONENT_ROOT=$(DELIVERY_COMPONENT_ROOT)) \
 	$(foreach name,$(DELIVERY_INPUTS),$(if $(filter command line environment,$(origin $(name))),$(call delivery_quote,$(name)=$($(name)))))

@@ -52,8 +52,9 @@ The Linux assets target glibc-based distributions compatible with `manylinux_2_1
 support Alpine Linux or other musl-based distributions. The Release also includes
 `SHA256SUMS-python-wheels.txt` for download verification.
 
-The wheel contains the native Tokenless runtime and the matching RTK executable. It does not need
-the `tokenless` CLI, a system RTK binary, or a separate TOON executable.
+The wheel contains the native Tokenless runtime and a matching `tokenless` executable that runs
+rewritten commands. It does not need a system `tokenless` CLI, an RTK binary, or a separate TOON
+executable.
 
 ### Build from source
 
@@ -73,8 +74,8 @@ python3 -m venv /tmp/tokenless-sdk
 make python-wheel MATURIN=maturin
 ```
 
-Pip installs the wheel in unpacked form, which gives the packaged RTK executable the stable path
-required by command rewriting.
+Pip installs the wheel in unpacked form, which gives the packaged `tokenless` executable the stable
+path that rewritten commands call.
 
 ### Choose an API
 
@@ -238,7 +239,8 @@ call = await sdk.pre_tool(
 ```
 
 Core considers only the explicitly named `command_field`. If RTK has a rewrite, the response uses
-`replace_arguments`, contains the packaged RTK path, and reports `output_optimization=rtk`. Execute
+`replace_arguments`, runs through the packaged `tokenless` path as `tokenless rtk`, and reports
+`output_optimization=rtk`. Execute
 the returned arguments and carry that optimization value into PostTool. A disabled RTK is an
 adapter choice: do not call `pre_tool()` when `TokenlessConfig.rtk_enabled` is false.
 
@@ -298,7 +300,7 @@ integration-owned tool name for framework layers such as AgentScope; they declar
 Core through the recovery capability. Names must contain 1–64 ASCII letters, digits, underscores,
 or hyphens. This also tightens validation of existing `retrieve_tool_name` configurations: names
 containing dots, colons, or spaces must be renamed before upgrading.
-`rtk_enabled` controls whether the SDK resolves packaged RTK for PreTool. Compression thresholds,
+`rtk_enabled` controls whether the SDK resolves its packaged `tokenless` executable for PreTool. Compression thresholds,
 content detection, TOON selection, diagnostics, authorization, and Stash policy are Core behavior
 and are not Python configuration.
 

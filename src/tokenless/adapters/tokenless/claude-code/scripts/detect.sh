@@ -360,14 +360,6 @@ else
     note_prereq_missing "tokenless binary"
 fi
 
-rtk_bin="$(command -v rtk 2>/dev/null || true)"
-if [ -n "$rtk_bin" ]; then
-    field "rtk binary"        "present (${rtk_bin})"
-else
-    field "rtk binary"        "missing"
-    note_prereq_missing "rtk binary"
-fi
-
 # Shared hook scripts live under FHS; warn when missing so user knows to run
 # `make install` (or install the RPM) before adapter actually fires.
 SHARED_HOOKS_DIR=""

@@ -55,7 +55,6 @@ steps. Observe-only chains keep native reverse unwind order.
 
 PreTool denies the original call and returns full retry arguments to the model;
 each new attempt passes native permissions and sec-core again. An attributed RTK
-retry avoids double compression even with a new call ID. Install RTK separately
-for PreTool; PostTool works without it. See [Tokenless behavior](../../../../user-guide/en/aw/tokenless.md)
+retry avoids double compression even with a new call ID. See [Tokenless behavior](../../../../user-guide/en/aw/tokenless.md)
 for text-slot eligibility, failure handling and telemetry configuration. Invalid
 final-response replacement directives report failure and retain the original result.

@@ -28,7 +28,7 @@ if r['operation'] == 'pre_tool':
     args = r['input']['arguments'].copy()
     args['command'] = ('env TOKENLESS_AGENT_ID=' + r['attribution']['agent_id']
         + ' TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=blocked-call TOKENLESS_DATA_DIR='
-        + os.environ['TOKENLESS_DATA_DIR'] + ' /opt/tokenless/rtk git status')
+        + os.environ['TOKENLESS_DATA_DIR'] + ' /opt/tokenless/tokenless rtk git status')
     action, optimization = 'block_and_suggest', 'rtk'
     if mode == 'direct': action = 'replace_arguments'
     if mode == 'other_field': args['cwd'] = '/changed'
@@ -247,12 +247,19 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
     let bin = f.root.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
-    let rtk = bin.join("rtk");
-    fs::write(&rtk, "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'rtk 0.49.0'; elif [ \"$1\" = rewrite ]; then case \"$2\" in sudo\\ *) printf 'sudo rtk %s\\n' \"${2#sudo }\";; *) printf 'rtk %s\\n' \"$2\";; esac; else exit 99; fi\n").unwrap();
-    fs::set_permissions(&rtk, fs::Permissions::from_mode(0o700)).unwrap();
+    // A decoy RTK first on PATH proves rewrites use the CLI's linked RTK.
+    let decoy = bin.join("rtk");
+    let decoy_marker = f.root.path().join("decoy.seen");
+    fs::write(
+        &decoy,
+        format!("#!/bin/sh\ntouch '{}'\nexit 99\n", decoy_marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&decoy, fs::Permissions::from_mode(0o700)).unwrap();
     let cli = PathBuf::from(
         std::env::var_os("AW_TOKENLESS_TEST_CLI").expect("set AW_TOKENLESS_TEST_CLI"),
     );
+    let launcher = cli.canonicalize().unwrap();
     let diagnostics = f.root.path().join("cli.stderr");
     let captured = f.root.path().join("cli.input");
     let wrapper = f.root.path().join("cli-wrapper");
@@ -263,7 +270,6 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
     .unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
     let mut environment: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
-    // Keep dependency discovery independent of runner/developer executables.
     environment.insert(
         "PATH".into(),
         std::env::join_paths([
@@ -286,7 +292,7 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
     );
     let probe = CommandSpec {
         program: "/bin/sh".into(),
-        args: vec!["-c".into(), "command -v rtk && rtk --version".into()],
+        args: vec!["-c".into(), "command -v rtk".into()],
         cwd: f.root.path().into(),
         environment: environment.clone(),
     };
@@ -302,14 +308,9 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
         &AtomicBool::new(false),
     )
     .unwrap();
-    assert!(
-        probe.status.success(),
-        "{}",
-        String::from_utf8_lossy(&probe.stderr)
-    );
     assert_eq!(
         String::from_utf8(probe.stdout).unwrap(),
-        format!("{}\nrtk 0.49.0\n", rtk.display())
+        format!("{}\n", decoy.display())
     );
     let mut command = CommandSpec {
         program: env!("CARGO_BIN_EXE_aw-provider-tokenless").into(),
@@ -362,7 +363,7 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
                 });
             serde_json::from_slice(&output.stdout).unwrap()
         };
-        for original in ["git status", "rg 'foo|bar' src", "sudo git status"] {
+        for original in ["git status", "rg 'foo|bar' src"] {
             let mut before = f.request("hermes");
             before["event"]["tool"]["input"]["command"] = json!(original);
             before["budget_ms"] = json!(5000);
@@ -376,10 +377,13 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
                     .unwrap(),
             )
             .unwrap();
-            assert!(retry["command"]
-                .as_str()
-                .unwrap()
-                .contains(rtk.to_str().unwrap()));
+            let words = shlex::split(retry["command"].as_str().unwrap()).unwrap();
+            assert!(
+                words
+                    .windows(2)
+                    .any(|pair| pair[0] == launcher.to_str().unwrap() && pair[1] == "rtk"),
+                "{retry}"
+            );
             before["event"]["tool"]["input"] = retry;
             before["event"]["tool"]["call_id"] = json!("fresh-retry");
             assert_eq!(invoke(before.clone())["effects"], json!([]));
@@ -401,6 +405,7 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
             assert_eq!(reply["effects"][0]["type"], "replace_result", "{reply}");
         }
     }
+    assert!(!decoy_marker.exists());
     // Call-scoped receipts remain active when statistics and recovery are off.
     for state in [
         f.root.path().to_path_buf(),

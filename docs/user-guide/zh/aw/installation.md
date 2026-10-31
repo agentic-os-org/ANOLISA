@@ -23,7 +23,7 @@ Linux aarch64 或其他构建环境请按源码构建指南交付。
 | `aw-provider-sec-core` | 工具安全检查 Provider |
 | `aw-provider-tokenless` | 工具输出压缩与命令重写 Provider |
 
-Provider 归档只包含桥接程序。Tokenless CLI/RTK 与 sec-core CLI/daemon 由后端
+Provider 归档只包含桥接程序。Tokenless CLI 与 sec-core CLI/daemon 由后端
 owner 的发行件或原生 core 包安装。
 
 ## 安装

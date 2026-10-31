@@ -37,8 +37,11 @@
 # compares those, and leaves alone anything a newer installation has taken over.
 #
 # Installation methods and what each one produces:
-#   npm     prebuilt `tokenless` + `rtk` binaries and the bundled Agent adapters
-#   source  the `tokenless` CLI only — no `rtk`, no adapters (CLI-only install)
+#   npm     the prebuilt `tokenless` binary and the bundled Agent adapters
+#   source  the `tokenless` CLI only — no adapters (CLI-only install)
+#
+# Releases before RTK was linked into tokenless also shipped an `rtk` launcher
+# through npm; the snapshot, rollback and uninstall paths still handle it.
 #
 # The npm route is transactional: everything it replaces is snapshotted first,
 # and a failure after `npm install -g` puts the global package, the launcher
@@ -1618,6 +1621,19 @@ try_source_build() {
               -path '*/tokenless/Cargo.toml' -exec dirname {} \; 2>/dev/null | sort | head -1)
   [ -n "$src_dir" ] || die "Could not find tokenless source (src/tokenless/Cargo.toml) in tarball"
 
+  # Tags that link RTK need its pinned, patched checkout, which the tag archive
+  # leaves out. Older tags build the CLI without it. The pattern accepts other
+  # keys and spacing in the dependency entry.
+  if grep -qE '^rtk[[:space:]]*=[[:space:]]*\{[^}]*path[[:space:]]*=[[:space:]]*"third_party/rtk"' \
+      "${src_dir}/Cargo.toml"; then
+    local tool
+    for tool in git patch; do
+      command -v "$tool" &>/dev/null || die "${tool} is required to fetch the RTK source for the source build"
+    done
+    info "Fetching the pinned RTK source..."
+    bash "${src_dir}/packaging/build/setup-rtk.sh" 2>&1 || die "RTK source setup failed"
+  fi
+
   info "Building (this may take a few minutes)..."
   (cd "$src_dir" && cargo build --release --locked -p tokenless-cli 2>&1) || die "Build failed"
 
@@ -1649,7 +1665,7 @@ try_source_build() {
   fi
 
   info "Installed tokenless to ${install_dir}/tokenless"
-  warn "Source build installs the tokenless CLI only: no rtk and no Agent adapters."
+  warn "Source build installs the tokenless CLI only: no Agent adapters."
   warn "Adapter enablement therefore does not apply to this install method — see the"
   warn "'Install Tokenless' table in the Quick Start for the path that matches it."
 

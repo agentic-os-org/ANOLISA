@@ -8,6 +8,7 @@ SOURCE="$(realpath "$1")"
 OUTPUT="$(realpath "$2")"
 WHEELS="$(realpath "$3")"
 VERSION="$4"
+PACKAGED_EXECUTABLE="${TOKENLESS_PACKAGED_EXECUTABLE:?build.sh selects the packaged executable}"
 IMAGE=anolisa/rust-release-builder:windows-msvc-x86_64
 IMAGE_ID=sha256:7649bcb55d8c5632232c7f27e3c2191b71fb7c31149de87412c447fc7a997303
 # The containerd store identifies the same image by its manifest digest.
@@ -28,6 +29,7 @@ container=(docker run --rm --init --user "$(id -u):$(id -g)"
     --entrypoint /bin/bash
     --env "BUILDER_IMAGE_ID=$IMAGE_ID" --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
     --env HOME=/wine/home --env CARGO_BUILD_JOBS=8
+    --env "TOKENLESS_PACKAGED_EXECUTABLE=$PACKAGED_EXECUTABLE"
     --env HTTP_PROXY --env HTTPS_PROXY --env ALL_PROXY --env NO_PROXY
     --env http_proxy --env https_proxy --env all_proxy --env no_proxy
     --volume "$SOURCE:/source"
@@ -37,9 +39,17 @@ container=(docker run --rm --init --user "$(id -u):$(id -g)"
 "${container[@]}" --network host "$IMAGE_ID" /action/windows-container.sh build \
     2>&1 | tee "$WORK/out/build.log"
 
+BINARIES=(tokenless)
+SBOM_PROJECTS=(--project-dir "$SOURCE")
+if [ "$PACKAGED_EXECUTABLE" = rtk ]; then
+    BINARIES+=(rtk)
+    SBOM_PROJECTS+=(--project-dir "$SOURCE/third_party/rtk")
+fi
 mkdir -p "$SOURCE/target/npm-prebuilt/win32-x64"
-cp "$WORK/out/build/x86_64-pc-windows-msvc/release/"{tokenless,rtk}.exe \
-    "$SOURCE/target/npm-prebuilt/win32-x64/"
+for binary in "${BINARIES[@]}"; do
+    cp "$WORK/out/build/x86_64-pc-windows-msvc/release/$binary.exe" \
+        "$SOURCE/target/npm-prebuilt/win32-x64/"
+done
 if [[ -f "$SOURCE/packaging/npm/package-npm.js" ]]; then
     npm_packer="$SOURCE/packaging/npm/package-npm.js"
 else
@@ -48,7 +58,7 @@ fi
 node "$npm_packer" --target win32-x64
 python3 "$ACTION_DIR/package-windows.py" "$SOURCE" "$OUTPUT" "$VERSION"
 python3 "$ACTION_DIR/verify-wheels.py" --directory "$WHEELS" --version "$VERSION" \
-    --layout flat --os windows --arch x86_64
+    --tokenless-source-root "$SOURCE/../.." --layout flat --os windows --arch x86_64
 
 # Smoke the extracted release ZIP and wheel, with no network or source mounts needed by the test.
 "${container[@]}" --network none "$IMAGE_ID" /action/windows-container.sh smoke "$VERSION"
@@ -60,8 +70,9 @@ ARCHIVE="tokenless-$VERSION-windows-x86_64.zip"
 python3 "$COMMON_DIR/generate-sbom.py" \
     --artifact "$OUTPUT/$ARCHIVE" --component tokenless --version "$VERSION" \
     --os windows --arch x86_64 --target x86_64-pc-windows-msvc \
-    --project-dir "$SOURCE" --project-dir "$SOURCE/third_party/rtk" \
+    "${SBOM_PROJECTS[@]}" \
     --source-date-epoch "$SOURCE_DATE_EPOCH" >/dev/null
 python3 "$COMMON_DIR/verify-artifacts.py" --directory "$OUTPUT" \
     --component tokenless --version "$VERSION" --layout flat --os windows --arch x86_64
-printf 'Windows ZIP (CLI, RTK, npm packages), ABI3 wheel and Wine smoke passed; image=%s\n' "$IMAGE_ID"
+printf 'Windows ZIP (%s, npm packages), ABI3 wheel and Wine smoke passed; image=%s\n' \
+    "${BINARIES[*]}" "$IMAGE_ID"

@@ -194,7 +194,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-The npm/manual install script differs in *how* it consents, not *whether*: it adds `--dangerously-force-unsafe-install` automatically whenever the installer still advertises that option as effective, because the plugin launches fixed `tokenless` and `rtk` child processes. Hosts that mark the option a deprecated no-op (OpenClaw 2026.6.5+) never receive it — there the safety scan is decided by `security.installPolicy`, so a rejection must be resolved by the operator relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
+The npm/manual install script differs in *how* it consents, not *whether*: it adds `--dangerously-force-unsafe-install` automatically whenever the installer still advertises that option as effective, because the plugin launches the fixed `tokenless` child process. Hosts that mark the option a deprecated no-op (OpenClaw 2026.6.5+) never receive it — there the safety scan is decided by `security.installPolicy`, so a rejection must be resolved by the operator relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
 
 ## QwenPaw install reports an unavailable SDK wheel
 
@@ -246,13 +246,16 @@ pip and reports whatever pip reports.
 RTK does not have a rewrite rule for every command. Test it directly:
 
 ```bash
-rtk rewrite "ls -la"
+tokenless rtk rewrite "ls -la"
 ```
 
-If `rtk` is missing:
+RTK is linked into `tokenless`, so no separate `rtk` executable is needed. If
+`tokenless rtk` is not a recognized command, the active `tokenless` predates the
+embedded RTK; check which one runs:
 
 ```bash
-command -v rtk
+command -v tokenless
+tokenless --version
 ```
 
 If RTK works directly but not in the agent, inspect the framework support matrix, adapter status, and whether the session was restarted.
@@ -444,7 +447,7 @@ Upgrade by re-running the installer. It overwrites the recorded paths and rewrit
 curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | bash
 ```
 
-Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. Nothing is retired until the replacement has been verified: the previous install is moved aside first and put back if the new one fails, so a missing tag, a failing build or an unwritable directory leaves the working CLI and its receipt exactly as they were. A recorded path whose recorded identity no longer matches was taken over by another installer and is left alone.
+Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — retires what the previous method created, so no launcher link, npm global package or adapter tree survives that the new receipt no longer mentions. Nothing is retired until the replacement has been verified: the previous install is moved aside first and put back if the new one fails, so a missing tag, a failing build or an unwritable directory leaves the working CLI and its receipt exactly as they were. A recorded path whose recorded identity no longer matches was taken over by another installer and is left alone.
 
 An npm-to-npm upgrade is covered the same way. It replaces the package payload in place and the launcher links resolve into that payload, so a copy of the previous module directory, its `@anolisa` platform package and the prefix's own bin links is kept until the new CLI has been verified; a broken new binary is put back rather than left behind a launcher that still resolves to it.
 
@@ -479,9 +482,9 @@ The uninstaller stops short rather than half-finishing, and says so by exiting n
 
 Re-installing into a different `TOKENLESS_INSTALL_DIR` also retires the PATH entry the installer appended for the previous directory. The receipt names one rc file and one directory, so without that the block for the old directory would survive every uninstall.
 
-What gets removed depends on the recorded method. After an npm path, the script removes the recorded launcher binaries from the recorded install directory — including a custom `TOKENLESS_INSTALL_DIR` — runs `npm uninstall -g anolisa-tokenless` against the recorded prefix, and removes the adapter resource copy only when that npm run created it — running each bundled framework's own `scripts/uninstall.sh` first, so an enabled OpenClaw, Hermes or Qwen Code registration is removed instead of being left pointing at a deleted directory. After a source build it removes only the `tokenless` CLI, because that path installs no `rtk` and no adapter resources. Either way a neighbouring anolisa CLI or manual npm installation that shares the same directory survives.
+What gets removed depends on the recorded method. After an npm path, the script removes the recorded launcher binaries from the recorded install directory — including a custom `TOKENLESS_INSTALL_DIR` — runs `npm uninstall -g anolisa-tokenless` against the recorded prefix, and removes the adapter resource copy only when that npm run created it — running each bundled framework's own `scripts/uninstall.sh` first, so an enabled OpenClaw, Hermes or Qwen Code registration is removed instead of being left pointing at a deleted directory. After a source build it removes only the `tokenless` CLI, because that path installs no adapter resources. Either way a neighbouring anolisa CLI or manual npm installation that shares the same directory survives.
 
-Do not substitute a fixed `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` list. It misses a custom `TOKENLESS_INSTALL_DIR` and the npm global package, and after a source-build install it deletes `rtk` and adapter resources that install path never created.
+Do not substitute a fixed `rm -f ~/.local/bin/tokenless ~/.local/bin/rtk` list. It misses a custom `TOKENLESS_INSTALL_DIR` and the npm global package, and it can delete an `rtk` launcher or adapter resources that this installation never created.
 
 Without a receipt the uninstaller refuses to guess and prints the per-method manual steps instead. Uninstall through the method you actually used: [anolisa installation](#anolisa-installation), [npm installation](#npm-installation), or the YUM/RPM sequence below.
 

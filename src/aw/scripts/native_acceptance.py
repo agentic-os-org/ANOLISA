@@ -40,7 +40,6 @@ def verify_bundle(directory: Path, expected: str, required: set[str] | None = No
         "aw-provider-tokenless",
         "aw-provider-sec-core",
         "tokenless",
-        "rtk",
         "policy",
         "agent-sec-cli",
         "agent-sec-daemon",

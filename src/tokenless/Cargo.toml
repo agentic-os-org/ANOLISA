@@ -49,10 +49,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 blake3 = "1.5"
 dirs = "5.0"
 libc = "0.2"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
 similar = "2"
 pyo3 = "0.24.2"
 tempfile = "3"
+# Fetched and patched by packaging/build/setup-rtk.sh; excluded from the
+# members above so workspace-wide fmt, clippy, and tests leave the vendored
+# upstream alone.
+rtk = { path = "third_party/rtk" }
 
 [profile.release]
 opt-level = 3

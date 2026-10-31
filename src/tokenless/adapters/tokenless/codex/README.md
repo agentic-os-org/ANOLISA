@@ -24,7 +24,7 @@ The plugin registers four hooks with Codex:
    blocks a tool. Re-enabling the retained legacy pipeline requires a source
    change and a new release.
 3. **`PreToolUse` (rewrite)** — runs before shell command execution:
-   - Rewrites commands via `rtk rewrite` for token optimization
+   - Rewrites commands through Tokenless PreTool (`tokenless compress`)
    - Only applies to Bash/Shell/terminal/programmatic tools
 4. **`PostToolUse`** — runs after every tool execution:
    - Skips content-reading and task-management tools
@@ -112,7 +112,7 @@ tokenless stats show <id>
 ```
 Shell command
     │
-    ├─ PreToolUse: rtk rewrite
+    ├─ PreToolUse: tokenless PreTool
     │   └─ Replaces the command with an output-reducing equivalent
     │
     ├─ Tool execution

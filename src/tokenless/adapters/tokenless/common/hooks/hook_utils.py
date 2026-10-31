@@ -14,19 +14,19 @@ from pathlib import Path
 
 # -- Binary fallback paths ----------------------------------------------------
 #
-# Tokenless has three supported installers whose layouts differ:
+# Tokenless has three supported installers whose binary directories differ:
 #
-# - Makefile:     ~/.local/{bin,libexec} or /usr/{bin,libexec}
-# - Anolisa CLI:  ~/.local/{bin,lib/anolisa/libexec} or /usr/local/{bin,libexec}
-# - RPM:          /usr/{bin,libexec}
+# - Makefile:     ~/.local/bin or /usr/bin
+# - Anolisa CLI:  ~/.local/bin or /usr/local/bin
+# - RPM:          /usr/bin
 #
-# Keep the legacy lib/share paths until installations made by older releases
-# have aged out.
+# Callers keep passing the legacy lib/share paths as explicit fallbacks until
+# installations made by older releases have aged out.
 #
 # KEEP IN SYNC with tool_ready_hook.sh::resolve_binary,
 # env_check.rs::binary_fallback_paths, OpenClaw's fallback constants, and the
 # Codex standalone scripts. Makefile and the Anolisa component manifest define
-# the supported layouts; the canonical order is user, /usr/local, /usr, legacy.
+# the supported layouts; the canonical order is user, /usr/local, then /usr.
 
 _USER_HOME = os.path.expanduser("~")
 if not _USER_HOME or not os.path.isabs(_USER_HOME):
@@ -40,11 +40,6 @@ def _user_path(*parts: str) -> str:
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
 _TOKENLESS_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "tokenless")
 _TOKENLESS_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "tokenless")
-_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "rtk")
-_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
-
-_TOKENLESS_HELPER_BINARIES = frozenset({"rtk"})
 
 
 def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
@@ -56,55 +51,8 @@ def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
     paths = []
     if user_home:
         paths.append(os.path.join(user_home, ".local", "bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        if user_home:
-            paths.extend(
-                [
-                    os.path.join(user_home, ".local", "libexec", "tokenless", name),
-                    # Anolisa CLI user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "lib",
-                        "anolisa",
-                        "libexec",
-                        "tokenless",
-                        name,
-                    ),
-                    # Makefile user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "libexec",
-                        "anolisa",
-                        "tokenless",
-                        name,
-                    ),
-                ]
-            )
     paths.append(os.path.join("/usr/local/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        # Anolisa CLI system mode.
-        paths.append(os.path.join("/usr/local/libexec/tokenless", name))
-        paths.append(os.path.join("/usr/local/libexec/anolisa/tokenless", name))
     paths.append(os.path.join("/usr/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        paths.extend(
-            [
-                os.path.join("/usr/libexec/tokenless", name),
-                # Makefile system mode and RPM.
-                os.path.join("/usr/libexec/anolisa/tokenless", name),
-                # Debian and pre-layout-migration compatibility.
-                os.path.join("/usr/lib/anolisa/tokenless", name),
-            ]
-        )
-        if user_home:
-            paths.extend(
-                [
-                    os.path.join(user_home, ".local", "share", "anolisa", "tokenless", name),
-                    os.path.join(user_home, ".local", "lib", "anolisa", "tokenless", name),
-                ]
-            )
     return tuple(paths)
 
 
@@ -379,11 +327,9 @@ def classify_env_error(tool_response) -> tuple[str | None, str | None]:
     return None, None
 
 
-# -- Context file for rewrite session tracking --
+# -- Hook state directory --
 
-_CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
-_CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
-_OPTIMIZATION_STATE_DIR = os.path.join(_CONTEXT_DIR, "hook-state")
+_OPTIMIZATION_STATE_DIR = os.path.join(os.path.expanduser("~"), ".tokenless", "hook-state")
 _OPTIMIZATION_STATE_TTL_SECONDS = 24 * 60 * 60
 # This bound is shared by all sessions using the same state directory. Under
 # pressure an in-flight marker can be evicted, losing PostTool deduplication.
@@ -494,7 +440,7 @@ def resolve_data_directory() -> str:
 
 def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
     """Map QwenWork workspace shell events to the shared Bash contract."""
-    global _CONTEXT_DIR, _CONTEXT_FILE, _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME
+    global _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME
     if agent_id != "qwenwork":
         return input_data
 
@@ -521,8 +467,6 @@ def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
     except (OSError, ValueError, RuntimeError) as error:
         warn(f"{error}. Passing through unchanged.")
         skip()
-    _CONTEXT_DIR = data_dir
-    _CONTEXT_FILE = os.path.join(data_dir, ".rewrite-context")
     _OPTIMIZATION_STATE_DIR = os.path.join(data_dir, "hook-state")
     # Bare retrieval commands do not inherit the hook's runtime environment.
     _QWENWORK_PRIVATE_RUNTIME = True
@@ -656,11 +600,6 @@ def secure_write_text(path: str, content: str) -> None:
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(content)
-
-
-def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
-    """Write context file for rtk rewrite session tracking."""
-    secure_write_text(_CONTEXT_FILE, f"{agent_id}\n{session_id}\n{tool_use_id}\n")
 
 
 def _optimization_state_path(agent_id: str, session_id: str, tool_use_id: str) -> str:

@@ -93,7 +93,6 @@ class QwenWorkInstallTests(unittest.TestCase):
         (self.bin / "python3").symlink_to(sys.executable)
         (self.bin / "bash").symlink_to("/bin/bash")
         self.executable("uname", "#!/bin/sh\nprintf '%s\\n' Darwin\n")
-        self.executable("rtk", "#!/bin/sh\nexit 0\n")
         _create_mock_tokenless(str(self.bin))
         self.forbidden_log = self.root / "forbidden-command.log"
         for name in ("qoderclicn", "killall", "pkill", "osascript"):
@@ -288,13 +287,6 @@ class QwenWorkInstallTests(unittest.TestCase):
         shutil.move(str(self.bin / "tokenless"), user_bin)
         out, _ = self.run_action("detect")
         self.assertIn(str(user_bin), out)
-
-    def test_missing_rtk_warns_but_allows_install(self) -> None:
-        (self.bin / "rtk").unlink()
-        _, error = self.run_action("install")
-        self.assertIn("command rewriting is unavailable", error)
-        self.assertTrue(self.target.is_dir())
-        self.assertFalse((self.bin / "request.json").exists(), "detect must not invoke binaries")
 
     def test_unsupported_platform_rejects_install(self) -> None:
         before = snapshot(self.root)

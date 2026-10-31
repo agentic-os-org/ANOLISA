@@ -45,7 +45,7 @@ def main() -> None:
             ["node", "--version"], text=True, timeout=10
         ).strip(),
         "rtk": subprocess.check_output(
-            [str(binaries / "rtk"), "--version"], text=True, timeout=10
+            [str(binaries / "tokenless"), "rtk", "--version"], text=True, timeout=10
         ).strip(),
         "claude_cli": subprocess.check_output(
             [cli, "--version"], text=True, timeout=15

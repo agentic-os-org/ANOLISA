@@ -76,7 +76,8 @@ Third-Party Software
 
 rtk (src/tokenless/third_party/rtk/)
   Pinned source from https://github.com/rtk-ai/rtk.git
-  Built using src/tokenless/packaging/build/setup-rtk.sh and Tokenless patches
+  Fetched and patched by src/tokenless/packaging/build/setup-rtk.sh,
+  then linked into the tokenless executable as a library
   Copyright RTK Contributors
   Licensed under the Apache License, Version 2.0
 
