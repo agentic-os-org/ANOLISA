@@ -75,6 +75,26 @@ for line in sys.stdin:
                 os.write(fd, b'overwritten')
             finally:
                 os.close(fd)
+        elif op == 'truncate':
+            os.truncate(path, 0)
+        elif op == 'otrunc':
+            os.close(os.open(path, os.O_WRONLY | os.O_TRUNC))
+        elif op == 'ftruncate':
+            fd = os.open(path, os.O_RDWR)
+            try:
+                os.ftruncate(fd, 0)
+            finally:
+                os.close(fd)
+        elif op == 'mmapw':
+            import mmap
+            fd = os.open(path, os.O_RDWR)
+            try:
+                with mmap.mmap(fd, 0, mmap.MAP_SHARED,
+                               mmap.PROT_READ | mmap.PROT_WRITE) as mapping:
+                    mapping[0:1] = b'X'
+                    mapping.flush()
+            finally:
+                os.close(fd)
         elif op.startswith('rename:'):
             os.rename(path, op.split(':', 1)[1])
         elif op.startswith('exchange:'):

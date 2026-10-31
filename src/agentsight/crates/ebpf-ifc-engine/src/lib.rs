@@ -2139,7 +2139,6 @@ fn lsm_needed(
     block_file: bool,
     block_connect: bool,
     recv_flow: bool,
-    advanced_hooks: bool,
 ) -> bool {
     match name {
         "enforce_task_kill" | "enforce_ptrace_access_check" | "enforce_bpf_syscall" => true,
@@ -2147,7 +2146,12 @@ fn lsm_needed(
         "enforce_socket_connect" => block_connect,
         "enforce_socket_recvmsg" => recv_flow,
         "enforce_file_permission" => block_file,
-        "enforce_mmap_file" | "enforce_file_mprotect" => advanced_hooks && block_file,
+        // Nominal requirement without a hook budget: writable shared mappings
+        // bypass file_permission, so any file-blocking profile would want the
+        // mapping mediation. lsm_needed_for_budget decides whether the hook
+        // set can actually carry it (verifier stack budget on the validated
+        // kernels); do not read this arm as the production gate.
+        "enforce_mmap_file" | "enforce_file_mprotect" => block_file,
         "enforce_file_open"
         | "enforce_file_truncate"
         | "enforce_path_truncate"
@@ -2177,14 +2181,13 @@ fn lsm_needed_for_budget(
                 ))
             || (block_connect && name == "enforce_socket_connect");
     }
-    lsm_needed(
-        name,
-        block_exec,
-        block_file,
-        block_connect,
-        recv_flow,
-        budget.advanced_tracepoints,
-    )
+    // Mapping mediation ships only with the advanced tracepoint budget: the
+    // inode-only profile denies writable opens instead, which keeps these
+    // hooks out of its verifier stack budget.
+    if matches!(name, "enforce_mmap_file" | "enforce_file_mprotect") {
+        return budget.advanced_tracepoints && block_file;
+    }
+    lsm_needed(name, block_exec, block_file, block_connect, recv_flow)
 }
 
 fn rename_program_selected(name: &str) -> bool {
@@ -4802,14 +4805,7 @@ mod tests {
         assert!(budget.features & FEAT_OPEN_RULES != 0);
         assert!(!tracepoint_needed(spec("trace_openat"), budget));
         assert!(!tracepoint_needed(spec("trace_rename"), budget));
-        assert!(lsm_needed(
-            "enforce_file_open",
-            false,
-            true,
-            false,
-            false,
-            false,
-        ));
+        assert!(lsm_needed("enforce_file_open", false, true, false, false,));
         assert!(lsm_needed_for_budget(
             "enforce_file_open",
             false,
@@ -4860,17 +4856,9 @@ mod tests {
             false,
             true,
             false,
-            false,
             false
         ));
-        assert!(lsm_needed(
-            "enforce_path_unlink",
-            false,
-            true,
-            false,
-            false,
-            false
-        ));
+        assert!(lsm_needed("enforce_path_unlink", false, true, false, false));
     }
 
     #[test]
@@ -4998,17 +4986,9 @@ mod tests {
 
     #[test]
     fn file_flow_does_not_enable_lsm_file_hooks_without_block_file() {
-        assert!(lsm_needed(
-            "enforce_task_kill",
-            false,
-            false,
-            false,
-            false,
-            false
-        ));
+        assert!(lsm_needed("enforce_task_kill", false, false, false, false));
         assert!(lsm_needed(
             "enforce_ptrace_access_check",
-            false,
             false,
             false,
             false,
@@ -5019,7 +4999,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             false
         ));
         assert!(!lsm_needed(
@@ -5027,32 +5006,33 @@ mod tests {
             false,
             false,
             false,
-            false,
             false
         ));
-        assert!(!lsm_needed(
+        assert!(!lsm_needed_for_budget(
             "enforce_mmap_file",
             false,
+            true,
             false,
             false,
-            false,
-            true
+            HookBudget::for_pinned_reserve(HookReserve::agent_file_guard()),
         ));
         assert!(lsm_needed(
             "enforce_file_permission",
             false,
             true,
             false,
-            false,
             false
         ));
-        assert!(lsm_needed(
+        assert!(lsm_needed_for_budget(
             "enforce_mmap_file",
             false,
             true,
             false,
             false,
-            true
+            HookBudget::for_pinned_reserve(
+                HookReserve::pinned_profile_value(Some("credential-exfiltration"))
+                    .expect("credential profile"),
+            ),
         ));
     }
 

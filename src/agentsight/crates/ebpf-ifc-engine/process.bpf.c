@@ -956,6 +956,7 @@ struct {
 struct file_scratch {
 	char path[MAX_FILENAME_LEN];
 	struct file_id fid;
+	struct file_domain_id fdom;
 };
 struct fd_scratch {
 	struct fd_key key;
@@ -2538,6 +2539,35 @@ static __noinline int te_handle_rename_exit(long ret, __u32 mode)
 	return rc;
 }
 
+/* Emit a violation event for an inode-guard block so the audit chain
+ * sees the denied operation even when the fast path short-circuits
+ * the full taint evaluation. The target is the registered canonical path,
+ * or the dentry name when the inode has none. */
+static __always_inline void te_inode_guard_violation(
+	pid_t pid, struct dentry *dentry, const struct inode_guard_val *guard,
+	__u32 op)
+{
+	struct file_id fid = {};
+	struct inode *inode = BPF_CORE_READ(dentry, d_inode);
+	const char *target = NULL;
+	__u32 rule_id = guard->rule_id;
+	__u32 dom_id = guard->domain_id;
+
+	if (inode) {
+		fid.ino = BPF_CORE_READ(inode, i_ino);
+		fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
+	}
+	struct file_domain_id key = { .fid = fid, .domain_id = dom_id };
+	struct inode_path_val *known = bpf_map_lookup_elem(&te_inode_path, &key);
+	if (known)
+		target = known->path;
+	else
+		target = (const char *)BPF_CORE_READ(dentry, d_name.name);
+	emit_violation(pid, rule_id, target, /*conn_ip=*/0,
+		      TE_OBJ_FILE, &fid, dom_id, /*matched_labels=*/0,
+		      op, /*blocked=*/1, /*killed=*/0, TEFFECT_BLOCK);
+}
+
 static __always_inline int te_handle_file_permission(struct file *file,
 						     __u32 access, __u32 mode)
 {
@@ -2557,16 +2587,88 @@ static __always_inline int te_handle_file_permission(struct file *file,
 	if (!te_is_regular_or_dir(file, NULL, TE_REF_FILE) ||
 	    te_resolve_file_id_from_file(file, &scratch->fid) < 0)
 		return 0;
-	struct file_domain_id key = {
-		.fid = scratch->fid,
-		.domain_id = cap_domain_for_pid(pid),
-	};
-	struct inode_path_val *known = bpf_map_lookup_elem(&te_inode_path, &key);
+	scratch->fdom.fid = scratch->fid;
+	scratch->fdom.domain_id = cap_domain_for_pid(pid);
+	if (access & TE_ACCESS_WRITE) {
+		struct inode_guard_val *guard =
+			bpf_map_lookup_elem(&te_inode_guard, &scratch->fdom);
+
+		/* Guards are per-domain: without this check a pid bound to
+		 * another domain (credential delegation, narrowed scopes)
+		 * would be denied by a foreign binding's guard. */
+		if (guard && (guard->flags & INODE_GUARD_WRITE) &&
+		    guard->domain_id == scratch->fdom.domain_id) {
+			te_inode_guard_violation(pid,
+				BPF_CORE_READ(file, f_path.dentry), guard,
+				TE_EVENT_OP_ORDINARY_WRITE);
+			return -EPERM;
+		}
+	}
+	struct inode_path_val *known = bpf_map_lookup_elem(&te_inode_path, &scratch->fdom);
 	if (known) {
 		__builtin_memcpy(scratch->path, known->path, sizeof(scratch->path));
 		scratch->path[sizeof(scratch->path) - 1] = '\0';
 	} else if (file_basename(file, scratch->path, sizeof(scratch->path)) < 0) {
 		return 0;
+	}
+
+	return te_handle_file_event(pid, scratch->path, &scratch->fid, access, mode);
+}
+
+/* inode-only kernels forbid bpf_d_path in LSM hooks, so path_truncate cannot
+ * resolve a canonical path. Match the registered canonical path from
+ * te_inode_path (falling back to the basename) so truncate(2) honors legacy
+ * write rules exactly like the file_permission hook does. */
+static __always_inline int te_handle_path_permission(const struct path *path,
+						     __u32 access, __u32 mode)
+{
+	struct file_scratch *scratch = file_scratch_buf();
+	struct dentry *dentry;
+	struct inode *inode;
+	pid_t pid;
+
+	if (mode == TE_MODE_BLOCK && !enforce_mode)
+		return 0;
+	if (!access || !path)
+		return 0;
+	if (!scratch)
+		return 0;
+	pid = bpf_get_current_pid_tgid() >> 32;
+	if (!te_pid_active(pid))
+		return 0;
+	dentry = BPF_CORE_READ(path, dentry);
+	inode = BPF_CORE_READ(dentry, d_inode);
+	if (!dentry || !inode)
+		return 0;
+	if ((BPF_CORE_READ(inode, i_mode) & 0170000) != 0100000)
+		return 0;
+	__builtin_memset(scratch, 0, sizeof(*scratch));
+	scratch->fid.ino = BPF_CORE_READ(inode, i_ino);
+	scratch->fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
+	scratch->fdom.fid = scratch->fid;
+	scratch->fdom.domain_id = cap_domain_for_pid(pid);
+	if (access & TE_ACCESS_WRITE) {
+		struct inode_guard_val *guard =
+			bpf_map_lookup_elem(&te_inode_guard, &scratch->fdom);
+
+		if (guard && (guard->flags & INODE_GUARD_WRITE) &&
+		    guard->domain_id == scratch->fdom.domain_id) {
+			te_inode_guard_violation(pid, dentry, guard,
+						 TE_EVENT_OP_ORDINARY_WRITE);
+			return -EPERM;
+		}
+	}
+	struct inode_path_val *known = bpf_map_lookup_elem(&te_inode_path, &scratch->fdom);
+	if (known) {
+		__builtin_memcpy(scratch->path, known->path, sizeof(scratch->path));
+		scratch->path[sizeof(scratch->path) - 1] = '\0';
+	} else {
+		const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
+
+		if (!name ||
+		    bpf_probe_read_kernel_str(scratch->path,
+					      sizeof(scratch->path), name) <= 0)
+			return 0;
 	}
 
 	return te_handle_file_event(pid, scratch->path, &scratch->fid, access, mode);
@@ -2842,6 +2944,78 @@ static __always_inline int te_handle_exec(__u32 ref_kind, const void *a,
 	return te_handle_exec_event(pid, target, shown, mode);
 }
 
+static __always_inline int te_policy_handle_file_permission(struct file *file, int mask)
+{
+	if (!enforce_mode || !(mask & MAY_WRITE) || !file)
+		return 0;
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	if (!te_pid_active(pid))
+		return 0;
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (!domain || !domain->ordinary_write_mask)
+		return 0;
+	__u32 zero = 0;
+	struct te_policy_permission_scratch *scratch =
+		bpf_map_lookup_elem(&te_policy_permission_scratch, &zero);
+	struct dentry *dentry = NULL, *parent = NULL;
+	struct vfsmount *vfsmount = NULL;
+	if (!scratch || BPF_CORE_READ_INTO(&dentry, file, f_path.dentry) || !dentry ||
+	    BPF_CORE_READ_INTO(&vfsmount, file, f_path.mnt) || !vfsmount ||
+	    BPF_CORE_READ_INTO(&parent, dentry, d_parent) || !parent ||
+	    (BPF_CORE_READ(dentry, d_inode, i_mode) & 0170000) != 0100000)
+		return 0;
+	__builtin_memset(scratch, 0, sizeof(*scratch));
+	scratch->parent_path.mnt = vfsmount;
+	scratch->parent_path.dentry = parent;
+	te_policy_classify(&scratch->parent_path, dentry, true,
+			   domain->ordinary_write_mask, domain,
+			   &scratch->classification);
+	/* UNKNOWN remains fail-open for phase-one ordinary writes. */
+	if (scratch->classification.kind != TE_POLICY_CLASS_PROTECTED)
+		return 0;
+	te_inode_guard_violation(pid, dentry, &scratch->classification.guard,
+				 TE_EVENT_OP_ORDINARY_WRITE);
+	return -EPERM;
+}
+
+/* path_truncate receives a struct path, not a struct file. Classify the same
+ * parent+dentry pair so truncate(2) honors structured ordinary writes without
+ * bpf_d_path, which LSM hooks on verified kernels do not permit. */
+static __always_inline int te_policy_handle_path_permission(const struct path *path,
+							    int mask)
+{
+	if (!enforce_mode || !(mask & MAY_WRITE) || !path)
+		return 0;
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	if (!te_pid_active(pid))
+		return 0;
+	const struct te_policy_domain_val *domain = te_policy_domain(pid);
+	if (!domain || !domain->ordinary_write_mask)
+		return 0;
+	__u32 zero = 0;
+	struct te_policy_permission_scratch *scratch =
+		bpf_map_lookup_elem(&te_policy_permission_scratch, &zero);
+	struct dentry *dentry = NULL, *parent = NULL;
+	struct vfsmount *vfsmount = NULL;
+	if (!scratch || BPF_CORE_READ_INTO(&dentry, path, dentry) || !dentry ||
+	    BPF_CORE_READ_INTO(&vfsmount, path, mnt) || !vfsmount ||
+	    BPF_CORE_READ_INTO(&parent, dentry, d_parent) || !parent ||
+	    (BPF_CORE_READ(dentry, d_inode, i_mode) & 0170000) != 0100000)
+		return 0;
+	__builtin_memset(scratch, 0, sizeof(*scratch));
+	scratch->parent_path.mnt = vfsmount;
+	scratch->parent_path.dentry = parent;
+	te_policy_classify(&scratch->parent_path, dentry, true,
+			   domain->ordinary_write_mask, domain,
+			   &scratch->classification);
+	/* UNKNOWN remains fail-open for phase-one ordinary writes. */
+	if (scratch->classification.kind != TE_POLICY_CLASS_PROTECTED)
+		return 0;
+	te_inode_guard_violation(pid, dentry, &scratch->classification.guard,
+				 TE_EVENT_OP_ORDINARY_WRITE);
+	return -EPERM;
+}
+
 SEC("lsm/bprm_check_security")
 int BPF_PROG(enforce_bprm_check_security, struct linux_binprm *bprm)
 {
@@ -2865,6 +3039,9 @@ int BPF_PROG(enforce_file_open, struct file *file)
 SEC("lsm/file_truncate")
 int BPF_PROG(enforce_file_truncate, struct file *file)
 {
+	int rc = te_policy_handle_file_permission(file, MAY_WRITE);
+	if (rc)
+		return rc;
 	return te_handle_file_permission(file, TE_ACCESS_WRITE, TE_MODE_BLOCK);
 }
 
@@ -2886,7 +3063,6 @@ int BPF_PROG(enforce_file_mprotect, struct vm_area_struct *vma,
 	struct file *file;
 	unsigned long vm_flags;
 	unsigned long map_flags;
-
 	(void)reqprot;
 	if (!vma)
 		return 0;
@@ -2903,77 +3079,15 @@ int BPF_PROG(enforce_file_mprotect, struct vm_area_struct *vma,
 SEC("lsm/path_truncate")
 int BPF_PROG(enforce_path_truncate, const struct path *path_arg)
 {
+	int rc = te_policy_handle_path_permission(path_arg, MAY_WRITE);
+	if (rc)
+		return rc;
 #ifdef INODE_GUARD_ONLY
-	return 0; /* No path resolution; truncate not guarded in inode mode */
+	return te_handle_path_permission(path_arg, TE_ACCESS_WRITE, TE_MODE_BLOCK);
 #else
 	return te_handle_file(TE_REF_PATH, path_arg, 0, TE_ACCESS_WRITE,
 			      TE_MODE_BLOCK);
 #endif
-}
-
-/* Emit a violation event for an inode-guard block so the audit chain
- * sees the denied operation even when the fast path short-circuits
- * the full taint evaluation. The target is the registered canonical path,
- * or the dentry name when the inode has none. */
-static __always_inline void te_inode_guard_violation(
-	pid_t pid, struct dentry *dentry, const struct inode_guard_val *guard,
-	__u32 op)
-{
-	struct file_id fid = {};
-	struct inode *inode = BPF_CORE_READ(dentry, d_inode);
-	const char *target = NULL;
-	__u32 rule_id = guard->rule_id;
-	__u32 dom_id = guard->domain_id;
-
-	if (inode) {
-		fid.ino = BPF_CORE_READ(inode, i_ino);
-		fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
-	}
-	struct file_domain_id key = { .fid = fid, .domain_id = dom_id };
-	struct inode_path_val *known = bpf_map_lookup_elem(&te_inode_path, &key);
-	if (known)
-		target = known->path;
-	else
-		target = (const char *)BPF_CORE_READ(dentry, d_name.name);
-	emit_violation(pid, rule_id, target, /*conn_ip=*/0,
-		      TE_OBJ_FILE, &fid, dom_id, /*matched_labels=*/0,
-		      op, /*blocked=*/1, /*killed=*/0, TEFFECT_BLOCK);
-}
-
-static __always_inline int te_policy_handle_file_permission(struct file *file, int mask)
-{
-	if (!enforce_mode || !(mask & MAY_WRITE) || !file)
-		return 0;
-	pid_t pid = bpf_get_current_pid_tgid() >> 32;
-	if (!te_pid_active(pid))
-		return 0;
-	const struct te_policy_domain_val *domain = te_policy_domain(pid);
-	if (!domain || !domain->ordinary_write_mask)
-		return 0;
-	__u32 zero = 0;
-	struct te_policy_permission_scratch *scratch =
-		bpf_map_lookup_elem(&te_policy_permission_scratch, &zero);
-	struct dentry *dentry = NULL, *parent = NULL;
-	struct vfsmount *vfsmount = NULL;
-	struct inode *inode = NULL;
-	if (!scratch || BPF_CORE_READ_INTO(&dentry, file, f_path.dentry) || !dentry ||
-	    BPF_CORE_READ_INTO(&vfsmount, file, f_path.mnt) || !vfsmount ||
-	    BPF_CORE_READ_INTO(&parent, dentry, d_parent) || !parent ||
-	    BPF_CORE_READ_INTO(&inode, dentry, d_inode) || !inode ||
-	    (BPF_CORE_READ(inode, i_mode) & 0170000) != 0100000)
-		return 0;
-	__builtin_memset(scratch, 0, sizeof(*scratch));
-	scratch->parent_path.mnt = vfsmount;
-	scratch->parent_path.dentry = parent;
-	te_policy_classify(&scratch->parent_path, dentry, true,
-			   domain->ordinary_write_mask, domain,
-			   &scratch->classification);
-	/* UNKNOWN remains fail-open for phase-one ordinary writes. */
-	if (scratch->classification.kind != TE_POLICY_CLASS_PROTECTED)
-		return 0;
-	te_inode_guard_violation(pid, dentry, &scratch->classification.guard,
-				 TE_EVENT_OP_ORDINARY_WRITE);
-	return -EPERM;
 }
 
 SEC("lsm/file_permission")

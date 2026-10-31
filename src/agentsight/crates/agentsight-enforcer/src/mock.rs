@@ -317,14 +317,7 @@ impl EnforcementBackend for MockBackend {
             return Ok(if actual.as_ref() == Some(&request.expected) {
                 ReplaceOutcome::SourceRetained {
                     binding: request.expected,
-                    code: match error {
-                        BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
-                        BackendError::BindingConflict(_) | BackendError::MissingBinding(_) => {
-                            ReplaceFailureCode::BindingConflict
-                        }
-                        BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
-                        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
-                    },
+                    code: crate::backend::backend_failure_code(&error),
                 }
             } else {
                 ReplaceOutcome::Conflict {
@@ -633,6 +626,30 @@ mod tests {
             }],
         });
         request
+    }
+
+    #[test]
+    fn replace_retains_source_when_replacement_payload_is_unsupported() {
+        let backend = MockBackend::new();
+        let source = backend.apply(request()).expect("legacy apply");
+
+        let outcome = backend
+            .replace(replacement(source.clone(), structured_request()))
+            .expect("payload validation failure is reported as an outcome");
+
+        assert!(matches!(
+            outcome,
+            ReplaceOutcome::SourceRetained {
+                code: ReplaceFailureCode::CompileFailure,
+                ..
+            }
+        ));
+        assert_eq!(
+            EnforcementBackend::bindings(&backend)
+                .expect("bindings should remain queryable")
+                .len(),
+            1
+        );
     }
 
     #[test]

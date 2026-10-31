@@ -701,6 +701,8 @@ fn remote_backend_error(error: BackendError) -> RemoteError {
         BackendError::StaleProcess { .. } => "stale_process",
         BackendError::CompileFailure(_) => "compile_failure",
         BackendError::KernelFailure(_) => "kernel_failure",
+        BackendError::PreexistingWritableMap { .. } => "preexisting_writable_map",
+        BackendError::PreexistingWritableFd { .. } => "preexisting_writable_fd",
     };
     RemoteError {
         code: code.into(),
@@ -764,6 +766,20 @@ mod tests {
 
     use super::*;
     use crate::MockBackend;
+
+    #[test]
+    fn remote_error_code_names_preexisting_writable_map() {
+        let error = remote_backend_error(BackendError::PreexistingWritableMap {
+            pid: 7,
+            path: "/protected/keep.txt".into(),
+        });
+        assert_eq!(error.code, "preexisting_writable_map");
+        let error = remote_backend_error(BackendError::PreexistingWritableFd {
+            pid: 7,
+            path: "/protected/keep.txt".into(),
+        });
+        assert_eq!(error.code, "preexisting_writable_fd");
+    }
 
     #[test]
     fn peer_driven_accept_errors_are_transient() {

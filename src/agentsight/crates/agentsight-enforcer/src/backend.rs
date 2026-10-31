@@ -3,8 +3,8 @@
 use std::sync::mpsc::Receiver;
 
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, ApplyPolicy, Binding, HealthStatus, ReplaceOutcome, ReplacePolicy,
-    SecurityEvent, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, HealthStatus, ReplaceFailureCode, ReplaceOutcome,
+    ReplacePolicy, SecurityEvent, ViolationEvent,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -36,12 +36,50 @@ pub enum BackendError {
     /// Kernel attachment or runtime state management failed.
     #[error("kernel enforcement failed: {0}")]
     KernelFailure(String),
+    /// The bound process tree already holds a writable shared mapping that no
+    /// LSM hook can revoke, so content protection cannot be guaranteed.
+    #[error(
+        "process {pid} holds a pre-existing writable shared mapping of {path}; restart it without the mapping before applying content protection"
+    )]
+    PreexistingWritableMap {
+        /// Process inside the requested binding tree holding the mapping.
+        pid: i32,
+        /// Mapped file path as reported by `/proc/<pid>/maps`.
+        path: String,
+    },
+    /// The bound process tree already holds a writable descriptor that could
+    /// be mapped shared-writable after binding without any further open.
+    #[error(
+        "process {pid} holds a pre-existing writable descriptor of {path}; restart it without the descriptor before applying content protection"
+    )]
+    PreexistingWritableFd {
+        /// Process inside the requested binding tree holding the descriptor.
+        pid: i32,
+        /// Protected path the descriptor refers to.
+        path: String,
+    },
 }
 
 pub(crate) fn validate_apply_policy_payload(request: &ApplyPolicy) -> Result<(), BackendError> {
     request
         .validate_payload()
         .map_err(|error| BackendError::CompileFailure(error.to_string()))
+}
+
+/// Maps backend failures onto the replacement protocol's failure codes; both
+/// backends share it so new variants need one covered mapping site.
+pub(crate) fn backend_failure_code(error: &BackendError) -> ReplaceFailureCode {
+    match error {
+        BackendError::BindingConflict(_) | BackendError::MissingBinding(_) => {
+            ReplaceFailureCode::BindingConflict
+        }
+        BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
+        BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
+        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
+        // Pre-attach preflight rejections are policy admission failures.
+        BackendError::PreexistingWritableMap { .. } => ReplaceFailureCode::CompileFailure,
+        BackendError::PreexistingWritableFd { .. } => ReplaceFailureCode::CompileFailure,
+    }
 }
 
 #[cfg(feature = "mock-backend")]
@@ -123,5 +161,53 @@ pub trait EnforcementBackend: Send + Sync + 'static {
             self.detach(binding.request.binding_id)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preexisting_map_failure_maps_to_compile_failure() {
+        assert_eq!(
+            backend_failure_code(&BackendError::PreexistingWritableMap {
+                pid: 7,
+                path: "/protected/keep.txt".into(),
+            }),
+            ReplaceFailureCode::CompileFailure
+        );
+    }
+
+    #[test]
+    fn backend_failure_code_covers_every_variant() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            backend_failure_code(&BackendError::BindingConflict(id)),
+            ReplaceFailureCode::BindingConflict
+        );
+        assert_eq!(
+            backend_failure_code(&BackendError::MissingBinding(id)),
+            ReplaceFailureCode::BindingConflict
+        );
+        assert_eq!(
+            backend_failure_code(&BackendError::StaleProcess { pid: 7 }),
+            ReplaceFailureCode::StaleProcess
+        );
+        assert_eq!(
+            backend_failure_code(&BackendError::CompileFailure("payload".into())),
+            ReplaceFailureCode::CompileFailure
+        );
+        assert_eq!(
+            backend_failure_code(&BackendError::KernelFailure("attach".into())),
+            ReplaceFailureCode::KernelFailure
+        );
+        assert_eq!(
+            backend_failure_code(&BackendError::PreexistingWritableFd {
+                pid: 7,
+                path: "/protected/keep.txt".into(),
+            }),
+            ReplaceFailureCode::CompileFailure
+        );
     }
 }
