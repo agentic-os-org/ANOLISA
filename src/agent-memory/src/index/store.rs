@@ -690,12 +690,27 @@ impl BM25Store {
     ///
     /// Cold criteria: `access_count == 0 AND age > cold_after_days`.
     /// Files with `access_count > 0` are never compacted (warm protection).
+    ///
+    /// `cold_after_days` is an unbounded `u64` read straight from config, so
+    /// the day span is widened with checked arithmetic. A threshold too large
+    /// to express as a millisecond offset pins the cutoff at `i64::MIN`, which
+    /// reads as "nothing is old enough to go cold" -- not even a row stamped
+    /// with the minimum representable `mtime_ms` -- rather than overflowing
+    /// the multiply (a panic in debug builds) or wrapping it into a future
+    /// cutoff that cools the whole warm set (release builds).
     pub fn compact(&mut self, cold_after_days: u64) -> Result<usize> {
         let now_ms: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let cutoff_ms = now_ms - (cold_after_days as i64 * 86_400_000);
+        // The unrepresentable-threshold cutoff has to be `i64::MIN` itself,
+        // not the widest representable span subtracted from `now_ms`: with a
+        // positive clock, `now_ms - i64::MAX` lands above `i64::MIN`, so a row
+        // stored at the minimum timestamp would still be cold enough.
+        let cutoff_ms = i64::try_from(cold_after_days)
+            .ok()
+            .and_then(|days| days.checked_mul(86_400_000))
+            .map_or(i64::MIN, |span_ms| now_ms.saturating_sub(span_ms));
 
         let tx = self.conn.transaction()?;
 
@@ -2690,6 +2705,91 @@ mod tests {
         let hits = s.search("recent", 5, true).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "fresh.md");
+    }
+
+    #[test]
+    fn compact_unrepresentable_cold_after_days_does_not_overflow() {
+        // `cold_after_days` above `i64::MAX / 86_400_000` overflowed the
+        // day-to-millisecond multiply: a panic in debug builds, a wrapped
+        // cutoff in release builds. Either way the warm set was lost.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("fresh.md", now_ms, 20, "recent knowledge", None)
+            .unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 3650 * 86_400_000,
+            20,
+            "ancient wisdom",
+            None,
+        )
+        .unwrap();
+
+        let compacted = s.compact(i64::MAX as u64).unwrap();
+        assert_eq!(
+            compacted, 0,
+            "a threshold that cannot be expressed in milliseconds must cool nothing"
+        );
+        let (warm, cold) = s.warm_cold_counts().unwrap();
+        assert_eq!((warm, cold), (2, 0));
+
+        // Both files stay in normal search, the ten-year-old one included.
+        let hits = s.search("recent", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "fresh.md");
+        let hits = s.search("ancient", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "old.md");
+    }
+
+    #[test]
+    fn compact_out_of_range_cold_after_days_keeps_warm_set() {
+        // `u64::MAX` narrowed to `-1` day, so the cutoff landed one day in the
+        // future and every never-accessed file -- including one written moments
+        // ago -- was marked cold.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("fresh.md", now_ms, 20, "recent knowledge", None)
+            .unwrap();
+
+        let compacted = s.compact(u64::MAX).unwrap();
+        assert_eq!(
+            compacted, 0,
+            "an out-of-range threshold must not archive the warm set"
+        );
+        let hits = s.search("recent", 5, true).unwrap();
+        assert_eq!(hits.len(), 1, "fresh file must stay searchable");
+        assert_eq!(hits[0].path, "fresh.md");
+    }
+
+    #[test]
+    fn compact_out_of_range_cold_after_days_keeps_minimum_mtime_row() {
+        // `i64::MIN` is the boundary the saturated cutoff must still refuse to
+        // cool. Subtracting a fallback `i64::MAX` span from a positive clock
+        // stopped one short of it, so this row used to be archived.
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("oldest.md", i64::MIN, 20, "minimum mtime", None)
+            .unwrap();
+
+        // Neither overflow path -- a day count too big to widen, or a span too
+        // big to multiply -- may cool it.
+        for days in [i64::MAX as u64, u64::MAX] {
+            assert_eq!(
+                s.compact(days).unwrap(),
+                0,
+                "cold_after_days={days} is not expressible in milliseconds, \
+                 so nothing is old enough to go cold"
+            );
+            assert_eq!(s.warm_cold_counts().unwrap(), (1, 0));
+        }
     }
 
     #[test]
