@@ -108,6 +108,8 @@ impl CoshCore {
                 APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS,
             ),
             approval_timed_out: std::sync::atomic::AtomicBool::new(false),
+            failed_side_effect_pending_approval: false,
+            reapproval_checkpoint: None,
             control_transport_failure: std::sync::OnceLock::new(),
             execution_profile,
         };

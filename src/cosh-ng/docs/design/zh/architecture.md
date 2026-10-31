@@ -151,6 +151,43 @@ revision，且脱敏 transcript digest 一致的后台压缩。活动 transcript
   `core`/`gateway-brokered-v1` selector。Durable API 使用 idempotency key，因此客户端 I/O
   不确定时可以重试而不会重放未知 side effect。
 
+副作用执行失败或执行结果未知后，Core 保留会话级的重新审批标记。对已有持久化
+会话执行副作用或向 Host 交付任何审批（包括 Prompt Hook 和 ReadOnly/Other Ask）前，Core 在现有、独占锁定的活动租约中同步写入
+一字节保护标记。恢复时合并租约标记和会话 envelope，取消、SIGINT 或进程终止
+不能因轮次尚未落盘而恢复旧的自动批准。已有会话即使使用 `auto_persist = false`
+也受保护；从未提交 envelope 的新会话无法恢复。标记身份、owner、写入或同步失败
+都会阻止执行。
+格式错误的 Host 完成响应保持未确认；实际执行失败在可失败的后处理之前即标记为
+未决。envelope 已发布但 commit 报错时仍绑定保留的租约；无法绑定时，在执行前
+停止后续交互请求。
+
+只有显式批准后的副作用执行成功才会清除内存要求；活动租约中的持久标记必须等
+完整轮次提交后再清除，提交前崩溃会保守地再次要求批准。明确拒绝且此前无未决
+标记时，可以撤销本次请求新建的标记；拒绝和只读成功不能清除之前的失败状态。
+所有审批交付还会预先置 memory pending；不能因请求kind是只读而丢失错kind或未知Host响应
+的保护。非副作用裸allow/deny仅在所有bypass明确未执行后，分别恢复本次exposure的memory和
+checkpoint基线；临时exposure不改变原mandatory批准策略。
+标记复用现有活动租约与会话清理，不改写 transcript generation 或 compaction revision。
+新会话独立开始。
+
+[审批响应归一化合同](approval-response-normalization.md)定义普通决定与Host完成的
+统一原始帧分类及输入矩阵。
+
+Core 通过现有的 `hook_requires_approval` 布尔字段传递该要求。Shell 必须进入
+交互审批，不能通过 Trust、Auto 或 turn-batch 绕过，也不依赖 Hook UI 文案。
+这里复用 Shell 已有的强制审批契约。Host Shell 退出码必须是有符号32位JSON整数；
+非法值保持未确认，缺失或null继续视为未知，只有有效的0才能确认成功。
+
+对brokered工作区checkpoint，Gateway将该要求通过native Runtime事件的
+`requires_explicit_approval`布尔字段传到调度，`AllowAll`也必须保持审批pending。
+新字段默认false且false时不输出，保留旧false报文形状；true需要更新后的Gateway
+消费者，旧native事件的严格reader会拒绝带true的新事件。该路径的保护要求Gateway
+bridge、scheduler和consumer一起更新；只更新Core而保留旧Gateway bridge，仍可能
+丢失已有的Core审批位并被AllowAll自动批准，这种混合部署不受新增保护。Core控制
+wire及持久化request/permit schema均未变化。workspace-write profile保留原有对mandatory请求
+的失败关闭拒绝，本轮不增加该profile的重新审批能力。回退Core会撤去新增保护；
+客户端仍需正确处理已有的Core审批字段。
+
 ## Gateway 与 ACP 交付边界
 
 Package slice 是 durable local Task Plane，不是通用的 production Gateway。它支持的边界是

@@ -41,7 +41,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
         ) else {
             continue;
         };
-        // Hook ask decisions must never be auto-approved
+        // Mandatory Core decisions must never be auto-approved.
         if request.hook_requires_approval {
             continue;
         }
@@ -206,7 +206,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         ) else {
             continue;
         };
-        // Hook ask decisions must never be auto-approved
+        // Mandatory Core decisions must never be auto-approved.
         if request.hook_requires_approval {
             continue;
         }

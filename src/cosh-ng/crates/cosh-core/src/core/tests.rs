@@ -1,4 +1,9 @@
 use super::*;
+
+#[path = "tests/approval_response_matrix.rs"]
+mod approval_response_matrix;
+#[path = "tests/reapproval.rs"]
+mod reapproval;
 use crate::provider::mock::MockProvider;
 use crate::tool::{Tool, ToolResult};
 use async_trait::async_trait;
@@ -1788,7 +1793,7 @@ async fn brokered_profile_rejects_a_checkpoint_execution_result() {
         .await;
     assert!(matches!(
         result,
-        ApprovalResult::Denied(Some(reason)) if reason == "unknown response"
+        ApprovalResult::Unconfirmed(Some(reason)) if reason == "unknown response"
     ));
 }
 
@@ -1838,7 +1843,7 @@ async fn checkpoint_profile_accepts_only_typed_terminal_results() {
     let result = core
         .wait_for_approval("expected-id", Some(ToolKind::HostedSideEffect), &mut reader)
         .await;
-    assert!(matches!(result, ApprovalResult::Denied(Some(_))));
+    assert!(matches!(result, ApprovalResult::Unconfirmed(Some(_))));
 
     let input = r#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"host_executed_checkpoint_create","checkpointResult":{"checkpoint_id":"ckp_123e4567-e89b-12d3-a456-426614174000","outcome":{"status":"created","snapshot_id":"snap-1"}},"hiddenAuthority":"forbidden"}}}
 "#;
@@ -1846,7 +1851,7 @@ async fn checkpoint_profile_accepts_only_typed_terminal_results() {
     let result = core
         .wait_for_approval("expected-id", Some(ToolKind::HostedSideEffect), &mut reader)
         .await;
-    assert!(matches!(result, ApprovalResult::Denied(Some(_))));
+    assert!(matches!(result, ApprovalResult::Unconfirmed(Some(_))));
 }
 
 #[tokio::test]

@@ -528,6 +528,7 @@ impl CoshCoreBridge {
                 },
                 request,
                 operation,
+                requires_explicit_approval: hook_requires_approval,
             }),
         ))
     }

@@ -188,6 +188,55 @@ fallback policy or guarantee activation while the runtime is busy.
   idempotency keys so uncertain client I/O can be retried without replaying an
   unknown side effect.
 
+Core keeps a session-scoped reapproval flag after a failed side effect or an
+unknown execution outcome. Before execution or any approval handoff in a persisted
+session, including Prompt Hook and ReadOnly/Other Ask, Core synchronously arms a one-byte checkpoint in its existing locked
+activity lease. Resume combines this checkpoint with the session envelope, so
+cancellation, SIGINT, or process death before the turn commit cannot restore
+an earlier automatic approval. A resumed session remains protected even with
+`auto_persist = false`; a fresh session without a committed envelope cannot be
+resumed. Checkpoint identity, ownership, write, or sync failures prevent execution.
+Malformed host completions remain unconfirmed, and execution failures become
+pending before fallible post-processing. A published envelope whose commit reports
+an error retains its lease protection; inability to bind that lease stops the next
+interactive request before execution.
+
+Only a successful side effect after explicit approval clears the in-memory
+requirement. The durable checkpoint clears after the completed turn is committed;
+a crash before that commit conservatively requires approval again. A correlated
+denial with no prior pending checkpoint can undo that request's new checkpoint,
+but denial and read-only success never clear an earlier failure. All approval handoffs also set memory pending before delivery; malformed or
+mismatched results cannot lose protection merely because the requested tool was
+read-only. A plain non-effect allow/deny restores only this exposure's separate
+memory/checkpoint baselines after all sandbox-bypass handoffs end without execution.
+The temporary exposure does not change the original mandatory-approval policy.
+The checkpoint
+uses the existing activity lease and its session cleanup; it does not change the
+transcript generation or compaction revision. New sessions start independently.
+
+The [approval response normalization contract](approval-response-normalization.md) defines
+one raw-frame classification for plain decisions and Host completions.
+
+Core sends this requirement through the existing `hook_requires_approval`
+boolean. Shell must show interactive approval instead of applying Trust, Auto,
+or turn-batch bypasses, independent of Hook UI text. This uses Shell's existing
+mandatory-approval contract. Host shell exit codes must be signed 32-bit JSON
+integers; invalid values are unconfirmed, while missing or null values remain
+unknown. Only a valid zero exit code confirms success.
+
+For brokered workspace checkpoints, Gateway carries the requirement in the native
+Runtime event's `requires_explicit_approval` boolean and keeps the approval pending
+even under `AllowAll`. This field defaults to false and is omitted when false,
+preserving the old false wire shape. True requires an updated Gateway consumer;
+an older strict native-event reader rejects that new true event. This protection
+requires updating the Gateway bridge, scheduler, and consumer together. An updated
+Core with an older Gateway bridge can still lose the existing Core bit and bypass
+fresh approval under AllowAll; that mixed deployment is not protected. The Core
+control wire and durable request/permit schemas are unchanged. The workspace-write
+profile retains its existing fail-closed rejection of mandatory approval requests;
+this change does not add fresh approval support to that profile. A Core rollback
+removes the new guard; clients must honor the existing Core approval field.
+
 ## Gateway and ACP delivery boundary
 
 The packaged slice is a durable local Task Plane, not a general-purpose

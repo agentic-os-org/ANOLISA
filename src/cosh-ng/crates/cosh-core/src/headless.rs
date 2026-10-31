@@ -32,6 +32,8 @@ use crate::tool::SessionWorkspace;
 mod auth;
 #[cfg(test)]
 mod live_state_tests;
+#[cfg(test)]
+mod reapproval_review_tests;
 
 use auth::request_auth;
 
@@ -205,6 +207,12 @@ pub async fn run(
     .with_workspace_file_tools(workspace_file_tools);
     engine.extra_params = extra_params;
     engine.messages = session.record.messages.clone();
+    engine.failed_side_effect_pending_approval = session.record.failed_side_effect_pending_approval;
+    if let Err(error) = session.bind_reapproval_checkpoint(&mut engine) {
+        emit_session_error(&mut writer, args.resume.as_deref(), &error);
+        engine.shutdown_extension_runtime().await;
+        return Ok(0);
+    }
     engine.compaction.load_state(
         session.record.compaction.clone(),
         session.record.compaction_revision,
@@ -229,7 +237,7 @@ pub async fn run(
         let turn_result = engine
             .handle_user_message(prompt, &mut lines, &mut writer)
             .await;
-        let persist_result = session.persist(&engine);
+        let persist_result = session.persist(&mut engine);
         let upload_handle;
         match combine_turn_and_persist(turn_result, persist_result) {
             Ok(()) => {
@@ -745,6 +753,11 @@ where
                 engine.shell_context = Some(ctx);
             }
 
+            if let Err(error) = session.bind_reapproval_checkpoint(engine) {
+                emit_session_error(writer, Some(&engine.session_id), &error);
+                return InputLineResult::Shutdown;
+            }
+
             session.refresh_background_compaction(engine);
 
             // Reset per-turn metrics before each user message
@@ -867,7 +880,7 @@ struct SessionRuntime {
     /// Held for the whole life of this process so a task-budget sweep from any
     /// other process treats the session as being interacted with right now.
     /// Dropped implicitly on exit, and released by the kernel if the process dies.
-    live_lease: Option<SessionLock>,
+    live_lease: Option<Arc<SessionLock>>,
     workspace_scope: String,
     record: PersistedSession,
     auto_persist: bool,
@@ -942,7 +955,7 @@ impl SessionRuntime {
         let record = match (args.resume.as_deref(), store.as_ref()) {
             (Some(value), Some(store)) => {
                 let session_id = ProviderSessionId::parse(value)?;
-                live_lease = store.acquire_resume_live_lease(&session_id)?;
+                live_lease = store.acquire_resume_live_lease(&session_id)?.map(Arc::new);
                 let mut resumed = match store.load(&session_id) {
                     Ok(resumed) => resumed,
                     Err(error) => {
@@ -1041,19 +1054,57 @@ impl SessionRuntime {
         self.record = saved;
     }
 
-    fn persist(&mut self, engine: &CoshCore) -> Result<(), SessionError> {
+    fn persist(&mut self, engine: &mut CoshCore) -> Result<(), SessionError> {
         if !self.auto_persist || self.store.is_none() {
             return Ok(());
         }
         self.record.messages = engine.messages.clone();
         self.record.model = engine.model.clone();
+        self.record.failed_side_effect_pending_approval =
+            engine.failed_side_effect_pending_approval;
         // Emergency in-run compaction updates the projection in memory; it
         // commits together with the transcript it belongs to.
         self.record.compaction = engine.compaction.state().cloned();
         // The revision clock is persisted even when no projection survives, so
         // the next commit cannot reuse an already published revision.
         self.record.compaction_revision = engine.compaction.revision();
-        self.commit()
+        let commit_result = self.commit();
+        if let Err(checkpoint_error) = self.bind_reapproval_checkpoint(engine) {
+            if let Err(commit_error) = &commit_result {
+                tracing::warn!(
+                    session_id = %self.record.session_id,
+                    error = ?commit_error,
+                    checkpoint_error = ?checkpoint_error,
+                    "session commit and reapproval binding failed"
+                );
+            }
+            return Err(checkpoint_error);
+        }
+        commit_result?;
+        if let Some(checkpoint) = engine.reapproval_checkpoint.as_ref() {
+            checkpoint.set_pending(engine.failed_side_effect_pending_approval)?;
+        }
+        Ok(())
+    }
+
+    fn bind_reapproval_checkpoint(&self, engine: &mut CoshCore) -> Result<(), SessionError> {
+        if engine.reapproval_checkpoint.is_some()
+            || (!self.record.was_loaded && self.live_lease.is_none())
+        {
+            return Ok(());
+        }
+        if let (Some(store), Some(lease)) = (self.store.as_ref(), self.live_lease.as_ref()) {
+            let checkpoint =
+                store.reapproval_checkpoint(&self.record.session_id, Arc::clone(lease))?;
+            engine.failed_side_effect_pending_approval |= checkpoint.pending()?;
+            engine.reapproval_checkpoint = Some(checkpoint);
+            return Ok(());
+        }
+        Err(crate::session::SessionError::Io {
+            operation: "bind reapproval checkpoint",
+            path: std::path::PathBuf::from(&self.workspace_scope),
+            message: "loaded session has no activity lease".to_string(),
+        })
     }
 
     /// Commits the current record once. Split out of [`Self::persist`] so the
@@ -1067,7 +1118,9 @@ impl SessionRuntime {
         };
         let result = (|| {
             if self.live_lease.is_none() {
-                self.live_lease = store.acquire_live_lease(&self.record.session_id)?;
+                self.live_lease = store
+                    .acquire_live_lease(&self.record.session_id)?
+                    .map(Arc::new);
             }
             store.persist(&mut self.record)
         })();
@@ -1547,7 +1600,8 @@ mod tests {
         let store = runtime.store.as_ref().unwrap();
         runtime.live_lease = store
             .acquire_live_lease(&runtime.record.session_id)
-            .unwrap();
+            .unwrap()
+            .map(Arc::new);
         let index = root.join(".budget/00000000-0000-4000-8000-000000000000.json");
         let original = fs::read(&index).unwrap();
         fs::write(&index, b"invalid location index").unwrap();
@@ -1596,7 +1650,8 @@ mod tests {
         let store = runtime.store.as_ref().unwrap();
         runtime.live_lease = store
             .acquire_live_lease(&runtime.record.session_id)
-            .unwrap();
+            .unwrap()
+            .map(Arc::new);
         let envelope = store.session_file(&runtime.record.session_id);
         let activity = envelope
             .parent()
@@ -1614,6 +1669,88 @@ mod tests {
     fn store_at(root: &std::path::Path, workspace: &std::path::Path) -> SessionStore {
         SessionStore::for_test_workspace(root.to_str().expect("utf-8 root"), workspace)
             .expect("build store")
+    }
+
+    #[tokio::test]
+    async fn failed_effect_pending_approval_persists_until_successful_approval() {
+        use crate::provider::{mock::MockProvider, GenerateEvent};
+        use crate::tool::ToolRegistry;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let mut runtime = runtime_for_store(store_at(&temp.path().join("sessions"), &workspace));
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = ApprovalMode::Auto;
+        let responses = [
+            ("shell", serde_json::json!({"command":"exit 23"})),
+            (
+                "write_file",
+                serde_json::json!({"path":"approved-effect", "content":"approved"}),
+            ),
+        ]
+        .into_iter()
+        .flat_map(|(name, arguments)| {
+            [
+                vec![
+                    GenerateEvent::ToolCallStart {
+                        index: 0,
+                        id: name.into(),
+                        name: name.into(),
+                    },
+                    GenerateEvent::ToolCallDelta {
+                        index: 0,
+                        arguments_delta: arguments.to_string(),
+                    },
+                    GenerateEvent::ToolCallEnd { index: 0 },
+                    GenerateEvent::MessageEnd,
+                ],
+                vec![GenerateEvent::MessageEnd],
+            ]
+        })
+        .collect();
+        let snapshot = RuntimeSnapshot::bootstrap(
+            RuntimeGeneration::healthy(1, "test"),
+            Arc::new(ToolRegistry::with_defaults_for_test()),
+        );
+        let mut engine = CoshCore::new_with_snapshot_and_session_id(
+            config,
+            Box::new(MockProvider::new(responses)),
+            snapshot,
+            runtime.record.session_id.to_string(),
+            workspace.clone(),
+            SessionWorkspace::new(&workspace),
+            crate::cli::ExecutionProfile::Legacy,
+        );
+        for (request, pending) in [(0, true), (1, false)] {
+            let decision = serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":format!("req-{request}"),"response":{"behavior":"allow"}}}).to_string()+"\n";
+            let mut lines = BufReader::new(decision.as_bytes()).lines();
+            engine
+                .handle_user_message("continue current task", &mut lines, &mut Vec::new())
+                .await
+                .unwrap();
+            runtime.persist(&mut engine).unwrap();
+            let restored = runtime
+                .store
+                .as_ref()
+                .unwrap()
+                .load(&runtime.record.session_id)
+                .unwrap();
+            let stored = serde_json::to_value(restored).unwrap();
+            assert_eq!(stored["failed_side_effect_pending_approval"], pending);
+            assert_eq!(
+                engine
+                    .reapproval_checkpoint
+                    .as_ref()
+                    .unwrap()
+                    .pending()
+                    .unwrap(),
+                pending
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(workspace.join("approved-effect")).unwrap(),
+            "approved"
+        );
     }
 
     /// A budget refusal must cost the process only the log line, never the later

@@ -1465,6 +1465,95 @@ fn trust_mode_surfaces_hook_followup_approval_after_auto_approved_tool() {
 }
 
 #[test]
+fn trust_mode_requires_explicit_approval_for_forced_core_wire_requests() {
+    use crate::adapter::{parse_control_request, ControlRequest};
+
+    for (tool, input) in [
+        ("shell", serde_json::json!({"command":"printf effect"})),
+        (
+            "write_file",
+            serde_json::json!({"path":"effect", "content":"effect"}),
+        ),
+    ] {
+        for forced in [false, true] {
+            let audit_root = unique_audit_root("forced-core-approval");
+            let mut state = InlineState {
+                approval_mode: CoshApprovalMode::Trust,
+                audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+                    audit_root.path(),
+                )),
+                ..InlineState::default()
+            };
+            let (mut active, approval_rx) =
+                crate::agent::run::test_support::test_active_run_with_id("run-1");
+            active.provider_name = "cosh-core";
+            let run_request = active.request.clone();
+            state.agent_run.active = Some(active);
+            let wire = serde_json::json!({"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":tool,"input":input,"tool_use_id":"call-1","hook_requires_approval":forced}}).to_string();
+            let Some(ControlRequest::CanUseTool {
+                request_id,
+                tool_name,
+                tool_input,
+                tool_use_id,
+                hook_requires_approval,
+                audit_ref,
+            }) = parse_control_request(&wire)
+            else {
+                panic!("Core approval wire was not decoded")
+            };
+            let event = GovernedEvent {
+                decision: GovernanceDecision::Display,
+                policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+                event: AgentEvent::ToolPermissionRequest {
+                    run_id: "run-1".into(),
+                    request_id,
+                    tool_name,
+                    tool_input,
+                    tool_use_id,
+                    hook_requires_approval,
+                    audit_ref,
+                },
+                reason: "Core requires explicit approval".into(),
+                display_text: "Core requires explicit approval".into(),
+                auto_execute: false,
+            };
+            let adapter = AdapterInstance::CoshCore(CoshCoreAdapter::default());
+            crate::agent::events::render_agent_structured_events(
+                &mut state,
+                &[event],
+                Some(&run_request),
+                AgentRunOrigin::Standard,
+                &mut Vec::new(),
+                &adapter,
+            )
+            .unwrap();
+            let request = &state.approvals.requests[0];
+            if forced {
+                assert_eq!(request.status, ApprovalRequestStatus::Pending);
+                assert_eq!(
+                    state.approvals.active_panel_id.as_deref(),
+                    Some(request.id.as_str())
+                );
+                assert!(state.control.shell_handoff().approved_is_empty());
+                assert!(
+                    !approval_rx.try_iter().any(|message| matches!(
+                        message,
+                        crate::adapter::ApprovalChannelMessage::Response(_)
+                    )),
+                    "forced approval emitted a provider response"
+                );
+            } else {
+                assert_eq!(
+                    request.status,
+                    ApprovalRequestStatus::Approved,
+                    "the unforced wire must exercise the auto-approval route"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn shell_request_policy_denies_duplicate_host_executed_request() {
     let mut state = InlineState::default();
     state

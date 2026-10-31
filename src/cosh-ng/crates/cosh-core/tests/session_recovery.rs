@@ -13,6 +13,8 @@ mod activity;
 mod common;
 #[path = "session_recovery/quota.rs"]
 mod quota;
+#[path = "session_recovery/reapproval.rs"]
+mod reapproval;
 
 fn binary_path() -> PathBuf {
     let mut path = std::env::current_exe()

@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::compaction::CompactionState;
 use crate::provider::Message;
 
+mod checkpoint;
 mod io;
 mod listing;
 mod scoped;
 mod store;
 mod summary;
 
+pub(crate) use checkpoint::ReapprovalCheckpoint;
 pub(crate) use io::SessionLock;
 pub use store::SessionStore;
 pub(crate) use summary::bounded_summary_text;
@@ -114,6 +116,9 @@ pub struct PersistedSession {
     /// a revision an earlier commit already published.
     #[serde(default)]
     pub compaction_revision: u64,
+    /// Whether a failed or unknown side effect requires fresh approval.
+    #[serde(default)]
+    pub failed_side_effect_pending_approval: bool,
     #[serde(skip)]
     pub(crate) was_loaded: bool,
 }
@@ -138,6 +143,7 @@ impl PersistedSession {
             messages,
             compaction: None,
             compaction_revision: 0,
+            failed_side_effect_pending_approval: false,
             was_loaded: false,
         }
     }
