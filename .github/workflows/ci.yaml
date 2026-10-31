@@ -1271,6 +1271,7 @@ jobs:
       - name: Validate install promotion permissions
         run: |
           bash distribution/anolisa/tests/test-install-chmod-scope.sh
+          bash distribution/anolisa/tests/test-install-stdin.sh
 
       - name: Check formatting
         run: |
