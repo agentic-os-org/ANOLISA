@@ -529,7 +529,17 @@ min_episode_steps = 3
 max_episodes_per_session = 10
 conflict_detection = true
 conflict_bm25_threshold = -2.0
+
+[memory.snapshot_reclaim]
+enabled = true
+# 产物删除前的最短保留时长（秒）。硬下限：60。
+# TOML 配置低于 60 会导致启动失败；env 覆盖低于 60 则 warn 后忽略。
+min_artifact_age_secs = 86400
 ```
+
+启用 reclaim 后，挂载打开时的清扫还会删除 `.anolisa/snapshots/` 下超过保留时长的崩溃残留：不完整的 `*.partial` 归档、缺 sidecar 的归档、缺归档的 sidecar，以及 restore 中断遗留的隐藏 `.<id>.staging` 目录。崩溃 restore 的 staging 目录包含整棵挂载树拷贝，因此 reclaim 也是防止该故障模式吃满磁盘的机制。
+
+清扫还会修复损坏的 sidecar：当其归档结构完整（gzip 流完整，且所有条目均通过 restore 提取前运行的同一套检查：仅含普通文件与目录条目、无 `..` 路径穿越、无重名文件条目、无文件落在已提取路径上的冲突）时，从归档自身的元数据重新生成 sidecar。未通过这些检查的归档同样会被 restore 拒绝，因此会被直接删除，而不是被修复成一个永远无法 restore 的快照。修复本身会把替换内容暂存为归档旁边的隐藏 `.memory-write-*.tmp` 文件；修复中途被强杀遗留的此类文件会在超过保留时长后被后续清扫删除。
 
 ### 环境变量
 
@@ -571,6 +581,8 @@ conflict_bm25_threshold = -2.0
 | `MEMORY_MAX_EPISODES` | 每会话最多情景数 | 10 |
 | `MEMORY_CONFLICT_DETECTION` | 冲突检测 | true |
 | `MEMORY_CONFLICT_THRESHOLD` | BM25 冲突阈值 | -2.0 |
+| `MEMORY_SNAPSHOT_RECLAIM_ENABLED` | 挂载打开时回收孤儿快照产物 | true |
+| `MEMORY_SNAPSHOT_RECLAIM_MIN_AGE` | 产物删除前的最短保留时长（秒）；低于 60 秒下限的值 warn 后忽略（TOML 配置低于 60 则启动失败） | 86400 |
 
 数据存储：`~/.anolisa/memory/<namespace>/`。
 

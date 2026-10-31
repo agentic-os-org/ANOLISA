@@ -564,7 +564,33 @@ min_episode_steps = 3
 max_episodes_per_session = 10
 conflict_detection = true
 conflict_bm25_threshold = -2.0
+
+[memory.snapshot_reclaim]
+enabled = true
+# Minimum artefact age before removal, in seconds. Hard floor: 60.
+# A TOML value below 60 fails startup; the env override below 60 is
+# ignored with a warning instead.
+min_artifact_age_secs = 86400
 ```
+
+With reclaim enabled, a mount-open sweep also removes crash leftovers under
+`.anolisa/snapshots/` once they exceed the age guard: incomplete `*.partial`
+archives, archives without a sidecar, sidecars without an archive, and hidden
+`.<id>.staging` directories left by an interrupted restore. A crashed restore's
+staging directory contains a full copy of the mount tree, so reclaim is also
+what keeps that failure mode from consuming disk.
+
+The sweep also repairs a truncated or unparseable sidecar when its archive is
+structurally valid — a full gzip stream whose entries all pass the same
+pre-extraction checks `restore` applies (only regular files and directories;
+no `..` traversal, duplicate file names, or a file landing on an
+already-extracted path) — by
+regenerating the sidecar from the archive's own metadata. An archive that
+fails those checks is also refused by `restore`, so it is deleted instead of
+being repaired into a snapshot that could never restore.
+The repair itself stages its replacement as a hidden `.memory-write-*.tmp`
+file next to the archives; one left by a hard kill mid-repair is removed by
+later sweeps once it ages past the guard.
 
 ### Environment variables
 
@@ -606,6 +632,8 @@ Every config key has a matching `MEMORY_*` env var. Priority: **env > config.tom
 | `MEMORY_MAX_EPISODES` | max episodes per session | 10 |
 | `MEMORY_CONFLICT_DETECTION` | conflict detection | true |
 | `MEMORY_CONFLICT_THRESHOLD` | BM25 conflict threshold | -2.0 |
+| `MEMORY_SNAPSHOT_RECLAIM_ENABLED` | reclaim orphaned snapshot artefacts at mount open | true |
+| `MEMORY_SNAPSHOT_RECLAIM_MIN_AGE` | minimum artefact age (seconds) before removal; values below the 60 s floor are ignored with a warning (a TOML value below 60 fails startup instead) | 86400 |
 
 Data storage: `~/.anolisa/memory/<namespace>/`.
 

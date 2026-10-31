@@ -14,7 +14,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::Utc;
@@ -35,7 +35,171 @@ const BACKEND_TAG: &str = "tar.gz";
 /// race on the rename-aside step and leave the mount in a half-swapped
 /// state. The mutex is held for the full restore so concurrent file
 /// tools see either the pre- or post-restore state, never an interleave.
+/// Reclaim's staging sweep takes the same lock (`restore_lock`) so a
+/// sweep cannot remove a staging directory a concurrent in-process
+/// restore has just created.
 static RESTORE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Accessor for reclaim's staging sweep — the only external user of the
+/// restore lock. Process-local: cross-process sweeps are still separated
+/// from restores only by the age guard.
+pub(crate) fn restore_lock() -> std::sync::MutexGuard<'static, ()> {
+    RESTORE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Archive-intrinsic entry gate shared by `restore_tarball` and the
+/// reclaim validator. `restore_tarball` refuses an entry, for reasons
+/// intrinsic to the archive, in exactly these cases:
+///
+/// 1. entry type outside {Regular, Directory} ("forbidden entry type");
+/// 2. the name has a `ParentDir` component — the only shape `unpack_in`
+///    skips (Prefix/RootDir/CurDir are dropped and re-rooted into
+///    staging; containment is then `validate_inside_dst`'s job);
+/// 3. a *regular-file* entry whose name was already extracted — with
+///    `set_overwrite(false)` the second write hits `AlreadyExists`. For a
+///    directory entry only a prior regular file at the same name refuses
+///    (`unpack_dir` lets an existing directory slide), so duplicate
+///    directory entries and a directory over an already-created subtree
+///    both extract successfully;
+/// 4. an ancestor of the name was already extracted as a regular file —
+///    `ensure_dir_created` fails with ENOTDIR for either entry kind;
+/// 5. a name that normalises to nothing (`./`, `/`, `.`) extracts
+///    nothing — `unpack_in` treats it as a no-op success — so it is
+///    admitted but never tracked.
+///
+/// Everything else restore can fail on is runtime (I/O errors, ENOSPC,
+/// permissions), which no pre-extraction check can screen for and is not
+/// claimed. Sharing one gate between restore and the validator means a
+/// future change to restore's refusals cannot silently invalidate the
+/// repair path: the validator's "would restore accept this archive"
+/// claim is true by construction.
+pub(crate) struct EntryGate {
+    files: std::collections::HashSet<PathBuf>,
+    dirs: std::collections::HashSet<PathBuf>,
+    /// Every strict ancestor of an admitted member — the names extraction
+    /// has already materialised as directories. A later *regular file*
+    /// with one of those names collides (`create_new(true)` on an
+    /// existing directory); maintained incrementally so `admit` is
+    /// O(depth) per entry rather than O(admitted members).
+    populated: std::collections::HashSet<PathBuf>,
+}
+
+impl EntryGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            files: std::collections::HashSet::new(),
+            dirs: std::collections::HashSet::new(),
+            populated: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Whether `restore_tarball` would extract this entry rather than
+    /// refuse it. `Err` names the refusal; runtime failures (I/O, ENOSPC)
+    /// are not visible here and are not claimed.
+    pub(crate) fn admit(&mut self, ty: ::tar::EntryType, path: &std::path::Path) -> Result<()> {
+        // 1. entry type — restore's "forbidden entry type" rejection.
+        if !matches!(ty, ::tar::EntryType::Regular | ::tar::EntryType::Directory) {
+            return Err(MemoryError::InvalidArgument(format!(
+                "forbidden entry type: {}",
+                entry_type_name(ty)
+            )));
+        }
+        // 2. `unpack_in` skips exactly one shape — a `..` component.
+        // Prefix/RootDir/CurDir components are dropped and the entry is
+        // re-rooted into staging, so containment is enforced at unpack
+        // time, not here. Refusing them here would delete archives
+        // restore accepts.
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(MemoryError::InvalidArgument(
+                "entry skipped by parent traversal".into(),
+            ));
+        }
+        // Normalise the way `unpack_in` does — drop Prefix/RootDir/CurDir
+        // so the seen-sets match what actually lands on disk.
+        let normalised: PathBuf = path
+            .components()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                        | std::path::Component::CurDir
+                )
+            })
+            .collect();
+        // A name that normalises to nothing (`./`, `/`, `.`) extracts no
+        // file at all: `unpack_in` returns Ok(true) without touching the
+        // filesystem. Track nothing — and never let the empty path reach
+        // the containment checks, since every path starts with it.
+        if normalised.as_os_str().is_empty() {
+            return Ok(());
+        }
+        // 3. the name was already extracted. For a *directory* entry only a
+        //    prior regular file at the same name is a refusal: `unpack_dir`
+        //    lets an existing directory slide, so duplicate directory
+        //    entries and a directory over an already-created subtree both
+        //    extract successfully.
+        let duplicate = match ty {
+            ::tar::EntryType::Regular => {
+                self.files.contains(&normalised) || self.dirs.contains(&normalised)
+            }
+            _ => self.files.contains(&normalised),
+        };
+        if duplicate {
+            return Err(MemoryError::InvalidArgument(format!(
+                "duplicate entry: {}",
+                path.display()
+            )));
+        }
+        // 4. any ancestor already extracted as a file fails for either
+        // entry kind (`ensure_dir_created` through a regular file).
+        let mut ancestors = normalised.ancestors().peekable();
+        ancestors.next(); // the path itself
+        for ancestor in ancestors {
+            if self.files.contains(ancestor) {
+                return Err(MemoryError::InvalidArgument(format!(
+                    "ancestor of {} is a regular file: {}",
+                    path.display(),
+                    normalised.display()
+                )));
+            }
+        }
+        // 4b. reverse prefix containment — a prior member already lives
+        // under this name, so extraction created the name as a directory.
+        // Only a *new regular file* collides with that (`create_new(true)`
+        // on an existing directory); a directory entry over an existing
+        // subtree is precisely what `unpack_dir` tolerates, and refusing
+        // it would break archives that list children before parents — a
+        // shape the deferred-directory pass deliberately supports. The
+        // `populated` set makes the check O(depth) instead of a scan over
+        // all admitted members.
+        let under = matches!(ty, ::tar::EntryType::Regular) && self.populated.contains(&normalised);
+        if under {
+            return Err(MemoryError::InvalidArgument(format!(
+                "path collides with an extracted path: {}",
+                normalised.display()
+            )));
+        }
+        for ancestor in normalised.ancestors().skip(1) {
+            if ancestor.as_os_str().is_empty() {
+                break;
+            }
+            self.populated.insert(ancestor.to_path_buf());
+        }
+        match ty {
+            ::tar::EntryType::Regular => {
+                self.files.insert(normalised);
+            }
+            _ => {
+                self.dirs.insert(normalised);
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Reject snapshot ids that could escape `<mount>/.anolisa/snapshots/`.
 /// `id` is interpolated into `<id>.tar.gz` and `.<id>.staging` paths
@@ -208,13 +372,24 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
         // Regular files use overwrite=false. Directory entries are deferred
         // until children exist, then applied child-first with archived modes.
         let mut directories = Vec::new();
+        let mut gate = EntryGate::new();
         for entry in tar
             .entries()
             .map_err(|e| MemoryError::Other(format!("tar entries: {e}")))?
         {
             let mut entry =
                 entry.map_err(|e| MemoryError::Other(format!("tar entry read: {e}")))?;
-            match entry.header().entry_type() {
+            // Gate every entry before extraction. `admit` mirrors the
+            // archive-intrinsic refusals the unpack steps below produce —
+            // entry type, parent traversal, duplicate names, file/dir
+            // prefix collisions — so a refused entry is a hard restore
+            // failure rather than a silently partial snapshot. The gate
+            // lives in one place so the reclaim validator (which shares
+            // it) cannot drift from what restore actually refuses.
+            let ty = entry.header().entry_type();
+            let entry_path = entry.path()?.to_path_buf();
+            gate.admit(ty, &entry_path)?;
+            match ty {
                 ::tar::EntryType::Directory => directories.push(entry),
                 ::tar::EntryType::Regular => {
                     // unpack_in re-roots absolute names and refuses parent
@@ -233,6 +408,8 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                         )));
                     }
                 }
+                // Unreachable — the gate above refuses every other entry
+                // type with the same message shape.
                 other => {
                     return Err(MemoryError::InvalidArgument(format!(
                         "snapshot contains forbidden entry type '{}' at {}",
