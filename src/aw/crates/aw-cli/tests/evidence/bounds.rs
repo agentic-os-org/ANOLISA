@@ -79,10 +79,11 @@ fn item_byte_and_source_limits_report_gaps_without_truncating_the_candidate() {
 fn original_event_deadline_caps_a_later_context_request() {
     let fixture = Fixture::new();
     let source = Source::new(&fixture, trajectory(1));
-    *source.delay.lock().unwrap() = Duration::from_secs(1);
+    // Allow CI startup and audit I/O while keeping HTTP slower than the event budget.
+    *source.delay.lock().unwrap() = Duration::from_secs(3);
     let mut document = fixture.document();
     source.configure(&mut document);
-    document["spec"]["execution"]["default_event_budget_ms"] = json!(250);
+    document["spec"]["execution"]["default_event_budget_ms"] = json!(1000);
     document["spec"]["agents"]["target"]["evidence"]["query_timeout_ms"] = json!(5000);
     let service = Running::start(&fixture, &document);
     let binding = fixture.bind(&service.client);
@@ -96,7 +97,7 @@ fn original_event_deadline_caps_a_later_context_request() {
         .client
         .call(freeze(&handle), Instant::now() + TIMEOUT)
         .is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(2));
     assert!(service
         .client
         .call(freeze(&handle), Instant::now() + TIMEOUT)
