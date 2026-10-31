@@ -81,6 +81,26 @@ in the following format:
 Do NOT retry the same command — fix the environment first.
 ```
 
+The hint is failure advice, so it is gated on failure evidence
+(`hook_utils.env_error_signal`). A host-reported error — `is_error`, a non-zero
+exit code, or a JSON process result embedded in the output text — keeps the full
+pattern match, and a payload reporting success, interruption, or denial is never
+diagnosed. Embedded JSON counts as a process result only when it carries process
+state — an exit code, an output stream, or an explicit error flag — so a command
+that prints `{"error": "..."}` as its own data stays ordinary output. Codex hands
+PostToolUse the command output as one bare string with no status, so there only
+lines shaped like a tool error report may match: the failure wording has to lead
+the line, either at once (`ModuleNotFoundError: ...`, `which: no frobnicate in
+(...)`) or behind the program that failed and the subjects and locations it
+names (`bash: frobnicate: command not found`, `./configure: line 42: gcc: ...`).
+A successful run that merely quotes an error phrase stays silent — a `git log`
+subject, a `Fixes:` trailer, a wrapped commit-message line, a README paragraph,
+a printed source file, a search hit (`rg` and `grep` print `path:content`, and a
+file prefix is not a program prefix). The remaining boundary is a line that
+*opens* with a canonical error token: a doc example wrapped so that
+`npm ERR! 404 ...` starts the line reads exactly like a report, and with no host
+signal it is diagnosed as one.
+
 ## Configuration
 
 Configuration is managed through the `tokenless` CLI's environment and config file:

@@ -346,23 +346,249 @@ ENV_PATTERNS: list[tuple[list[str], str, str]] = [
 ]
 
 
-def classify_env_error(tool_response) -> tuple[str | None, str | None]:
+# -- Environment-error gating -------------------------------------------------
+#
+# ENV_PATTERNS matches text, and shell output quotes error text constantly
+# without being an error: a `git log` subject (`fix: accept codex "not
+# installed" row`), a grep hit inside a test assertion, a `cat` of the very
+# file that defines these patterns. Telling the agent "Do NOT retry the same
+# command — fix the environment first" about a command that succeeded sends it
+# after a phantom environment problem, so the hint requires failure evidence.
+#
+# The evidence is read from the same host facts the shared Common Hook uses to
+# derive `status` (compress_response_hook.py, step 9): explicit host markers
+# first, then the process result, either as dict fields or as a JSON shell
+# envelope embedded in a string payload. Three outcomes:
+#
+#   "failure" — the host reports an error; pattern-match the whole text.
+#   "clean"   — the host reports a non-error (success, interrupted, denied);
+#               never diagnose.
+#   "unknown" — the payload carries no signal at all, which is what Codex hands
+#               PostToolUse for a shell tool: the output as one bare string.
+#               Only lines shaped like a tool error report may match there, so
+#               quoted error phrases inside ordinary output stay silent.
+#
+# Two rules keep ordinary output out of the failure class: JSON text only counts
+# as a process result when it carries process state (_ENVELOPE_FIELDS), and a
+# `token:` line prefix only counts as an error report when the token names a
+# program rather than a file a search tool printed (_is_program_prefix).
+
+_EXIT_CODE_FIELDS = ("exit_code", "exitCode", "exit_status", "exitStatus", "returncode")
+_FAILURE_STATUSES = frozenset({"error", "errored", "failed", "failure"})
+_NON_ERROR_STATUSES = frozenset(
+    {"success", "ok", "succeeded", "completed", "interrupted", "denied"}
+)
+
+# Fields that make a parsed JSON object a process-result envelope instead of
+# application data. Codex hands PostToolUse the command output as text, so a
+# successful command printing `{"error": "..."}` reports its own data, not this
+# process; the envelopes the Common Hook parses (compress_response_hook.py,
+# step 9) always carry the process result itself — an exit code, an output
+# stream (`stdout` / `stderr`), or an explicit error flag.
+_ENVELOPE_FIELDS = frozenset(_EXIT_CODE_FIELDS) | {
+    "stdout",
+    "stderr",
+    "is_error",
+    "isError",
+    "interrupted",
+}
+
+# Line shapes that carry a tool error report rather than quoting one:
+#   ModuleNotFoundError: No module named X  exception class name
+#   error: command 'gcc' failed: ...        bare error keyword leading the line
+#   npm ERR! 404 Not Found - GET ...        package-manager error line
+#   command not found: frobnicate           the error text itself leading
+_ENV_ERROR_TEXT_RE = re.compile(
+    r"""^\s*(?:
+          [A-Za-z_][\w.]*(?:Error|Exception)\b
+        | (?:error|err|fatal|failed|failure|panic|traceback|aborted?|denied
+           |cannot|unable|missing)\b
+        | (?:npm|yarn|pnpm)\s+(?:ERR!+|error\b)
+        | command\s+not\s+found\b
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# The remaining shape is a program prefix ending in ": ", as in
+#   bash: frobnicate: command not found
+#   /bin/sh: 1: frobnicate: not found
+#   curl: (6) Could not resolve host: registry.invalid
+# `rg --no-heading` and `grep` print a hit as `path:content` in the same shape,
+# so the prefix has to name a program, and the separator has to be the ": " a
+# program writes rather than the verbatim (tab- or space-indented) source line a
+# search tool echoes after the colon.
+_ENV_ERROR_PREFIX_RE = re.compile(r"^\s*(?P<prefix>[\w./+@-]+)(?:\[\d+\])?: (?!\s)")
+
+
+def _is_program_prefix(token: str) -> bool:
+    """Report whether a ``token:`` line prefix names a program, not a file.
+
+    Search output is told from an error report by the last path segment: files
+    carry a dotted alphabetic extension (`hook_utils.py`, `README.md`), while
+    programs are bare names (`bash`, `curl`, `ERROR`), absolute interpreter
+    paths (`/bin/sh`, `/usr/bin/env`), or versioned names (`python3.11`). A
+    multi-segment prefix must also be rooted (`./configure`), because `dir/name:`
+    is what a search tool prints.
+    """
+    if not token:
+        return False
+    if "/" in token and not token.startswith(("/", "./", "../")):
+        return False
+    stem, dot, suffix = token.rsplit("/", 1)[-1].partition(".")
+    if dot and not suffix.isdigit():
+        return False
+    return bool(stem)
+
+
+# An environment phrase that leads a line is the failure wording itself, not a
+# quotation of it, so the phrases are anchored for the shape test below. Built
+# from ENV_PATTERNS so the two lists cannot drift apart.
+_ENV_PATTERN_LEAD_RE = re.compile(
+    r"^\s*(?:{})".format(
+        "|".join(f"(?:{pat})" for pats, _, _ in ENV_PATTERNS for pat in pats)
+    ),
+    re.IGNORECASE,
+)
+
+# Between the program that failed and the failure wording a report may carry
+# nested subjects and locations: the offending command, path or versioned name
+# (`bash: frobnicate: ...`, `cat: /work/missing.txt: ...`, `/usr/bin/env:
+# 'node': ...`), a build location (`./configure: line 42: gcc: ...`), a shell
+# argv index (`/bin/sh: 1: ...`), or a transport code (`curl: (6) ...`). Prose
+# stops at its first word that is not such a segment, which is what keeps a
+# quoted phrase buried mid-sentence out of the failure class.
+_REPORT_LEAD_RE = re.compile(
+    r"""^\s*(?:
+          (?P<subject>[\w./+@~*-]+|'[^']*'|"[^"]*")\s*:\s+
+        | (?P<location>[\w./+-]+\s+\d+)\s*:\s+
+        | \(\d+\)\s+
+        )""",
+    re.VERBOSE,
+)
+
+_MAX_REPORT_LEADS = 4
+
+
+def _reports_failure(text: str) -> bool:
+    """Report whether `text` states a failure rather than mentioning one."""
+    return bool(_ENV_ERROR_TEXT_RE.match(text) or _ENV_PATTERN_LEAD_RE.match(text))
+
+
+def _error_shaped_line(line: str) -> bool:
+    """Report whether `line` is a tool error report rather than output quoting one.
+
+    A report states the failure itself, so the failure wording has to lead the
+    line: either straight away (`ModuleNotFoundError: ...`, `error: ...`,
+    `which: no frobnicate in ...`) or behind the program that failed and the
+    nested subjects and locations it prints first (`bash: frobnicate: command
+    not found`). Prose carries its phrase mid-sentence instead — a commit-message
+    continuation, a `Fixes:` trailer, a README line — and never reaches the
+    failure class, whatever word it happens to quote.
+    """
+    if _reports_failure(line):
+        return True
+    prefixed = _ENV_ERROR_PREFIX_RE.match(line)
+    if prefixed is None or not _is_program_prefix(prefixed.group("prefix")):
+        return False
+    rest = line[prefixed.end() :]
+    for _ in range(_MAX_REPORT_LEADS):
+        if _reports_failure(rest):
+            return True
+        lead = _REPORT_LEAD_RE.match(rest)
+        if lead is None:
+            return False
+        rest = rest[lead.end() :]
+    return False
+
+
+def _error_shaped_lines(text: str) -> str:
+    """Keep only the lines of `text` that look like a tool error report."""
+    return "\n".join(line for line in text.splitlines() if _error_shaped_line(line))
+
+
+def _payload_exit_code(result: dict) -> int | None:
+    """Return the first numeric exit code in a process-result payload."""
+    for field in _EXIT_CODE_FIELDS:
+        code = result.get(field)
+        if isinstance(code, bool):
+            continue
+        if isinstance(code, int):
+            return code
+        if isinstance(code, str) and code.strip().lstrip("+-").isdigit():
+            return int(code.strip())
+    return None
+
+
+def _embedded_process_result(tool_response: object) -> dict | None:
+    """Parse a JSON shell envelope carried inside a string payload.
+
+    Hosts that hand shell output over as text (Codex, cosh-core, copilot-shell)
+    may still embed the process result, whose exit_code / stderr / error fields
+    are the only failure signal available. An object with no process state is
+    output, not metadata — a successful command may print `{"error": "..."}` as
+    its own data — so it stays text for the caller to read.
+    """
+    if not isinstance(tool_response, str):
+        return None
+    parsed = try_parse_json(tool_response)
+    if isinstance(parsed, str):
+        parsed = try_parse_json(parsed)
+    if not isinstance(parsed, dict) or not _ENVELOPE_FIELDS.intersection(parsed):
+        return None
+    return parsed
+
+
+def env_error_signal(input_data: object, tool_response: object) -> str:
+    """Report what a PostToolUse payload says about the tool result.
+
+    Returns "failure", "clean" or "unknown" (no host signal either way).
+    """
+    status = ""
+    if isinstance(input_data, dict):
+        status = str(input_data.get("status") or "").strip().lower()
+        if status in _FAILURE_STATUSES or input_data.get("is_error") is True:
+            return "failure"
+
+    result = tool_response if isinstance(tool_response, dict) else None
+    if result is None:
+        result = _embedded_process_result(tool_response)
+    if isinstance(result, dict):
+        if result.get("isError") is True or result.get("is_error") is True:
+            return "failure"
+        # An interrupted or denied run is not an environment failure.
+        if result.get("interrupted") is True:
+            return "clean"
+        error = result.get("error")
+        if error is not None and error != "":
+            return "failure"
+        exit_code = _payload_exit_code(result)
+        if exit_code is not None:
+            return "failure" if exit_code != 0 else "clean"
+
+    if isinstance(input_data, dict):
+        if status in _NON_ERROR_STATUSES or input_data.get("is_error") is False:
+            return "clean"
+    return "unknown"
+
+
+def classify_env_error(
+    tool_response: object, input_data: object = None
+) -> tuple[str | None, str | None]:
     """Detect environment errors in tool output.
 
     Accepts either a parsed dict (with stderr/error/exit_code fields) or a
-    plain string. Returns (category_tag, fix_hint) or (None, None).
+    plain string, plus the enclosing PostToolUse payload so the host-reported
+    result can gate the diagnosis (see env_error_signal). Returns
+    (category_tag, fix_hint) or (None, None).
 
     Shared by codex/scripts/response-diagnostics and compress_response_hook.
     """
+    signal = env_error_signal(input_data, tool_response)
+    if signal == "clean":
+        return None, None
+
     if isinstance(tool_response, dict):
         text = str(tool_response.get("stderr", "")) + str(tool_response.get("error", ""))
-        # Use `is None` — `or` would treat exit_code=0 (success) as falsy and
-        # incorrectly fall through to exitCode.
-        exit_code = tool_response.get("exit_code")
-        if exit_code is None:
-            exit_code = tool_response.get("exitCode")
-        if exit_code is not None and exit_code == 0 and not text:
-            return None, None
     elif isinstance(tool_response, str):
         text = tool_response
     else:
@@ -370,6 +596,11 @@ def classify_env_error(tool_response) -> tuple[str | None, str | None]:
 
     if not text:
         return None, None
+
+    if signal == "unknown":
+        text = _error_shaped_lines(text)
+        if not text:
+            return None, None
 
     for patterns, category, hint in ENV_PATTERNS:
         for pat in patterns:
