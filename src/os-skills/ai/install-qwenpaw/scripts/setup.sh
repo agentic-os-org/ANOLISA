@@ -178,15 +178,15 @@ fi
 # ── 步骤 6: 启动服务 ─────────────────────────────────────
 echo "[6/6] 启动服务..."
 
-# 先停掉旧进程（如果有）
-if pgrep -f "qwenpaw app" > /dev/null 2>&1; then
-  echo "  停止已有 QwenPaw 进程..."
-  kill $(pgrep -f "qwenpaw app") 2>/dev/null || true
-  sleep 2
-fi
+# A global pgrep can match other users' instances and unrelated commands.
+# Only restart a process whose PID this installer saved, after checking that
+# the PID still belongs to a QwenPaw app process.
+source "$SCRIPT_DIR/managed_process.sh"
+stop_managed_qwenpaw "$QWENPAW_DIR/qwenpaw.pid"
 
 nohup qwenpaw app --host 0.0.0.0 --port 8088 > "$QWENPAW_DIR/qwenpaw.log" 2>&1 &
 QWENPAW_PID=$!
+printf '%s\n' "$QWENPAW_PID" > "$QWENPAW_DIR/qwenpaw.pid"
 echo "  QwenPaw 已启动 (PID: $QWENPAW_PID)"
 echo "  等待服务就绪..."
 sleep 5
