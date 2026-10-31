@@ -14,7 +14,7 @@ mod prompts;
 use anyhow::Result;
 
 use crate::atif::AtifTrajectory;
-use crate::trace::{collect_tool_calls_with, tool_window_secs};
+use crate::trace::{collect_tool_calls_with, tool_busy_secs, tool_window_secs};
 use crate::types::{CacheTurn, IdleGap, PerfCandidateSet, PerfStats, ToolAggStats, ToolCallRecord};
 
 /// Default threshold (seconds) for detecting idle gaps between turns.
@@ -46,7 +46,7 @@ pub fn compute_stats(trajectory: &AtifTrajectory) -> Result<PerfStats> {
         .map(|(t, origin)| (t - origin).as_seconds_f64())
         .unwrap_or(0.0);
 
-    let tool_secs: f64 = tool_calls.iter().map(|c| c.dur).sum();
+    let tool_secs = tool_busy_secs(trajectory);
     let model_secs = compute_model_turn_durations(trajectory).0;
     let idle_secs = (wall_secs - tool_secs - model_secs).max(0.0);
     let tool_count = tool_calls.len();
@@ -102,21 +102,26 @@ pub fn compute_stats(trajectory: &AtifTrajectory) -> Result<PerfStats> {
 /// missing-start condition), so claiming it as model time too double-books
 /// the same wall-clock second and the model/tool/idle split leaves its
 /// 0..wall domain (observed: tool+model = 2× wall on start-less traces).
+/// When all of that previous step's tool completions are recorded, inference
+/// can instead be estimated from their latest result to this step's end.
 /// Returns (total_secs, per_step_vec).
 fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
     let mut turns: Vec<f64> = Vec::new();
     let mut prev_ts = None;
     let mut prev_agent_had_calls = false;
+    let mut prev_tool_end = None;
     let mut user_intervened = false;
 
     for step in &traj.steps {
         let step_end = step.end_ts();
         if step.is_agent() {
-            let start = step.start_ts().or_else(|| {
-                (!prev_agent_had_calls || user_intervened)
-                    .then_some(prev_ts)
-                    .flatten()
-            });
+            let start = step
+                .start_ts()
+                .or(if prev_agent_had_calls && !user_intervened {
+                    prev_tool_end
+                } else {
+                    prev_ts
+                });
             if let (Some(s), Some(e)) = (start, step_end) {
                 let dur = (e - s).as_seconds_f64();
                 if dur > 0.0 {
@@ -124,6 +129,12 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
                 }
             }
             prev_agent_had_calls = !step.calls().is_empty();
+            let completions: Option<Vec<_>> = step
+                .calls()
+                .iter()
+                .map(|call| step.tool_result_ts(call))
+                .collect();
+            prev_tool_end = completions.and_then(|timestamps| timestamps.into_iter().max());
             user_intervened = false;
         } else if step.is_user() {
             user_intervened = true;

@@ -161,7 +161,9 @@ pub fn build_inventory(traj: &AtifTrajectory) -> TraceInventory {
 ///
 /// Per-call duration = the step's tool window (next agent step start − this
 /// step end) divided evenly among the step's parallel calls, so summing
-/// durations stays consistent with wall-clock accounting.
+/// durations stays consistent with wall-clock accounting. A valid recorded
+/// result time instead gives the individual call's duration; parallel measured
+/// durations can overlap, and performance totals count their union separately.
 pub fn collect_tool_calls(traj: &AtifTrajectory) -> Vec<ToolCallRecord> {
     collect_tool_calls_with(traj, CMD_TRUNCATE_CHARS)
 }
@@ -219,7 +221,11 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
                 name: call.display_name(),
                 call_id: call.tool_call_id.clone(),
                 start,
-                dur: per_call.max(0.0),
+                dur: step
+                    .tool_result_ts(call)
+                    .zip(step.end_ts())
+                    .map(|(result, start)| (result - start).as_seconds_f64())
+                    .unwrap_or(per_call.max(0.0)),
                 cmd: call.command_summary(cmd_chars),
                 err,
                 target: file_target(call),
@@ -241,26 +247,63 @@ fn file_target(call: &crate::atif::AtifToolCall) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Tool execution window of agent step `idx`: next agent step's start (or
-/// end, when start is unrecorded) minus this step's end. Zero when a user
-/// step intervenes (turn ended — the gap is user idle) or no next step exists.
+/// Tool window from recorded result times. When any completion is unrecorded,
+/// extend it using the next agent step's start (or end), provided no user step
+/// intervenes. Recorded completions remain usable even for terminal steps.
 pub(crate) fn tool_window_secs(traj: &AtifTrajectory, idx: usize) -> f64 {
     let steps = &traj.steps;
     let Some(end) = steps[idx].end_ts() else {
         return 0.0;
     };
+    let recorded: Vec<_> = steps[idx]
+        .calls()
+        .iter()
+        .filter_map(|call| steps[idx].tool_result_ts(call))
+        .map(|timestamp| (timestamp - end).as_seconds_f64())
+        .collect();
+    let measured = recorded.iter().copied().fold(0.0_f64, f64::max);
+    if recorded.len() == steps[idx].calls().len() {
+        return measured;
+    }
     for next in &steps[idx + 1..] {
         if next.is_user() {
-            return 0.0;
+            return measured;
         }
         if next.is_agent() {
             let next_start = next.start_ts().or_else(|| next.end_ts());
-            return next_start
-                .map(|t| (t - end).as_seconds_f64().max(0.0))
-                .unwrap_or(0.0);
+            return measured.max(
+                next_start
+                    .map(|t| (t - end).as_seconds_f64().max(0.0))
+                    .unwrap_or(0.0),
+            );
         }
     }
-    0.0
+    measured
+}
+
+/// Union of tool windows; parallel measured calls consume wall time once.
+pub(crate) fn tool_busy_secs(traj: &AtifTrajectory) -> f64 {
+    let Some(origin) = traj.origin_ts() else {
+        return 0.0;
+    };
+    let mut windows: Vec<_> = traj
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| step.is_agent() && !step.calls().is_empty())
+        .filter_map(|(index, step)| {
+            let start = (step.end_ts()? - origin).as_seconds_f64();
+            Some((start, start + tool_window_secs(traj, index)))
+        })
+        .collect();
+    windows.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let mut end = f64::NEG_INFINITY;
+    let mut total = 0.0;
+    for (start, next_end) in windows {
+        total += (next_end - start.max(end)).max(0.0);
+        end = end.max(next_end);
+    }
+    total
 }
 
 // ── Internal implementation ──
