@@ -111,8 +111,8 @@ echo "Running on instance: $INSTANCE_ID"
 ```bash
 INSTANCE_TYPE=$(curl -s http://100.100.100.200/latest/meta-data/instance-type)
 case $INSTANCE_TYPE in
-  *large*) WORKERS=4 ;;
   *xlarge*) WORKERS=8 ;;
+  *large*) WORKERS=4 ;;
 esac
 ```
 
