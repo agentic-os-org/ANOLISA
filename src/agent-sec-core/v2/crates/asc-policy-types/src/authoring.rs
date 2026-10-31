@@ -2,12 +2,29 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cedar::CedarPolicySource;
 use crate::error::{Validate, ValidationError};
 
 mod condition;
 pub use condition::{
     Comparison, Condition, HistoryCondition, HistoryEvent, HistoryLogic, Scalar, Value,
 };
+
+/// Authored content, independent of Policy identity and Scope/Binding assignment.
+///
+/// This envelope is not yet used by PAP requests or persisted Policy snapshots.
+/// A frontend must derive the representation from the source rather than trust a
+/// caller-supplied AST.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "language", content = "content", deny_unknown_fields)]
+pub enum PolicySource {
+    /// Existing JSON authoring format, including its own `specVersion`.
+    #[serde(rename = "seccore")]
+    SecCore(PolicyTemplate),
+    /// Cedar text and the exact application schema used for validation.
+    #[serde(rename = "cedar")]
+    Cedar(CedarPolicySource),
+}
 
 /// Reusable policy content; identity and revision belong to `PreparedPolicy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +107,29 @@ pub enum Resource {
         /// Target path pattern.
         path: String,
     },
+}
+
+impl Validate for PolicySource {
+    /// Checks the source envelope; Cedar parsing and schema checks require the frontend.
+    ///
+    /// # Errors
+    /// Returns an existing native-AST error, or rejects blank/NUL-bearing Cedar text.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::SecCore(template) => template.validate().map_err(|error| {
+                ValidationError::new(format!("content.{}", error.path), error.message)
+            }),
+            Self::Cedar(source) => {
+                if source.text.trim().is_empty() || source.text.contains('\0') {
+                    return Err(ValidationError::new(
+                        "content.text",
+                        "must contain non-whitespace Cedar text without NUL",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Validate for PolicyTemplate {

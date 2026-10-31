@@ -61,6 +61,12 @@ The current crates are:
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, template validation, and target Adapter contracts. Snapshots retain
   `policyId`, `policyName`, `revision` and `template`.
+- `asc-policy-cedar`: library-only Cedar frontend with a pinned file/process and
+  whole-network permission schema, strict SDK validation, common-subset checks
+  through `validate` and official typed PST output through `pst`. Agent Hook
+  actions can add separate typed contexts.
+  It is not yet connected to PAP, RPC, persistence or target translation. See the
+  [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
 - `asc-policy-adapter-agentsight`: deterministic file-deletion and pinned-process
   translation directly from the Binding's template into an AgentSight/ActPlane
   plan, with semantic and encoding checks. Reusable policies contain general

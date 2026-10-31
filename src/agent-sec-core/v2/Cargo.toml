@@ -28,6 +28,7 @@ members = [
     "crates/asc-model-client",
     "crates/asc-agentsight-client",
     "crates/asc-policy-adapter-agentsight",
+    "crates/asc-policy-cedar",
     "crates/asc-pap",
     "crates/asc-pcp",
     "crates/asc-policy-runtime",
@@ -41,7 +42,7 @@ members = [
 version = "1.1.2"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.89"
 repository = "https://github.com/alibaba/anolisa"
 publish = false
 
@@ -77,6 +78,7 @@ asc-pap = { path = "crates/asc-pap" }
 asc-pcp = { path = "crates/asc-pcp" }
 asc-persistence-sqlite = { path = "crates/asc-persistence-sqlite" }
 asc-policy-adapter-agentsight = { path = "crates/asc-policy-adapter-agentsight" }
+asc-policy-cedar = { path = "crates/asc-policy-cedar" }
 asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }
 asc-policy-repository = { path = "crates/asc-policy-repository" }
 asc-policy-types = { path = "crates/asc-policy-types" }
@@ -85,6 +87,8 @@ asc-telemetry = { path = "crates/asc-telemetry" }
 asc-security-summary = { path = "crates/asc-security-summary" }
 asc-sqlite-kernel = { path = "crates/asc-sqlite-kernel" }
 base64 = "0.22"
+cedar-policy = "=4.14.0"
+cedar-policy-core = "=4.14.0"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6", features = ["derive"] }
 signal-hook = { version = "0.3", default-features = false }
