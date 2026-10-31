@@ -84,7 +84,7 @@ def filter_instances(instances: list[SWEInstance], config: DatasetConfig) -> lis
     slice_tuple = config.get_slice()
     if slice_tuple is not None:
         start, end = slice_tuple
-        result = result[start:] if end == -1 else result[start:end]
+        result = result[start:end]
         logger.info("FILTER_SLICE instance=global remaining=%s start=%s end=%s", len(result), start, end)
 
     logger.info("FILTER_END instance=global remaining=%s", len(result))
