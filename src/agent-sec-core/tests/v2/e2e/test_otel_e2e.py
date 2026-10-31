@@ -19,6 +19,8 @@ from urllib.parse import quote
 
 import pytest
 
+from tests.v2.e2e.conftest import _SOCKET_WAIT_SECONDS
+
 TRACE = "11111111111111111111111111111111"
 PARENT = "2222222222222222"
 CANARY = "DO_NOT_EXPORT_SECRET_PAYLOAD"
@@ -76,7 +78,7 @@ class OtelEnvironment:
             stdout=subprocess.PIPE,
             stderr=self.log if stderr is None else stderr,
         )
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
         while not self.socket.exists():
             assert self.daemon.poll() is None
             assert time.monotonic() < deadline

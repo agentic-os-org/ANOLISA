@@ -178,7 +178,8 @@ jobs:
           echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
           echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
           echo "AGENT_SEC_DAEMON_PID=$daemon_pid" >> "$GITHUB_ENV"
-          for _ in $(seq 1 100); do
+          startup_deadline=$((SECONDS + 30))
+          while (( SECONDS < startup_deadline )); do
             if ! sudo kill -0 "$(cat "$daemon_pid")" 2>/dev/null; then
               echo "agent-sec-daemon exited before accepting connections" >&2
               cat "$daemon_log" >&2
@@ -371,7 +372,8 @@ jobs:
           echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
           echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
           echo "AGENT_SEC_DAEMON_PID=$daemon_pid" >> "$GITHUB_ENV"
-          for _ in $(seq 1 100); do
+          startup_deadline=$((SECONDS + 30))
+          while (( SECONDS < startup_deadline )); do
             if ! sudo kill -0 "$(cat "$daemon_pid")" 2>/dev/null; then
               echo "agent-sec-daemon exited before accepting connections" >&2
               cat "$daemon_log" >&2

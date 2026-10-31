@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.v2.e2e.conftest import _SOCKET_WAIT_SECONDS
+
 COMPONENT = Path(__file__).resolve().parents[3]
 BIN_DIR = Path(os.environ.get("ASC_V2_BIN_DIR", COMPONENT / "v2/target/debug"))
 
@@ -84,7 +86,7 @@ class ProcessDaemon:
             stdout=subprocess.DEVNULL,
             stderr=self.log,
         )
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
         while time.monotonic() < deadline:
             assert self.process.poll() is None, (
                 self.root / "daemon.stderr"

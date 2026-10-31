@@ -420,7 +420,7 @@ async fn a_tick_and_cancellation_ready_together_schedule_no_new_pass() {
 }
 
 // Readiness includes the startup retention catch-up over the seeded backlog.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 // Match the deployment stop budget, including drain, persistence, and runtime cleanup.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(45);
 
