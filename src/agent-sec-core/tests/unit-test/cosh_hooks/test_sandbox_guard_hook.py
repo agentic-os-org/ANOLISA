@@ -1,6 +1,7 @@
 """Unit tests for cosh-extension/hooks/sandbox-guard.py."""
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -295,6 +296,46 @@ class TestStripSudo:
         assert has_sudo == expected_has_sudo
 
 
+@pytest.mark.parametrize(
+    "cwd",
+    [
+        "/home/user/project",
+        "/home/user/$(printf injected)/project",
+        "/home/user/`printf injected`/project",
+        '/home/user/"quoted"/project',
+        "/home/user/it's/project",
+        "/home/user/trailing\\",
+    ],
+)
+def test_build_sandbox_command_preserves_cwd_as_literal_shell_argument(
+    cwd, monkeypatch, tmp_path
+):
+    sandbox_stub = tmp_path / "linux-sandbox-stub"
+    sandbox_stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "print(json.dumps(sys.argv[1:]))\n"
+    )
+    sandbox_stub.chmod(0o755)
+    monkeypatch.setattr(sandbox_guard, "LINUX_SANDBOX", str(sandbox_stub))
+
+    command = sandbox_guard.build_sandbox_command("true", cwd)
+    completed = subprocess.run(
+        command,
+        shell=True,
+        executable="/bin/bash",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    arguments = json.loads(completed.stdout)
+    cwd_index = arguments.index("--sandbox-policy-cwd")
+    assert arguments[cwd_index + 1] == cwd
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 端到端集成测试 - 验证 main() 决策路径
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -348,6 +389,16 @@ class TestMainDecision:
         sandboxed_cmd = result["hookSpecificOutput"]["tool_input"]["command"]
         assert "linux-sandbox" in sandboxed_cmd
         assert "rm -rf /tmp/build" in sandboxed_cmd
+
+    def test_sandboxed_command_preserves_metacharacter_cwd(self, monkeypatch):
+        cwd = "/home/user/$(printf injected)/it's/project"
+        result = self._run_main("rm -rf /tmp/build", monkeypatch, cwd=cwd)
+
+        sandboxed_cmd = result["hookSpecificOutput"]["tool_input"]["command"]
+        expected = (
+            "--sandbox-policy-cwd '/home/user/$(printf injected)/it'\\''s/project'"
+        )
+        assert expected in sandboxed_cmd
 
     def test_curl_pipe_bash_sandboxed(self, monkeypatch):
         """curl | bash 管道执行应进沙箱。"""
