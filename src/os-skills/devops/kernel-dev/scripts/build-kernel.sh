@@ -140,7 +140,10 @@ build_srpm() {
     info "Starting kernel compilation (this may take 1-3 hours)..."
     info "Build log: $LOG_FILE"
     
-    rpmbuild -bc kernel.spec \
+    # -bb, not -bc: -bc stops after %build and never writes the RPMs that
+    # the success message below and `install srpm` both expect under
+    # $OUTPUT_DIR/RPMS/.
+    rpmbuild -bb kernel.spec \
         --define "_topdir $OUTPUT_DIR" \
         --define "with_debug 0" \
         --define "with_doc 0" \
@@ -303,7 +306,12 @@ show_status() {
     
     info "SRPM Build Log:"
     if [ -f "/tmp/kernel-rpmbuild.log" ]; then
+        # Manual flow from examples/build-kernel.md logs here.
         tail -10 /tmp/kernel-rpmbuild.log
+    elif [ -f "$LOG_FILE" ]; then
+        # Script-driven srpm builds tee into $LOG_FILE; nothing in this
+        # script writes /tmp/kernel-rpmbuild.log.
+        tail -10 "$LOG_FILE"
     else
         warn "SRPM build log not found"
     fi
