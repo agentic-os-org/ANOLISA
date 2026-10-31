@@ -326,12 +326,13 @@ pub(crate) fn apply_auth_credentials(
 
     // Preserve settings the auth response cannot carry, so a 401/403 re-auth
     // does not silently reset them to None (which persist_config_to_dir would
-    // then omit): the user's explicit cache preference, and any SysOM endpoint
-    // they configured -- losing the latter would quietly switch the client back
-    // to probing.
+    // then omit): the user's explicit cache preference, their provider
+    // extra_params, and any SysOM endpoint they configured -- losing the latter
+    // would quietly switch the client back to probing.
     let existing = config.ai.providers.get(&response.provider_id);
     let existing_explicit_cache = existing.and_then(|p| p.explicit_cache);
     let existing_sysom_endpoint = existing.and_then(|p| p.sysom_endpoint.clone());
+    let existing_extra_params = existing.and_then(|p| p.extra_params.clone());
 
     config.ai.active_provider = Some(response.provider_id.clone());
     config.ai.active_model = final_model.clone();
@@ -342,7 +343,7 @@ pub(crate) fn apply_auth_credentials(
         sysom_endpoint: existing_sysom_endpoint,
         api_key: Some(api_key),
         model: final_model.clone(),
-        extra_params: None,
+        extra_params: existing_extra_params,
         access_key_id,
         access_key_secret,
         security_token,
@@ -1020,6 +1021,37 @@ mod tests {
             p.sysom_endpoint.as_deref(),
             Some("https://sysom.cn-shanghai.aliyuncs.com")
         );
+    }
+
+    #[test]
+    fn auth_refresh_preserves_extra_params() {
+        let extra_params = serde_json::json!({"enable_thinking": false, "top_p": 0.5});
+        let mut config = CoreConfig::default();
+        config.ai.providers.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+                api_key: Some("sk-old".to_string()),
+                model: Some("qwen3.7-plus".to_string()),
+                extra_params: Some(extra_params.clone()),
+                ..Default::default()
+            },
+        );
+
+        // Simulate 401/403 re-auth: same provider_id, new api_key
+        let response = AuthResponse {
+            provider_id: "dashscope".to_string(),
+            provider_type: None,
+            values: HashMap::from([("api_key".to_string(), "sk-new".to_string())]),
+            persist: true,
+        };
+        apply_auth_credentials(&mut config, &response).unwrap();
+
+        let p = config.ai.providers.get("dashscope").unwrap();
+        assert_eq!(p.api_key.as_deref(), Some("sk-new"));
+        // extra_params must survive re-auth
+        assert_eq!(p.extra_params, Some(extra_params));
     }
 
     #[test]
