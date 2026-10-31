@@ -187,6 +187,7 @@ scenario() {
     mkdir -p -- "$OPENCLAW_STATE_DIR"
     rm -f -- "$MEMORY_CORE_MARKER"
     env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+        -u ANOLISA_ACCEPT_CAPABILITIES \
         "$@" bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
     [ "$rc" = "$want_rc" ] || fail "$label: rc=$rc, want $want_rc"
     [ "$(grep -c '^plugins install --help$' "$TEST_ARGV_LOG")" = 1 ] \
@@ -231,6 +232,7 @@ channel_scenario() {
     : > "$TEST_ARGV_LOG"
     rm -f "$TEST_INSTALLED"
     env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+        -u ANOLISA_ACCEPT_CAPABILITIES \
         "$@" bash "$INSTALL_SH" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
     [ "$rc" = "$want_rc" ] || { echo "FAIL: $label: rc=$rc, want $want_rc" >&2; channel_dump; exit 1; }
     local install_calls
@@ -311,6 +313,79 @@ expect_log 'EACCES'
 expect_no_log 'install failed with consent withheld'
 export TEST_GATE=new
 
+# The same policy is reachable through ANOLISA_ACCEPT_CAPABILITIES, the switch
+# shared with the other ANOLISA OpenClaw installer scripts, so one variable
+# withholds consent on every script entry point.
+scenario 'modern host, consent opt-out via shared switch' 3 "$(argv no no)" ANOLISA_ACCEPT_CAPABILITIES=0
+expect_log 'ANOLISA_ACCEPT_CAPABILITIES=0: withholding --accept-capabilities'
+expect_log 'install failed with consent withheld by ANOLISA_ACCEPT_CAPABILITIES=0'
+expect_no_log 'Passing --accept-capabilities'
+scenario 'modern host, shared opt-out via off' 3 "$(argv no no)" ANOLISA_ACCEPT_CAPABILITIES=OFF
+scenario 'modern host, shared opt-out with padding' 3 "$(argv no no)" ANOLISA_ACCEPT_CAPABILITIES=' no '
+scenario 'modern host, shared opt-in via Yes' 0 "$(argv no yes)" ANOLISA_ACCEPT_CAPABILITIES=Yes
+expect_log 'Passing --accept-capabilities'
+
+# The component-scoped name is the more specific one and wins in both
+# directions, so an operator withholding consent everywhere can still decide
+# for agent-memory alone. Every line must name the variable that decided,
+# never the one that was ignored.
+scenario 'component switch overrides shared opt-out' 0 "$(argv no yes)" \
+    AGENT_MEMORY_ACCEPT_CAPABILITIES=1 ANOLISA_ACCEPT_CAPABILITIES=0
+expect_log 'Passing --accept-capabilities'
+scenario 'component switch overrides shared opt-in' 3 "$(argv no no)" \
+    AGENT_MEMORY_ACCEPT_CAPABILITIES=0 ANOLISA_ACCEPT_CAPABILITIES=1
+expect_log 'install failed with consent withheld by AGENT_MEMORY_ACCEPT_CAPABILITIES=0'
+expect_no_log 'ANOLISA_ACCEPT_CAPABILITIES=0'
+
+# Precedence keys on whether a variable is *set*, not on whether its value is
+# non-empty. An explicitly empty component setting still decides, and empty is
+# the documented accepting default, so it must not fall through to a shared
+# ANOLISA_ACCEPT_CAPABILITIES=0 and withhold consent this component was told
+# to leave alone. Regression: a `-n` test made set-but-empty mean unset.
+scenario 'explicitly empty component switch beats a shared opt-out' 0 "$(argv no yes)" \
+    AGENT_MEMORY_ACCEPT_CAPABILITIES= ANOLISA_ACCEPT_CAPABILITIES=0
+expect_log 'Passing --accept-capabilities'
+expect_no_log 'withholding --accept-capabilities'
+expect_no_log 'ANOLISA_ACCEPT_CAPABILITIES=0'
+
+# A component value that decides also shields the shared one from parsing: an
+# unparseable shared setting must not abort an install the component already
+# accepted.
+scenario 'empty component switch shields an unparseable shared value' 0 "$(argv no yes)" \
+    AGENT_MEMORY_ACCEPT_CAPABILITIES= ANOLISA_ACCEPT_CAPABILITIES=maybe
+expect_log 'Passing --accept-capabilities'
+expect_no_log 'is not a boolean'
+
+# And the shared switch alone: set-but-empty is the accepting default too, so
+# no refusal line may name it.
+scenario 'explicitly empty shared switch accepts' 0 "$(argv no yes)" \
+    ANOLISA_ACCEPT_CAPABILITIES=
+expect_log 'Passing --accept-capabilities'
+expect_no_log 'withholding --accept-capabilities'
+
+# An unparseable shared value aborts like an unparseable component value, and
+# the error names the variable that carried it.
+: > "$TEST_ARGV_LOG"
+rc=0
+env ANOLISA_ACCEPT_CAPABILITIES=maybe bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "invalid shared switch value: expected rc 2, got $rc"
+[ ! -s "$TEST_ARGV_LOG" ] || fail 'invalid shared switch value: openclaw must not be invoked'
+grep -q "ANOLISA_ACCEPT_CAPABILITIES='maybe' is not a boolean" "$SANDBOX/output" \
+    || fail 'invalid shared switch value: the error must name ANOLISA_ACCEPT_CAPABILITIES'
+echo 'PASS: invalid shared switch value aborts before any OpenClaw call'
+
+# A bad component value is not rescued by a good shared one: the more specific
+# variable decided, so its value is the one that has to parse.
+: > "$TEST_ARGV_LOG"
+rc=0
+env AGENT_MEMORY_ACCEPT_CAPABILITIES=maybe ANOLISA_ACCEPT_CAPABILITIES=0 \
+    bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "invalid component value beside a valid shared value: expected rc 2, got $rc"
+[ ! -s "$TEST_ARGV_LOG" ] || fail 'invalid component value: openclaw must not be invoked'
+grep -q "AGENT_MEMORY_ACCEPT_CAPABILITIES='maybe' is not a boolean" "$SANDBOX/output" \
+    || fail 'invalid component value: the error must name AGENT_MEMORY_ACCEPT_CAPABILITIES'
+echo 'PASS: an invalid component value is not masked by a valid shared value'
+
 export TEST_HELP=legacy TEST_GATE=old
 scenario 'legacy host, default' 0 "$(argv yes no)"
 expect_log 'did not advertise --accept-capabilities'
@@ -324,6 +399,8 @@ expect_log 'declining --dangerously-force-unsafe-install'
 expect_log 'AGENT_MEMORY_SAFE_INSTALL=1 declined the unsafe-install bypass'
 # Nothing to refuse when the host does not gate consent.
 scenario 'legacy host, consent opt-out' 0 "$(argv yes no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
+scenario 'legacy host, shared-switch consent opt-out' 0 "$(argv yes no)" ANOLISA_ACCEPT_CAPABILITIES=0
+expect_log 'did not advertise --accept-capabilities'
 
 export TEST_HELP=near_match
 scenario 'near-miss options only' 0 "$(argv no no)"
