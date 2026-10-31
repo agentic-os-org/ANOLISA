@@ -44,6 +44,15 @@ fn claude_stream_parser_extracts_partial_text_and_completion() {
 }
 
 #[test]
+fn cosh_core_empty_success_emits_completion_without_text() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(r#"{"type":"result","subtype":"success","is_error":false}"#);
+
+    assert!(matches!(&events[..], [AgentEvent::AgentCompleted { .. }]));
+}
+
+#[test]
 fn claude_stream_parser_maps_thinking_delta_to_transient_status() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 
