@@ -50,18 +50,6 @@ class TestCwdInsideWorkspaceReason:
 
 
 # ---------------------------------------------------------------------------
-# _on_pre_llm_call
-# ---------------------------------------------------------------------------
-
-
-class TestOnPreLlmCall:
-    def test_captures_message(self):
-        import hermes as h
-        h._on_pre_llm_call(user_message="hello world")
-        assert h._last_user_message == "hello world"
-
-
-# ---------------------------------------------------------------------------
 # _on_session_end
 # ---------------------------------------------------------------------------
 
@@ -93,7 +81,7 @@ class TestOnSessionEnd:
         import hermes as h
         with h._msg_lock:
             pass  # ensure lock is free
-        h._last_user_message = "x" * 200
+        h._on_pre_llm_call(user_message="x" * 200)
         h._on_session_end()
 
         call_kwargs = mgr.create_checkpoint.call_args[1]
@@ -112,7 +100,7 @@ class TestOnSessionEnd:
         mock_get_mgr.return_value = mgr
 
         import hermes as h
-        h._last_user_message = ""
+        h._on_pre_llm_call(user_message="")
         h._on_session_end()
 
         call_kwargs = mgr.create_checkpoint.call_args[1]
