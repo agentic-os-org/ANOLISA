@@ -176,15 +176,22 @@ def audit_quality(sheets: dict) -> dict:
             col_lower = str(col).lower()
             # "年" is the Chinese character for "year" — detect year columns in CJK spreadsheets
             if "year" in col_lower or "yr" in col_lower or "年" in col_lower:
-                if df[col].dropna().between(1900, 2200).all():
-                    if df[col].dtype == float:
-                        sheet_findings.append({
-                            "type": "year_as_float",
-                            "column": col,
-                            "note": f"Column '{col}' appears to be a year column stored as float "
-                                    "(e.g., 2024.0). Convert with df[col].astype(int).astype(str) "
-                                    "to get clean year strings like '2024'."
-                        })
+                values = df[col].dropna()
+                if (
+                    not values.empty
+                    and values.between(1900, 2200).all()
+                    and values.mod(1).eq(0).all()
+                ):
+                    if pd.api.types.is_float_dtype(df[col]):
+                        sheet_findings.append(
+                            {
+                                "type": "year_as_float",
+                                "column": col,
+                                "note": f"Column '{col}' appears to be a year column stored as float "
+                                "(e.g., 2024.0). Use df[col].astype('Int64').astype('string') "
+                                "to preserve missing values and format years like '2024'.",
+                            }
+                        )
 
         # Outliers via IQR on numeric columns
         for col in df.select_dtypes(include="number").columns:
