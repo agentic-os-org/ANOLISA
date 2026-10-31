@@ -32,6 +32,34 @@ pub struct BM25Store {
 /// doesn't silently corrupt rows it doesn't understand.
 pub(crate) const SCHEMA_VERSION: i64 = 5;
 
+/// The record identity of an indexed file: the `mtime_ms` and `size` the
+/// index worker observed when it built the row.
+///
+/// `files.path` is `UNIQUE` but it is *not* a stable record identity. When a
+/// file disappears the worker deletes its row, and when unrelated content
+/// later appears at the same path it inserts a fresh row under that same
+/// `path`. Anything that holds a path across a gap — a slow write, a deferred
+/// supersede — therefore needs a second key to tell "the record I scanned"
+/// apart from "whatever lives at that path now". `mtime_ms` + `size` are
+/// exactly what the row was built from, so re-reading them answers that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub mtime_ms: i64,
+    pub size: i64,
+}
+
+/// One conflict candidate: where it lives, how strongly it matched, and the
+/// identity of the index row that produced it.
+///
+/// Pass `identity` back to [`BM25Store::supersede_identified`] when retiring
+/// the candidate later than it was scanned.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConflictCandidate {
+    pub path: String,
+    pub score: f64,
+    pub identity: FileIdentity,
+}
+
 /// What the index currently records for one path.
 ///
 /// The incremental watcher checks this before reading a body. A matching
@@ -110,7 +138,7 @@ impl BM25Store {
     }
 
     #[cfg(test)]
-    fn open_for_test(path: &Path) -> Result<Self> {
+    pub(crate) fn open_for_test(path: &Path) -> Result<Self> {
         Self::open(path, 0.01, 0.3, true)
     }
 
@@ -739,6 +767,27 @@ impl BM25Store {
     /// Detect potential conflicts: search for files similar to the given
     /// text and return those with BM25 score above the threshold.
     pub fn detect_conflicts(&self, text: &str, threshold: f64) -> Result<Vec<(String, f64)>> {
+        Ok(self
+            .detect_conflicts_identified(text, threshold)?
+            .into_iter()
+            .map(|c| (c.path, c.score))
+            .collect())
+    }
+
+    /// Same scan as [`Self::detect_conflicts`], but every candidate also
+    /// carries the [`FileIdentity`] of the row that produced it.
+    ///
+    /// The identity is what makes a *deferred* supersede safe. A caller that
+    /// scans first and retires the candidates later — because slow filesystem
+    /// work has to happen in between, and holding the store lock across it
+    /// would block every search — can hand the identity back to
+    /// [`Self::supersede_identified`], which flips `is_superseded` only if the
+    /// path still names the record that was scanned.
+    pub fn detect_conflicts_identified(
+        &self,
+        text: &str,
+        threshold: f64,
+    ) -> Result<Vec<ConflictCandidate>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -759,7 +808,7 @@ impl BM25Store {
 
         // Search excluding cold and superseded files.
         let sql = r#"
-            SELECT f.path, bm25(files_fts) AS rank
+            SELECT f.path, bm25(files_fts) AS rank, f.mtime_ms, f.size
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE files_fts MATCH ?1 AND f.is_cold = 0 AND f.is_superseded = 0
@@ -768,13 +817,20 @@ impl BM25Store {
         "#;
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![match_query], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            Ok(ConflictCandidate {
+                path: row.get(0)?,
+                score: row.get(1)?,
+                identity: FileIdentity {
+                    mtime_ms: row.get(2)?,
+                    size: row.get(3)?,
+                },
+            })
         })?;
 
-        let results: Vec<(String, f64)> = rows
+        let results: Vec<ConflictCandidate> = rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|(_, score)| *score >= threshold)
+            .filter(|c| c.score >= threshold)
             .collect();
 
         Ok(results)
@@ -788,7 +844,11 @@ impl BM25Store {
     /// potential conflict rather than silently miss a duplicate/contradiction.
     /// A row decode failure aborts detection; the caller logs it and writes
     /// without superseding. Successful results are still reviewed first.
-    fn detect_conflicts_like(&self, tokens: &[&str], threshold: f64) -> Result<Vec<(String, f64)>> {
+    fn detect_conflicts_like(
+        &self,
+        tokens: &[&str],
+        threshold: f64,
+    ) -> Result<Vec<ConflictCandidate>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -803,7 +863,7 @@ impl BM25Store {
         // then sort + truncate.
         let sql = format!(
             r#"
-            SELECT f.path, files_fts.body, f.mtime_ms
+            SELECT f.path, files_fts.body, f.mtime_ms, f.size
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE {like_clause} AND f.is_cold = 0 AND f.is_superseded = 0
@@ -821,12 +881,13 @@ impl BM25Store {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?;
 
-        let mut out: Vec<(String, f64)> = Vec::new();
+        let mut out: Vec<ConflictCandidate> = Vec::new();
         for row in rows {
-            let (path, body, mtime_ms) = row?;
+            let (path, body, mtime_ms, size) = row?;
             // Case-insensitive frequency: SQLite LIKE is ASCII
             // case-insensitive, so a Rust `matches()` (case-sensitive) would
             // under-count and zero the score for mixed-case matches.
@@ -838,39 +899,82 @@ impl BM25Store {
             let decay = time_decay(mtime_ms, self.time_decay_lambda);
             let score = freq + self.time_decay_alpha * decay;
             if score >= threshold {
-                out.push((path, score));
+                out.push(ConflictCandidate {
+                    path,
+                    score,
+                    identity: FileIdentity { mtime_ms, size },
+                });
             }
         }
         // Highest score first, then cap at 5 to match the MATCH path's LIMIT.
-        out.sort_by(|a, b| b.1.total_cmp(&a.1));
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
         out.truncate(5);
         Ok(out)
     }
 
     /// Mark a file as superseded by another file. The superseded file
     /// remains on disk but is excluded from normal search.
+    ///
+    /// Matches on `path` alone: prefer [`Self::supersede_identified`] whenever
+    /// the caller scanned the candidate earlier and the index may have moved
+    /// since.
     pub fn supersede(&mut self, old_path: &str, new_id: &str) -> Result<()> {
         // Update the database flag.
         self.conn.execute(
             "UPDATE files SET is_superseded = 1 WHERE path = ?1",
             params![old_path],
         )?;
-
-        // Update the frontmatter in the file on disk.
-        // This is best-effort — the DB flag is the authoritative source.
-        // mount_root is derived from the db path (not an env var), and we
-        // canonicalize before checking containment to guard against path
-        // traversal via `..` segments.
-        if !self.mount_root.as_os_str().is_empty() {
-            let file_path = self.mount_root.join(old_path);
-            // Resolve symlinks and `..` before checking containment.
-            let canonical = file_path.canonicalize().unwrap_or(file_path.clone());
-            if canonical.starts_with(&self.mount_root) && canonical.is_file() {
-                let _ = add_superseded_frontmatter(&canonical, new_id);
-            }
-        }
-
+        self.mark_superseded_on_disk(old_path, new_id);
         Ok(())
+    }
+
+    /// [`Self::supersede`] with an identity re-check, for callers that retire
+    /// a conflict candidate later than they scanned it.
+    ///
+    /// The flag is flipped only while the row at `old_path` still carries the
+    /// `mtime_ms`/`size` that were read at scan time. Between the two, the
+    /// index worker may have deleted that row (file unlinked) and indexed
+    /// *unrelated* content at the same path; superseding on `path` alone would
+    /// hide that content from every search and stamp a bogus `superseded_by`
+    /// into its frontmatter. The check is part of the `UPDATE` itself rather
+    /// than a preceding `SELECT`, so no other store user can slip in between
+    /// the comparison and the write.
+    ///
+    /// Returns `false` — and changes nothing — when the row is gone, has been
+    /// re-indexed from different bytes, or was already superseded.
+    pub fn supersede_identified(
+        &mut self,
+        old_path: &str,
+        identity: FileIdentity,
+        new_id: &str,
+    ) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE files SET is_superseded = 1 \
+             WHERE path = ?1 AND mtime_ms = ?2 AND size = ?3 AND is_superseded = 0",
+            params![old_path, identity.mtime_ms, identity.size],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        self.mark_superseded_on_disk(old_path, new_id);
+        Ok(true)
+    }
+
+    /// On-disk half of a supersede: add `superseded_by` to the file's
+    /// frontmatter. Best-effort — the DB flag is the authoritative source.
+    /// mount_root is derived from the db path (not an env var), and we
+    /// canonicalize before checking containment to guard against path
+    /// traversal via `..` segments.
+    fn mark_superseded_on_disk(&self, old_path: &str, new_id: &str) {
+        if self.mount_root.as_os_str().is_empty() {
+            return;
+        }
+        let file_path = self.mount_root.join(old_path);
+        // Resolve symlinks and `..` before checking containment.
+        let canonical = file_path.canonicalize().unwrap_or(file_path.clone());
+        if canonical.starts_with(&self.mount_root) && canonical.is_file() {
+            let _ = add_superseded_frontmatter(&canonical, new_id);
+        }
     }
 
     /// Store a dense embedding vector for `rel_path`. The vector is
@@ -1535,6 +1639,78 @@ fn add_superseded_frontmatter(path: &std::path::Path, new_id: &str) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `supersede_identified` only retires the row it was handed the identity
+    /// of: a path whose row was rebuilt from different bytes — the index worker
+    /// removing an unlinked file and indexing unrelated content that reappears
+    /// there — must survive.
+    #[test]
+    fn supersede_identified_rejects_a_replaced_row() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes/a.md", 100, 10, "rust loves ownership", None)
+            .unwrap();
+        let scanned = s
+            .detect_conflicts_identified("rust loves ownership", -1_000_000.0)
+            .unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(
+            scanned[0].identity,
+            FileIdentity {
+                mtime_ms: 100,
+                size: 10
+            }
+        );
+
+        // Same path, different record.
+        s.remove("notes/a.md").unwrap();
+        s.upsert("notes/a.md", 200, 42, "kubernetes pod affinity", None)
+            .unwrap();
+
+        assert!(
+            !s.supersede_identified(&scanned[0].path, scanned[0].identity, "new-id")
+                .unwrap(),
+            "a re-indexed row must not be retired on the strength of a stale scan"
+        );
+        assert!(
+            s.search("kubernetes", 10, true)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "notes/a.md"),
+            "the unrelated record was hidden from search"
+        );
+
+        // The identity the row actually has now still works.
+        let current = s
+            .detect_conflicts_identified("kubernetes pod affinity", -1_000_000.0)
+            .unwrap();
+        assert_eq!(current.len(), 1);
+        assert!(
+            s.supersede_identified(&current[0].path, current[0].identity, "new-id")
+                .unwrap()
+        );
+        assert!(s.search("kubernetes", 10, true).unwrap().is_empty());
+    }
+
+    /// Both conflict-detection paths — the FTS MATCH one and the short-CJK LIKE
+    /// fallback — must report the row identity, or a deferred supersede would
+    /// have nothing to check on that path.
+    #[test]
+    fn detect_conflicts_like_reports_identity() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes/a.md", 100, 10, "rust loves ownership", None)
+            .unwrap();
+        // "rs" is < 3 chars, which routes detection to the LIKE fallback.
+        let found = s.detect_conflicts_identified("rs", -1_000_000.0).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, "notes/a.md");
+        assert_eq!(
+            found[0].identity,
+            FileIdentity {
+                mtime_ms: 100,
+                size: 10
+            }
+        );
+    }
 
     #[test]
     fn remove_file_reports_only_actual_evictions() {
