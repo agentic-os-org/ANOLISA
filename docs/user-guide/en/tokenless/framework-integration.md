@@ -525,6 +525,10 @@ successful recovery result is returned without another compression pass.
 
 Qoder IDE and qodercli may cache plugin configuration. Fully restart the IDE after enabling or upgrading. If an old hook path is reported, see [Qoder plugin cache issue](troubleshooting.md#qoder-plugin-cache-issue).
 
+The Qoder hook wrapper uses the user-local installation only when `HOME` is an
+absolute path. With `HOME` unset, empty, or relative, bundled and system hooks
+remain available; no working-directory-relative user fallback is added.
+
 ### Claude Code
 
 The marketplace plugin takes effect after restarting Claude Code. The install script may also offer a plugin refresh command.

@@ -471,6 +471,9 @@ Plugin 在 Hermes 新会话中生效。重启 Hermes 后先执行 Shell 工具�
 
 Qoder IDE 和 qodercli 可能缓存 Plugin 配置。启用或升级后应完全重启 IDE。若出现旧 Hook 路径错误，参阅[Qoder Plugin 缓存问题](troubleshooting.md#qoder-plugin-缓存问题)。
 
+Qoder Hook 包装器只在 `HOME` 为绝对路径时使用用户级安装。`HOME` 未设置、为空或为
+相对路径时，自带和系统 Hook 仍然可用，但不会基于当前工作目录添加用户级回退路径。
+
 ### Claude Code
 
 Marketplace Plugin 在 Claude Code 重启后生效，也可以按照安装脚本提示刷新 Plugin。
