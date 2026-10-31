@@ -499,6 +499,8 @@ Inserting a row at position N shifts all rows from N downward. Every reference t
 | `<mergeCell ref="...">` | Shift start and end rows | `A7:C7` → `A8:C8` |
 | `<conditionalFormatting sqref="...">` | Shift range | `A5:D20` → `A5:D21` |
 | `<dataValidations sqref="...">` | Shift range | `B6:B50` → `B7:B51` |
+| Worksheet `<autoFilter ref="...">` | Expand/contract the sheet filter range | `A1:D20` → `A1:D21` |
+| Worksheet `<sortState ref="...">` / `<sortCondition ref="...">` | Expand/contract the sheet sort range | `A2:D20` → `A2:D21` |
 | `xl/charts/chartN.xml` data source ranges | Shift series ranges | `Sheet1!$B$5:$B$20` → `Sheet1!$B$6:$B$21` |
 | `xl/pivotTables/*.xml` source ranges | Shift source data range | Handle with extreme care — see Section 7 |
 | `<dimension ref="...">` | Expand to include new extent | `A1:D20` → `A1:D21` |
@@ -514,7 +516,7 @@ python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 1
 python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ delete 8 1
 ```
 
-The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
+The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<dimension ref="...">`, worksheet-level `<autoFilter ref="...">` / `<sortState ref="...">` / `<sortCondition ref="...">` ranges, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
 
 **After running the shift script, always repack and validate:**
 ```bash
