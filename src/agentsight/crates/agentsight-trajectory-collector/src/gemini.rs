@@ -490,7 +490,13 @@ fn gemini_record_is_empty(msg: &serde_json::Value) -> bool {
 fn token_metrics(tokens: Option<&serde_json::Value>) -> Option<Metrics> {
     let tokens = tokens.filter(|v| v.is_object())?;
     let prompt = tokens.get("input").and_then(|v| v.as_u64());
-    let completion = tokens.get("output").and_then(|v| v.as_u64());
+    // Gemini persists visible candidates and billed reasoning separately.
+    let visible = tokens.get("output").and_then(|v| v.as_u64());
+    let thoughts = tokens.get("thoughts").and_then(|v| v.as_u64());
+    let completion = match (visible, thoughts) {
+        (Some(output), Some(thoughts)) => output.checked_add(thoughts),
+        (output, thoughts) => output.or(thoughts),
+    };
     if prompt.is_none() && completion.is_none() {
         return None;
     }
