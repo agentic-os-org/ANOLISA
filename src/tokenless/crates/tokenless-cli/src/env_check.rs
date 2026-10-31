@@ -15,9 +15,99 @@ use std::sync::LazyLock;
 // `split_whitespace().last()` is fragile: tools like `curl` print
 // "curl 8.1.2 (x86_64-linux-gnu)" where `.last()` gives the arch suffix,
 // and `jq-1.6` has no whitespace around the version. A targeted regex
-// anchored on digit groups avoids these false matches.
+// anchored on digit groups avoids these false matches. The patch group is
+// optional: common tools report only `major.minor` (jq "jq-1.6", GNU Make
+// "GNU Make 4.3", gzip "gzip 1.10", and an rtk build reporting "rtk 0.36")
+// — a strict three-group pattern extracts nothing for those and every
+// comparison degrades to "0.0.0", falsely reporting VersionLow.
 static VERSION_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+(?:\.\d+)?)").unwrap());
+
+/// Extract the installed version from `--version` output.
+///
+/// Returns the first version-like token (at least `major.minor`), or
+/// `"0.0.0"` when the output carries no version at all. Used by
+/// `check_dep`; `select_rtk_path` has its own rtk-anchored extractor
+/// (`rtk_version_from`) so the release-build rtk gate does not misread
+/// a distractor version printed by an unrelated banner line.
+fn installed_version_from(output: &str) -> String {
+    VERSION_RE
+        .find(output)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "0.0.0".to_string())
+}
+
+/// Version `rtk` reports for itself, anchored to the start of a line:
+/// "rtk 0.43.0", "rtk/0.43.0", "rtk version 0.43.0", "rtk v0.43.0", or
+/// the name alone on a line with the version on the next. The line
+/// anchor keeps a diagnostic that merely *names* an older rtk version
+/// ("rtk: warning: config written for rtk 0.9 syntax", with the real
+/// banner on a later line) from winning over the real one, and the
+/// standalone-token suffix keeps a leading-number message ("rtk 1.0
+/// migration required: run rtk migrate") from being read as the
+/// version: the captured number must be followed by end-of-line or a
+/// separator (-, +, (, )). Three components only: the loose tier
+/// admits prose between the name and the number, so it is the tier
+/// least able to tell a version from a schema number - the same
+/// reasoning the nameless tier below already writes down. Residual,
+/// stated rather than fixed: a three-component number in prose
+/// ("rtk: warning: config schema 2.1.0 (unsupported)") still passes;
+/// closing that fully means giving up the decorated-banner grammar.
+static RTK_VERSION_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?im)^[ \t]*rtk(?:(?:[^\n]*?[^0-9.\n])?|\r?\n[ \t]*(?:v(?:ersion)?[ \t:]*)?)v?(\d+\.\d+\.\d+)(?:[ \t]*[-(+)]|[ \t]*\r?$|\.\d)",
+    )
+    .unwrap()
+});
+
+/// A nameless banner whose leading token is *only* a version: bare
+/// "0.43.0", or "0.43.0 (x86_64-unknown-linux-gnu)". A message that
+/// merely starts with a dotted number ("1.0 migration required: run
+/// rtk migrate", "2.1 unsupported: config schema") is not a version
+/// banner: the token must be followed by end-of-line or a separator.
+/// Three components only: the unnamed fallback is the last resort, and
+/// a bare two-component number alone on a line is far more likely to be
+/// a schema or config number than a tool version.
+static NAMELESS_VERSION_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?m)^[ \t]*v?(\d+\.\d+\.\d+)(?:[ \t]*[-(+)]|[ \t]*\r?$|\.\d)").unwrap()
+});
+
+/// Tier 1 of the rtk gate: a line that is *only* the rtk name (optionally
+/// with a build suffix, "rtk-static"), separators, the version (with
+/// SemVer pre-release and build halves, "-rc1+build.7"), and a trailing
+/// parenthetical. Prose anywhere before the number disqualifies the
+/// line, so a diagnostic that happens to name an older rtk version
+/// ("rtk: note: config for rtk 0.34", real banner on the next line)
+/// cannot shadow the banner. Tried first on both streams;
+/// `RTK_VERSION_RE` is the stdout-only fallback that keeps the decorated
+/// banners main accepts today.
+static RTK_VERSION_STRICT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?im)^[ \t]*rtk(?:-[0-9A-Za-z]+)?(?:[ \t_/:=,+()-]*|\r?\n[ \t]*)(?:v(?:ersion)?[ \t_/:=,+()-]*)?v?(\d+\.\d+(?:\.\d+)?)(?:-[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z.-]*)?[ \t]*(?:\([^)\n]*\)|\))?[ \t]*\r?$",
+    )
+    .unwrap()
+});
+
+/// Version rtk reports for itself, or a nameless version banner.
+///
+/// Only a line that is *just* the rtk name and the version may come from
+/// stderr; prose diagnostics and the unnamed fallback are stdout-only, so
+/// "rtk: warning: config schema 2.1 (unsupported)" cannot be
+/// false-accepted on either stream. `rtk_version_probe` in
+/// benchmark/l1-compressor/run-benchmarks.sh is narrower again (stdout-only
+/// and first-line-only); this helper deliberately is not, so a bare
+/// "rtk 0.43.0" banner on stderr still resolves.
+fn rtk_version_from(stdout: &str, stderr: &str) -> Option<String> {
+    let capture = |re: &regex::Regex, text: &str| {
+        re.captures(text)
+            .and_then(|captures| captures.get(1))
+            .map(|m| m.as_str().to_owned())
+    };
+    capture(&RTK_VERSION_STRICT_RE, stdout)
+        .or_else(|| capture(&RTK_VERSION_STRICT_RE, stderr))
+        .or_else(|| capture(&RTK_VERSION_RE, stdout))
+        .or_else(|| capture(&NAMELESS_VERSION_RE, stdout))
+}
 
 fn tool_ready_hard_bypassed() -> bool {
     // Release builds always bypass Tool Ready. Unit tests retain a test-only
@@ -686,16 +776,10 @@ fn select_rtk_candidates(candidates: Vec<PathBuf>) -> Option<String> {
         if !output.status.success() {
             return None;
         }
-        let version_text = format!(
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let version = VERSION_RE
-            .captures(&version_text)
-            .and_then(|captures| captures.get(1))?
-            .as_str();
-        version_ge(version, "0.35.0").then(|| path.to_string_lossy().into_owned())
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let version = rtk_version_from(&stdout, &stderr)?;
+        version_ge(&version, "0.35.0").then(|| path.to_string_lossy().into_owned())
     })
 }
 
@@ -708,16 +792,7 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
                 let required_version = extract_required_version(version);
                 let version_output = Command::new(&path).arg("--version").output();
                 let installed_version = match version_output {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        // Use regex to find the first version-like token
-                        // (digits.digits.digits), not split_whitespace().last()
-                        // which fails for "curl 8.1.2 (x86_64...)" and "jq-1.6".
-                        VERSION_RE
-                            .find(&stdout)
-                            .map(|m| m.as_str().to_string())
-                            .unwrap_or_else(|| "0.0.0".to_string())
-                    }
+                    Ok(out) => installed_version_from(&String::from_utf8_lossy(&out.stdout)),
                     Err(_) => "0.0.0".to_string(),
                 };
 

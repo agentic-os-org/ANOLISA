@@ -235,6 +235,45 @@ fn version_ge_patch_comparison() {
     assert!(!version_ge("1.0.0", "1.0.1"));
 }
 
+#[test]
+fn version_regex_matches_two_component_versions() {
+    // jq, GNU Make, gzip, and an rtk reporting "0.36" all print major.minor
+    // with no patch group; the extraction must not degrade them to "0.0.0".
+    // Platform-independent: this exercises only the regex, no filesystem.
+    assert_eq!(VERSION_RE.find("jq-1.6").map(|m| m.as_str()), Some("1.6"));
+    assert_eq!(
+        VERSION_RE.find("GNU Make 4.3\n").map(|m| m.as_str()),
+        Some("4.3")
+    );
+    assert_eq!(VERSION_RE.find("gzip 1.10").map(|m| m.as_str()), Some("1.10"));
+    assert_eq!(VERSION_RE.find("rtk 0.36").map(|m| m.as_str()), Some("0.36"));
+    // Three-component versions keep matching, with tool prefixes and
+    // trailing architecture noise intact.
+    assert_eq!(
+        VERSION_RE
+            .find("curl 8.1.2 (x86_64-linux-gnu)")
+            .map(|m| m.as_str()),
+        Some("8.1.2")
+    );
+    assert_eq!(
+        VERSION_RE
+            .find("GNU bash, version 5.2.21(1)-release")
+            .map(|m| m.as_str()),
+        Some("5.2.21")
+    );
+}
+
+#[test]
+fn installed_version_from_handles_two_component_and_missing_versions() {
+    assert_eq!(installed_version_from("jq-1.6"), "1.6");
+    assert_eq!(installed_version_from("GNU Make 4.3\n"), "4.3");
+    assert_eq!(
+        installed_version_from("curl 8.1.2 (x86_64-linux-gnu)\n"),
+        "8.1.2"
+    );
+    assert_eq!(installed_version_from("no version here"), "0.0.0");
+}
+
 // Legacy readiness checks require Unix tools or filesystem layouts.
 #[cfg(unix)]
 #[test]
@@ -491,6 +530,328 @@ fn rtk_resolution_skips_incompatible_path_candidate() {
         ),
         Some(bundled.to_string_lossy().into_owned())
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_accepts_two_component_version() {
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(&rtk, "#!/bin/sh\nprintf 'rtk 0.36'\n").unwrap();
+    chmod_file(&rtk, 0o700);
+
+    // An rtk reporting a two-component version ("0.36") satisfies the
+    // >= 0.35.0 floor and must be selected; a strict three-group pattern
+    // extracts nothing, rejects the candidate, and silently disables rtk.
+    assert_eq!(
+        select_rtk_candidates(vec![rtk.clone()]),
+        Some(rtk.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_reads_rtk_version_not_leading_dotted_pair() {
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(&rtk, "#!/bin/sh\nprintf 'schema 0.1\\nrtk 0.43.0\\n'\n").unwrap();
+    chmod_file(&rtk, 0o700);
+
+    // A banner whose first dotted pair belongs to a schema line must not
+    // shadow the rtk version: the leftmost rule reads "0.1", fails the
+    // 0.35.0 floor, and silently disables rtk (or, on a host with another
+    // install, substitutes the fallback rtk). The assertion is path-exact
+    // so the substitution case cannot pass unnoticed.
+    assert_eq!(
+        select_rtk_candidates(vec![rtk.clone()]),
+        Some(rtk.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_rejects_versionless_stderr_banner() {
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(
+        &rtk,
+        "#!/bin/sh\nprintf 'rtk: warning: config schema 2.1 unsupported' >&2\n",
+    )
+    .unwrap();
+    chmod_file(&rtk, 0o700);
+
+    // stderr can never supply a version (mirroring rtk_version_probe in
+    // benchmark/l1-compressor/run-benchmarks.sh): the old combined-blob
+    // rule false-accepted "2.1" here and passed the floor. assert_ne!
+    // rather than a bare None: binary_fallback_paths may select another
+    // rtk on a shared host, which a None assertion would flake on.
+    assert_ne!(
+        select_rtk_candidates(vec![rtk.clone()]),
+        Some(rtk.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_rejects_versionless_stdout_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(
+        &rtk,
+        "#!/bin/sh\nprintf 'rtk: warning: config schema 2.1 unsupported\\n'\n",
+    )
+    .unwrap();
+    chmod_file(&rtk, 0o700);
+
+    // The same diagnostic on STDOUT must not reach the gate through the
+    // generic fallback either: the banner's dotted number ("2.1" - a
+    // schema version) never sits at the start of the output, and only a
+    // nameless banner whose first token IS the version may use the
+    // fallback. assert_ne! for the same multi-install reason as above.
+    assert_ne!(
+        select_rtk_candidates(vec![rtk.clone()]),
+        Some(rtk.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_accepts_nameless_version_banner() {
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(&rtk, "#!/bin/sh\nprintf '0.43.0 (x86_64-unknown-linux-gnu)\\n'\n").unwrap();
+    chmod_file(&rtk, 0o700);
+
+    // The generic fallback exists for a banner that carries no rtk name
+    // at all and leads with the version; pin that positive case so the
+    // fallback cannot be deleted wholesale by a future hardening pass.
+    assert_eq!(
+        select_rtk_candidates(vec![rtk.clone()]),
+        Some(rtk.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_rejects_leading_number_messages() {
+    // A message whose leading token is a dotted number is not a version
+    // banner: the number must be followed by end-of-line or a separator,
+    // so "1.0 migration required" / "2.1 unsupported" cannot pass the
+    // gate - nameless or named ("rtk 1.0 migration required...").
+    for banner in [
+        "1.0 migration required: run rtk migrate",
+        "2.1 unsupported: config schema",
+        "rtk 1.0 migration required: run rtk migrate",
+        "rtk 2.1 unsupported: config schema",
+        "rtk version 2.1 is unsupported",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let rtk = directory.path().join("rtk");
+        std::fs::write(&rtk, format!("#!/bin/sh\nprintf '{banner}\\n'\n")).unwrap();
+        chmod_file(&rtk, 0o700);
+        assert_ne!(
+            select_rtk_candidates(vec![rtk.clone()]),
+            Some(rtk.to_string_lossy().into_owned()),
+            "banner must not pass the version gate: {banner}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_ignores_older_rtk_versions_in_diagnostics() {
+    // A diagnostic that names an older rtk version must not win over the
+    // real banner on a later line: the name anchor is line-started, so
+    // "rtk 0.9" inside a warning sentence is not a match and the healthy
+    // "rtk 0.43.0" line is.
+    for banner in [
+        "rtk: warning: config written for rtk 0.9 syntax\nrtk 0.43.0",
+        "warning: rtk 0.9 config format is deprecated\nrtk 0.43.0",
+        "rtk: note: config for rtk 0.34\nrtk 0.43.0",
+        "rtk: note: please migrate from 0.34.0\nrtk 0.43.0",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let rtk = directory.path().join("rtk");
+        std::fs::write(&rtk, format!("#!/bin/sh\nprintf '{banner}\\n'\n")).unwrap();
+        chmod_file(&rtk, 0o700);
+        assert_eq!(
+            select_rtk_candidates(vec![rtk.clone()]),
+            Some(rtk.to_string_lossy().into_owned()),
+            "diagnostic must not shadow the real banner: {banner}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_rejects_decorated_stderr_diagnostics() {
+    // The loose tier is stdout-only: a prose diagnostic on stderr with a
+    // bracket-adjacent number ("... schema 2.1 (unsupported)") cannot be
+    // false-accepted, and the strict tier refuses prose on both streams.
+    // A bare banner on stderr still resolves through the strict tier, so
+    // only the prose shape is refused.
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(
+        &rtk,
+        "#!/bin/sh\nprintf 'rtk: warning: config schema 2.1 (unsupported)\\n' >&2\n",
+    )
+    .unwrap();
+    chmod_file(&rtk, 0o700);
+    assert_ne!(
+        select_rtk_candidates(vec![rtk.clone()]),
+        Some(rtk.to_string_lossy().into_owned())
+    );
+
+    let ok = directory.path().join("rtk-clean");
+    std::fs::write(
+        &ok,
+        "#!/bin/sh\nprintf 'rtk: warning: config schema 2.1\\n' >&2\nprintf 'rtk 0.43.0\\n' >&2\n",
+    )
+    .unwrap();
+    chmod_file(&ok, 0o700);
+    assert_eq!(
+        select_rtk_candidates(vec![ok.clone()]),
+        Some(ok.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_rejects_a_stdout_diagnostic_whose_number_ends_the_line() {
+    // The reported spelling ("... 2.1 unsupported") already rejects because the
+    // number is followed by prose; the same diagnostic ending at the number,
+    // bracketed or not, must reject too. "2.1" is a schema version, and an rtk
+    // of unknown version must not clear the >= 0.35.0 floor.
+    for banner in [
+        "rtk: warning: config schema 2.1 (unsupported)",
+        "rtk: warning: config schema 2.1",
+        "rtk: error: schema 1.0 (too old)",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let rtk = directory.path().join("rtk");
+        std::fs::write(&rtk, format!("#!/bin/sh\nprintf '{banner}'\n")).unwrap();
+        chmod_file(&rtk, 0o700);
+        assert_eq!(
+            select_rtk_candidates(vec![rtk.clone()]),
+            None,
+            "stdout diagnostic must not supply a version: {banner}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_accepts_crlf_version_banners() {
+    // (?m)$ matches before \n, never before \r, so the line-end anchor needs an
+    // explicit \r? or every CRLF banner rejects a healthy rtk.
+    for banner in [
+        "rtk 0.43.0\r\n",
+        "rtk version 0.43.0\r\n",
+        "rtk\r\n0.43.0\r\n",
+        "0.43.0 (x86_64-unknown-linux-gnu)\r\n",
+        "rtk (rewrite toolkit) 0.43.0\r\n",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let rtk = directory.path().join("rtk");
+        let payload = banner.replace('\r', "\\r").replace('\n', "\\n");
+        std::fs::write(&rtk, format!("#!/bin/sh\nprintf '{payload}'\n")).unwrap();
+        chmod_file(&rtk, 0o700);
+        assert_eq!(
+            select_rtk_candidates(vec![rtk.clone()]),
+            Some(rtk.to_string_lossy().into_owned()),
+            "CRLF banner must resolve: {banner:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_accepts_semver_metadata_on_stderr() {
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(&rtk, "#!/bin/sh\nprintf 'rtk 0.43.0-rc1+build.7' >&2\n").unwrap();
+    chmod_file(&rtk, 0o700);
+    assert_eq!(
+        select_rtk_candidates(vec![rtk.clone()]),
+        Some(rtk.to_string_lossy().into_owned())
+    );
+}
+
+#[test]
+fn rtk_version_from_does_not_slide_into_a_longer_dotted_number() {
+    // Pure extraction, platform-independent. "rtk-0.43.0" is a dash-joined
+    // banner for 0.43.0, not a build suffix "rtk-" plus "0.43.0"; and a
+    // four-component number must yield its first three components, not an
+    // inner window that appears nowhere in the output.
+    for (output, expected) in [
+        ("rtk-0.43.0\n", Some("0.43.0")),
+        ("rtk-v0.43.0\n", Some("0.43.0")),
+        ("rtk-0.34.0\n", Some("0.34.0")),
+        ("rtk 0.43.0.1\n", Some("0.43.0")),
+        ("rtk 0.34.0.1\n", Some("0.34.0")),
+        ("rtk 0.34.0.20241001\n", Some("0.34.0")),
+        ("rtk version 0.43.0.1\n", Some("0.43.0")),
+        ("0.43.0.1\n", Some("0.43.0")),
+    ] {
+        assert_eq!(
+            rtk_version_from(output, "").as_deref(),
+            expected,
+            "extraction must not slide inside a dotted run: {output:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_rejects_a_below_floor_version_with_a_dash_or_fourth_component() {
+    // 0.34.0 and 0.9.0 are below the >= 0.35.0 floor. Reading "34.0" / "9.0"
+    // / "34.0.1" instead selects an rtk that cannot serve the rewrite.
+    for (banner, stream) in [
+        ("rtk-0.34.0\n", "stdout"),
+        ("rtk-0.9.0\n", "stdout"),
+        ("rtk 0.34.0.1\n", "stdout"),
+        ("rtk 0.34.0.20241001\n", "stdout"),
+        ("rtk-0.34.0\r\n", "stdout"),
+        ("rtk-0.34.0\n", "stderr"),
+        ("rtk 0.34.0.1\n", "stderr"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let rtk = directory.path().join("rtk");
+        let redirect = if stream == "stderr" { " >&2" } else { "" };
+        let payload = banner.replace('\r', "\\r").replace('\n', "\\n");
+        std::fs::write(&rtk, format!("#!/bin/sh\nprintf '{payload}'{redirect}\n")).unwrap();
+        chmod_file(&rtk, 0o700);
+        assert_eq!(
+            select_rtk_candidates(vec![rtk.clone()]),
+            None,
+            "below-floor banner must not pass the gate: {banner:?} on {stream}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_accepts_a_dash_joined_version_banner() {
+    // The same dash-joined shape above the floor must still resolve, on both
+    // streams: this is the "jq-1.6" banner style the VERSION_RE comment cites.
+    for (banner, stream) in [
+        ("rtk-0.43.0\n", "stdout"),
+        ("rtk-v0.43.0\n", "stdout"),
+        ("rtk-0.43.0\n", "stderr"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let rtk = directory.path().join("rtk");
+        let redirect = if stream == "stderr" { " >&2" } else { "" };
+        let payload = banner.replace('\r', "\\r").replace('\n', "\\n");
+        std::fs::write(&rtk, format!("#!/bin/sh\nprintf '{payload}'{redirect}\n")).unwrap();
+        chmod_file(&rtk, 0o700);
+        assert_eq!(
+            select_rtk_candidates(vec![rtk.clone()]),
+            Some(rtk.to_string_lossy().into_owned()),
+            "dash-joined banner must resolve: {banner:?} on {stream}"
+        );
+    }
 }
 
 #[cfg(unix)]
