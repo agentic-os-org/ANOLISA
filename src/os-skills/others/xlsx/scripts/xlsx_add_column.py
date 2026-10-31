@@ -91,10 +91,11 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     rels_tree = ET.parse(os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels"))
     for rel in rels_tree.getroot():
         if rel.get("Id") == rid:
-            target = rel.get("Target")
-            # Handle absolute paths (starting with /) and relative paths
-            if target.startswith("/"):
-                target = target[1:]  # Remove leading /
+            target = rel.get("Target").lstrip("/")
+            # Relative targets are resolved against the rels part's own
+            # directory (xl/), the form Excel and openpyxl write.
+            if not target.startswith("xl/"):
+                target = "xl/" + target
             return os.path.join(work_dir, target)
 
     print(f"ERROR: Relationship not found: {rid}")
