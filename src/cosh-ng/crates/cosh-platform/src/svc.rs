@@ -141,13 +141,10 @@ fn parse_svc_list_line(line: &str) -> Option<SvcStatus> {
     }
     let name = parts[0].trim_end_matches(".service");
     let active = parts[2] == "active";
-    let state = match parts[3] {
-        "running" => SvcState::Running,
-        "exited" => SvcState::Stopped,
-        "dead" => SvcState::Stopped,
-        "failed" => SvcState::Failed,
-        other => SvcState::Unknown(other.to_string()),
-    };
+    // The `ACTIVE`/`SUB` columns carry the same values as the `ActiveState`/
+    // `SubState` properties, so both views go through one mapping instead of
+    // disagreeing about `activating`, `deactivating` or a finished oneshot.
+    let state = state_from_active_and_sub(parts[2], Some(parts[3]));
     let description = if parts.len() > 4 {
         Some(parts[4..].join(" "))
     } else {
@@ -247,13 +244,46 @@ fn load_service_properties(
     Ok(props)
 }
 
+/// Map a systemd `SubState` onto the state the rest of `svc` reports.
+///
+/// `svc status` reads the full property set and `svc list` parses the `SUB`
+/// column; both see the same values, so they share this table. It is what
+/// keeps `ActiveState=active` from meaning "running" on its own: a oneshot
+/// that finished successfully reports `active` + `exited` with `MainPID=0`,
+/// and no process exists.
+fn state_from_sub_state(sub: &str) -> Option<SvcState> {
+    match sub {
+        "running" | "reloading" => Some(SvcState::Running),
+        "exited" | "dead" => Some(SvcState::Stopped),
+        "failed" => Some(SvcState::Failed),
+        "activating" => Some(SvcState::Activating),
+        "deactivating" => Some(SvcState::Deactivating),
+        _ => None,
+    }
+}
+
 fn state_from_properties(props: &std::collections::HashMap<String, String>) -> SvcState {
-    match props
-        .get("ActiveState")
-        .map(String::as_str)
-        .unwrap_or("unknown")
-    {
-        "active" => SvcState::Running,
+    state_from_active_and_sub(
+        props
+            .get("ActiveState")
+            .map(String::as_str)
+            .unwrap_or("unknown"),
+        props.get("SubState").map(String::as_str),
+    )
+}
+
+/// The one mapping both `svc status` (`ActiveState`/`SubState` properties) and
+/// `svc list` (`ACTIVE`/`SUB` columns) go through, so the two views cannot
+/// disagree.
+///
+/// `active` alone does not mean a process is running: a oneshot that finished
+/// successfully reports `active` + `exited` with `MainPID=0`. `SubState`
+/// decides in that case, and a unit that omits it keeps the previous answer.
+fn state_from_active_and_sub(active: &str, sub: Option<&str>) -> SvcState {
+    match active {
+        "active" => sub
+            .and_then(state_from_sub_state)
+            .unwrap_or(SvcState::Running),
         "inactive" => SvcState::Stopped,
         "failed" => SvcState::Failed,
         "activating" => SvcState::Activating,
@@ -410,6 +440,55 @@ mod tests {
         let props = parse_systemctl_show("MainPID=0");
         let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Unknown("unknown".to_string()));
+    }
+
+    // --- SubState decides what `active` means ---
+
+    #[test]
+    fn test_svc_status_exited_oneshot_is_not_running() {
+        // A oneshot that finished successfully: systemd keeps
+        // ActiveState=active, but SubState=exited and MainPID=0.
+        let props = parse_systemctl_show("ActiveState=active\nSubState=exited\nMainPID=0");
+        assert_ne!(
+            state_from_properties(&props),
+            SvcState::Running,
+            "an exited oneshot must not be reported Running"
+        );
+    }
+
+    #[test]
+    fn test_svc_status_active_running_keeps_running() {
+        let props = parse_systemctl_show("ActiveState=active\nSubState=running\nMainPID=42");
+        assert_eq!(state_from_properties(&props), SvcState::Running);
+    }
+
+    #[test]
+    fn test_svc_status_active_without_substate_keeps_running() {
+        let props = parse_systemctl_show("ActiveState=active");
+        assert_eq!(state_from_properties(&props), SvcState::Running);
+    }
+
+    #[test]
+    fn test_svc_list_activating_matches_status_mapping() {
+        let listed =
+            parse_svc_list_line("db.service loaded activating start-pre Starting").unwrap();
+        let props = parse_systemctl_show("ActiveState=activating");
+        assert_eq!(
+            listed.state,
+            state_from_properties(&props),
+            "list ACTIVE activating must map like ActiveState activating"
+        );
+    }
+
+    #[test]
+    fn test_svc_list_exited_oneshot_is_not_running() {
+        let listed =
+            parse_svc_list_line("flush.service loaded active exited Flush journal").unwrap();
+        assert_ne!(
+            listed.state,
+            SvcState::Running,
+            "an exited oneshot must not be reported Running from list either"
+        );
     }
 
     // --- UTF-8 service names and descriptions ---
