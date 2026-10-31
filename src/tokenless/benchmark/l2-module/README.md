@@ -20,6 +20,17 @@ in the same round.
 | Sample size N | Independent observations behind compression/retention. Static categories compress deterministically, so repetitions of one sample count **once**; feeding every copy into bootstrap/Wilson would narrow the intervals without adding payload. Repetition count is sized from a 5-run pilot as `N = ceil((1.96·CV/0.05)²)` clamped to `[5, 50]` and still drives latency percentiles; bootstrap 95% CIs (10000 resamples, seed 42) |
 | Comparability | `code` is reported but **not** cross-side comparable: tokenless' engine only accepts JSON values, so that payload reaches it inside a `{"content": ...}` envelope while headroom sees raw text. The paired gap is withheld and the report says why; each side's own rate still stands |
 
+> **`json` sample shape:** author a `json` sample as an object or array at the
+> top level. The enforced rule is narrower — a **top-level string** is rejected
+> by both the asset check (`tests/l2_samples.rs`) and the tokenless entry point
+> (`wire_before`). When the quoted text parses as an object or array the
+> compressor unwraps it and is scored against the inner value while the
+> before-count still reports the quoted form (one rate over two bases); when it
+> does not, a bare string measures escaping rather than JSON compression. The
+> guard therefore rejects every top-level string — deliberately broader than the
+> engine's unwrap condition — while scalar top levels (number, bool, null) pass
+> through unchanged.
+
 ### Latency bases (not cross-comparable)
 
 | Side | Basis |
