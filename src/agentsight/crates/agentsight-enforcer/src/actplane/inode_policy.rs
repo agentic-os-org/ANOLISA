@@ -20,6 +20,10 @@ struct InodeFile {
     dev: u32,
     path: String,
     rule_id: Option<u32>,
+    /// Whether a `block write` clause (not only `block unlink`) guards this
+    /// file: only write-guarded files promise content coverage, so only they
+    /// feed the pre-existing write-access preflight.
+    write_clause: bool,
     _file: Arc<File>,
 }
 
@@ -27,6 +31,10 @@ struct InodeFile {
 #[derive(Clone, Debug, Default)]
 pub(super) struct InodePolicy {
     files: Vec<InodeFile>,
+    /// Directory inodes above every guarded file. Guarding them keeps the
+    /// configured path reachable: renaming or removing an ancestor would
+    /// otherwise detach the protected entry from its authored path.
+    ancestors: Vec<InodeFile>,
 }
 
 impl InodePolicy {
@@ -49,16 +57,22 @@ impl InodePolicy {
             .iter()
             .filter(|source| source.kind == Kind::File)
         {
-            prepared.add_file(&source.pattern, None)?;
+            prepared.add_file(&source.pattern, None, false)?;
         }
-        for (path, rule_id) in guards {
-            prepared.add_file(&path, Some(rule_id))?;
+        for (path, rule_id, write_clause) in guards {
+            prepared.add_file(&path, Some(rule_id), write_clause)?;
         }
+        prepared.add_ancestors()?;
         Ok(prepared)
     }
 
-    fn add_file(&mut self, path: &str, rule_id: Option<u32>) -> Result<(), BackendError> {
-        let file = pin_file(path, rule_id)?;
+    fn add_file(
+        &mut self,
+        path: &str,
+        rule_id: Option<u32>,
+        write_clause: bool,
+    ) -> Result<(), BackendError> {
+        let file = pin_file(path, rule_id, write_clause)?;
         if let Some(existing) = self
             .files
             .iter_mut()
@@ -76,10 +90,70 @@ impl InodePolicy {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
+            existing.write_clause |= write_clause;
         } else {
             self.files.push(file);
         }
         Ok(())
+    }
+
+    /// Hold every directory above each guarded file so path-relation changes
+    /// (rename or removal of an ancestor) cannot detach the guarded entry from
+    /// its authored path while the binding is active.
+    fn add_ancestors(&mut self) -> Result<(), BackendError> {
+        let guarded: Vec<(String, Option<u32>)> = self
+            .files
+            .iter()
+            .filter(|file| file.rule_id.is_some())
+            .map(|file| (file.path.clone(), file.rule_id))
+            .collect();
+        for (path, rule_id) in guarded {
+            let mut ancestor = Path::new(&path);
+            while let Some(parent) = ancestor.parent() {
+                if parent.as_os_str().is_empty() || parent.as_os_str() == "/" {
+                    break;
+                }
+                ancestor = parent;
+                let parent_path = parent.to_str().ok_or_else(|| {
+                    invalid(format!("'{path}': ancestor path is not valid UTF-8"))
+                })?;
+                if self.known_inode(parent_path).is_some() {
+                    continue;
+                }
+                self.ancestors.push(pin_dir(parent_path, rule_id)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reports an already held identity for the path, in files or ancestors.
+    fn known_inode(&self, path: &str) -> Option<&InodeFile> {
+        let canonical = fs::canonicalize(path).ok()?;
+        let metadata = fs::metadata(&canonical).ok()?;
+        let ino = metadata.ino();
+        let dev = userspace_dev_to_kernel(metadata.dev());
+        self.files
+            .iter()
+            .chain(&self.ancestors)
+            .find(|entry| entry.ino == ino && entry.dev == dev)
+    }
+
+    /// Device/inode identities of write-guarded files for the pre-attach
+    /// write-access scan. Delete-only guards promise no content coverage, so
+    /// pre-existing writable mappings or descriptors of theirs must not
+    /// reject the binding.
+    pub(super) fn protected_identities(&self) -> Vec<super::preexisting_maps::ProtectedEntry> {
+        self.files
+            .iter()
+            .filter(|file| file.rule_id.is_some() && file.write_clause)
+            .map(|file| super::preexisting_maps::ProtectedEntry {
+                path: file.path.clone(),
+                scope: super::preexisting_maps::ProtectedScope::Exact {
+                    dev: file.dev,
+                    ino: file.ino,
+                },
+            })
+            .collect()
     }
 
     /// Register paths for source matching/audit, and guards only for block clauses.
@@ -96,7 +170,22 @@ impl InodePolicy {
                     rule_id,
                 )
             },
-        )
+        )?;
+        // Ancestor directories carry no registered path: they only keep the
+        // guarded entry's authored path reachable inside the bound domain.
+        for ancestor in &self.ancestors {
+            let rule_id = ancestor.rule_id.unwrap_or(0);
+            engine
+                .guard_inode(
+                    ancestor.ino,
+                    ancestor.dev,
+                    INODE_GUARD_UNLINK | INODE_GUARD_RENAME,
+                    domain,
+                    rule_id,
+                )
+                .map_err(|error| registration_error("guard ancestor inode", ancestor, error))?;
+        }
+        Ok(())
     }
 
     fn populate(
@@ -131,7 +220,7 @@ pub(super) fn clear(engine: &PinnedEngine) -> Vec<String> {
 fn extract_guarded_paths(
     policy: &Policy,
     compiled: &Compiled,
-) -> Result<Vec<(String, u32)>, BackendError> {
+) -> Result<Vec<(String, u32, bool)>, BackendError> {
     let seed = if compiled.labels.contains_key("COMMAND") {
         "COMMAND"
     } else {
@@ -192,7 +281,11 @@ fn extract_guarded_paths(
             }
             let rule_id = u32::try_from(rule_id)
                 .map_err(|_| invalid("lowered rule index exceeds the inode guard ABI"))?;
-            paths.push((clause.target.pattern.clone(), rule_id));
+            paths.push((
+                clause.target.pattern.clone(),
+                rule_id,
+                matches!(clause.op, Op::Write),
+            ));
         }
     }
     Ok(paths)
@@ -212,7 +305,11 @@ fn matches_clause(meta: &RuleMeta, rule: &Rule, clause: &Clause) -> bool {
         && meta.target_arg == clause.target.arg
 }
 
-fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError> {
+fn pin_file(
+    path: &str,
+    rule_id: Option<u32>,
+    write_clause: bool,
+) -> Result<InodeFile, BackendError> {
     if !Path::new(path).is_absolute() || path.contains(['*', '?', '[', ']', '{', '}', '\\']) {
         return Err(invalid(format!(
             "'{path}': inode-only paths must be exact absolute literals, not globs; use full-path mode for patterns"
@@ -251,6 +348,36 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
         dev: userspace_dev_to_kernel(metadata.dev()),
         path: path.into(),
         rule_id,
+        write_clause,
+        _file: Arc::new(file),
+    })
+}
+
+/// Hold one ancestor directory of a guarded file for path-stability guards.
+fn pin_dir(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            invalid(format!(
+                "'{path}': cannot hold ancestor with O_PATH: {error}"
+            ))
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| invalid(format!("'{path}': cannot stat held ancestor: {error}")))?;
+    if !metadata.is_dir() {
+        return Err(invalid(format!(
+            "'{path}': guarded file ancestors must be directories"
+        )));
+    }
+    Ok(InodeFile {
+        ino: metadata.ino(),
+        dev: userspace_dev_to_kernel(metadata.dev()),
+        path: path.into(),
+        rule_id,
+        write_clause: false,
         _file: Arc::new(file),
     })
 }
@@ -326,13 +453,64 @@ mod tests {
     }
 
     #[test]
+    fn preflight_identities_cover_only_write_guarded_files() {
+        let fixture = Fixture::new();
+        let path = fixture.file("p");
+        let unlink_only = prepare(&guard_dsl(&path, "if AGENT")).unwrap();
+        assert!(
+            unlink_only.protected_identities().is_empty(),
+            "delete-only guards promise no content coverage"
+        );
+        let dsl = format!(
+            "source AGENT = exec \"**\"\nrule protect:\n block write file \"{path}\" if AGENT\n because \"keep file\"\n"
+        );
+        let write_guarded = prepare(&dsl).unwrap();
+        assert_eq!(write_guarded.protected_identities().len(), 1);
+    }
+
+    #[test]
+    fn guarded_files_hold_their_ancestor_directories() {
+        let fixture = Fixture::new();
+        let nested = fixture.path("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        let path = fixture.file("a/b/keep");
+        let prepared = prepare(&guard_dsl(&path, "if AGENT")).unwrap();
+        let ancestors: Vec<String> = prepared
+            .ancestors
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert!(ancestors.contains(&nested), "{ancestors:?}");
+        assert!(ancestors.contains(&fixture.path("a")), "{ancestors:?}");
+        assert!(!ancestors.iter().any(|entry| entry == "/"), "{ancestors:?}");
+        assert_eq!(prepared.files.len(), 1);
+        assert_eq!(prepared.files[0].path, path);
+        // Shared ancestors of two guarded files are held once.
+        let sibling = fixture.file("a/b/keep2");
+        let dsl = format!(
+            "source AGENT = exec \"**\"\nrule one:\n block unlink file \"{path}\" if AGENT\n because \"one\"\nrule two:\n block unlink file \"{sibling}\" if AGENT\n because \"two\"\n"
+        );
+        let prepared = prepare(&dsl).unwrap();
+        let held = prepared
+            .ancestors
+            .iter()
+            .filter(|entry| entry.path == nested)
+            .count();
+        assert_eq!(held, 1);
+    }
+
+    #[test]
     fn lowered_index_accounts_for_dnf_and_clause_offset_and_first_guard_wins() {
         let fixture = Fixture::new();
         let path = fixture.file("p");
         let dsl = format!(
             "source AGENT = exec \"**\"\nsource OTHER = exec \"**\"\n\
              rule prior:\n notify connect endpoint \"*\" if AGENT or OTHER\n because \"prior\"\n\
-             rule protect:\n notify connect endpoint \"*\"\n block write file \"{path}\" if AGENT\n because \"keep file\"\n\
+             rule protect:
+ notify connect endpoint \"*\"
+ block write file \"{path}\" if AGENT
+ because \"keep file\"
+\
              rule later:\n block unlink file \"{path}\"\n because \"later\"\n"
         );
         let compiled = compile_str(&dsl).unwrap();
@@ -483,7 +661,7 @@ mod tests {
                 format!("source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{bad}\"\n");
             assert!(prepare(&source).is_err(), "source: {bad}");
         }
-        let error = pin_file(&format!("/{}", "a".repeat(126)), None).unwrap_err();
+        let error = pin_file(&format!("/{}", "a".repeat(126)), None, false).unwrap_err();
         assert!(error.to_string().contains("126-byte"));
     }
 
