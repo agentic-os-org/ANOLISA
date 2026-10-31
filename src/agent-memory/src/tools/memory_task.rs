@@ -368,12 +368,17 @@ fn task_exists(svc: &MemoryService, id: &str) -> bool {
 
 /// Create or update a task. If `id` is provided and a task with that id
 /// exists, it is updated; otherwise a new task is created.
+///
+/// `progress` is the caller-facing percentage. It is deliberately wider than
+/// the persisted `u8` field so the documented 0-100 range is clamped here,
+/// after the value has crossed the MCP boundary intact: narrowing first would
+/// wrap modulo 256 (300 -> 44, 256 -> 0) and persist in-range garbage.
 #[allow(clippy::too_many_arguments)]
 pub fn memory_task_save(
     svc: &MemoryService,
     title: &str,
     status: Option<&str>,
-    progress: Option<u8>,
+    progress: Option<u32>,
     next_steps: Option<Vec<String>>,
     blockers: Option<Vec<String>>,
     files_modified: Option<Vec<String>>,
@@ -446,7 +451,9 @@ pub fn memory_task_save(
         };
     }
     if let Some(p) = progress {
-        task.progress = p.min(100);
+        // Clamped to the documented 0-100 range before the narrowing cast, so
+        // the `as u8` below is exact and cannot wrap.
+        task.progress = p.min(100) as u8;
     }
     if let Some(ns) = next_steps {
         task.next_steps = ns;
@@ -871,5 +878,72 @@ mod tests {
 
         let resume = memory_task_resume(&svc, "custom-id-42").unwrap();
         assert!(resume.contains("Brand new task"));
+    }
+
+    #[test]
+    fn task_save_clamps_out_of_range_progress() {
+        let (_tmp, svc) = setup();
+        memory_task_save(
+            &svc,
+            "Clamped progress",
+            None,
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("clamp-1"),
+        )
+        .unwrap();
+
+        // The MCP tool advertises "progress (0-100%)". A caller that sends more
+        // must be clamped to 100 instead of wrapped modulo 256 (300 -> 44,
+        // 256 -> 0), which is what narrowing to u8 before the clamp did.
+        for out_of_range in [101u32, 255, 256, 300, u32::MAX] {
+            let result = memory_task_save(
+                &svc,
+                "",
+                None,
+                Some(out_of_range),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("clamp-1"),
+            )
+            .unwrap();
+            assert!(
+                result.contains("progress=100%"),
+                "progress {out_of_range} must report 100%, got: {result}"
+            );
+
+            // The clamp must reach the persisted task file, not only the reply.
+            let resume = memory_task_resume(&svc, "clamp-1").unwrap();
+            assert!(
+                resume.contains("100%)"),
+                "persisted progress for {out_of_range} must be 100, got: {resume}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_save_keeps_in_range_progress() {
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "In range",
+            None,
+            Some(44),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(result.contains("progress=44%"), "got: {result}");
     }
 }
