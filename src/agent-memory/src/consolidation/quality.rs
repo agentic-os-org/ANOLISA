@@ -309,6 +309,25 @@ mod tests {
     }
 
     #[test]
+    fn normalize_absurd_days_ago_leaves_text_unchanged() {
+        // `days_before` degrades to a no-op past `Days`' range, past `NaiveDate`'s
+        // ±262143-year range, and past what a u64 holds. The counts here arrive
+        // verbatim inside surrounding prose and memory file names, so the whole
+        // string has to come back untouched -- a partial rewrite would corrupt the
+        // path the fact was extracted from.
+        for text in [
+            "set 999999999999 days ago",
+            "notes/999999999999 days ago.md",
+            "found 100000000 days ago",
+            "seen 99999999999999999999999999 days ago",
+            "999999999999天前的记录",
+            "99999999999999999999999999天前的记录",
+        ] {
+            assert_eq!(normalize_relative_dates(text), text);
+        }
+    }
+
+    #[test]
     fn normalize_chinese_n_days() {
         let result = normalize_relative_dates("5天前发现的bug");
         assert!(!result.contains("天前"));
