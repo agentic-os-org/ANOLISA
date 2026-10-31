@@ -82,6 +82,9 @@ Register it with `qwen extensions link`, or run the install script: qwencode/scr
 OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and Tool
 Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
 Register it by running the install script: opencode/scripts/install.sh
+Command Code mod (response/TOON compression, RTK command rewriting, and Tool Ready)
+is available under /usr/share/anolisa/adapters/tokenless/cmd/.
+Register it by running the install script: cmd/scripts/install.sh
 
 %package core
 Summary:        Tokenless CLI and RTK command rewriting runtime
@@ -107,8 +110,9 @@ Conflicts:      %{name} < %{version}
 
 %description plugins
 OpenClaw, DSH, Hermes, Qoder, QwenWork, Claude Code, Codex, OpenCode,
-Qwen Code, QwenPaw, and cosh integrations, including shared hooks and
-framework registration scripts. Registration remains a separate user action.
+Command Code, Qwen Code, QwenPaw, and cosh integrations, including shared
+hooks and framework registration scripts. Registration remains a separate
+user action.
 
 %prep
 %setup -q -n %{name}-%{version}
@@ -152,7 +156,7 @@ for directory in common/hooks common/commands openclaw/dist dsh/dist \
     codex/.codex-plugin codex/hooks qwencode/hooks; do
     install -d -m 0755 "$adapters/$directory"
 done
-for framework in openclaw hermes qwenpaw qoder qwenwork claude-code codex opencode qwencode; do
+for framework in openclaw hermes qwenpaw qoder qwenwork claude-code codex opencode cmd qwencode; do
     install -d -m 0755 "$adapters/$framework/scripts"
     install -m 0755 \
         "adapters/tokenless/$framework/scripts/detect.sh" \
@@ -208,6 +212,8 @@ install -m 0755 adapters/tokenless/codex/scripts/check-tokenless \
     adapters/tokenless/codex/scripts/tool-ready "$adapters/codex/scripts/"
 install -m 0644 adapters/tokenless/codex/scripts/_common.sh "$adapters/codex/scripts/"
 install -m 0644 adapters/tokenless/opencode/plugin.js "$adapters/opencode/"
+# Command Code loads a TypeScript mod through jiti instead of a JS plugin.
+install -m 0644 adapters/tokenless/cmd/tokenless.ts "$adapters/cmd/"
 install -m 0644 adapters/tokenless/qwencode/qwen-extension.json "$adapters/qwencode/"
 install -m 0755 adapters/tokenless/qwencode/hooks/run-hook.sh "$adapters/qwencode/hooks/"
 
@@ -332,6 +338,21 @@ if [ $1 -eq 0 ]; then
     OPENCODE_SCRIPT="%{_adapterdir_tokenless}/opencode/scripts/uninstall.sh"
     if [ -x "$OPENCODE_SCRIPT" ]; then
         bash "$OPENCODE_SCRIPT" || true
+    fi
+
+    # --- Command Code mod cleanup ---
+    # Note: %preun runs as root, while the mod is registered as a symlink in
+    # each invoking user's own ~/.commandcode/mods. This only removes root's
+    # link, so a non-root user's link survives and dangles once RPM deletes the
+    # packaged tokenless.ts it points at. Such users have to run
+    # cmd/scripts/uninstall.sh before the package is erased (it also removes an
+    # already dangling link) or delete ~/.commandcode/mods/tokenless.ts by hand
+    # afterwards.
+    CMD_SCRIPT="%{_adapterdir_tokenless}/cmd/scripts/uninstall.sh"
+    if [ -x "$CMD_SCRIPT" ]; then
+        bash "$CMD_SCRIPT" || true
+        echo "WARN: per-user Command Code mod links are not removed by RPM %preun." >&2
+        echo "WARN: each user running cmd must remove their own ~/.commandcode/mods/tokenless.ts link: run cmd/scripts/uninstall.sh before erasing this package, or delete the link once it dangles." >&2
     fi
 
     # --- Qwen Code plugin cleanup ---

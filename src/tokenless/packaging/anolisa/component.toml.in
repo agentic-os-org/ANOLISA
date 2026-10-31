@@ -221,3 +221,31 @@ dest = "{datadir}/adapters/{component}/qwencode/"
 
 [adapters.bundle]
 entry = "qwen-extension.json"
+
+# Command Code (cmd) discovers user-scope mods as loose files under
+# ~/.commandcode/mods and compiles them with jiti, so the bundle entry is the
+# mod file itself and there is no build step. ANOLISA manages the mod link
+# through receipts; the bundled lifecycle scripts stay available for standalone
+# installs across distribution channels. Keep plugin_id aligned with the mod
+# file name — cmd derives the mod name from it, and `cmd mods disable` takes
+# that same name.
+[[adapters]]
+framework = "cmd"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/cmd"
+dest = "{datadir}/adapters/{component}/cmd/"
+detect = { binary = "cmd" }
+
+[adapters.bundle]
+entry = "tokenless.ts"
+
+[[adapters.notices]]
+when = "post_enable"
+level = "info"
+text = "Start a new Command Code session (or run /reload) to load the Tokenless mod."
+
+[[adapters.notices]]
+when = "post_disable"
+level = "warning"
+text = "Start a new Command Code session (or run /reload) to unload the Tokenless mod."
