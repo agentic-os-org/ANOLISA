@@ -123,10 +123,16 @@ def _ensure_docker_host_for_rootless_context(
     rootless_socket = rootless_socket or Path(f"/run/user/{os.getuid()}/docker.sock")
 
     try:
-        config = json.loads(docker_config.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        # A docker config is optional and user-owned: it can be missing, be
+        # written in the platform code page, or hold a bare ``null``. Probing it
+        # must never raise out of evaluation setup, so every decode and shape
+        # failure maps to "no rootless context to detect".
+        config = json.loads(docker_config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return
 
+    if not isinstance(config, dict):
+        return
     if config.get("currentContext") != "rootless" or not rootless_socket.exists():
         return
 
