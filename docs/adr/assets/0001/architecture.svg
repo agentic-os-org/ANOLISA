@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1038" viewBox="0 0 1600 1038" role="img" aria-labelledby="title description">
+  <title id="title">ANOLISA architecture and AW integration paths</title>
+  <desc id="description">L4 contains cosh-ng and OS Skills beside external Agent frameworks. L3 places AW Hook, logical AW Core coordination, and Provider Host from left to right. Hooks connect upward to Agent entrypoints. L2 contains six components in one horizontal row, with External Providers beside it at the same level. Provider Host connects to individual capability cards through existing or proposed Provider bridges. AgentSight has a separate optional observation connection to AW coordination. L1 contains host facilities and ktuner. Solid connectors show existing interfaces; dashed connectors show proposed integrations.</desc>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #162d43; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 20px; fill: #52677b; }
+      .layer { font-size: 24px; font-weight: 700; }
+      .label { font-size: 20px; font-weight: 600; }
+      .body { font-size: 18px; }
+      .note { font-size: 16px; fill: #52677b; }
+      .card { fill: #fff; stroke: #c6d4df; stroke-width: 1.5; }
+      .control { fill: none; stroke: #52718b; stroke-width: 2; }
+      .planned { stroke-dasharray: 8 5; }
+      .observation { fill: none; stroke: #8b62aa; stroke-width: 2; }
+      .observation-label { font-size: 17px; fill: #785397; }
+      .aw-separator { fill: none; stroke: #b7cfc8; stroke-width: 1.5; stroke-dasharray: 4 4; }
+    </style>
+    <marker id="control-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse" viewBox="0 0 8 8">
+      <path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="#52718b" stroke-width="1.4"/>
+    </marker>
+    <marker id="observation-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse" viewBox="0 0 8 8">
+      <path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="#8b62aa" stroke-width="1.4"/>
+    </marker>
+  </defs>
+  <rect width="1600" height="1038" rx="18" fill="#f5f8fb"/>
+  <text x="40" y="55" class="title">ANOLISA Architecture</text>
+  <text x="40" y="85" class="subtitle">L4 User Entrypoint · L3 AW Unified Stack · L2 Agent Semantic · L1 Host Foundation</text>
+
+  <rect id="layer-4" x="40" y="112" width="1050" height="148" rx="12" fill="#e7efff" stroke="#b0c7ec"/>
+  <text x="60" y="148" class="layer">L4 · User Entrypoint Layer</text>
+  <rect x="60" y="165" width="488" height="75" rx="8" class="card"/>
+  <text x="80" y="195" class="label">cosh-ng</text>
+  <text x="80" y="223" class="body">Terminal · Agent execution</text>
+  <rect x="564" y="165" width="506" height="75" rx="8" class="card"/>
+  <text x="584" y="195" class="label">OS Skills</text>
+  <text x="584" y="223" class="body">OS handbook · Operational instructions</text>
+
+  <rect x="1110" y="112" width="450" height="148" rx="12" fill="#fff" stroke="#a9b9c9" stroke-dasharray="6 4"/>
+  <text x="1130" y="148" class="label">External Agent frameworks</text>
+  <text x="1130" y="190" class="body">Model · UI · Scheduling · Native permissions</text>
+
+  <rect id="layer-3" x="40" y="330" width="1520" height="148" rx="12" fill="#e4f3ef" stroke="#a6d2c4"/>
+  <text x="60" y="366" class="layer">L3 · AW Unified Stack</text>
+  <rect id="aw-runtime" x="60" y="383" width="1480" height="75" rx="8" class="card"/>
+  <g id="aw-hook">
+    <text x="80" y="413" class="label">AW Hook</text>
+    <text x="80" y="441" class="body">Native callbacks · Effect adoption</text>
+  </g>
+  <g id="aw-coordination">
+    <text x="550" y="413" class="label">AW Core</text>
+    <text x="550" y="441" class="body">Coordination · Policy · Audit</text>
+  </g>
+  <g id="provider-host">
+    <text x="1040" y="413" class="label">Provider Host</text>
+    <text x="1040" y="441" class="body">Provider admission · Invocation</text>
+  </g>
+  <path d="M 515 395 V 447 M 1000 395 V 447" class="aw-separator"/>
+
+  <rect id="layer-2" x="40" y="548" width="1240" height="210" rx="12" fill="#fff3df" stroke="#e0c69b"/>
+  <text x="60" y="738" class="layer">L2 · Agent Semantic Layer</text>
+
+  <path id="edge-hook-core" d="M 490 420 H 540" class="control" marker-start="url(#control-arrow)" marker-end="url(#control-arrow)"/>
+  <path id="edge-core-host" d="M 975 420 H 1025" class="control" marker-start="url(#control-arrow)" marker-end="url(#control-arrow)"/>
+  <path id="edge-hook-l4" d="M 420 383 V 286 H 304 V 240" class="control planned" marker-start="url(#control-arrow)" marker-end="url(#control-arrow)"/>
+  <text x="80" y="286" class="note">L4 Hook integration</text>
+  <path id="edge-hook-frameworks" d="M 470 383 V 310 H 1335 V 260" class="control" marker-start="url(#control-arrow)" marker-end="url(#control-arrow)"/>
+  <text x="950" y="299" class="note">Native callbacks</text>
+
+  <text x="300" y="502" class="observation-label">Optional observation queries</text>
+
+  <path id="provider-spine" d="M 1270 458 V 538 H 355" class="control"/>
+  <text x="760" y="523" class="note">Provider bridges</text>
+
+  <rect id="agentsight" x="60" y="568" width="186" height="120" rx="8" class="card"/>
+  <text x="80" y="614" class="label">AgentSight</text>
+  <text x="80" y="660" class="note">Observability</text>
+  <rect id="sec-core" x="262" y="568" width="186" height="120" rx="8" class="card"/>
+  <text x="278" y="614" class="label">agent-sec-core</text>
+  <text x="278" y="660" class="note">Security</text>
+  <rect id="tokenless" x="464" y="568" width="186" height="120" rx="8" class="card"/>
+  <text x="480" y="614" class="label">tokenless</text>
+  <text x="480" y="660" class="note">Token efficiency</text>
+  <rect id="agent-memory" x="666" y="568" width="186" height="120" rx="8" class="card"/>
+  <text x="682" y="614" class="label">agent-memory</text>
+  <text x="682" y="660" class="note">Persistent memory</text>
+  <rect id="skillfs" x="868" y="568" width="186" height="120" rx="8" class="card"/>
+  <text x="884" y="614" class="label">SkillFS</text>
+  <text x="884" y="660" class="note">Skill views</text>
+  <rect id="ws-ckpt" x="1070" y="568" width="186" height="120" rx="8" class="card"/>
+  <text x="1086" y="614" class="label">ws-ckpt</text>
+  <text x="1086" y="660" class="note">Workspace recovery</text>
+
+  <rect id="external-providers" x="1320" y="568" width="240" height="120" rx="8" class="card"/>
+  <text x="1336" y="614" class="label">External Providers</text>
+  <text x="1336" y="660" class="note">Process protocol</text>
+
+  <path id="edge-host-sec-core" d="M 355 538 V 584" class="control" marker-end="url(#control-arrow)"/>
+  <path id="edge-host-tokenless" d="M 557 538 V 584" class="control" marker-end="url(#control-arrow)"/>
+  <path id="edge-host-memory" d="M 759 538 V 584" class="control planned" marker-end="url(#control-arrow)"/>
+  <path id="edge-host-skillfs" d="M 961 538 V 584" class="control planned" marker-end="url(#control-arrow)"/>
+  <path id="edge-host-ckpt" d="M 1163 538 V 584" class="control planned" marker-end="url(#control-arrow)"/>
+  <path id="edge-host-external" d="M 1440 458 V 584" class="control" marker-end="url(#control-arrow)"/>
+  <path id="edge-observation" d="M 745 452 V 514 H 25 V 638 H 76" class="observation" marker-start="url(#observation-arrow)" marker-end="url(#observation-arrow)"/>
+
+  <rect id="layer-1" x="40" y="780" width="1520" height="174" rx="12" fill="#e9edf2" stroke="#bbc8d4"/>
+  <text x="60" y="938" class="layer">L1 · Host Foundation</text>
+  <rect x="60" y="800" width="984" height="100" rx="8" class="card"/>
+  <text x="80" y="830" class="label">Host facilities</text>
+  <text x="80" y="859" class="body">OS · Kernel · Processes · Filesystems</text>
+  <text x="80" y="886" class="note">Isolation · Networking · Service facilities</text>
+  <rect x="1060" y="800" width="480" height="100" rx="8" class="card"/>
+  <text x="1080" y="830" class="label">ktuner</text>
+  <text x="1080" y="859" class="body">Kernel tuning</text>
+  <text x="1080" y="886" class="note">Host diagnosis · Apply · Rollback</text>
+
+  <path d="M 60 988 H 110" class="control"/>
+  <text x="122" y="994" class="note">Existing interface</text>
+  <path d="M 350 988 H 400" class="control planned"/>
+  <text x="412" y="994" class="note">Proposed integration</text>
+  <path d="M 680 988 H 730" class="observation"/>
+  <text x="742" y="994" class="note">Optional observation</text>
+  <text x="40" y="1024" class="note">Logical responsibilities · ADR 0001 · Proposed</text>
+</svg>
