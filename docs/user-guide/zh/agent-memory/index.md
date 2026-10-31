@@ -469,6 +469,8 @@ BM25 + 稠密向量混合检索，通过 RRF（Reciprocal Rank Fusion, k=60）�
 
 每次成功工具调用向 `<mount>/.anolisa/audit.log` 追加 JSONL，启用会话还写入 `/run/anolisa/sessions/<sid>/log.jsonl`。`audit.journald=true` 时 fan-out 到 systemd-journald，带结构化字段（`MESSAGE_ID`、`AGENT_MEMORY_TOOL` 等），便于 `journalctl --user-unit=anolisa-memory@<user>` 过滤。
 
+审计日志保持 `0600`，且每次启动都会重新收紧——为外部日志收集器特意设置的 `0640` 会被静默恢复；需要外部收集请改用 `audit.journald` 或同 uid 读取。若文件系统无法保持 `0600`（vfat/exfat/ntfs-3g、WSL `drvfs`、固定 `file_mode` 的 CIFS、部分 FUSE/9p 挂载），启动将直接拒绝：把 `memory.paths.base_dir` 移到本地文件系统。
+
 ---
 
 ## 配置
@@ -785,6 +787,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 症状 | 可能原因 | 处理 |
 |------|----------|------|
 | 启动报 `unshare(NEWUSER\|NEWNS): EPERM` | unprivileged user namespace 被禁 | `sysctl kernel.unprivileged_userns_clone=1`，或 `MEMORY_MOUNT_STRATEGY=userland` |
+| 启动报 `audit log ... is still mode ... after chmod` | 审计日志所在文件系统无法保持 `0600`（vfat/exfat/ntfs-3g、WSL `drvfs`、固定 `file_mode` 的 CIFS、部分 FUSE/9p 挂载） | 把 `memory.paths.base_dir` 移到本地文件系统；外部收集改用 `audit.journald` 或同 uid 读取 |
 | `tmpfs /mnt: EBUSY` | 新 namespace 中 `/mnt` 已被占用 | 重启进程 |
 | macOS / Windows `cargo build` 报 `libsystemd`/`nix` 错 | 宿主非 Linux | `make remote-build` / `remote-test` |
 | `tools/call memory_search` 返 `METHOD_NOT_FOUND` | `MEMORY_PROFILE=expert` 隐藏 Tier B | 切回 `advanced`，或直接用 Tier A |

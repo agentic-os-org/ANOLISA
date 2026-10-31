@@ -502,6 +502,8 @@ On shutdown, automatically extracts atomic facts from the session audit log (`me
 
 Every successful tool call appends a JSONL line to `<mount>/.anolisa/audit.log`; with sessions enabled, also to `/run/anolisa/sessions/<sid>/log.jsonl`. `audit.journald=true` fans out to systemd-journald with structured fields (`MESSAGE_ID`, `AGENT_MEMORY_TOOL`, etc.) for `journalctl --user-unit=anolisa-memory@<user>` filtering.
 
+The audit log is kept `0600` and re-tightened on every start — an intentional `0640` for an external log collector is silently reverted; collect via `audit.journald` or a same-uid reader instead. Startup is refused outright if the filesystem cannot hold `0600` (vfat/exfat/ntfs-3g, WSL `drvfs`, CIFS with a fixed `file_mode`, some FUSE/9p mounts): move `memory.paths.base_dir` onto a local filesystem.
+
 ---
 
 ## Configuration
@@ -831,6 +833,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | Symptom | Likely cause | Fix |
 |------|----------|------|
 | startup `unshare(NEWUSER\|NEWNS): EPERM` | unprivileged user namespace disabled | `sysctl kernel.unprivileged_userns_clone=1`, or `MEMORY_MOUNT_STRATEGY=userland` |
+| startup fails with `audit log ... is still mode ... after chmod` | the filesystem holding the log cannot keep `0600` (vfat/exfat/ntfs-3g, WSL `drvfs`, CIFS with a fixed `file_mode`, some FUSE/9p) | move `memory.paths.base_dir` onto a local filesystem; collect audit via `audit.journald` or a same-uid reader |
 | `tmpfs /mnt: EBUSY` | `/mnt` occupied in new namespace | restart the process |
 | macOS / Windows `cargo build` fails on `libsystemd`/`nix` | non-Linux host | `make remote-build` / `remote-test` |
 | `tools/call memory_search` returns `METHOD_NOT_FOUND` | `MEMORY_PROFILE=expert` hides Tier B | switch to `advanced`, or use Tier A directly |
