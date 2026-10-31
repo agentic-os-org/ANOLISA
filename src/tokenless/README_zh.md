@@ -86,6 +86,14 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 ## 集成路径
 
+### 可选 selective-claw 上下文引擎
+
+`selective-claw` 上下文引擎要求 OpenClaw `2026.5.22` 或更高版本。
+每个引擎最多同时执行四个摘要请求，每次 `assemble()` 或 `afterTurn()` 调用最多
+占两个名额，避免单次调用占满请求池。请求期限仍由宿主负责；多个停滞批次仍可能
+耗尽全部名额。延迟与 Provider 限额边界见
+[上下文引擎说明](../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
+
 ### Agent Adapter
 
 - **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损实时 PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
