@@ -214,6 +214,37 @@ class TestDiscoverTasksRange:
         with pytest.raises(SystemExit):
             discover_tasks(str(tmp_path), range_str="1-10:0")
 
+    def test_range_zero_lower_bound_is_rejected(self, tmp_path):
+        """--range 0-N must exit, not silently slice from index -1.
+
+        The range is 1-based (``task_dirs[lo - 1 : hi]``); lo=0 turns the
+        slice start into -1 and selects the LAST task instead of rejecting
+        the input.
+        """
+        from ce_runner.run_task import discover_tasks
+
+        for i in range(1, 15):
+            name = f"T{i:03d}_test"
+            task_dir = tmp_path / name
+            task_dir.mkdir()
+            (task_dir / "task.yaml").write_text(f"task_id: {name}\n")
+
+        with pytest.raises(SystemExit):
+            discover_tasks(str(tmp_path), range_str="0-10")
+
+    def test_range_reversed_bounds_are_rejected(self, tmp_path):
+        """--range L-R with R < L must exit, not return an empty list."""
+        from ce_runner.run_task import discover_tasks
+
+        for i in range(1, 15):
+            name = f"T{i:03d}_test"
+            task_dir = tmp_path / name
+            task_dir.mkdir()
+            (task_dir / "task.yaml").write_text(f"task_id: {name}\n")
+
+        with pytest.raises(SystemExit):
+            discover_tasks(str(tmp_path), range_str="5-3")
+
     def test_range_m_tasks_with_prefix(self, tmp_path):
         """Filter M tasks by range with --prefix."""
         from ce_runner.run_task import discover_tasks
