@@ -393,6 +393,9 @@ class OpenClawSandboxManager:
             data = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"OpenClaw sandbox explain returned invalid JSON for {spec.agent_id}") from exc
+        # 合法 JSON 但非对象（CLI 出错/警告路径的合理输出）同样走既有错误路径
+        if not isinstance(data, dict):
+            raise RuntimeError(f"OpenClaw sandbox explain returned invalid JSON for {spec.agent_id}")
 
         sandbox = data.get("sandbox")
         workspace_root = sandbox.get("workspaceRoot") if isinstance(sandbox, dict) else None
