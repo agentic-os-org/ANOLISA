@@ -159,7 +159,7 @@ python3 SKILL_DIR/scripts/formula_check.py file.xlsx --json         # formula va
 python3 SKILL_DIR/scripts/formula_check.py file.xlsx --report      # standardized report
 python3 SKILL_DIR/scripts/xlsx_unpack.py in.xlsx /tmp/work/         # unpack for XML editing
 python3 SKILL_DIR/scripts/xlsx_pack.py /tmp/work/ out.xlsx          # repack after editing
-python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/work/ insert 5 1  # shift rows for insertion
+python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/work/ insert 5 1 [--sheet NAME|INDEX]  # shift rows (multi-sheet: --sheet required)
 python3 SKILL_DIR/scripts/xlsx_add_column.py /tmp/work/ --col G ... # add column with formulas
 python3 SKILL_DIR/scripts/xlsx_insert_row.py /tmp/work/ --at 6 ...  # insert row with data
 ```
