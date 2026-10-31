@@ -136,6 +136,17 @@ def run(
     console.print(f"\n[green]Done:[/green] {report.succeeded}/{report.total} succeeded")
     console.print(f"[green]Run metadata:[/green] {report.metadata_path}")
 
+    # A batch where every instance failed (agent crashes, timeouts, prepare or
+    # post-processing errors) produced no usable work. Pipelines that chain
+    # `run` into `evaluate` must be able to detect this without parsing the
+    # report, so exit non-zero instead of reporting success. Partial failures
+    # keep the historical exit code 0; the report carries the details.
+    if report.succeeded == 0:
+        console.print(
+            f"[red]All {report.total} instance(s) failed; check the run log before evaluating predictions.[/red]"
+        )
+        raise typer.Exit(code=1)
+
 
 @app.command()
 def evaluate(
