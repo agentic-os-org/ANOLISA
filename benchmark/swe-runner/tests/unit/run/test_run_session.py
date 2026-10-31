@@ -14,6 +14,7 @@
 
 """Unit tests for RunSession and RunReport."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -175,11 +176,62 @@ class TestRunSession:
 
         assert report.succeeded == 1
         assert report.total == 1
+        assert report.skipped_existing == 0
         assert report.metadata_path == tmp_path / "run_metadata.json"
+        # One shared store reads attempted IDs for resume visibility and then
+        # writes the run metadata.
         mock_store_cls.assert_called_once_with(tmp_path)
         mock_store.write_run_metadata.assert_called_once()
         snapshot = mock_store.write_run_metadata.call_args.args[0]
         assert snapshot.metadata_mappings == {"session_ids": {"i1": "sess-1"}}
+
+    def test_execute_reports_resume_skipped_instances(self, tmp_path):
+        settings = self._make_settings(tmp_path)
+        session = RunSession(settings)
+        # Two of the three requested instances already have result files on
+        # disk, so the default resume path must report them as skipped.
+        results_dir = tmp_path / "results"
+        results_dir.mkdir(parents=True)
+        for instance_id in ("i1", "i2"):
+            (results_dir / f"{instance_id}.json").write_text(
+                json.dumps({"instance_id": instance_id}), encoding="utf-8"
+            )
+
+        with (
+            patch("swe_runner.run.session.check_agent_environment"),
+            patch("swe_runner.run.session.get_agent", return_value=MagicMock()),
+            patch(
+                "swe_runner.run.session.load_dataset",
+                return_value=[_make_instance("i1"), _make_instance("i2"), _make_instance("i3")],
+            ),
+            patch("swe_runner.run.session.Orchestrator") as mock_orch_cls,
+        ):
+            mock_orch_cls.return_value.run_batch.return_value = [_make_result("i3")]
+            report = session.execute()
+
+        assert report.total == 1
+        assert report.skipped_existing == 2
+        assert report.instance_ids == ["i3"]
+
+    def test_execute_redo_reports_zero_skipped_instances(self, tmp_path):
+        settings = self._make_settings(tmp_path)
+        session = RunSession(settings, redo=True)
+        results_dir = tmp_path / "results"
+        results_dir.mkdir(parents=True)
+        (results_dir / "i1.json").write_text(
+            json.dumps({"instance_id": "i1"}), encoding="utf-8"
+        )
+
+        with (
+            patch("swe_runner.run.session.check_agent_environment"),
+            patch("swe_runner.run.session.get_agent", return_value=MagicMock()),
+            patch("swe_runner.run.session.load_dataset", return_value=[_make_instance("i1")]),
+            patch("swe_runner.run.session.Orchestrator") as mock_orch_cls,
+        ):
+            mock_orch_cls.return_value.run_batch.return_value = [_make_result("i1")]
+            report = session.execute()
+
+        assert report.skipped_existing == 0
 
     def test_execute_passes_redo_to_orchestrator(self, tmp_path):
         settings = self._make_settings(tmp_path)

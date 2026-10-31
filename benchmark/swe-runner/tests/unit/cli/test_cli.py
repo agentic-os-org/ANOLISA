@@ -622,3 +622,44 @@ def test_evaluate_none_namespace_uses_local_build_mode(mocker: MockerFixture) ->
     assert result.exit_code == 0
     mock_run_evaluation.assert_called_once()
     assert mock_run_evaluation.call_args.kwargs["namespace"] is None
+
+def test_run_reports_already_attempted_when_resume_skips_everything(tmp_path):
+    report = RunReport(
+        succeeded=0,
+        failed=0,
+        total=0,
+        instance_ids=[],
+        metadata_path=None,
+        skipped_existing=7,
+    )
+
+    with patch("swe_runner.cli_commands.RunSession") as mock_session_cls:
+        mock_session_cls.return_value.execute.return_value = report
+
+        result = runner.invoke(app, ["run", "--agent", "openclaw", "--output", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "All 7 instance(s) were already attempted" in result.output
+    assert "--redo" in result.output
+    assert "No instances to process" not in result.output
+
+
+def test_run_reports_partial_resume_skips_on_the_done_line(tmp_path):
+    report = RunReport(
+        succeeded=1,
+        failed=1,
+        total=2,
+        instance_ids=["inst-1", "inst-2"],
+        metadata_path=tmp_path / "run" / "run_metadata.json",
+        skipped_existing=3,
+    )
+
+    with patch("swe_runner.cli_commands.RunSession") as mock_session_cls:
+        mock_session_cls.return_value.execute.return_value = report
+
+        result = runner.invoke(app, ["run", "--agent", "openclaw", "--output", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "1/2 succeeded" in result.output
+    assert "Skipped: 3 instance(s) already attempted" in result.output
+
