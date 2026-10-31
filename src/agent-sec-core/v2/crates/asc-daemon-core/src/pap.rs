@@ -1,7 +1,7 @@
 use asc_foundation_types::{ResourceId, Revision};
 pub use asc_pap::EnqueueError;
 use asc_pap::{Page, PapError, PapRepository, PapService};
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::BindingView;
 use asc_policy_types::error::ValidationError;
 use asc_policy_types::policy::PreparedPolicy;
@@ -182,7 +182,7 @@ pub trait PolicyAdministration: Send + Sync {
         &self,
         principal: &Principal,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError>;
 
     /// Updates one existing Policy identity.
@@ -194,7 +194,7 @@ pub trait PolicyAdministration: Send + Sync {
         principal: &Principal,
         policy_id: &ResourceId,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError>;
 
     /// Reads one exact current Policy revision.
@@ -310,7 +310,7 @@ where
         &self,
         principal: &Principal,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
         PapService::create_policy(self, policy_name, template)
@@ -322,7 +322,7 @@ where
         principal: &Principal,
         policy_id: &ResourceId,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
         PapService::update_policy(self, policy_id, policy_name, template)

@@ -656,3 +656,48 @@ fn scope_create_encodes_name_and_path_assignments() {
         .is_err()
     );
 }
+
+#[test]
+fn policy_commands_accept_tagged_cedar_source_files() {
+    let directory = common::Directory::new();
+    let file = directory.0.join("cedar-policy.json");
+    let source = json!({"language":"cedar", "content":{
+        "schema":{"schemaId":"seccore.system", "revision":2},
+        "text":"permit(principal, action, resource);"
+    }});
+    std::fs::write(&file, serde_json::to_vec(&source).unwrap()).unwrap();
+    for operation in ["create", "update"] {
+        let mut args = vec![
+            "agent-sec-cli",
+            "policy",
+            operation,
+            "--name",
+            "sandbox",
+            "--file",
+            file.to_str().unwrap(),
+        ];
+        if operation == "update" {
+            args.extend(["--policy-id", "sandbox-baseline"]);
+        }
+        let request = Cli::parse_from(args).unwrap().request().unwrap();
+        assert_eq!(request.params["template"], source);
+        assert_eq!(request.method, format!("policy.templates.{operation}"));
+    }
+    let mut with_trailing_data = serde_json::to_vec(&source).unwrap();
+    with_trailing_data.extend_from_slice(b" {}");
+    std::fs::write(&file, with_trailing_data).unwrap();
+    assert!(
+        Cli::parse_from([
+            "agent-sec-cli",
+            "policy",
+            "create",
+            "--name",
+            "sandbox",
+            "--file",
+            file.to_str().unwrap()
+        ])
+        .unwrap()
+        .request()
+        .is_err()
+    );
+}

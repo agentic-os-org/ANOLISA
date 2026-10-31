@@ -125,7 +125,7 @@ for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health; do
     python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --max 2.28 \
         "$BUILD_DIR/v2/bin/$binary"
 done
-python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --max 2.28 \
+python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --require-static \
     "$BUILD_DIR/linux-sandbox"
 python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --max 2.28 \
     "$BUILD_DIR/python-runtime/bin/python3.11"

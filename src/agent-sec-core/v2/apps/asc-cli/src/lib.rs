@@ -4,6 +4,7 @@ pub mod capabilities;
 mod commands;
 mod context;
 pub mod output;
+pub mod sandbox;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;
@@ -32,6 +33,8 @@ pub struct Cli {
 /// How a parsed invocation reaches its result.
 #[derive(Debug)]
 pub enum Plan<'a> {
+    /// Run a local sandbox with explicit permissions, independently of the daemon.
+    Sandbox(&'a sandbox::SandboxCommand),
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
     /// Generate the observability record schema without a daemon endpoint.
@@ -102,6 +105,9 @@ impl Cli {
             let mut tokens = argv.iter().skip(1);
             let mut count = 0;
             while let Some(argument) = tokens.next() {
+                if argument == "--" {
+                    break;
+                }
                 if argument == "--text" || argument == "--code" {
                     tokens.next();
                 } else if argument.as_bytes().split(|byte| *byte == b'=').next()
@@ -121,7 +127,11 @@ impl Cli {
             // A local command must stay usable on hosts that never deploy a
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
-            None if arguments.command.is_observability_schema() => None,
+            None if arguments.command.is_observability_schema()
+                || arguments.command.sandbox().is_some() =>
+            {
+                None
+            }
             None => Some(resolve_socket(arguments.socket, socket_env)?),
         };
         Ok(Self {
@@ -153,6 +163,9 @@ impl Cli {
 
     /// Reports whether this invocation runs locally or against the daemon.
     pub fn plan(&self) -> Plan<'_> {
+        if let Some(command) = self.command.sandbox() {
+            return Plan::Sandbox(command);
+        }
         if self.command.is_observability_schema() {
             return Plan::ObservabilitySchema;
         }
@@ -370,6 +383,68 @@ impl InputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_never_resolves_a_daemon_and_preserves_target_options() {
+        let cli = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/unused",
+                "sandbox",
+                "run",
+                "--permissions",
+                "permissions.json",
+                "--",
+                "python3",
+                "a b.py",
+                "--socket",
+                "one",
+                "--socket",
+                "two",
+                "--timeout-ms",
+                "invalid",
+            ],
+            Some(OsStr::new("relative")),
+        )
+        .unwrap();
+        assert!(cli.socket().is_none());
+        assert!(matches!(cli.request(), Err(InputError::LocalCommand)));
+        let Plan::Sandbox(sandbox::SandboxCommand::Run(command)) = cli.plan() else {
+            panic!("local sandbox plan");
+        };
+        assert_eq!(
+            command.command,
+            [
+                "python3",
+                "a b.py",
+                "--socket",
+                "one",
+                "--socket",
+                "two",
+                "--timeout-ms",
+                "invalid",
+            ]
+        );
+    }
+
+    #[test]
+    fn sandbox_requires_permissions_and_an_explicit_command_boundary() {
+        for args in [
+            vec!["agent-sec-cli", "sandbox", "run", "--", "true"],
+            vec!["agent-sec-cli", "sandbox", "run", "--permissions", "p.json"],
+            vec![
+                "agent-sec-cli",
+                "sandbox",
+                "run",
+                "--permissions",
+                "p.json",
+                "true",
+            ],
+        ] {
+            assert!(Cli::parse_from_with_socket_env(args, None).is_err());
+        }
+    }
 
     #[test]
     fn scanner_hyphen_values_are_data_but_duplicate_global_options_fail() {

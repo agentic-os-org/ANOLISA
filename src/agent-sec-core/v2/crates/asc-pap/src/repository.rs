@@ -46,6 +46,13 @@ pub trait PapRepository: Send + Sync {
     /// Returns not-found or persistence failures.
     fn get_policy(&self, id: &ResourceId, revision: Revision) -> Result<PreparedPolicy, PapError>;
 
+    /// Reads 1..32 selected current policies in one consistent storage snapshot.
+    /// Returns records in requested order; no missing policy may be omitted.
+    ///
+    /// # Errors
+    /// Rejects invalid selection sizes, missing policies, or persistence failures.
+    fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError>;
+
     /// Lists current Policy records ordered by Policy identity ascending.
     ///
     /// # Errors

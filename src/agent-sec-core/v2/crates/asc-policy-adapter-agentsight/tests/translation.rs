@@ -10,7 +10,7 @@ use asc_policy_adapter_agentsight::{
     AgentSightScopePlan,
 };
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::{Action, Effect, Resource};
+use asc_policy_types::authoring::{Action, Effect, PolicySource, PolicyTemplate, Resource};
 use asc_policy_types::binding::PreparedBinding;
 use asc_policy_types::scope::ScopeSelector;
 use asc_policy_types::target::TranslationOutcome;
@@ -27,8 +27,32 @@ fn complete_binding_fixture() -> PreparedBinding {
 
 fn binding_with_files(files: Vec<String>) -> PreparedBinding {
     let mut binding = complete_binding_fixture();
-    binding.policy.template = file_policy(files);
+    binding.policy.template = file_policy(files).into();
     binding
+}
+
+fn native_template(binding: &mut PreparedBinding) -> &mut PolicyTemplate {
+    let PolicySource::SecCore(template) = &mut binding.policy.template else {
+        panic!("expected native fixture")
+    };
+    template
+}
+
+#[test]
+fn cedar_sources_are_rejected_without_a_target_plan() {
+    let mut binding = complete_binding_fixture();
+    binding.policy.template = serde_json::from_value(serde_json::json!({
+        "language": "cedar", "content": {
+            "schema": {"schemaId": "seccore.system", "revision": 2},
+            "text": "forbid(principal, action, resource);"
+        }
+    }))
+    .unwrap();
+    let TranslationOutcome::Rejected(rejection) = AgentSightAdapter.translate(&binding).unwrap()
+    else {
+        panic!("Cedar must not be silently translated as native rules")
+    };
+    assert_eq!(rejection.code, "UNSUPPORTED_POLICY_LANGUAGE");
 }
 
 #[test]
@@ -120,7 +144,7 @@ fn invalid_rules_produce_no_plan() {
         file_policy(vec!["/invalid/../path".into()]),
     ] {
         let mut binding = complete_binding_fixture();
-        binding.policy.template = template;
+        binding.policy.template = template.into();
         let TranslationOutcome::Rejected(rejection) =
             AgentSightAdapter.translate(&binding).unwrap()
         else {
@@ -142,7 +166,7 @@ fn unsupported_rule_rejects_the_entire_policy_with_its_position() {
         (Effect::Block, Action::Read, "RULE_1_UNSUPPORTED_ACTION"),
     ] {
         let mut binding = complete_binding_fixture();
-        let rule = &mut binding.policy.template.rules[1];
+        let rule = &mut native_template(&mut binding).rules[1];
         rule.effect = effect;
         rule.action = action;
         if action == Action::Read {
@@ -169,8 +193,8 @@ fn unsupported_rule_rejects_the_entire_policy_with_its_position() {
 #[test]
 fn explanations_are_preserved_and_cannot_inject_dsl() {
     let mut binding = binding_with_files(vec!["/same".into(), "/same".into()]);
-    binding.policy.template.rules[0].because = Some("保护配置文件".into());
-    binding.policy.template.rules[1].because = Some("Independent reason".into());
+    native_template(&mut binding).rules[0].because = Some("保护配置文件".into());
+    native_template(&mut binding).rules[1].because = Some("Independent reason".into());
     let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&binding).unwrap()
     else {
         panic!("expected a complete plan");
@@ -180,7 +204,7 @@ fn explanations_are_preserved_and_cannot_inject_dsl() {
     assert!(plan.policy.content.contains("保护配置文件"));
     assert!(plan.policy.content.contains("Independent reason"));
     for reason in ["bad\"reason", "bad\\reason", "bad\nreason"] {
-        binding.policy.template.rules[1].because = Some(reason.into());
+        native_template(&mut binding).rules[1].because = Some(reason.into());
         binding.validate().unwrap();
         assert_eq!(
             AgentSightAdapter.translate(&binding).unwrap(),
@@ -274,14 +298,14 @@ fn rule_order_is_preserved_and_changed_rules_change_the_plan() {
     let original = complete_binding_fixture();
     let expected = AgentSightAdapter.translate(&original).unwrap();
     let mut reversed = original.clone();
-    reversed.policy.template.rules.reverse();
+    native_template(&mut reversed).rules.reverse();
     assert_ne!(AgentSightAdapter.translate(&reversed).unwrap(), expected);
     let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&reversed).unwrap()
     else {
         panic!("expected plan");
     };
     let decoded: AgentSightBindingPlan = serde_json::from_slice(&plan.content).unwrap();
-    let Resource::File { path } = &reversed.policy.template.rules[0].target;
+    let Resource::File { path } = &native_template(&mut reversed).rules[0].target;
     assert!(decoded.policy.content.starts_with(&format!(
         "source AGENT = exec \"**\"\nrule agentseccore-unlink-0000:\n  block unlink file \"{path}\""
     )));

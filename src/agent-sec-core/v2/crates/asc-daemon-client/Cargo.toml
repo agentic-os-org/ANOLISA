@@ -12,6 +12,7 @@ publish.workspace = true
 testing = []
 
 [dependencies]
+serde.workspace = true
 asc-observability.workspace = true
 tracing.workspace = true
 asc-daemon-protocol = { workspace = true }

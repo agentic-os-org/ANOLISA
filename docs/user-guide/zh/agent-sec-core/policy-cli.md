@@ -120,6 +120,23 @@ CLI 工作目录解析。
 更新或删除 Policy 不改变已有 Scope 和 Binding。撤销分配应删除 Scope。已删除的已知
 Policy ID 保留 revision 计数器；update 可按下一 revision 重建内容，未知 ID 不可 update。
 
+Cedar 策略使用同样的 create/update 命令，将以下源码封装保存为 `--file` 输入，
+替代原有 JSON 模板（此示例有意拒绝所有请求）：
+
+```json
+{
+  "language": "cedar",
+  "content": {
+    "schema": {"schemaId": "seccore.system", "revision": 2},
+    "text": "forbid(principal, action, resource);"
+  }
+}
+```
+
+Cedar 在保存前校验语法和 schema。原有 JSON 模板和 SQLite 记录保持兼容。
+AgentSight Adapter 不接受 Cedar；sandbox 授权服务按 [Sandbox 指南](sandbox.md)
+读取所选策略的当前版本。更新影响新的授权请求，不改变已有 Scope/Binding 快照或运行中的 sandbox。
+
 ## 管理 Scope
 
 创建时提供 Policy ID、精确 revision 和一个 selector：`--process-name` 精确匹配 Linux

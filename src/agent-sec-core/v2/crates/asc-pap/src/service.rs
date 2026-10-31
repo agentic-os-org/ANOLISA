@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView};
 use asc_policy_types::error::ValidationError;
 use asc_policy_types::policy::{PreparedPolicy, validate_policy_name};
@@ -131,12 +131,12 @@ where
     /// # Errors
     /// Returns validation, conflict, revision, or persistence errors.
     #[tracing::instrument(skip_all, name = "pap.create_policy")]
-    pub fn create_policy(
+    pub fn create_policy<T: Clone + Into<PolicySource>>(
         &self,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &T,
     ) -> Result<PreparedPolicy, PapError> {
-        self.write_policy(WriteTarget::Create, policy_name, template)
+        self.write_policy(WriteTarget::Create, policy_name, &template.clone().into())
     }
 
     /// Updates one existing Policy identity to an authored template.
@@ -147,23 +147,32 @@ where
     /// # Errors
     /// Returns validation, conflict, revision, or persistence errors.
     #[tracing::instrument(skip_all, name = "pap.update_policy")]
-    pub fn update_policy(
+    pub fn update_policy<T: Clone + Into<PolicySource>>(
         &self,
         policy_id: &ResourceId,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &T,
     ) -> Result<PreparedPolicy, PapError> {
-        self.write_policy(WriteTarget::Update(policy_id), policy_name, template)
+        self.write_policy(
+            WriteTarget::Update(policy_id),
+            policy_name,
+            &template.clone().into(),
+        )
     }
 
     fn write_policy(
         &self,
         target: WriteTarget<'_>,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PapError> {
         validate_policy_name(policy_name)
             .map_err(|message| PapError::InvalidPolicyName(message.to_owned()))?;
+        if let PolicySource::Cedar(source) = template {
+            asc_policy_cedar::validate(source).map_err(|error| {
+                PapError::InvalidPolicy(ValidationError::new("template.content", error.to_string()))
+            })?;
+        }
         let (update_existing, mut selected_id) = match target {
             WriteTarget::Create => (false, generated_resource_id()?),
             WriteTarget::Update(id) => (true, id.clone()),
@@ -217,6 +226,14 @@ where
         revision: Revision,
     ) -> Result<PreparedPolicy, PapError> {
         self.repository.get_policy(id, revision)
+    }
+
+    /// Reads selected current policies together, in requested order.
+    ///
+    /// # Errors
+    /// Rejects empty or oversized selections, missing policies, and storage failures.
+    pub fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.repository.current_policies(ids)
     }
 
     /// Lists current Policy records.

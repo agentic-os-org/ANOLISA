@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+pub use asc_policy_types::{AuthorizationRequest, Decision, ExecutionReceipt, ReceiptAck};
+
 mod action;
 mod observability;
 pub use observability::ObservabilityRecordParams;

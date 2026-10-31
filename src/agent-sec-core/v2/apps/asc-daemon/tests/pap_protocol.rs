@@ -20,7 +20,7 @@ use asc_daemon_protocol::{DaemonRequest, DaemonResponse, RequestId, error_code};
 use asc_foundation_types::{ResourceId, Revision};
 use asc_pap::PapService;
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
 use asc_policy_types::scope::{PreparedScope, ScopeDeletion, ScopeSelector};
@@ -174,7 +174,7 @@ impl PolicyAdministration for RecordingAdministration {
         &self,
         principal: &Principal,
         _policy_name: &str,
-        _template: &PolicyTemplate,
+        _template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         self.record(principal, "policy.templates.create")?;
         Ok(self.policy())
@@ -185,7 +185,7 @@ impl PolicyAdministration for RecordingAdministration {
         principal: &Principal,
         _policy_id: &ResourceId,
         _policy_name: &str,
-        _template: &PolicyTemplate,
+        _template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         self.record(principal, "policy.templates.update")?;
         Ok(self.policy())
@@ -699,7 +699,7 @@ fn invalid_param_values(kind: ParamKind) -> Vec<(&'static str, Value, &'static s
         ParamKind::PolicyTemplate => vec![(
             "wrong type",
             Value::Null,
-            "invalid type: null, expected struct PolicyTemplate",
+            "data did not match any variant of untagged enum Input",
         )],
         ParamKind::PolicyReferences => vec![
             (

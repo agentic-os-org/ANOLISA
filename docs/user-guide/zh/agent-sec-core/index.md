@@ -8,6 +8,8 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 下文 RPM 选包说明对应 V2 Rust CLI 和 daemon。Agent 接入资源保留既有宿主接口；
 后端命令与服务契约请参阅 V2 指南。
 
+Rust V2 的 [Sandbox 指南](sandbox.md)说明如何按明确 OS 权限执行命令，以及如何接入 PDP。
+
 ## 概述
 
 | 模块 | 说明 |

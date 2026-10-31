@@ -9,6 +9,8 @@ The RPM package selection below describes the V2 Rust CLI and daemon. Agent
 integration resources retain their existing host interfaces; consult the V2
 guide for the backend command and service contracts.
 
+The Rust V2 [sandbox guide](sandbox.md) covers execution with explicit OS permissions and optional PDP integration.
+
 ## Overview
 
 | Module | Description |

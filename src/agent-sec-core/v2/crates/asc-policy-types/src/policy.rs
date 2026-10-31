@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::authoring::PolicyTemplate;
+use crate::authoring::PolicySource;
 use crate::error::{Validate, ValidationError};
 use crate::identifiers::{ResourceId, Revision};
 
@@ -17,7 +17,8 @@ pub struct PreparedPolicy {
     /// Immutable revision.
     pub revision: Revision,
     /// Product authoring input.
-    pub template: PolicyTemplate,
+    #[serde(with = "crate::authoring::policy_template")]
+    pub template: PolicySource,
 }
 
 impl Validate for PreparedPolicy {
@@ -28,7 +29,11 @@ impl Validate for PreparedPolicy {
                 "must contain a visible, control-free value of at most 256 bytes",
             ));
         }
-        self.template.validate().map_err(|error| {
+        let result = match &self.template {
+            PolicySource::SecCore(template) => template.validate(),
+            PolicySource::Cedar(_) => self.template.validate(),
+        };
+        result.map_err(|error| {
             ValidationError::new(format!("template.{}", error.path), error.message)
         })
     }

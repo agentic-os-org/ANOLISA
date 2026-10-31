@@ -1,0 +1,71 @@
+// Runtime authorization supports logical subjects independently of process binding.
+namespace SecCore {
+    entity Subject { agent_type?: String };
+    entity Process { program: String, resolved_program: String };
+
+    // Resource attributes describe concrete request targets, not policy patterns.
+    entity File { path: String };
+    // Whole-network permission only; no endpoint or protocol filtering yet.
+    entity Network enum ["all"];
+    entity WriteOperation enum ["write", "create", "delete", "rename", "setattr"];
+
+    type FileReadContext = {
+        // Executable making the request, distinct from a file.exec target.
+        input: { program: String }
+    };
+
+    type FileWriteContext = {
+        input: {
+            program: String,
+            operation: WriteOperation,
+            // Requested setattr values, not current file metadata.
+            // The request producer must enforce u32 bounds and operation validity.
+            mode?: Long,
+            ownerUid?: Long,
+            ownerGid?: Long
+        }
+    };
+
+    // Positions preserve order and repeated tokens despite Cedar's unordered sets.
+    // Index 0 denotes argv[1]; argv[0] is excluded from args and arg_count.
+    type ProcessArgument = { index: Long, value: String };
+    type FileExecContext = {
+        input: {
+            cwd: String,
+            arg_count: Long,
+            // The producer supplies all arguments, with one value per index in
+            // 0..arg_count. Schema typing alone does not enforce these invariants.
+            args: Set<ProcessArgument>
+        }
+    };
+
+    action "file.read" appliesTo {
+        principal: Subject,
+        resource: File,
+        context: FileReadContext
+    };
+    action "file.write" appliesTo {
+        principal: Subject,
+        resource: File,
+        context: FileWriteContext
+    };
+    // An executable invocation, not a Linux filesystem X permission check.
+    action "file.exec" appliesTo {
+        principal: Subject,
+        resource: File,
+        context: FileExecContext
+    };
+    action "process.spawn" appliesTo {
+        principal: Subject,
+        resource: Process,
+        context: FileExecContext
+    };
+    action "network.use" appliesTo {
+        principal: Subject,
+        resource: Network,
+        context: {}
+    };
+}
+
+// Future Agent Hook actions define their own resource and context types.
+// Reuse Subject without adding scanner facts or optional catch-all fields here.

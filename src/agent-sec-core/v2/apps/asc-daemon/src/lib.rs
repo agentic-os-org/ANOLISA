@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 mod actions;
+/// Trusted runtime authorization policy loading.
+pub mod authorization;
 mod scope_discovery;
 pub use scope_discovery::{ScopeDiscoveryJob, ScopeDiscoveryRegistry};
 mod bootstrap;

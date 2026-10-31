@@ -28,6 +28,9 @@ members = [
     "crates/asc-model-client",
     "crates/asc-agentsight-client",
     "crates/asc-policy-adapter-agentsight",
+    "crates/asc-policy-cedar",
+    "crates/asc-pdp-runtime",
+    "crates/asc-pep-runtime",
     "crates/asc-pap",
     "crates/asc-pcp",
     "crates/asc-policy-runtime",
@@ -41,7 +44,7 @@ members = [
 version = "1.1.2"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.89"
 repository = "https://github.com/alibaba/anolisa"
 publish = false
 
@@ -77,6 +80,10 @@ asc-pap = { path = "crates/asc-pap" }
 asc-pcp = { path = "crates/asc-pcp" }
 asc-persistence-sqlite = { path = "crates/asc-persistence-sqlite" }
 asc-policy-adapter-agentsight = { path = "crates/asc-policy-adapter-agentsight" }
+asc-policy-cedar = { path = "crates/asc-policy-cedar" }
+asc-pdp-runtime = { path = "crates/asc-pdp-runtime" }
+asc-pep-runtime = { path = "crates/asc-pep-runtime" }
+linux-sandbox = { path = "../linux-sandbox" }
 asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }
 asc-policy-repository = { path = "crates/asc-policy-repository" }
 asc-policy-types = { path = "crates/asc-policy-types" }
@@ -85,9 +92,11 @@ asc-telemetry = { path = "crates/asc-telemetry" }
 asc-security-summary = { path = "crates/asc-security-summary" }
 asc-sqlite-kernel = { path = "crates/asc-sqlite-kernel" }
 base64 = "0.22"
+cedar-policy = "=4.14.0"
+cedar-policy-core = "=4.14.0"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6", features = ["derive"] }
-signal-hook = { version = "0.3", default-features = false }
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
 dirs = "6"
 fancy-regex = "0.16"
@@ -97,7 +106,7 @@ nix = { version = "0.31", default-features = false, features = ["user", "fs", "s
 regex = "1.10"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
-rustix = { version = "1.1", features = ["fs", "process", "net"] }
+rustix = { version = "1.1", features = ["fs", "process", "net", "pipe"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 serde_yaml = "0.9"

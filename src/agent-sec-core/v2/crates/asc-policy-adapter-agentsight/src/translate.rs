@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::{
-    Action, Category, Comparison, Condition, Effect, Resource, Scalar, Value,
+    Action, Category, Comparison, Condition, Effect, PolicySource, Resource, Scalar, Value,
 };
 use asc_policy_types::binding::BindingScope;
 use asc_policy_types::binding::PreparedBinding;
@@ -86,7 +86,10 @@ fn translate_scope(scope: &BindingScope) -> Result<AgentSightScopePlan, Translat
 }
 
 fn compile_policy(binding: &PreparedBinding) -> Result<String, TranslationRejection> {
-    let rules = &binding.policy.template.rules;
+    let PolicySource::SecCore(template) = &binding.policy.template else {
+        return Err(rejection("UNSUPPORTED_POLICY_LANGUAGE"));
+    };
+    let rules = &template.rules;
     if rules.len() > ACTPLANE_MAX_RULES {
         return Err(rejection("ACTPLANE_RULE_LIMIT_EXCEEDED"));
     }

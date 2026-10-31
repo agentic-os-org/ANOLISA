@@ -110,7 +110,7 @@ fn policy_round_trips_without_template_digest_and_rejects_the_removed_field() {
 #[test]
 fn binding_validation_rejects_invalid_embedded_template() {
     let mut binding = prepared_binding();
-    binding.policy.template = file_policy(vec!["relative".into()]);
+    binding.policy.template = file_policy(vec!["relative".into()]).into();
     assert_eq!(
         binding.validate().unwrap_err().path,
         "policy.template.rules[0].target.path"

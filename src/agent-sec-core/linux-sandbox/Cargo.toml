@@ -17,6 +17,7 @@ uninlined_format_args = "deny"
 redundant_closure_for_method_calls = "deny"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+asc-policy-types = { path = "../v2/crates/asc-policy-types" }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 libc = "0.2.182"

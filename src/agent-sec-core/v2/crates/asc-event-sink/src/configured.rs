@@ -120,6 +120,17 @@ impl ConfiguredSecurityEventSinks {
         }
     }
 
+    /// Records an event only acknowledging success after both configured writes.
+    ///
+    /// # Errors
+    /// Reports either destination's failure. A failed call may have appended JSONL;
+    /// callers must not retry the action that produced the event.
+    pub fn record(&self, event: &SecurityEvent) -> Result<(), SinkError> {
+        self.jsonl.write_or_raise(event)?;
+        self.sqlite_writer()?.write_checked(event)?;
+        Ok(())
+    }
+
     /// Runs maintenance and closes the configured `SQLite` writer if initialized.
     pub fn close(&self) {
         self.close_with_deadline(None);
@@ -252,6 +263,35 @@ mod tests {
     use serde_json::Map;
 
     use super::*;
+
+    #[test]
+    fn checked_security_record_requires_both_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let db = dir.path().join("events.db");
+        let sinks = ConfiguredSecurityEventSinks::new(log.clone(), db.clone());
+        let event = SecurityEvent::new("authorization_receipt", "sandbox", Map::new());
+        sinks.record(&event).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let count: u64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
+
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        for (jsonl, sqlite) in [
+            (blocked.join("events.jsonl"), dir.path().join("other.db")),
+            (dir.path().join("other.jsonl"), blocked.join("events.db")),
+        ] {
+            assert!(
+                ConfiguredSecurityEventSinks::new(jsonl, sqlite)
+                    .record(&event)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn run_sqlite_retention_runs_once_per_window_without_closing() {

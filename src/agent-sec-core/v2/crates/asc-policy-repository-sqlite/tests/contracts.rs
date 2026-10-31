@@ -448,7 +448,7 @@ fn sql_list_byte_budget_preserves_total_and_advances_every_page() {
     let repo = SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap();
     let initial = seed(&repo).binding.spec.policy;
     let mut policy = initial.clone();
-    let mut template = serde_json::to_value(&policy.template).unwrap();
+    let mut template = serde_json::to_value(&policy).unwrap()["template"].clone();
     let rule = template["rules"][0].clone();
     template["rules"] = serde_json::Value::Array(
         (0..200)
@@ -459,7 +459,10 @@ fn sql_list_byte_budget_preserves_total_and_advances_every_page() {
             })
             .collect(),
     );
-    policy.template = serde_json::from_value(template).unwrap();
+    policy.template =
+        serde_json::from_value::<asc_policy_types::authoring::PolicyTemplate>(template)
+            .unwrap()
+            .into();
     let mut expected = vec![initial];
     for index in 0..7 {
         policy.policy_id = ResourceId::new(format!("large-{index}")).unwrap();
@@ -884,14 +887,14 @@ fn general_policy_rules_survive_reopen_in_current_scope_and_binding_snapshots() 
     ))
     .unwrap();
     let mut policy = binding.policy;
-    policy.template = serde_json::from_value(serde_json::json!({
+    policy.template = serde_json::from_value::<asc_policy_types::authoring::PolicyTemplate>(serde_json::json!({
         "specVersion":"0.1", "description":"Reusable policy requiring review",
         "rules":[{"effect":"require_confirmation","category":"file","action":"exec",
             "target":{"type":"file","path":"/usr/bin/git"},
             "where":{"and":[{"argsPrefix":{"eq":["push"]}},{"cwd":{"eq":"/workspace"}}]},
             "previous":{"category":"file","action":"read","target":{"type":"file","path":"/secrets/**"}},
             "because":"Review before pushing"}]
-    })).unwrap();
+    })).unwrap().into();
     repo.put_policy(&policy).unwrap();
     let mut scopes = Vec::new();
     let mut bindings = Vec::new();
@@ -1003,4 +1006,63 @@ fn legacy_policy_payloads_are_rejected_without_discarding_saved_responsibility()
         let db = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(read(&db), before);
     }
+}
+
+#[test]
+fn selected_current_policies_preserve_cedar_and_legacy_sources_across_reopen() {
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let (native, cedar) = {
+        let repository = std::sync::Arc::new(SqlitePolicyRepository::open(&path).unwrap());
+        let native = seed(repository.as_ref()).binding.spec.policy;
+        let pap = asc_pap::PapService::new(repository.clone());
+        let source: asc_policy_types::authoring::PolicySource =
+            serde_json::from_value(serde_json::json!({
+                "language": "cedar", "content": {
+                    "schema": {"schemaId": "seccore.system", "revision": 2},
+                    "text": "permit(principal, action, resource);"
+                }
+            }))
+            .unwrap();
+        let cedar = pap.create_policy("sandbox", &source).unwrap();
+        assert_eq!(
+            pap.current_policies(&[cedar.policy_id.clone(), native.policy_id.clone()])
+                .unwrap(),
+            vec![cedar.clone(), native.clone()]
+        );
+        assert!(pap.current_policies(&[]).is_err());
+        assert!(
+            pap.current_policies(&vec![native.policy_id.clone(); 33])
+                .is_err()
+        );
+        assert_eq!(
+            pap.current_policies(&[
+                native.policy_id.clone(),
+                ResourceId::new("missing").unwrap()
+            ]),
+            Err(PapError::NotFound)
+        );
+        (native, cedar)
+    };
+    let repository = SqlitePolicyRepository::open(&path).unwrap();
+    assert_eq!(
+        repository
+            .current_policies(&[native.policy_id.clone(), cedar.policy_id.clone()])
+            .unwrap(),
+        vec![native.clone(), cedar.clone()]
+    );
+    let native_json = serde_json::to_value(&native).unwrap();
+    assert!(native_json["template"].get("specVersion").is_some());
+    assert!(native_json["template"].get("language").is_none());
+    assert_eq!(
+        serde_json::to_value(&cedar).unwrap()["template"]["language"],
+        "cedar"
+    );
+    repository
+        .delete_policy_revision(&cedar.policy_id, cedar.revision)
+        .unwrap();
+    assert_eq!(
+        repository.current_policies(&[native.policy_id, cedar.policy_id]),
+        Err(PapError::NotFound)
+    );
 }

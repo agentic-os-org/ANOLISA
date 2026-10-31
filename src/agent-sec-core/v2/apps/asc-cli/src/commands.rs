@@ -30,6 +30,9 @@ use crate::InputError;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Run a command locally with explicitly supplied sandbox permissions.
+    #[command(subcommand)]
+    Sandbox(crate::sandbox::SandboxCommand),
     /// Collect observability records through the daemon.
     #[command(subcommand)]
     Observability(observability::ObservabilityCommand),
@@ -58,6 +61,13 @@ pub(crate) enum Command {
 }
 
 impl Command {
+    pub(crate) const fn sandbox(&self) -> Option<&crate::sandbox::SandboxCommand> {
+        match self {
+            Self::Sandbox(command) => Some(command),
+            _ => None,
+        }
+    }
+
     pub(crate) fn run_observability_query(
         &self,
         socket: &std::path::Path,
@@ -84,7 +94,7 @@ impl Command {
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
-            Self::Capabilities(_) => Err(InputError::LocalCommand),
+            Self::Capabilities(_) | Self::Sandbox(_) => Err(InputError::LocalCommand),
             Self::SkillLedger(command) => command.request(),
         }
     }

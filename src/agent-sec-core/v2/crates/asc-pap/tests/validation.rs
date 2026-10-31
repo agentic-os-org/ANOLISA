@@ -9,7 +9,7 @@ use std::sync::Arc;
 use asc_pap::{PapError, PapRepository, PapService};
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::{Category, Effect};
+use asc_policy_types::authoring::{Category, Effect, PolicySource, PolicyTemplate};
 use asc_policy_types::binding::PreparedBinding;
 use asc_policy_types::error::ValidationError;
 use asc_policy_types::scope::ScopeSelector;
@@ -19,6 +19,13 @@ fn binding() -> PreparedBinding {
         "../../asc-policy-types/tests/fixtures/prepared-binding.json"
     ))
     .unwrap()
+}
+
+fn native_template() -> PolicyTemplate {
+    let PolicySource::SecCore(template) = binding().policy.template else {
+        panic!("expected native fixture")
+    };
+    template
 }
 
 #[test]
@@ -95,9 +102,9 @@ fn invalid_template_rejects_create_and_update_without_writing() {
     let saved = pap
         .create_policy("policy", &binding().policy.template)
         .unwrap();
-    let mut bad_version = binding().policy.template;
+    let mut bad_version = native_template();
     bad_version.spec_version = "99".into();
-    let mut bad_category = binding().policy.template;
+    let mut bad_category = native_template();
     bad_category.rules[0].category = Category::Network;
     for (template, path) in [
         (file_policy(vec![]), "template.rules"),
@@ -129,10 +136,10 @@ fn valid_backend_unsupported_decisions_are_saved_as_reusable_policies() {
     let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let pap = PapService::new(repository.clone());
     for effect in [Effect::Allow, Effect::RequireConfirmation] {
-        let mut template = binding().policy.template;
+        let mut template = native_template();
         template.rules[0].effect = effect;
         let saved = pap.create_policy("general policy", &template).unwrap();
-        assert_eq!(saved.template, template);
+        assert_eq!(saved.template, PolicySource::SecCore(template));
         assert_eq!(
             repository
                 .get_policy(&saved.policy_id, saved.revision)
@@ -140,4 +147,78 @@ fn valid_backend_unsupported_decisions_are_saved_as_reusable_policies() {
             saved
         );
     }
+}
+
+fn cedar(text: &str) -> PolicySource {
+    serde_json::from_value(serde_json::json!({
+        "language": "cedar", "content": {
+            "schema": {"schemaId": "seccore.system", "revision": 2},
+            "text": text
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn cedar_admission_validates_before_replacing_the_current_revision() {
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let pap = PapService::new(repository.clone());
+    let source = cedar(
+        r#"@advice("{\"verdict\":\"warn\",\"message\":\"review output\"}")
+permit(principal, action == SecCore::Action::"process.spawn", resource)
+when { principal has agent_type && principal.agent_type == "codex" };"#,
+    );
+    let first = pap.create_policy("baseline", &source).unwrap();
+    assert_eq!(first.template, source);
+    assert_eq!(
+        pap.create_policy("other", &source).unwrap().revision.get(),
+        1
+    );
+    assert_eq!(
+        pap.update_policy(&first.policy_id, "baseline", &source)
+            .unwrap(),
+        first
+    );
+    for invalid in [
+        cedar("not Cedar"),
+        cedar(r#"permit(principal, action == SecCore::Action::"missing", resource);"#),
+        cedar(r#"@advice("{\"verdict\":\"unknown\"}") permit(principal, action, resource);"#),
+    ] {
+        assert!(matches!(
+            pap.create_policy("invalid", &invalid),
+            Err(PapError::InvalidPolicy(_))
+        ));
+        assert!(matches!(
+            pap.update_policy(&first.policy_id, "invalid", &invalid),
+            Err(PapError::InvalidPolicy(_))
+        ));
+        assert_eq!(
+            pap.current_policies(std::slice::from_ref(&first.policy_id))
+                .unwrap(),
+            vec![first.clone()]
+        );
+    }
+    let updated = pap
+        .update_policy(
+            &first.policy_id,
+            "baseline",
+            &cedar("forbid(principal, action, resource);"),
+        )
+        .unwrap();
+    assert_eq!(updated.revision.get(), 2);
+    assert_eq!(
+        pap.current_policies(std::slice::from_ref(&first.policy_id))
+            .unwrap(),
+        vec![updated.clone()]
+    );
+    assert_eq!(
+        pap.get_policy(&first.policy_id, first.revision),
+        Err(PapError::NotFound)
+    );
+    pap.delete_policy_revision(&updated.policy_id, updated.revision)
+        .unwrap();
+    assert_eq!(
+        pap.current_policies(&[first.policy_id]),
+        Err(PapError::NotFound)
+    );
 }

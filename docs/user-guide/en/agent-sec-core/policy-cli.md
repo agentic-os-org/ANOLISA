@@ -142,6 +142,25 @@ Delete the Scope to withdraw its assignments. A known deleted Policy ID retains 
 revision counter; updating it recreates content at the next revision. An unknown ID
 cannot be updated.
 
+Cedar policies use the same create/update commands. Save this source envelope in
+`--file` instead of a native template (this example intentionally denies everything):
+
+```json
+{
+  "language": "cedar",
+  "content": {
+    "schema": {"schemaId": "seccore.system", "revision": 2},
+    "text": "forbid(principal, action, resource);"
+  }
+}
+```
+
+Cedar syntax and schema are validated before storage. Native templates and existing
+SQLite records keep their wire format. The AgentSight Adapter does not accept Cedar;
+the sandbox authorization service reads the selected current policy revisions as
+explained in the [sandbox guide](sandbox.md). Updates affect new authorization
+requests; they do not mutate existing Scope/Binding snapshots or running sandboxes.
+
 ## Manage Scopes
 
 Create an assignment with a Policy ID and exact revision, plus one selector:

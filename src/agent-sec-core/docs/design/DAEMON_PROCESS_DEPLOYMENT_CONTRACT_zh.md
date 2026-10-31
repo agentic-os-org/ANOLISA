@@ -765,3 +765,34 @@ obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒�
 组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
 `v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
 以上不替代安装态不同 UID/systemd 验收。
+
+
+## V2 sandbox 执行与授权接入（DPROC-SANDBOX-001）
+
+`sandbox run --permissions <file> -- <command>` 是明确的本地执行入口：只消费调用方提供的
+OS 权限和命令，不访问 daemon、不读取其数据库、不取得策略审批。它不是 daemon 故障时的 fallback。
+其余命令继续遵循已有 daemon 所有权规则。上层应用需要授权时使用 `asc-pep-runtime`，
+通过现有 client/UDS 调用 `authorization.evaluate/report`；daemon 始终不执行目标命令。
+
+`agent-sec-daemon --authorization-config <file>` 配置 PAP 的 baseline_policy、可选 task_policy、
+environment_permissions 和 ttl_seconds。配置不含策略正文；文件及祖先目录由 root 管理，
+不可被组/其他用户写入。未配置时授权接口返回 unavailable，不影响其他服务。
+每次 evaluate 从 PAP 同一事务读取当前策略；版本未变时复用编译结果。策略更新成功后
+影响下一次授权；删除或不可用时失败，不退回旧版本。Scope/Binding 仍使用固定版本。
+PEP 须在 expires_at 前接收决定；接收后的 ask 等待、安装和运行不再因该期限失败，
+策略更新不撤回已接收的决定。MODIFY 在事实齐备时由 PDP 同次完成最终授权；缺事实才 DEFER。
+
+`make build-sandbox` 生成静态 Linux helper，发布验证拒绝动态加载器或 DT_NEEDED。
+严格模式要求 bubblewrap >=0.10、user namespace；请求 noexec 时还需 mount_setattr。
+缺少能力即拒绝，不回退旧权限模式。helper 安装约束并降权后启动目标，外层 supervisor
+等待安装与退出，不接管宿主信号，不提供主动取消或目标运行超时；安装等待超过 30 秒则清理。
+父进程退出或主目标结束时清理后代；宿主被外部终止时不保证回执。旧底层 CLI 接口保留原语义。
+
+| 验收 | 可执行 fixture |
+|---|---|
+| 无 daemon 的纯 CLI、实际文件/网络/noexec 约束 | `tests/e2e/linux-sandbox/strict_cli.py`、`linux-sandbox/tests/suite/strict_runtime.rs` |
+| TTY 输入、默认信号行为、父进程退出及后台子进程清理 | `v2/apps/asc-cli/tests/sandbox.rs`（`ASC_SANDBOX_INTEGRATION=1`） |
+| 真实授权、ask 后直行、版本更新、双存储回执 | `tests/e2e/linux-sandbox/authorized_cli.py` |
+
+这些 fixture 不替代 RPM/systemd、多架构或完整 DPROC 安装验收。可执行命令由
+`.github/workflows/sandbox-pep.yaml` 维护。

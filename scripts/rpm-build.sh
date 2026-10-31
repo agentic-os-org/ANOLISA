@@ -192,11 +192,9 @@ build_copilot_shell() {
 #
 # Args: <pkg_dir>  destination staging directory (must already exist)
 #
-# Only the CLI/daemon layer differs between V1 and V2, so both callers stage the
-# same component payload here and then add their own layer. Keeping the trees
-# separate matters: the V1 tarball must keep its original payload inventory, so
-# no V2 runtime binaries may leak into this helper. Shared packaging
-# modules are included because both source trees use the same root Makefile.
+# Both builds need the shared Rust type sources and their workspace metadata.
+# V1 still builds and installs its Python CLI/daemon only; other V2 runtime
+# sources and build outputs remain outside its source tarball.
 #
 # Note: rust-toolchain.toml is intentionally excluded from the tarball. The
 # source file pins a Rust version that rpmbuild environments may not have, so by
@@ -218,6 +216,10 @@ stage_sec_core_payload() {
     tar -cf - -C "${SEC_DIR}" \
         --exclude='__pycache__' \
         packaging/ | tar -xf - -C "$pkg_dir/"
+    # linux-sandbox uses these path dependencies in both V1 and V2 builds.
+    tar -cf - -C "${SEC_DIR}" --exclude='target' \
+        v2/Cargo.toml v2/crates/asc-policy-types v2/crates/asc-foundation-types \
+        | tar -xf - -C "$pkg_dir/"
     [ -f "${SEC_DIR}/LICENSE" ] && cp "${SEC_DIR}/LICENSE" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
 

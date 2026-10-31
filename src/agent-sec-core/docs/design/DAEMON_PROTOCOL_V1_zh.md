@@ -538,7 +538,7 @@ reconcile Runtime。当前 Scope 自动管理 Binding，生产使用 SQLite，�
 [Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。内部 status_version、
 deployments 与写回执不进入公共响应。历史内存组合测试不作为真实 PEP 或物理断电验收。
 
-Policy CREATE/UPDATE 在 PAP 内校验 `PolicyTemplate` 并保存完整模板。
+Policy CREATE/UPDATE 在 PAP 内校验并保存 `PolicySource`。`template` 兼容原有裸 `PolicyTemplate`，也接受 `{"language":"cedar","content":{"schema":...,"text":...}}`；Cedar 经共享前端校验后入库，AgentSight Adapter 明确拒绝其不支持的 Cedar 源码。
 PolicyTemplate 是可被多个 Scope 复用的策略；内容使用 `specVersion`、可选 description 和
 非空 rules，每条规则包含 effect/category/action/typed target 及可选 where/previous/because。
 当前定义文件目标和 read/write/exec 动作，合法但 AgentSight 不支持的规则可以保存。
@@ -1054,3 +1054,36 @@ obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本�
 历史未知归属使用 `unknown_SessionId`；未重名的 ID 保持原样。组合名称仍有歧义时拒绝；原始存储 ID 和安全关联不变，详见查询设计 §4.1。
 内部 `DaemonDispatcher::handle` 使用命名的 5 秒 convenience budget；真实 UDS dispatch
 使用 transport 配置生成的 `DispatchControl`，不受该默认值替代。
+
+
+## V2 sandbox 授权扩展
+
+`authorization.evaluate` 与 `authorization.report` 使用现有 UDS、JSON 信封和 peer UID，
+不修改 V1 oracle。两个方法面向已准入的运行时调用者，不接受调用方上传 Cedar 策略。
+授权 `request_id`、`execution_id` 位于 params 内，与传输层生成的 request ID 分开。
+
+| method | params / data | 处理 |
+|---|---|---|
+| `authorization.evaluate` | `AuthorizationRequest` → `Decision` | 读取一个有效策略版本、求值；不启动进程、不等待 ask。 |
+| `authorization.report` | `ExecutionReceipt` → `ReceiptAck` | 校验当前 peer 对决策的归属和执行引用，确认日志持久化；不重新授权或执行。 |
+
+类型定义见 [`authorization.rs`](../../v2/crates/asc-policy-types/src/authorization.rs)。
+request 包含 type=os、principal、launch、requested_permissions、path_facts、capabilities、
+可选 continuation；Decision 包含绑定摘要、策略版本、接收期限 expires_at、warnings、五态及有效权限/待准备候选。
+所有类型拒绝未知字段。daemon 从 PAP 同一事务读取配置所选策略的当前版本；策略更新成功后供下一次授权使用，删除或不可用时拒绝授权，不回退缓存旧版本。
+
+MODIFY 携带 PDP 已完整授权的最终命令与权限，绑定原请求摘要；PEP 本地核验后直接执行。
+DEFER 没有执行权，仅在缺少必要事实时补充并再次 evaluate。STEP_UP 的本地确认通过后
+直接执行绑定动作，不再 evaluate。PEP 须在 expires_at 前一次性接收决定；接收后的审批等待和执行不再检查该期限。report 只接受同一 peer UID 的决策，包含 approval、
+installed/started、exit_code/signal/cancel_signal、错误和记录时间。
+已成功报告的决策拒绝重复回执；对转换 continuation 保留到消费或过期，普通 DEFER 回执后释放。非 DEFER 决策的回执关联沿用 expires_at 后 24 小时的保留窗口；它不限制已接收决定的执行。回执事件中的 warnings 来自 daemon 保存的 Decision。
+
+领域 DENY 是成功 RPC 中的决策。错误使用既有目录：无配置返回 `unavailable`，
+非法载荷 `invalid_argument`，跨 UID `permission_denied`，过期/引用冲突 `conflict`，
+容量不足 `resource_exhausted`，存储或内部失败 `internal`。只有所有配置的 SQLite/JSONL
+记录成功后才 Ack；部分写入失败返回错误，不承诺跨存储事务或自动重试。
+身份字段描述逻辑 Agent，由接入方提供；peer UID 约束决策与回执归属，不认证自报 agent_type。
+
+fixture：`asc-daemon-handler/src/authorization.rs`、`asc-daemon-core/src/authorization.rs`、
+`tests/e2e/linux-sandbox/authorized_cli.py`。部署和后端边界见
+[Sandbox 主设计](LINUX_SANDBOX_PEP_DESIGN_zh.md)。

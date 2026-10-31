@@ -49,7 +49,7 @@ endef
 
 .PHONY: build-sandbox
 build-sandbox: ## Build linux-sandbox binary
-	cd linux-sandbox && $(CARGO_BUILD_ENV) $(RAW_RUST_BUILDER) build --release --locked $(CARGO_OFFLINE_FLAGS)
+	cd linux-sandbox && $(CARGO_BUILD_ENV) $(RAW_RUST_BUILDER) rustc --bin linux-sandbox --release --locked $(CARGO_OFFLINE_FLAGS) -- -C target-feature=+crt-static
 	install -d -m 0755 $(BUILD_DIR)
 	cp -p linux-sandbox/target/$(RAW_RUST_RELEASE_SUBDIR)/linux-sandbox $(BUILD_DIR)/
 

@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod authorization;
 mod dispatcher;
 mod observability;
 mod pap;

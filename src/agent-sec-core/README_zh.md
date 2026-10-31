@@ -13,6 +13,9 @@
 
 AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)。
 
+Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- command`，可直接执行，无需 daemon。运行要求与可选策略授权见 [Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。
+可选授权从 PAP 读取 Cedar 策略，由 daemon `--authorization-config` 选择；策略更新成功后，后续授权使用新版本。
+
 ## 背景
 
 随着 AI Agent 逐步获得操作系统级别的执行能力（文件读写、网络访问、进程管理等），传统应用安全边界已不再适用。Agent Sec Core 从 **OS 层面** 为 Agent 构建纵深防御体系，确保 Agent 在受控、可审计、最小权限的环境中运行。

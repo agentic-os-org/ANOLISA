@@ -188,6 +188,214 @@ fn install_network_seccomp_filter_on_current_thread(
     Ok(())
 }
 
+/// Install the strict entrypoint's baseline without weakening full-network mode.
+///
+/// Unix socket pairs remain usable for child-process IPC, but connecting to host
+/// Unix sockets, creating namespaces, or changing mounts is never permitted.
+pub(crate) fn apply_strict_restrictions(network_enabled: bool) -> Result<()> {
+    set_no_new_privs()?;
+    let mut rules = BTreeMap::new();
+    for number in [
+        libc::SYS_ptrace,
+        libc::SYS_process_vm_readv,
+        libc::SYS_process_vm_writev,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+        libc::SYS_chroot,
+        libc::SYS_setns,
+        libc::SYS_unshare,
+        libc::SYS_open_tree,
+        libc::SYS_move_mount,
+        libc::SYS_mount_setattr,
+        libc::SYS_fsopen,
+        libc::SYS_fsconfig,
+        libc::SYS_fsmount,
+        libc::SYS_fspick,
+        libc::SYS_bpf,
+        libc::SYS_perf_event_open,
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+        libc::SYS_keyctl,
+        libc::SYS_add_key,
+        libc::SYS_request_key,
+        libc::SYS_linkat,
+    ] {
+        rules.insert(number, vec![]);
+    }
+    #[cfg(target_arch = "x86_64")]
+    rules.insert(libc::SYS_link, vec![]);
+
+    let namespace_flags = [
+        libc::CLONE_NEWUSER,
+        libc::CLONE_NEWNS,
+        libc::CLONE_NEWNET,
+        libc::CLONE_NEWPID,
+        libc::CLONE_NEWIPC,
+        libc::CLONE_NEWUTS,
+        libc::CLONE_NEWCGROUP,
+    ];
+    let clone_rules = namespace_flags
+        .into_iter()
+        .map(|flag| {
+            SeccompRule::new(vec![SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::MaskedEq(flag as u64),
+                flag as u64,
+            )?])
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rules.insert(libc::SYS_clone, clone_rules);
+    let socket_conditions = if network_enabled {
+        vec![
+            SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                libc::AF_INET as u64,
+            )?,
+            SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                libc::AF_INET6 as u64,
+            )?,
+        ]
+    } else {
+        // A socketpair is sufficient for sandbox-local IPC; a socket could
+        // reach a host abstract Unix endpoint when the host netns is shared.
+        Vec::new()
+    };
+    rules.insert(
+        libc::SYS_socket,
+        if socket_conditions.is_empty() {
+            vec![]
+        } else {
+            vec![SeccompRule::new(socket_conditions)?]
+        },
+    );
+    // A datagram socketpair can sendmsg to a host pathname Unix socket.
+    // Connected stream/seqpacket pairs cannot select a different peer.
+    // Rust uses seqpacket pairs to report errors during Command::spawn.
+    let connected_types = [
+        libc::SOCK_STREAM,
+        libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+        libc::SOCK_STREAM | libc::SOCK_NONBLOCK,
+        libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+        libc::SOCK_SEQPACKET,
+        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+        libc::SOCK_SEQPACKET | libc::SOCK_NONBLOCK,
+        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+    ];
+    let disallowed_type = connected_types
+        .into_iter()
+        .map(|kind| {
+            SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, kind as u64)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rules.insert(
+        libc::SYS_socketpair,
+        vec![
+            SeccompRule::new(vec![SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                libc::AF_UNIX as u64,
+            )?])?,
+            SeccompRule::new(disallowed_type)?,
+        ],
+    );
+    if !network_enabled {
+        for number in [
+            libc::SYS_connect,
+            libc::SYS_bind,
+            libc::SYS_listen,
+            libc::SYS_accept,
+            libc::SYS_accept4,
+        ] {
+            rules.insert(number, vec![]);
+        }
+    }
+    rules.insert(
+        libc::SYS_ioctl,
+        [libc::TIOCSTI, 0x541c]
+            .into_iter()
+            .map(|request| {
+                SeccompRule::new(vec![SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Eq,
+                    request,
+                )?])
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    );
+    install_strict_filter(rules, libc::EPERM)?;
+    // libc falls back to clone when clone3 is unavailable; its pointer-based
+    // flags cannot be inspected safely by seccomp.
+    install_strict_filter(BTreeMap::from([(libc::SYS_clone3, vec![])]), libc::ENOSYS)?;
+    #[cfg(target_arch = "x86_64")]
+    block_x32_syscalls()?;
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn block_x32_syscalls() -> Result<()> {
+    // x32 shares AUDIT_ARCH_X86_64 but adds this bit to syscall numbers. The
+    // native deny table must not default-allow that alternate ABI.
+    let program = [
+        seccompiler::sock_filter {
+            code: 0x20,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        }, // LD nr
+        seccompiler::sock_filter {
+            code: 0x45,
+            jt: 0,
+            jf: 1,
+            k: 0x4000_0000,
+        }, // JSET x32
+        seccompiler::sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        },
+        seccompiler::sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: libc::SECCOMP_RET_ALLOW,
+        },
+    ];
+    apply_filter(&program)?;
+    Ok(())
+}
+
+fn install_strict_filter(rules: BTreeMap<i64, Vec<SeccompRule>>, errno: i32) -> Result<()> {
+    let arch = if cfg!(target_arch = "x86_64") {
+        TargetArch::x86_64
+    } else if cfg!(target_arch = "aarch64") {
+        TargetArch::aarch64
+    } else {
+        return Err(SandboxError::UnsupportedOperation(
+            "strict seccomp architecture".into(),
+        ));
+    };
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::Errno(errno as u32),
+        arch,
+    )?;
+    let program: BpfProgram = filter.try_into()?;
+    apply_filter(&program)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::NetworkSeccompMode;

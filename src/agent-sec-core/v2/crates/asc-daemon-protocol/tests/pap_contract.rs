@@ -511,3 +511,26 @@ fn observability_query_method_inventory_matches_dispatch() {
         );
     }
 }
+
+#[test]
+fn cedar_policy_sources_round_trip_and_reject_mixed_or_duplicate_fields() {
+    let input = json!({"policyName":"sandbox", "template":{
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system", "revision":2},
+            "text":"permit(principal, action, resource);"
+        }
+    }});
+    assert_eq!(round_trip::<CreatePolicyParams>(input.clone()), input);
+    let mut mixed = input.clone();
+    mixed["template"]["specVersion"] = json!("0.1");
+    assert!(serde_json::from_value::<CreatePolicyParams>(mixed).is_err());
+    let mut injected = input;
+    injected["template"]["content"]["ast"] = json!({});
+    assert!(serde_json::from_value::<CreatePolicyParams>(injected).is_err());
+    for raw in [
+        r#"{"policyName":"p","template":{"specVersion":"0.1","specVersion":"0.1","rules":[]}}"#,
+        r#"{"policyName":"p","template":{"language":"cedar","language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":2},"text":"permit(principal,action,resource);"}}}"#,
+    ] {
+        assert!(serde_json::from_str::<CreatePolicyParams>(raw).is_err());
+    }
+}

@@ -115,6 +115,7 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<u8, RunError> {
     let socket = match cli.plan() {
+        Plan::Sandbox(command) => return command.run().map_err(RunError::Sandbox),
         // The capability view describes the environment this process inherited,
         // so it must resolve it here rather than through a daemon.
         Plan::Local(command) => {
@@ -229,6 +230,8 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
 
 #[derive(Debug, thiserror::Error)]
 enum RunError {
+    #[error(transparent)]
+    Sandbox(#[from] asc_cli::sandbox::SandboxError),
     #[error(transparent)]
     Input(#[from] InputError),
     #[error(transparent)]

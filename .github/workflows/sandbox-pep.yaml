@@ -1,0 +1,113 @@
+name: Sandbox PEP
+on:
+  pull_request:
+    paths: ['src/agent-sec-core/linux-sandbox/**', 'src/agent-sec-core/v2/**', '.github/workflows/sandbox-pep.yaml']
+  push:
+    branches: ['codex/sec-core-sandbox-pep']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sandbox-pep-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            src/agent-sec-core/v2
+            src/agent-sec-core/linux-sandbox
+      - name: Install strict sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config libcap-dev libseccomp-dev
+          git clone --depth 1 --branch v0.10.0 https://github.com/containers/bubblewrap.git /tmp/asc-bubblewrap
+          meson setup /tmp/asc-bubblewrap/build /tmp/asc-bubblewrap -Dman=disabled
+          ninja -C /tmp/asc-bubblewrap/build
+          sudo install -m 0755 /tmp/asc-bubblewrap/build/bwrap /usr/bin/bwrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+      - name: Format
+        working-directory: src/agent-sec-core
+        run: |
+          cargo fmt --manifest-path v2/Cargo.toml --all -- --check
+          cargo fmt --manifest-path linux-sandbox/Cargo.toml -- --check
+      - name: Test V2 workspace
+        working-directory: src/agent-sec-core/v2
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: 'sudo -E'
+        run: cargo test --locked --workspace --exclude asc-event-log --target x86_64-unknown-linux-gnu --no-fail-fast
+      - name: Test event log as ordinary user
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core/v2
+        run: cargo test --locked --target x86_64-unknown-linux-gnu -p asc-event-log
+      - name: Verify non-root server rejection
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core/v2
+        run: |
+          cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent
+          cargo test --locked -p asc-cli --test health_probe nonroot_server_is_rejected_before_health_request_is_sent
+      - name: Verify actual Linux isolation
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core/linux-sandbox
+        env:
+          ASC_SANDBOX_INTEGRATION: '1'
+        run: |
+          RUSTFLAGS="-C target-feature=+crt-static" cargo test --locked --no-fail-fast --target x86_64-unknown-linux-gnu --test all strict_runtime -- --nocapture
+          cargo test --locked --no-fail-fast --lib
+          sudo env ASC_SANDBOX_INTEGRATION=1 "$(find target/x86_64-unknown-linux-gnu/debug/deps -maxdepth 1 -type f -executable -name 'all-*' | head -1)" strict_runtime_enforces_write_and_read_carveouts --nocapture
+      - name: Build runnable CLI and helper
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core
+        run: |
+          cargo build --locked --manifest-path v2/Cargo.toml -p asc-cli -p asc-daemon
+          cargo rustc --locked --manifest-path linux-sandbox/Cargo.toml --bin linux-sandbox -- -C target-feature=+crt-static
+          python3 ../../.github/actions/prebuilt-rust-common/verify-glibc.py --arch x86_64 --require-static linux-sandbox/target/debug/linux-sandbox
+          cp linux-sandbox/target/debug/linux-sandbox v2/target/debug/linux-sandbox
+          python3 tests/e2e/linux-sandbox/strict_cli.py v2/target/debug/agent-sec-cli
+          ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" cargo test --locked --no-fail-fast --manifest-path v2/Cargo.toml -p asc-cli --test sandbox -- --nocapture
+          cargo build --locked --manifest-path v2/Cargo.toml -p asc-pep-runtime --example authorized_sandbox
+          sudo python3 tests/e2e/linux-sandbox/authorized_cli.py v2/target/debug/agent-sec-daemon v2/target/debug/examples/authorized_sandbox "$PWD/linux-sandbox/target/debug/linux-sandbox"
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            src/agent-sec-core/v2
+            src/agent-sec-core/linux-sandbox
+      - name: Lint V2 workspace
+        working-directory: src/agent-sec-core/v2
+        run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
+      - name: Lint Linux helper
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core/linux-sandbox
+        run: cargo clippy --locked --all-targets --keep-going -- -D warnings
+      - name: Document public APIs
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core/v2
+        run: cargo doc --locked --workspace --no-deps

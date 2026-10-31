@@ -1,5 +1,8 @@
 //! One bounded daemon call per UDS connection, with no retries or local execution.
 
+mod authorization;
+pub use authorization::{authorization_evaluate, authorization_report};
+
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;

@@ -10,7 +10,7 @@ use asc_daemon_protocol::method::{
 };
 use asc_daemon_protocol::{CreatePolicyParams, DaemonRequest, RevisionParams, UpdatePolicyParams};
 use asc_foundation_types::{ResourceId, Revision};
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::{PolicySource, policy_template};
 use clap::{Args, Subcommand};
 
 use super::common::{Page, encode, resource_id, revision};
@@ -40,7 +40,7 @@ pub(crate) struct PolicyInput {
     /// Complete Policy name.
     #[arg(long)]
     name: String,
-    /// JSON `PolicyTemplate` file, resolved in the CLI's working directory.
+    /// Native template or tagged Cedar source JSON file.
     #[arg(long)]
     file: PathBuf,
 }
@@ -88,7 +88,7 @@ impl PolicyCommand {
 }
 
 impl PolicyInput {
-    fn template(&self) -> Result<PolicyTemplate, InputError> {
+    fn template(&self) -> Result<PolicySource, InputError> {
         let mut bytes = Vec::new();
         File::open(&self.file)?
             .take(4 * 1024 * 1024 + 1)
@@ -98,7 +98,10 @@ impl PolicyInput {
         }
         // Decode the typed template before conversion to Value, so duplicate
         // fields cannot be silently collapsed by an untyped JSON map.
-        Ok(serde_json::from_slice(&bytes)?)
+        let mut decoder = serde_json::Deserializer::from_slice(&bytes);
+        let source = policy_template::deserialize(&mut decoder)?;
+        decoder.end()?;
+        Ok(source)
     }
 }
 

@@ -2,12 +2,74 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cedar::CedarPolicySource;
 use crate::error::{Validate, ValidationError};
 
 mod condition;
 pub use condition::{
     Comparison, Condition, HistoryCondition, HistoryEvent, HistoryLogic, Scalar, Value,
 };
+
+/// Authored content, independent of Policy identity and Scope/Binding assignment.
+///
+/// A frontend must derive the representation from the source rather than trust a
+/// caller-supplied AST.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "language", content = "content", deny_unknown_fields)]
+pub enum PolicySource {
+    /// Existing JSON authoring format, including its own `specVersion`.
+    #[serde(rename = "seccore")]
+    SecCore(PolicyTemplate),
+    /// Cedar text and the exact application schema used for validation.
+    #[serde(rename = "cedar")]
+    Cedar(CedarPolicySource),
+}
+
+impl From<PolicyTemplate> for PolicySource {
+    fn from(template: PolicyTemplate) -> Self {
+        Self::SecCore(template)
+    }
+}
+
+/// Preserves the legacy PAP template wire format while accepting tagged sources.
+pub mod policy_template {
+    use super::{PolicySource, PolicyTemplate};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Writes native templates unchanged and Cedar sources with their language tag.
+    ///
+    /// # Errors
+    /// Returns serializer errors.
+    pub fn serialize<S>(source: &PolicySource, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match source {
+            PolicySource::SecCore(template) => template.serialize(serializer),
+            PolicySource::Cedar(_) => source.serialize(serializer),
+        }
+    }
+
+    /// Accepts a native template or a tagged source without accepting mixed fields.
+    ///
+    /// # Errors
+    /// Rejects malformed, duplicate, or unknown source fields.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PolicySource, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Native(PolicyTemplate),
+            Source(PolicySource),
+        }
+        Ok(match Input::deserialize(deserializer)? {
+            Input::Native(template) => PolicySource::SecCore(template),
+            Input::Source(source) => source,
+        })
+    }
+}
 
 /// Reusable policy content; identity and revision belong to `PreparedPolicy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +152,29 @@ pub enum Resource {
         /// Target path pattern.
         path: String,
     },
+}
+
+impl Validate for PolicySource {
+    /// Checks the source envelope; Cedar parsing and schema checks require the frontend.
+    ///
+    /// # Errors
+    /// Returns an existing native-AST error, or rejects blank/NUL-bearing Cedar text.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::SecCore(template) => template.validate().map_err(|error| {
+                ValidationError::new(format!("content.{}", error.path), error.message)
+            }),
+            Self::Cedar(source) => {
+                if source.text.trim().is_empty() || source.text.contains('\0') {
+                    return Err(ValidationError::new(
+                        "content.text",
+                        "must contain non-whitespace Cedar text without NUL",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Validate for PolicyTemplate {

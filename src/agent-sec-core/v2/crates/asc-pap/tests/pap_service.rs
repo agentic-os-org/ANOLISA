@@ -83,6 +83,10 @@ impl PapRepository for FakeRepository {
         self.inner.get_policy(id, revision)
     }
 
+    fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.inner.current_policies(ids)
+    }
+
     fn list_policies(&self, limit: u32, offset: u32) -> Result<Page<PreparedPolicy>, PapError> {
         self.inner.list_policies(limit, offset)
     }

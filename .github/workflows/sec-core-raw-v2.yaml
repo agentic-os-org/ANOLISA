@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          dnf install -y tar git make gcc clang llvm openssl-devel libseccomp-devel \
+          dnf install -y tar git make gcc glibc-static clang llvm openssl-devel libseccomp-devel \
                          bubblewrap systemd systemd-rpm-macros python3-pip \
                          curl gzip jq gnupg2 nodejs
 
