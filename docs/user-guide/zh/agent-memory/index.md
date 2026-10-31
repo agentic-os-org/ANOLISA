@@ -785,6 +785,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 症状 | 可能原因 | 处理 |
 |------|----------|------|
 | 启动报 `unshare(NEWUSER\|NEWNS): EPERM` | unprivileged user namespace 被禁 | `sysctl kernel.unprivileged_userns_clone=1`，或 `MEMORY_MOUNT_STRATEGY=userland` |
+| 启动报 `... is still mode ... after chmod`（metadata 目录、索引库或快照） | `memory.paths.base_dir` 所在文件系统无法保持 owner-only 权限（vfat/exfat/ntfs-3g、WSL `drvfs`、固定 `file_mode` 的 CIFS、部分 FUSE/9p 挂载） | 把 `memory.paths.base_dir` 移到本地文件系统 |
 | `tmpfs /mnt: EBUSY` | 新 namespace 中 `/mnt` 已被占用 | 重启进程 |
 | macOS / Windows `cargo build` 报 `libsystemd`/`nix` 错 | 宿主非 Linux | `make remote-build` / `remote-test` |
 | `tools/call memory_search` 返 `METHOD_NOT_FOUND` | `MEMORY_PROFILE=expert` 隐藏 Tier B | 切回 `advanced`，或直接用 Tier A |

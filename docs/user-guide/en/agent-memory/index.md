@@ -831,6 +831,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | Symptom | Likely cause | Fix |
 |------|----------|------|
 | startup `unshare(NEWUSER\|NEWNS): EPERM` | unprivileged user namespace disabled | `sysctl kernel.unprivileged_userns_clone=1`, or `MEMORY_MOUNT_STRATEGY=userland` |
+| startup fails with `... is still mode ... after chmod` (metadata dir, index db, or snapshot) | the filesystem under `memory.paths.base_dir` cannot hold owner-only modes (vfat/exfat/ntfs-3g, WSL `drvfs`, CIFS with a fixed `file_mode`, some FUSE/9p) | move `memory.paths.base_dir` onto a local filesystem |
 | `tmpfs /mnt: EBUSY` | `/mnt` occupied in new namespace | restart the process |
 | macOS / Windows `cargo build` fails on `libsystemd`/`nix` | non-Linux host | `make remote-build` / `remote-test` |
 | `tools/call memory_search` returns `METHOD_NOT_FOUND` | `MEMORY_PROFILE=expert` hides Tier B | switch to `advanced`, or use Tier A directly |
