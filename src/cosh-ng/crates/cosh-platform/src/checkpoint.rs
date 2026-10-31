@@ -1912,6 +1912,7 @@ mod tests {
         assert_eq!(identity.registered_path, "/workspace");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn lost_response_after_full_write_is_possibly_applied() {
         let (_dir, socket_path, daemon) = spawn_silent_daemon();
