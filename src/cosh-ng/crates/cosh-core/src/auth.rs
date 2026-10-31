@@ -280,9 +280,15 @@ pub(crate) fn apply_auth_credentials(
 
     let (base_url, provider_type, default_model) = match template {
         Some(template) => (
+            // A blank base_url means "unset" — the same filter the validation
+            // arm applies. Without it Some("") short-circuits the builtin
+            // below, persisting an empty base_url that overrides the builtin
+            // all the way through resolve_provider (whose default only fires
+            // for None).
             response
                 .values
                 .get("base_url")
+                .filter(|url| !url.trim().is_empty())
                 .cloned()
                 .or(template.builtin_base_url)
                 .unwrap_or_default(),
@@ -796,6 +802,56 @@ mod tests {
             Some("https://coding.dashscope.aliyuncs.com/v1")
         );
         assert_eq!(provider.model.as_deref(), Some(DEFAULT_PLAN_MODEL));
+    }
+
+    #[test]
+    fn template_blank_base_url_applies_the_builtin() {
+        // Regression: validate_auth_response treats a blank base_url like an
+        // absent one and validates the template builtin instead, but the
+        // application arm kept Some(""), which short-circuits the builtin in
+        // `.or(template.builtin_base_url)` — the provider validation had just
+        // approved was persisted with an empty base_url, and resolve_provider
+        // then yields "" because its DashScope default only fires for None.
+        let mut config = CoreConfig::default();
+        for blank in ["", "   "] {
+            let response = AuthResponse {
+                provider_id: "dashscope".to_string(),
+                provider_type: None,
+                values: HashMap::from([
+                    ("api_key".to_string(), "sk-test123".to_string()),
+                    ("base_url".to_string(), blank.to_string()),
+                ]),
+                persist: true,
+            };
+            apply_auth_credentials(&mut config, &response).unwrap();
+
+            let p = config.ai.providers.get("dashscope").unwrap();
+            assert_eq!(
+                p.base_url.as_deref(),
+                Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                "a blank base_url must apply the builtin like validation reads it"
+            );
+        }
+    }
+
+    #[test]
+    fn template_blank_base_url_keeps_the_no_builtin_template_empty() {
+        // The aliyun template has no builtin, so a blank stays empty there —
+        // the documented steady state — and must not turn into an error.
+        let mut config = CoreConfig::default();
+        let response = AuthResponse {
+            provider_id: "aliyun".to_string(),
+            provider_type: None,
+            values: HashMap::from([
+                ("auth_source".to_string(), "ecs_ram_role".to_string()),
+                ("base_url".to_string(), "  ".to_string()),
+            ]),
+            persist: true,
+        };
+        apply_auth_credentials(&mut config, &response).unwrap();
+
+        let p = config.ai.providers.get("aliyun").unwrap();
+        assert_eq!(p.base_url.as_deref(), Some(""));
     }
 
     #[test]
