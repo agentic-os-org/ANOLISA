@@ -158,37 +158,107 @@ _FALLBACK_SHELL_TOOLS = [
 ]
 
 
+# Shapes consumed at module import. Unknown keys are ignored so a newer
+# tool_categories.json can carry extra tunables without invalidating an older
+# hook_utils.py.
+_REQUIRED_LAYERS = ("layer_1_skip", "layer_2_shell", "layer_3_api")
+_TOOL_LIST_LAYERS = ("layer_1_skip", "layer_2_shell")
+_THRESHOLD_LAYERS = ("layer_2_shell", "layer_3_api")
+_THRESHOLD_KEYS = ("truncate_strings_at", "truncate_arrays_at", "max_depth")
+
+
+def _safe_tool_categories() -> dict:
+    """Return the built-in categories used when the JSON is unusable.
+
+    Content-retrieval tools keep their skip classification, and the threshold
+    readers below fall back to their hardcoded defaults, so a broken
+    tool_categories.json degrades compression instead of breaking hooks.
+    """
+    return {
+        "layer_1_skip": {"tools": list(_FALLBACK_SKIP_TOOLS)},
+        "layer_2_shell": {"tools": list(_FALLBACK_SHELL_TOOLS)},
+        "layer_3_api": {},
+    }
+
+
+def _validate_tool_names(layer: str, value: object) -> None:
+    """Reject a ``tools`` list whose entries cannot become a set of names."""
+    if not isinstance(value, list):
+        raise ValueError(f"Layer {layer}.tools must be a list")
+    for entry in value:
+        # set() over a non-string entry raises TypeError -- dicts and lists are
+        # unhashable -- which aborted the import of every hook sharing this
+        # module.
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"Layer {layer}.tools entries must be strings, "
+                f"got {type(entry).__name__}"
+            )
+
+
+def _validate_thresholds(layer: str, value: object) -> None:
+    """Reject a ``thresholds`` mapping this module cannot read at import."""
+    if not isinstance(value, dict):
+        raise ValueError(f"Layer {layer}.thresholds must be a dict")
+    for key in _THRESHOLD_KEYS:
+        if key not in value:
+            continue
+        number = value[key]
+        # bool is an int subclass, and a flag is never a usable threshold.
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise ValueError(
+                f"Layer {layer}.thresholds.{key} must be a positive integer"
+            )
+
+
+def _validate_tool_categories(data: object) -> dict:
+    """Validate every tool_categories.json shape consumed at module import."""
+    if not isinstance(data, dict):
+        raise ValueError(f"Top level must be a dict, got {type(data).__name__}")
+    categories: dict = data
+
+    for layer in _REQUIRED_LAYERS:
+        if layer not in categories:
+            raise ValueError(f"Missing required layer: {layer}")
+        if not isinstance(categories[layer], dict):
+            raise ValueError(f"Layer {layer} must be a dict")
+
+    # layer_1 and layer_2 require a "tools" list; layer_3 is implicit
+    for layer in _TOOL_LIST_LAYERS:
+        if "tools" not in categories[layer]:
+            raise ValueError(f"Layer {layer} missing 'tools' field")
+        _validate_tool_names(layer, categories[layer]["tools"])
+
+    for layer in _THRESHOLD_LAYERS:
+        if "thresholds" in categories[layer]:
+            _validate_thresholds(layer, categories[layer]["thresholds"])
+
+    return categories
+
+
 def _load_tool_categories() -> dict:
-    """Load tool categories from unified JSON file with validation."""
+    """Load tool categories from the unified JSON file, validating its shapes.
+
+    Anything unusable -- an unreadable path, malformed JSON, or a shape this
+    module cannot consume -- falls back to the built-in safe categories. The
+    loader runs while a host agent imports a lifecycle hook, so it must never
+    raise: an escaping exception aborts every hook that shares this module
+    rather than one malformed request.
+    """
     try:
-        with open(_TOOL_CATEGORIES_PATH, "r") as f:
+        # The encoding is pinned so the JSON's non-ASCII prose decodes the same
+        # way under a POSIX/C locale as under a UTF-8 one; undecodable bytes
+        # still raise ValueError and reach the fallback below.
+        with open(_TOOL_CATEGORIES_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-
-        # Validate required structure
-        required_layers = ["layer_1_skip", "layer_2_shell", "layer_3_api"]
-        for layer in required_layers:
-            if layer not in data:
-                raise ValueError(f"Missing required layer: {layer}")
-            if not isinstance(data[layer], dict):
-                raise ValueError(f"Layer {layer} must be a dict")
-
-        # layer_1 and layer_2 require a "tools" list; layer_3 is implicit
-        for layer in ("layer_1_skip", "layer_2_shell"):
-            if "tools" not in data[layer]:
-                raise ValueError(f"Layer {layer} missing 'tools' field")
-            if not isinstance(data[layer]["tools"], list):
-                raise ValueError(f"Layer {layer}.tools must be a list")
-
-        return data
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
+        return _validate_tool_categories(data)
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        # OSError covers every read failure (missing file, a directory sitting
+        # at the path, permissions), ValueError covers malformed JSON, invalid
+        # UTF-8 and the rejected shapes above; TypeError and AttributeError stay
+        # in the net for shapes the validator does not yet describe.
         print(f"Warning: Failed to load tool_categories.json: {e}", file=sys.stderr)
-        # Fallback to hardcoded safe sets so content-retrieval tools are
-        # never accidentally compressed even if the JSON is unavailable.
-        return {
-            "layer_1_skip": {"tools": list(_FALLBACK_SKIP_TOOLS)},
-            "layer_2_shell": {"tools": list(_FALLBACK_SHELL_TOOLS)},
-            "layer_3_api": {},
-        }
+        return _safe_tool_categories()
 
 
 _tool_categories = _load_tool_categories()
