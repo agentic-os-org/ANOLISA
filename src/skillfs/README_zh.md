@@ -258,8 +258,9 @@ Linux 上直接检查 `PATH` 中的可执行文件，无需额外安装 `which`�
 没有条件块时，SkillFS 也会执行少量启发式命令归一化，例如：
 
 - 独立调用的 `pip install` / `pip3 install` -> `uv pip install`；保留指定解释器的
-  `python -m pip` 调用。独立调用使用保守的命令位置启发式判断，
-  不是完整的 shell 语法解析。
+  `python -m pip` 调用以及带 `--user` 的安装命令，因为 uv 不支持用户目录安装。
+  独立调用使用保守的命令位置启发式判断，不是完整的 shell 语法解析；未结束的
+  参数（包括续行）保持原样。
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 

@@ -346,6 +346,11 @@ agent：
 2. 可选的 **OS 适配器** stage 第二个执行，且只作用于 `SKILL.md`，在 Ubuntu/Debian
    与 Alinux/Anolis 约定之间改写发行版相关字面量。
 
+uv 可用时，启发式归一化保留 `pip install --user` 和 `pip3 install --user`，因为 uv
+不支持 pip 的用户目录安装模式。该选项可以位于包名之前或之后。普通 pip 安装仍可
+改写成 `uv pip install`，包括同一行中的其他命令；指定解释器的 `python -m pip`
+调用保持不变。未结束的参数或续行也会保留原始 pip 调用。
+
 启发式归一化选择 Yarn 时，仅把不带参数的 `npm install` 改写成 `yarn install`。
 带包名、选项或重定向的安装命令保持原样：Yarn 使用 `add` 添加依赖，并不支持所有 npm
 选项。例如，`npm install lodash` 保持不变；如果技能要求使用 Yarn，请直接写出对应命令。
