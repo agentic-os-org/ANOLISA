@@ -46,6 +46,28 @@ pub(super) fn record(connection: &Connection, trajectory: &TrajectoryRecord) -> 
 }
 
 impl TrajectoryStore {
+    /// Remove a successfully read empty source session and its old fingerprint
+    /// together, without affecting siblings in the same source database.
+    pub(crate) fn clear_source_session(
+        &self,
+        session_id: &str,
+        source: &str,
+        file_path: &str,
+    ) -> Result<()> {
+        let mut connection = self.lock_conn()?;
+        let transaction = connection.transaction()?;
+        for table in ["collected_trajectories", "source_session_states"] {
+            transaction.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE session_id = ?1 AND source = ?2 AND file_path = ?3"
+                ),
+                params![session_id, source, file_path],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// 按会话及来源定位指纹，容量裁剪后的会话仍保留状态。
     pub(crate) fn get_source_session_state(
         &self,

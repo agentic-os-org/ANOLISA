@@ -131,7 +131,17 @@ fn collect_session(
 ) -> Result<bool> {
     let messages =
         load_messages(connection, &schema.messages, &session.id).context("load Hermes messages")?;
-    if messages.is_empty() || session_is_expired(session, &messages, retention_days)? {
+    if messages.is_empty() {
+        // Rewind can remove the entire active history. A successful empty
+        // read supersedes the old payload; a read error above must not do so.
+        store.clear_source_session(
+            &scoped_session_id(database_namespace, &session.id),
+            SOURCE,
+            &db_path.to_string_lossy(),
+        )?;
+        return Ok(false);
+    }
+    if session_is_expired(session, &messages, retention_days)? {
         return Ok(false);
     }
     ingest_session(
