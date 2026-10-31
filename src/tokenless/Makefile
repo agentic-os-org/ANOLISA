@@ -193,25 +193,28 @@ test-tokenless:
 # is a merge conflict waiting to happen.
 .PHONY: test-hook-scripts
 
-# The two suites below are the only members of `test-hooks` that CI can run:
+# The three suites below are the only members of `test-hooks` that CI can run:
 # tests/run-all-tests.sh drives the release binary installed on PATH on purpose
 # (see the note above its test 5.0b), so `test-hooks` as a whole needs an
 # installed tokenless and stays a developer-machine target. No workflow calls
-# it -- grepping .github/ for test-hooks and for the two file names returns
-# nothing -- so two contracts only ever ran on developer machines: run-hook.sh
+# it -- grepping .github/ for test-hooks and for the three file names returns
+# nothing -- so three contracts only ever ran on developer machines: run-hook.sh
 # must resolve a hook from its own adapter tree before the FHS and
-# home-directory fallbacks, and tool_ready_hook.sh must keep its hard bypass so
-# the dormant legacy four-phase flow (which runs any readable env-fix script)
-# stays unreachable. Both suites are plain bash over a mktemp sandbox with
-# generated fixtures -- no cargo build output, node, jq, rtk, python3 or
-# network, verified by running them under a PATH that holds only bash and
-# coreutils -- so they cost well under a second. They ride on
+# home-directory fallbacks, run-hook.sh must still fail open with {} and exit 0
+# when the host omits HOME (its `set -u` candidate list must not expand an
+# unbound variable before reaching fail_open), and tool_ready_hook.sh must keep
+# its hard bypass so the dormant legacy four-phase flow (which runs any
+# readable env-fix script) stays unreachable. All three suites are plain bash
+# over a mktemp sandbox with generated fixtures -- no cargo build output,
+# node, jq, rtk, python3 or network, verified by running them under a PATH
+# that holds only bash and coreutils -- so they cost well under a second. They ride on
 # `test-integration` for the same reason test-claude-code-detect and
 # test-toon-cleanup do: that is the hook-contract target the Test tokenless job
-# already calls, so the pair reaches CI with no workflow edit and no new setup.
+# already calls, so the trio reaches CI with no workflow edit and no new setup.
 test-hook-scripts:
 	@echo "==> Testing tokenless hook scripts (no external dependencies)..."
 	bash tests/test-run-hook-install-scope.sh
+	bash tests/test-run-hook-home-fail-open.sh
 	bash tests/test-tool-ready-readable-fixer.sh
 
 test-hooks: test-hook-scripts
