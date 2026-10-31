@@ -89,9 +89,9 @@ def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
     mapping = {}
     for rel in rels:
         rid = rel.get("Id", "")
-        target = rel.get("Target", "")
+        target = rel.get("Target", "").lstrip("/")
         if "worksheets" in target:
-            # Target may be relative: "worksheets/sheet1.xml" -> "xl/worksheets/sheet1.xml"
+            # Resolve relative and package-absolute targets against xl/.
             if not target.startswith("xl/"):
                 target = "xl/" + target
             mapping[rid] = target
@@ -172,7 +172,7 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
 
     try:
         z = zipfile.ZipFile(xlsx_path, "r")
-    except (zipfile.BadZipFile, FileNotFoundError) as e:
+    except (zipfile.BadZipFile, OSError) as e:
         results["errors"].append({"type": "file_error", "message": str(e)})
         results["error_count"] = 1
         return results
@@ -185,7 +185,7 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
 
         for rid, sheet_name in sheet_names.items():
             # Apply sheet filter if requested
-            if sheet_filter and sheet_name != sheet_filter:
+            if sheet_filter is not None and sheet_name != sheet_filter:
                 continue
 
             ws_file = sheet_files.get(rid)
@@ -198,6 +198,7 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
 
             # Track shared formula IDs seen on this sheet (si -> primary cell ref)
             shared_primary: dict[str, str] = {}
+            shared_consumers: list[tuple[str, str]] = []
 
             for cell in ws.findall(f".//{NSP}c"):
                 cell_ref = cell.get("r", "?")
@@ -246,16 +247,29 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
                 # - Shared formula CONSUMER (si only, no text): do NOT count separately
                 #   (they are covered by the primary's ref range)
                 if f_type == "shared" and f_elem.text is None:
-                    # Consumer cell: skip formula counting and cross-ref checks
-                    # (the primary cell already covers this formula)
+                    if f_si is not None and f_elem.get("ref"):
+                        results["errors"].append(
+                            {
+                                "type": "shared_primary_missing_text",
+                                "sheet": sheet_name,
+                                "cell": cell_ref,
+                                "si": f_si,
+                                "detail": "Shared formula primary has no formula text",
+                            }
+                        )
+                        results["error_count"] += 1
+                    elif f_si is not None:
+                        # Consumer cell: the primary cell covers its formula.
+                        shared_consumers.append((f_si, cell_ref))
                     continue
 
                 formula = f_elem.text or ""
 
+                if f_type == "shared" and f_si is not None and formula:
+                    # Primary identity is si plus formula text; ref is optional.
+                    shared_primary.setdefault(f_si, cell_ref)
                 if f_type == "shared" and f_elem.get("ref"):
                     results["shared_formula_ranges"] += 1
-                    if f_si is not None:
-                        shared_primary[f_si] = cell_ref
 
                 if formula:
                     results["formula_count"] += 1
@@ -291,6 +305,41 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
                                 }
                             )
                             results["error_count"] += 1
+
+            # Check 4: shared formula integrity. A consumer whose si has no
+            # primary on this sheet is invalid OOXML and triggers Excel repair.
+            for si, consumer_ref in shared_consumers:
+                if si in shared_primary:
+                    continue
+                results["errors"].append(
+                    {
+                        "type": "orphan_shared_formula",
+                        "sheet": sheet_name,
+                        "cell": consumer_ref,
+                        "si": si,
+                        "detail": "Shared formula consumer has no primary cell on this sheet",
+                    }
+                )
+                results["error_count"] += 1
+
+    if sheet_filter is not None and not results["sheets_checked"]:
+        results["errors"].append(
+            {
+                "type": "sheet_not_found",
+                "sheet": sheet_filter,
+                "detail": f"Requested sheet '{sheet_filter}' was not found",
+                "valid_sheets": sorted(valid_sheet_names),
+            }
+        )
+        results["error_count"] += 1
+    elif not results["sheets_checked"]:
+        results["errors"].append(
+            {
+                "type": "no_sheets_checked",
+                "detail": "No worksheet could be loaded from the workbook",
+            }
+        )
+        results["error_count"] += 1
 
     return results
 
@@ -334,6 +383,9 @@ def main() -> None:
         if arg == "--sheet" and i + 1 < len(sys.argv):
             sheet_filter = sys.argv[i + 1]
             i += 2
+        elif arg == "--sheet":
+            print("Usage: formula_check.py <input.xlsx> [--json] [--report [-o FILE]] [--sheet NAME] [--summary]")
+            sys.exit(1)
         elif arg == "-o" and i + 1 < len(sys.argv):
             output_file = sys.argv[i + 1]
             i += 2
@@ -365,8 +417,12 @@ def main() -> None:
 
     # Human-readable output
     sheets = ", ".join(results["sheets_checked"]) or "(none)"
-    if sheet_filter:
-        sheets = f"{sheet_filter} (filtered)"
+    if sheet_filter is not None:
+        sheets = (
+            f"{sheet_filter} (filtered)"
+            if results["sheets_checked"]
+            else f"{sheet_filter} (not found)"
+        )
 
     print(f"File   : {results['file']}")
     print(f"Sheets : {sheets}")
@@ -396,6 +452,23 @@ def main() -> None:
                 print(f"         Defined names: {e.get('defined_names', [])}")
             elif e["type"] == "malformed_error_cell":
                 print(f"  [FAIL] [{e['sheet']}!{e['cell']}] malformed error cell: {e['detail']}")
+            elif e["type"] == "orphan_shared_formula":
+                print(
+                    f"  [FAIL] [{e['sheet']}!{e['cell']}] shared formula "
+                    f"si={e['si']} has no primary cell on this sheet"
+                )
+            elif e["type"] == "shared_primary_missing_text":
+                print(
+                    f"  [FAIL] [{e['sheet']}!{e['cell']}] shared formula "
+                    f"si={e['si']} primary has no formula text"
+                )
+            elif e["type"] == "sheet_not_found":
+                print(
+                    f"  [FAIL] requested sheet '{e['sheet']}' was not found "
+                    f"(valid: {e.get('valid_sheets', [])})"
+                )
+            elif e["type"] == "no_sheets_checked":
+                print(f"  [FAIL] {e['detail']}")
             elif e["type"] == "file_error":
                 print(f"  [FAIL] File error: {e['message']}")
         print()
