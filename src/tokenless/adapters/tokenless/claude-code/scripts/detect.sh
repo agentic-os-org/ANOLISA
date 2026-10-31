@@ -10,11 +10,20 @@ COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 AGENT="${ANOLISA_TARGET:-claude-code}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this detector with exit 1 -- the same status it otherwise reports for "not
+# installed but installable", so the crash would reach the caller as a verdict
+# instead of as an error. Resolve HOME once and derive every user-scope path
+# from it; an empty value skips those probes rather than guessing a path
+# under /.
+HOME_DIR="${HOME:-}"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+
 PLUGIN_ID="${COMPONENT}@anolisa-${COMPONENT}"
 PLUGIN_SRC="$ADAPTER_DIR/claude-code"
 
 CLAUDE_BIN="${CLAUDE_BIN:-}"
-export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+export PATH="${USER_LOCAL_BIN}/usr/local/bin:$PATH"
 
 # First-run settling retries: right after provisioning, the claude binary or
 # the plugin registry may be transiently invisible on the very first detect.sh
@@ -117,8 +126,10 @@ fi
 # this script creates the directory before `claude plugin list` runs, and that
 # call carries its own retry budget and initializes ~/.claude itself, so
 # retrying this probe would only delay the report.
-if [ -d "$HOME/.claude" ]; then
-    field "claude config dir" "present ($HOME/.claude)"
+if [ -z "$HOME_DIR" ]; then
+    field "claude config dir" "unknown (HOME is unset)"
+elif [ -d "$HOME_DIR/.claude" ]; then
+    field "claude config dir" "present ($HOME_DIR/.claude)"
 else
     field "claude config dir" "missing (created on first claude run)"
 fi
@@ -373,7 +384,7 @@ fi
 SHARED_HOOKS_DIR=""
 for d in /usr/local/share/anolisa/adapters/tokenless/common/hooks \
          /usr/share/anolisa/adapters/tokenless/common/hooks \
-         "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"; do
+         "${HOME_DIR:+$HOME_DIR/.local/share/anolisa/adapters/tokenless/common/hooks}"; do
     if [ -d "$d" ]; then SHARED_HOOKS_DIR="$d"; break; fi
 done
 if [ -n "$SHARED_HOOKS_DIR" ]; then
