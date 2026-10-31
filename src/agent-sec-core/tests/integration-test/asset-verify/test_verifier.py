@@ -26,6 +26,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
+    ErrManifestInvalid,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigMissing,
@@ -97,6 +98,42 @@ class TestVerifyManifestHashes(unittest.TestCase):
         with self.assertRaises(ErrUnexpectedFile) as ctx:
             verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
         self.assertIn("references/a.md", str(ctx.exception))
+
+    def test_non_object_manifest_is_rejected(self):
+        with self.assertRaises(ErrManifestInvalid) as ctx:
+            verify_manifest_hashes(self.tmpdir, [], "test_skill")
+        self.assertEqual(ctx.exception.code, 15)
+        self.assertIn("ERR_MANIFEST_INVALID", str(ctx.exception))
+        self.assertIn("test_skill", str(ctx.exception))
+
+    def test_files_not_a_list_is_rejected(self):
+        with self.assertRaises(ErrManifestInvalid) as ctx:
+            verify_manifest_hashes(self.tmpdir, {"files": "abc"}, "test_skill")
+        self.assertIn("'files' must be a list", str(ctx.exception))
+
+    def test_entry_missing_hash_is_rejected(self):
+        manifest = {"files": [{"path": "main.py"}]}
+        with self.assertRaises(ErrManifestInvalid) as ctx:
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        self.assertIn("missing 'path' or 'hash'", str(ctx.exception))
+
+    def test_entry_missing_path_is_rejected(self):
+        manifest = {"files": [{"hash": self.file_hash}]}
+        with self.assertRaises(ErrManifestInvalid) as ctx:
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        self.assertIn("missing 'path' or 'hash'", str(ctx.exception))
+
+    def test_non_string_path_is_rejected(self):
+        manifest = {"files": [{"path": 123, "hash": self.file_hash}]}
+        with self.assertRaises(ErrManifestInvalid) as ctx:
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        self.assertIn("must be strings", str(ctx.exception))
+
+    def test_non_object_entry_is_rejected(self):
+        manifest = {"files": ["main.py"]}
+        with self.assertRaises(ErrManifestInvalid) as ctx:
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        self.assertIn("must be a JSON object", str(ctx.exception))
 
     def test_unexpected_root_file(self):
         extra_file = os.path.join(self.tmpdir, "a.md")
