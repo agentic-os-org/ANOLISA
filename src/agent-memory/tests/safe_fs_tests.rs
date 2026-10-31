@@ -10,6 +10,8 @@
 //! - metadata() / exists() against normal paths, missing paths, symlinks
 //! - assert_no_symlink_traversal() against deep directory trees and partial paths
 //! - remove_dir_all_safe() symlink rejection inside directories
+//! - open_dir() / create_dir_durable() / create_new_in_dir() / rename_in_dir() /
+//!   regular_file_names() / unlink_in_dir(): descriptor-anchored directory IO
 //! - openat2 kernel-level rejection of .., absolute paths, /proc, symlinks
 //! - validate_user_id() edge cases (max length, Unicode control chars, .. variants)
 //! - resolve_path() boundary conditions (null bytes, non-UTF8, empty segments with ///)
@@ -26,6 +28,7 @@ use tempfile::tempdir;
 // use `agent_memory` (dashes → underscores).
 // ---------------------------------------------------------------------------
 use agent_memory::{
+    MemoryError,
     ns::{self},
     safe_fs,
 };
@@ -484,6 +487,192 @@ fn open_read_works() {
     let mut s = String::new();
     std::io::Read::read_to_string(&mut f, &mut s).unwrap();
     assert_eq!(s, "streaming data");
+}
+
+// ============================================================================
+// 6b. Directory-scoped IO: open_dir / create_dir_durable / create_new_in_dir /
+//     rename_in_dir / regular_file_names / unlink_in_dir
+// ============================================================================
+
+#[test]
+fn open_dir_returns_a_syncable_descriptor_on_the_root_itself() {
+    // `open_root` hands back O_PATH, and fsync on an O_PATH descriptor is
+    // EBADF. The durability sequence needs an O_RDONLY one for the same
+    // directory, including the root when a first-level directory is created.
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+
+    let dir = safe_fs::open_dir(root.as_fd(), Path::new(".")).unwrap();
+    assert!(dir.metadata().unwrap().is_dir());
+    dir.sync_all().unwrap();
+}
+
+#[test]
+fn open_dir_refuses_a_symlinked_component() {
+    let tmp = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    symlink(outside.path(), tmp.path().join("link")).unwrap();
+
+    let err = safe_fs::open_dir(root.as_fd(), Path::new("link")).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::PathOutsideMount(_)),
+        "a symlink must not be traversed, got {err:?}"
+    );
+}
+
+#[test]
+fn open_dir_refuses_a_regular_file() {
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("plain.txt"), b"x").unwrap();
+
+    assert!(safe_fs::open_dir(root.as_fd(), Path::new("plain.txt")).is_err());
+}
+
+#[test]
+fn create_dir_durable_creates_every_missing_parent() {
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+
+    safe_fs::create_dir_durable(root.as_fd(), Path::new("a/b/c")).unwrap();
+
+    assert!(tmp.path().join("a/b/c").is_dir());
+    // Idempotent: an existing directory is not an error, and re-running must
+    // not disturb what is already inside it.
+    std::fs::write(tmp.path().join("a/b/c/keep.txt"), b"keep").unwrap();
+    safe_fs::create_dir_durable(root.as_fd(), Path::new("a/b/c")).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("a/b/c/keep.txt")).unwrap(),
+        "keep"
+    );
+}
+
+#[test]
+fn create_dir_durable_refuses_a_symlinked_component() {
+    let tmp = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    symlink(outside.path(), tmp.path().join("a")).unwrap();
+
+    let err = safe_fs::create_dir_durable(root.as_fd(), Path::new("a/b")).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::PathOutsideMount(_)),
+        "a symlinked parent must be refused, got {err:?}"
+    );
+    assert!(
+        !outside.path().join("b").exists(),
+        "nothing may be created through the link"
+    );
+}
+
+#[test]
+fn create_dir_durable_refuses_a_regular_file_in_the_path() {
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("f"), b"not a directory").unwrap();
+
+    // EEXIST on the mkdir is not success: `f` is there, but it is a file, and
+    // a caller that deletes data on Ok must be told.
+    assert!(safe_fs::create_dir_durable(root.as_fd(), Path::new("f/sub")).is_err());
+    assert!(!tmp.path().join("f/sub").exists());
+}
+
+#[test]
+fn create_new_in_dir_refuses_a_taken_name() {
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    let dir = safe_fs::open_dir(root.as_fd(), Path::new(".")).unwrap();
+
+    let mut f = safe_fs::create_new_in_dir(dir.as_fd(), Path::new("one.json")).unwrap();
+    std::io::Write::write_all(&mut f, b"first").unwrap();
+    drop(f);
+
+    let err = safe_fs::create_new_in_dir(dir.as_fd(), Path::new("one.json")).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::AlreadyExists(_)),
+        "O_EXCL must refuse the existing name, got {err:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("one.json")).unwrap(),
+        "first"
+    );
+
+    // A symlink wearing that name is refused too, and its target untouched.
+    let outside = tempdir().unwrap();
+    std::fs::write(outside.path().join("target.json"), b"original").unwrap();
+    symlink(
+        outside.path().join("target.json"),
+        tmp.path().join("two.json"),
+    )
+    .unwrap();
+    assert!(safe_fs::create_new_in_dir(dir.as_fd(), Path::new("two.json")).is_err());
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("target.json")).unwrap(),
+        "original"
+    );
+}
+
+#[test]
+fn rename_in_dir_moves_the_file_within_the_directory() {
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    safe_fs::create_dir_durable(root.as_fd(), Path::new("backups")).unwrap();
+    let dir = safe_fs::open_dir(root.as_fd(), Path::new("backups")).unwrap();
+
+    let mut f = safe_fs::create_new_in_dir(dir.as_fd(), Path::new("x.partial")).unwrap();
+    std::io::Write::write_all(&mut f, b"payload").unwrap();
+    drop(f);
+
+    safe_fs::rename_in_dir(dir.as_fd(), Path::new("x.partial"), Path::new("x")).unwrap();
+
+    assert!(!tmp.path().join("backups/x.partial").exists());
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("backups/x")).unwrap(),
+        "payload"
+    );
+}
+
+#[test]
+fn regular_file_names_skips_directories_and_symlinks() {
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    safe_fs::create_dir_durable(root.as_fd(), Path::new("d/sub")).unwrap();
+    let dir = safe_fs::open_dir(root.as_fd(), Path::new("d")).unwrap();
+    std::fs::write(tmp.path().join("d/real.json"), b"{}").unwrap();
+    symlink(
+        "/nonexistent-anolisa-target",
+        tmp.path().join("d/planted.json"),
+    )
+    .unwrap();
+
+    let mut names = safe_fs::regular_file_names(&dir).unwrap();
+    names.sort();
+
+    assert_eq!(
+        names,
+        vec!["real.json".to_string()],
+        "only regular files are reported"
+    );
+    assert!(
+        tmp.path().join("d/planted.json").symlink_metadata().is_ok(),
+        "enumeration must not touch the link"
+    );
+}
+
+#[test]
+fn unlink_in_dir_removes_only_the_named_file() {
+    let tmp = tempdir().unwrap();
+    let root = safe_fs::open_root(tmp.path()).unwrap();
+    safe_fs::create_dir_durable(root.as_fd(), Path::new("d")).unwrap();
+    let dir = safe_fs::open_dir(root.as_fd(), Path::new("d")).unwrap();
+    std::fs::write(tmp.path().join("d/gone.json"), b"1").unwrap();
+    std::fs::write(tmp.path().join("d/stays.json"), b"2").unwrap();
+
+    safe_fs::unlink_in_dir(dir.as_fd(), "gone.json").unwrap();
+
+    assert!(!tmp.path().join("d/gone.json").exists());
+    assert!(tmp.path().join("d/stays.json").exists());
 }
 
 // ============================================================================
