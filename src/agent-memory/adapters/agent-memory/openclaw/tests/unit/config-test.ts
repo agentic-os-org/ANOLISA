@@ -119,6 +119,13 @@ describe("validateUserId", () => {
     assert.throws(() => validateUserId("foo..bar"), /contains '\.\.'/);
   });
 
+  it("rejects a bare '.'", () => {
+    // Mirrors the Rust rule: "." resolves to the joined directory itself,
+    // so a `sessionId: "."` config would anchor the session tree on the
+    // shared parent — the child rejects it, so this side must too.
+    assert.throws(() => validateUserId("."), /must not be '\.'/);
+  });
+
   it("rejects forward slash", () => {
     assert.throws(() => validateUserId("a/b"), /path separator/);
   });

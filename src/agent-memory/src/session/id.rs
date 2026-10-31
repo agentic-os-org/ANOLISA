@@ -77,4 +77,15 @@ mod tests {
             Err(MemoryError::InvalidArgument(_))
         ));
     }
+
+    #[test]
+    fn from_string_rejects_bare_dot() {
+        // "." joins to the session base itself: mkdir_child would anchor
+        // the session tree on the base directory, and end(Discard) would
+        // then recursively delete every session in it.
+        assert!(matches!(
+            SessionId::from_string("."),
+            Err(MemoryError::InvalidArgument(_))
+        ));
+    }
 }

@@ -161,6 +161,20 @@ impl SessionBase {
     /// without following it. A name that is a symlink would quietly send
     /// every later write to its target.
     pub fn mkdir_child(&self, name: &str, mode: u32) -> Result<()> {
+        // "." and ".." always exist, so `mkdirat` would return EEXIST and
+        // the `fstatat` below — which resolves them relative to the base
+        // descriptor — would happily report a directory: the session tree
+        // would then be anchored on the base itself (or its parent)
+        // instead of a child of it. An absolute name defeats the anchor
+        // outright: `mkdirat`/`fstatat` ignore the descriptor for
+        // absolute paths. Refuse anything that is not a single, normal,
+        // non-relative component before the syscall.
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(MemoryError::InvalidArgument(format!(
+                "mkdir_child({}): {name:?} is not a single child name",
+                self.display.display()
+            )));
+        }
         let bits = Mode::from_bits_truncate(mode);
         match nix::sys::stat::mkdirat(Some(self.fd()), name, bits) {
             Ok(()) | Err(Errno::EEXIST) => {}
@@ -192,4 +206,32 @@ fn io_error(e: Errno) -> std::io::Error {
 
 fn mem_io_error(e: Errno) -> MemoryError {
     MemoryError::Io(io_error(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn mkdir_child_refuses_relative_names() {
+        let tmp = tempdir().unwrap();
+        let base = SessionBase::open_nofollow(tmp.path()).unwrap();
+        // "." and ".." already exist, so mkdirat returns EEXIST and the
+        // directory check alone cannot catch them — the refusal must come
+        // from the name check, before any syscall.
+        assert!(base.mkdir_child(".", 0o700).is_err());
+        assert!(base.mkdir_child("..", 0o700).is_err());
+        // An absolute name ignores the descriptor entirely (mkdirat
+        // resolves it from "/"), which would build the session tree
+        // outside the base — the same refusal must catch it, along with
+        // the empty name.
+        assert!(base.mkdir_child("/tmp/escaped", 0o700).is_err());
+        assert!(!std::path::Path::new("/tmp/escaped").exists());
+        assert!(base.mkdir_child("", 0o700).is_err());
+        // Regular child names keep working, including a repeated create.
+        assert!(base.mkdir_child("real", 0o700).is_ok());
+        assert!(base.mkdir_child("real", 0o700).is_ok());
+        assert!(tmp.path().join("real").is_dir());
+    }
 }

@@ -98,6 +98,15 @@ export function validateUserId(value: string): string {
   if (value.includes("..")) {
     throw new Error(`userId '${value}' contains '..'`);
   }
+  // A bare "." contains no separator and no "..", yet resolves to the
+  // directory it is joined against — the subprocess rejects it because
+  // the per-user / per-session subtree would be built in (and, on
+  // cleanup, recursively removed from) the shared parent. Reject it here
+  // too, or a `sessionId: "."` config boots the plugin pinned to a
+  // session the child silently replaces.
+  if (value === ".") {
+    throw new Error("userId must not be '.'");
+  }
   // Unicode control characters: matches Rust's `char::is_control()`
   // (C0: U+0000-001F, DEL: U+007F, C1: U+0080-009F).
   for (const ch of value) {
