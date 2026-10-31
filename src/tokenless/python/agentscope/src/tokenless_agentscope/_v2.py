@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import replace
@@ -39,6 +40,8 @@ from tokenless_agentscope._contracts import (
     build_tool_contracts,
     retrieve_tool_declaration,
 )
+
+logger = logging.getLogger(__name__)
 
 _STATE_KEY = "anolisa_tokenless"
 
@@ -177,6 +180,7 @@ class TokenlessMiddleware(MiddlewareBase):
         self.retrieve_tool_name = config.retrieve_tool_name
         self._tool_contracts = build_tool_contracts(tool_contracts)
         self.sdk = TokenlessSdk(config)
+        self._post_tool_failures = 0
         self._session_markers: dict[str, frozenset[str]] = {}
         self._session_agents: dict[str, str] = {}
         self._retrieve_declaration = retrieve_tool_declaration(self.retrieve_tool_name)
@@ -271,9 +275,7 @@ class TokenlessMiddleware(MiddlewareBase):
         try:
             arguments = json.loads(source.input)
             if not isinstance(arguments, dict):
-                raise TypeError(
-                    "AgentScope tool input must decode to a JSON object"
-                )
+                raise TypeError("AgentScope tool input must decode to a JSON object")
         except (json.JSONDecodeError, TypeError):
             # AgentScope repairs malformed tool arguments upstream, but the
             # raw string still reaches the middleware. Raising here kills
@@ -345,33 +347,47 @@ class TokenlessMiddleware(MiddlewareBase):
         attribution: Attribution,
         command: str | None,
     ) -> ToolResponse:
+        status = self._status(response.state)
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
         for index, block in enumerate(response.content):
             if not isinstance(block, TextBlock):
                 continue
-            transformed = await self.sdk.post_tool(
-                PostToolRequest(
-                    result_kind=ResultKind.TOOL,
-                    tool_name=tool_name,
-                    content=block.text,
-                    status=self._status(response.state),
-                    content_origin=contract.content_origin,
-                    output_optimization=optimization,
-                    capabilities=PostToolCapabilities(
-                        replace_output=True,
-                        recovery=(
-                            RecoveryMethod.tool(self.retrieve_tool_name)
-                            if self._status(response.state) == ToolResultStatus.SUCCESS
-                            and optimization == OutputOptimization.NONE
-                            else RecoveryMethod()
+            try:
+                transformed = await self.sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name=tool_name,
+                        content=block.text,
+                        status=status,
+                        content_origin=contract.content_origin,
+                        output_optimization=optimization,
+                        capabilities=PostToolCapabilities(
+                            replace_output=True,
+                            recovery=(
+                                RecoveryMethod.tool(self.retrieve_tool_name)
+                                if status == ToolResultStatus.SUCCESS
+                                and optimization == OutputOptimization.NONE
+                                else RecoveryMethod()
+                            ),
+                            replace_with_text=True,
                         ),
-                        replace_with_text=True,
-                    ),
-                    attribution=attribution,
-                    command=command,
+                        attribution=attribution,
+                        command=command,
+                    )
                 )
-            )
+            except Exception:
+                # SDK/version failures cannot abort completed host tool calls.
+                # Earlier stash writes remain unreferenced: no partial markers escape.
+                self._post_tool_failures += 1
+                logger.exception(
+                    "tokenless: post_tool failed for %s; preserving original result "
+                    "(failures=%d, tool_use_id=%r)",
+                    tool_name,
+                    self._post_tool_failures,
+                    attribution.tool_use_id,
+                )
+                return response
             extra_context = extra_context or transformed.additional_context
             if transformed.output != block.text:
                 replacements[index] = block.model_copy(update={"text": transformed.output})
