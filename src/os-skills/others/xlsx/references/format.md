@@ -525,6 +525,11 @@ python3 SKILL_DIR/scripts/xlsx_pack.py /tmp/xlsx_fmt/unpacked/ /tmp/output.xlsx
 python3 SKILL_DIR/scripts/formula_check.py /tmp/output.xlsx
 ```
 
+The style audit applies year, percentage and numeric-input checks to numeric
+cells (`t="n"`, or no `t` attribute). Shared-string indices, booleans and cached
+string formula results are not numeric values. Formula color checks still
+apply to formulas regardless of their cached result type.
+
 Manual style reference integrity check:
 ```bash
 # Find the maximum s attribute value in the sheet XML
