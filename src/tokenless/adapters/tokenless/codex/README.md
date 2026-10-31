@@ -68,8 +68,15 @@ Or install from the marketplace (once published).
 
 ```bash
 ./scripts/detect.sh
-# {"installed": true, "version": "1.0.0", "path": "/home/user/.local/bin/tokenless"}
+# {
+#   "installed": true,
+#   "version": "0.1.0",
+#   "path": "/home/user/.local/bin/tokenless"
+# }
 ```
+
+`jq` and the no-`jq` fallback both print this object. A missing or
+non-running CLI prints `{"installed": false}`.
 
 ## Hook Output Format
 
