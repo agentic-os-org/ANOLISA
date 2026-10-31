@@ -93,8 +93,12 @@ export async function loadDocumentRedirects(root = repoRoot) {
 
 export function redirectDestination(to, locale, baseUrl = '/') {
   const localePrefix = locale === 'zh' ? 'zh/' : '';
-  return /^https?:/.test(to) ? to.replaceAll('{locale}', locale) :
-    `${baseUrl}${localePrefix}docs/${to.split('#')[0]}/${to.includes('#') ? `#${to.split('#')[1]}` : ''}`;
+  if (/^https?:/.test(to)) return to.replaceAll('{locale}', locale);
+  const prefix = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const hash = to.indexOf('#');
+  const pathname = hash < 0 ? to : to.slice(0, hash);
+  const fragment = hash < 0 ? '' : `#${to.slice(hash + 1)}`;
+  return `${prefix}${localePrefix}docs/${pathname}/${fragment}`;
 }
 
 export async function writeDocumentRedirects(outputRoot, locale, redirects, baseUrl = '/') {
