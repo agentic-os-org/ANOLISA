@@ -177,7 +177,10 @@ class ObservabilityEventRepository:
             )
             .where(*conditions)
             .group_by(ObservabilityEventRecord.session_id)
-            .order_by(func.max(ObservabilityEventRecord.observed_at_epoch).desc())
+            .order_by(
+                func.max(ObservabilityEventRecord.observed_at_epoch).desc(),
+                ObservabilityEventRecord.session_id.asc(),
+            )
         )
         if limit is not None:
             stmt = stmt.limit(limit)
@@ -238,7 +241,10 @@ class ObservabilityEventRepository:
             )
             .where(*conditions)
             .group_by(ObservabilityEventRecord.run_id)
-            .order_by(func.min(ObservabilityEventRecord.observed_at_epoch).asc())
+            .order_by(
+                func.min(ObservabilityEventRecord.observed_at_epoch).asc(),
+                ObservabilityEventRecord.run_id.asc(),
+            )
         )
         if limit is not None:
             stats_stmt = stats_stmt.limit(limit)
@@ -316,7 +322,10 @@ class ObservabilityEventRepository:
         stmt = (
             select(ObservabilityEventRecord)
             .where(*conditions)
-            .order_by(ObservabilityEventRecord.observed_at_epoch.asc())
+            .order_by(
+                ObservabilityEventRecord.observed_at_epoch.asc(),
+                ObservabilityEventRecord.id.asc(),
+            )
         )
         if limit is not None:
             stmt = stmt.limit(limit)

@@ -185,6 +185,30 @@ def test_list_sessions_orders_by_last_seen_desc(
     assert old.event_count == 1
 
 
+def test_list_sessions_uses_session_id_as_tie_breaker(
+    writer: ObservabilitySqliteWriter, db_path: str
+) -> None:
+    for session_id in ("session-Z", "session-A"):
+        _seed(
+            writer,
+            session_id=session_id,
+            run_id=f"run-{session_id}",
+            observed_at="2026-05-16T12:00:00Z",
+        )
+    writer.close()
+
+    store, repo = _open_repository(db_path)
+    try:
+        sessions = repo.list_sessions()
+    finally:
+        store.close()
+
+    assert [session.session_id for session in sessions] == [
+        "session-A",
+        "session-Z",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Assertion 3: list_runs preview fallback chain + 80-char truncation
 # ---------------------------------------------------------------------------
@@ -237,6 +261,27 @@ def test_list_runs_preview_fallback_and_truncation(
     assert by_id["run-C"].user_input_preview is None
     # ordering: chronological by started_at (run-A < run-B < run-C)
     assert [r.run_id for r in runs] == ["run-A", "run-B", "run-C"]
+
+
+def test_list_runs_uses_run_id_as_tie_breaker(
+    writer: ObservabilitySqliteWriter, db_path: str
+) -> None:
+    for run_id in ("run-Z", "run-A"):
+        _seed(
+            writer,
+            session_id="session-tie",
+            run_id=run_id,
+            observed_at="2026-05-16T12:00:00Z",
+        )
+    writer.close()
+
+    store, repo = _open_repository(db_path)
+    try:
+        runs = repo.list_runs("session-tie")
+    finally:
+        store.close()
+
+    assert [run.run_id for run in runs] == ["run-A", "run-Z"]
 
 
 def test_list_runs_preview_query_selects_first_before_agent_run_per_run_in_sql() -> (
@@ -377,6 +422,34 @@ def test_list_events_ordered_with_fields_preserved(
     assert json.loads(events[1].metadata_json)["toolCallId"] == "tc-1"
     assert events[2].tool_call_id == "tc-1"
     assert events[2].call_id == "call-after"
+
+
+def test_list_events_uses_record_id_for_equal_timestamps(
+    writer: ObservabilitySqliteWriter, db_path: str
+) -> None:
+    _seed(
+        writer,
+        session_id="session-tie",
+        run_id="run-tie",
+        hook="first_hook",
+        observed_at="2026-05-16T12:00:00Z",
+    )
+    _seed(
+        writer,
+        session_id="session-tie",
+        run_id="run-tie",
+        hook="second_hook",
+        observed_at="2026-05-16T12:00:00Z",
+    )
+    writer.close()
+
+    store, repo = _open_repository(db_path)
+    try:
+        events = repo.list_events("session-tie", "run-tie")
+    finally:
+        store.close()
+
+    assert [event.hook for event in events] == ["first_hook", "second_hook"]
 
 
 def test_list_events_is_scoped_to_session_when_run_ids_collide(
