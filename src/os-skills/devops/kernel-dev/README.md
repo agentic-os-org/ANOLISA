@@ -17,23 +17,22 @@
 ```bash
 cd kernel-dev
 
-# 完整环境搭建（推荐）
-python scripts/kernel_dev.py --setup
+# 一键搭建环境（推荐，需 root）
+sudo ./scripts/setup.sh
 
 # 分步执行
-python scripts/kernel_dev.py --install-deps    # 安装依赖
-python scripts/kernel_dev.py --install-devel   # 安装 devel 包
-python scripts/kernel_dev.py --test-module     # 测试编译
+./scripts/check-env.sh          # 检查环境依赖
+sudo ./scripts/install-deps.sh  # 安装缺失依赖
+./scripts/verify-env.sh         # 验证环境（含测试编译）
 ```
 
 ### 2. 创建第一个内核模块
 
 ```bash
-# 创建示例 module
-python scripts/kernel_dev.py --create hello_module
+# 使用内置示例模块（自定义模块见 SKILL.md）
+cd examples/hello_module
 
 # 编译和加载
-cd hello_module
 make
 sudo make install
 
@@ -63,7 +62,12 @@ gcc --version && ls /lib/modules/$(uname -r)/build
 
 | 脚本 | 功能 | 使用场景 |
 |------|------|---------|
-| `kernel_dev.py` | ⭐ 唯一主脚本 | 环境搭建、module 创建、编译测试 |
+| `scripts/setup.sh` | 一键搭建开发环境 | 首次配置（需 root） |
+| `scripts/check-env.sh` | 检查环境依赖 | 诊断缺失的依赖/工具链 |
+| `scripts/install-deps.sh` | 自动安装依赖 | 安装或补齐依赖（需 root） |
+| `scripts/verify-env.sh` | 全面验证环境（含测试编译） | 确认环境可编译模块 |
+| `scripts/build-kernel.sh` | 内核编译自动化（SRPM/Upstream） | 编译/安装内核 |
+| `scripts/test-module.sh` | 自动化测试内核模块 | 加载/卸载示例模块 |
 
 ## 支持的 Module 类型
 
@@ -142,10 +146,12 @@ sudo yum install kmod
 
 ```
 kernel-dev/
-├── SKILL.md                      # Skill 配置文件
+├── SKILL.md                      # Skill 详细文档
 ├── README.md                     # 本文件
-└── scripts/
-    └── kernel_dev.py             # 主脚本
+├── docs/                         # 故障排查、模块签名、编译性能
+├── examples/                     # 示例内核模块（hello/param/proc/char_device）
+├── references/                   # Alinux4 仓库与内核资源参考
+└── scripts/                      # 环境搭建、编译、验证、测试脚本
 ```
 
 ## 最佳实践
