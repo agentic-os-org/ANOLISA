@@ -3904,43 +3904,64 @@ sha256 = "{sha}"
     fn raw_update_upgrades_to_latest_and_preserves_ownership() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
-        seed_installed_raw(&c, "foo", "0.1.0", b"old v1 binary\n");
+        seed_installed_raw(&c, "skillfs", "0.1.0", b"old v1 binary\n");
         // A datadir contract that only the delegated refresh would consult;
         // an owned update must never copy it over the owned manifest.
         let layout = common::resolve_layout(&c);
+        let registry = layout.contract_path("skillfs");
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry, "distribution registry").unwrap();
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut legacy = StateStore::load(&state_path, 0).unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut legacy
+            .find_mut(ObjectKind::Component, "skillfs")
+            .unwrap()
+            .binding
+        {
+            artifact.files.push(OwnedFile {
+                path: registry.clone(),
+                ..artifact.files[0].clone()
+            });
+        }
+        legacy.save(&state_path).unwrap();
         let package_datadir = layout.package_datadir().expect("package datadir");
-        let contract = FsLayout::component_contract_path(&package_datadir, "foo");
+        let contract = FsLayout::component_contract_path(&package_datadir, "skillfs");
         std::fs::create_dir_all(contract.parent().expect("contract parent"))
             .expect("mkdir contract");
         std::fs::write(&contract, "framework = \"datadir\"\n").expect("write datadir contract");
-        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let new_body: &[u8] = b"#!/bin/sh\necho skillfs v2\n";
         publish_raw_repo(
             &tmp.path().join("repo"),
             &common::resolve_layout(&c),
-            "foo",
+            "skillfs",
             "0.2.0",
-            &raw_artifact("foo", "0.2.0", new_body),
+            &raw_artifact("skillfs", "0.2.0", new_body),
         );
         let rpm = FakeRpm::new("unused", None);
 
-        update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("raw update must succeed");
+        update_component_with_deps("skillfs", &c, &rpm, &rpm, false)
+            .expect("raw update must succeed");
 
         assert_eq!(
-            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            std::fs::read_to_string(&registry).unwrap(),
+            "distribution registry"
+        );
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("skillfs")).expect("read bin"),
             new_body,
             "binary must be replaced with the v2 payload"
         );
-        let manifest = FsLayout::component_manifest_snapshot_path(&layout.state_dir, "foo");
+        let manifest = FsLayout::component_manifest_snapshot_path(&layout.state_dir, "skillfs");
         assert_eq!(
             std::fs::read_to_string(&manifest).expect("read manifest"),
-            raw_manifest("foo", "0.2.0"),
+            raw_manifest("skillfs", "0.2.0"),
             "the manifest must be the owned artifact's, not the datadir contract"
         );
         assert!(
             !FsLayout::provenance_path_for_snapshot(&manifest).exists(),
             "an owned update must not publish contract provenance"
         );
-        let record = find_component(&c, "foo");
+        let record = find_component(&c, "skillfs");
         let artifact = owned_artifact(&record);
         assert_eq!(artifact.version, "0.2.0");
         assert_eq!(record.status, LifecycleStatus::Installed);
@@ -3954,7 +3975,10 @@ sha256 = "{sha}"
         );
         let store = load_store(&c);
         assert!(
-            store.operations.iter().any(|o| o.command == "update foo"),
+            store
+                .operations
+                .iter()
+                .any(|o| o.command == "update skillfs"),
             "update operation must be recorded"
         );
         assert!(
@@ -4141,9 +4165,25 @@ sha256 = "{sha}"
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
         let body: &[u8] = b"original v1 binary\n";
-        seed_installed_raw(&c, "foo", "0.1.0", body);
+        seed_installed_raw(&c, "skillfs", "0.1.0", body);
         let layout = common::resolve_layout(&c);
-        let bin = layout.bin_dir.join("foo");
+        let registry = layout.contract_path("skillfs");
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry, "distribution registry").unwrap();
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut legacy = StateStore::load(&state_path, 0).unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut legacy
+            .find_mut(ObjectKind::Component, "skillfs")
+            .unwrap()
+            .binding
+        {
+            artifact.files.push(OwnedFile {
+                path: registry.clone(),
+                ..artifact.files[0].clone()
+            });
+        }
+        legacy.save(&state_path).unwrap();
+        let bin = layout.bin_dir.join("skillfs");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -4153,13 +4193,13 @@ sha256 = "{sha}"
         publish_raw_repo(
             &tmp.path().join("repo"),
             &layout,
-            "foo",
+            "skillfs",
             "0.2.0",
-            &raw_artifact_missing_binary("foo", "0.2.0"),
+            &raw_artifact_missing_binary("skillfs", "0.2.0"),
         );
         let rpm = FakeRpm::new("unused", None);
 
-        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+        let err = update_component_with_deps("skillfs", &c, &rpm, &rpm, false)
             .expect_err("install of the new version must fail");
         assert_eq!(err.code(), "EXECUTION_FAILED");
         assert!(
@@ -4168,6 +4208,10 @@ sha256 = "{sha}"
             err.reason()
         );
 
+        assert_eq!(
+            std::fs::read_to_string(&registry).unwrap(),
+            "distribution registry"
+        );
         assert_eq!(
             std::fs::read(&bin).expect("read bin"),
             body,
@@ -4187,7 +4231,7 @@ sha256 = "{sha}"
             );
         }
         assert_eq!(
-            owned_artifact(&find_component(&c, "foo")).version,
+            owned_artifact(&find_component(&c, "skillfs")).version,
             "0.1.0",
             "failed update must not change the recorded version"
         );

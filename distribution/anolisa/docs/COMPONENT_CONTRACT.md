@@ -98,8 +98,36 @@ Raw archives may also carry the source contract at:
 .anolisa/component.toml
 ```
 
-ANOLISA should normalize that source contract into the installed datadir layout
-or directly into the installed-state snapshot described below.
+ANOLISA stores the archive's source contract in the installed-state snapshot
+below. For the seven distribution registry components (`cosh-ng`, `sec-core`,
+`agentsight`, `tokenless`, `skillfs`, `ws-ckpt`, and `agent-memory`), component
+raw installation, repair, update, rollback, and uninstall leave the discovery
+contract under `{datadir}/components/` to ANOLISA's own delivery. This also
+applies to older archives and installed records that still claim that path;
+archive digest verification and installed-state snapshot integrity checks remain
+in use.
+
+Raw contracts that omit this discovery path require ANOLISA 0.3.21 or later,
+the first distribution version that supplies the registry. Set this minimum in
+the embedded raw contract and distribution mirror before publishing a new
+component archive, so older CLIs reject it through their version gate. Publish
+the ANOLISA delivery, including its registry data, before promoting those
+component archives to a shared channel.
+
+For raw installations, `anolisa repair <component>` repairs component-owned
+payloads and snapshots. Restore a missing or corrupt discovery registry through
+ANOLISA's delivery: verify/reinstall the ANOLISA RPM for RPM deployments, or
+rerun the matching source, URL, or npm installer for those deployments. A raw
+component repair does not restore distribution-owned registry files.
+
+Obsolete ownership claims are removed in memory during scoped state loading,
+including quarantined records; read-only commands leave the state file intact.
+A later state save persists that cleanup. Downgrading to ANOLISA 0.3.20 or
+earlier while the state still contains an old claim re-enables that version's
+registry removal behavior. Keep the newer CLI for component lifecycle actions;
+if a downgrade is required, restore the registry through ANOLISA's delivery
+after any affected uninstall and use component archives compatible with the
+older CLI.
 
 ## Installed-State Snapshot
 

@@ -68,6 +68,10 @@ remains an input for raw/explicit distribution entrypoints. The explicit
 independently and must not generate ANOLISA metadata. RPM builds must not depend
 on generating or installing that raw contract.
 
+Raw layouts must also leave `{datadir}/components/tokenless/component.toml` to
+ANOLISA's delivery and require ANOLISA 0.3.21 or later for that registry. Keep the
+embedded archive contract and installed-state snapshot separate from this path.
+
 For packaging-only changes, run `make test-packaging` with prebuilt/mock fixtures.
 Use `make test-install-docs` when changing installation documentation. Follow the
 root platform restrictions before running native builds or Rust checks.

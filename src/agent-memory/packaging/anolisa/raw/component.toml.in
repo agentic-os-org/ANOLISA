@@ -25,11 +25,6 @@ arch = ["x86_64", "aarch64"]
 modes = ["user", "system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/agent-memory/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/agent-memory"
 target = "{bindir}/agent-memory"
 mode = "0755"

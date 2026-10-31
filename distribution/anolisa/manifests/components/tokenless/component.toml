@@ -6,13 +6,13 @@ domain = "optimization"
 display_name = "Tokenless"
 description = "LLM token optimization toolkit - schema/response compression, command rewriting"
 owner = "tokenless-team"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
 # RPM adapters need split-package file inventory aggregation (ANOLISA 0.3.15+).
-min_anolisa_version = "0.3.15"
+min_anolisa_version = "0.3.21"
 
 [component.platform]
 # min_kernel is intentionally omitted: tokenless has no kernel capability
@@ -34,11 +34,6 @@ packages = { rpm = "bash", deb = "bash" }
 
 [component.layout]
 modes = ["user", "system"]
-
-[[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/tokenless/component.toml"
-mode = "0644"
 
 [[component.layout.files]]
 source = "bin/tokenless"

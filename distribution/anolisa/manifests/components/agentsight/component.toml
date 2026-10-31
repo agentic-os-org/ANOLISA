@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.3.15"
+min_anolisa_version = "0.3.21"
 
 [backends.rpm]
 package = "agentsight"
@@ -35,11 +35,6 @@ min_kernel = "5.8"
 
 [component.layout]
 modes = ["system"]
-
-[[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/agentsight/component.toml"
-mode = "0644"
 
 [[component.layout.files]]
 source = "bin/agentsight"

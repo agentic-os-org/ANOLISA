@@ -464,8 +464,8 @@ with macos_path.open("rb") as stream:
 assert linux["component"]["platform"]["os"] == ["linux"]
 assert macos["component"]["platform"]["os"] == ["macos"]
 assert macos["component"]["platform"]["arch"] == ["aarch64", "x86_64"]
-assert linux["component"]["contract"]["min_anolisa_version"] == "0.2.17"
-assert macos["component"]["contract"]["min_anolisa_version"] == "0.2.17"
+assert linux["component"]["contract"]["min_anolisa_version"] == "0.3.21"
+assert macos["component"]["contract"]["min_anolisa_version"] == "0.3.21"
 assert linux["component"]["conflicts"] == ["cosh"]
 assert macos["component"]["conflicts"] == ["cosh"]
 linux_dependencies = {
@@ -516,7 +516,7 @@ assert linux.get("backends") == macos.get("backends")
 PY
 
 LEGACY_CONFLICT_CONTRACT="$TMP/legacy-conflict-component.toml"
-sed 's/min_anolisa_version = "0.2.17"/min_anolisa_version = "0.2.16"/' \
+sed 's/min_anolisa_version = "0.3.21"/min_anolisa_version = "0.2.16"/' \
     "$LINUX_CONTRACT" > "$LEGACY_CONFLICT_CONTRACT"
 if python3 "$ROOT/packaging/raw/verify-release.py" \
     "$SOURCE" "$LEGACY_CONFLICT_CONTRACT" \

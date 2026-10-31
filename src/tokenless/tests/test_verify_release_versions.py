@@ -296,7 +296,7 @@ class TestStampedRequirementsPipeline(unittest.TestCase):
         self.assertEqual(stamped.returncode, 0, stamped.stderr)
         with (root / "target/packaging/anolisa/component.toml").open("rb") as stream:
             contract = tomllib.load(stream)
-        self.assertEqual(contract["component"]["contract"]["min_anolisa_version"], "0.1.16")
+        self.assertEqual(contract["component"]["contract"]["min_anolisa_version"], "0.3.21")
         self.assertEqual(len(contract["adapters"]), 11)
         for adapter in contract["adapters"]:
             self.assertNotIn("backends", adapter, adapter["framework"])

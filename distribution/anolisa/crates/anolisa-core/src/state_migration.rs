@@ -101,10 +101,13 @@ pub enum QuarantineReason {
     NoEvidence,
 }
 
-/// A legacy record preserved verbatim because migration refused to guess.
+/// A legacy record retained because migration refused to guess.
+///
+/// Migration preserves the record verbatim. Scoped state loads may retire
+/// obsolete distribution discovery claims before lifecycle planning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuarantinedObject {
-    /// Original legacy record, unmodified — zero information loss.
+    /// Legacy record, subject to scoped ownership retirement after migration.
     pub record: InstalledObject,
     /// Why classification was refused.
     pub reason: QuarantineReason,

@@ -640,10 +640,17 @@ fn resolve_manifest_contract(
     if files.is_empty() {
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
-            reason: format!(
-                "component '{}' declares no [install.files] — nothing to install",
-                resolution.component
-            ),
+            reason: if manifest.install.files.is_empty() {
+                format!(
+                    "component '{}' declares no [install.files] — nothing to install",
+                    resolution.component
+                )
+            } else {
+                format!(
+                    "component '{}' only declares the ANOLISA-owned discovery contract; no component files remain to install",
+                    resolution.component
+                )
+            },
         });
     }
     // Adapter resources are laid alongside the component's own files, from
@@ -899,6 +906,10 @@ fn resolve_manifest_files(
             render,
         });
     }
+    // Published archives predate the transfer of discovery ownership to ANOLISA.
+    files.retain(|file| {
+        !anolisa_core::manifest::is_distribution_discovery_contract(layout, component, &file.dest)
+    });
     Ok(files)
 }
 
