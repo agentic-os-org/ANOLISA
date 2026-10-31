@@ -359,33 +359,51 @@ fn collect_tool_definitions(parsed: &[Option<LLMCall>]) -> Option<Vec<serde_json
     if defs.is_empty() { None } else { Some(defs) }
 }
 
-/// Extract system prompt text from event data.
+/// Extract instruction text, normalizing OpenAI's replacement role to ATIF system.
 fn extract_system_prompt(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> Option<String> {
-    // Strategy 1: from parsed LLMCall request messages
     if let Some(call) = parsed {
-        let text = extract_text_by_role(&call.request.messages, "system");
+        // Read both instruction roles in the order retained by the producer.
+        // Joining each role separately or deduplicating text would lose data.
+        let text = call
+            .request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role.as_str(), "system" | "developer"))
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::Text { content } if !content.is_empty() => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         if !text.is_empty() {
             return Some(text);
         }
     }
 
-    // Strategy 2: from system_instructions column (JSON array of InputMessage)
-    if let Some(ref json) = event.system_instructions {
-        if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
-            let text = extract_text_from_input_messages(&msgs, "system");
-            if !text.is_empty() {
-                return Some(text);
-            }
-        }
-        // Might be a plain string
-        if let Ok(s) = serde_json::from_str::<String>(json) {
-            if !s.is_empty() {
-                return Some(s);
-            }
+    // Empty parsed instruction text has always fallen back to stored columns.
+    // Those columns split system messages from the remaining input history, so
+    // retain their available order without claiming the original interleaving.
+    let mut instructions = Vec::new();
+    if let Some(json) = event.system_instructions.as_deref() {
+        let text = crate::genai::semantic::input_messages_from_column(json)
+            .map(|messages| extract_text_from_input_messages(&messages, "system"))
+            .or_else(|| serde_json::from_str::<String>(json).ok());
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            instructions.push(text);
         }
     }
-
-    None
+    if let Some(messages) = event
+        .input_messages
+        .as_deref()
+        .and_then(crate::genai::semantic::input_messages_from_column)
+    {
+        let text = extract_text_by_role(&messages, "developer");
+        if !text.is_empty() {
+            instructions.push(text);
+        }
+    }
+    (!instructions.is_empty()).then(|| instructions.join("\n"))
 }
 
 /// Extract user query text from event data.
