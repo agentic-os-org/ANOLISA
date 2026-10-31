@@ -29,11 +29,6 @@ packages = { rpm = "fuse3", deb = "fuse3" }
 modes = ["system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/skillfs/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/skillfs"
 target = "{bindir}/skillfs"
 mode = "0755"

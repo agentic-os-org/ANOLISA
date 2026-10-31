@@ -98,6 +98,21 @@ def file_patterns(spec: str, *, builddir: Path | None = None) -> dict[str, list[
 
 
 class ComponentContracts(unittest.TestCase):
+    def test_raw_layouts_leave_discovery_contracts_to_distribution(self) -> None:
+        for component in COMPONENTS:
+            source = "agent-sec-core" if component == "sec-core" else component
+            paths = [REGISTRY / component / "component.toml"]
+            paths.extend((REPOSITORY / "src" / source / "packaging/anolisa").rglob("*.toml*"))
+            for path in paths:
+                with self.subTest(component=component, path=path):
+                    text = path.read_text().replace("@VERSION@", "1.0.0")
+                    manifest = tomllib.loads(text)
+                    files = manifest.get("component", {}).get("layout", {}).get("files", [])
+                    self.assertNotIn(
+                        f"{{datadir}}/components/{component}/component.toml",
+                        [entry.get("target") for entry in files],
+                    )
+
     def test_registry_components_are_reachable_through_identity_indexes(self) -> None:
         for filename in ("components.toml", "components-v2.toml"):
             index = tomllib.loads((ROOT / "manifests" / filename).read_text())

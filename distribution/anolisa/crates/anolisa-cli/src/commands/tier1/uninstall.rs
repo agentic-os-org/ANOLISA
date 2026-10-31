@@ -989,6 +989,14 @@ mod tests {
             health: Vec::new(),
             provisioned_packages: Vec::new(),
         });
+        let registry = layout.contract_path("agentsight");
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry, "distribution registry").unwrap();
+        let registry_file = OwnedFile {
+            path: registry.clone(),
+            ..state.objects[0].files[0].clone()
+        };
+        state.objects[0].files.push(registry_file);
         let state_path = layout.state_dir.join("installed.toml");
         crate::test_support::write_legacy_state(&state, &state_path).expect("seed state save");
 
@@ -1008,6 +1016,10 @@ mod tests {
             "ANOLISA-owned file must be removed by component uninstall",
         );
 
+        assert_eq!(
+            std::fs::read_to_string(registry).unwrap(),
+            "distribution registry"
+        );
         let after = StateStore::load(&state_path, 0).expect("reload state");
         assert!(
             after.find(ObjectKind::Component, "agentsight").is_none(),

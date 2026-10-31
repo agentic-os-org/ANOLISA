@@ -21,11 +21,6 @@ arch = ["aarch64"]
 modes = ["user", "system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/agentsight/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/agentsight"
 target = "{bindir}/agentsight"
 mode = "0755"

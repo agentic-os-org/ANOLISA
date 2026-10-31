@@ -3192,6 +3192,20 @@ mod tests {
         );
         let layout = common::resolve_layout(&ctx);
         let state_path = layout.state_dir.join("installed.toml");
+        let registry = layout.contract_path("skillfs");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        fs::write(&registry, "new distribution registry").unwrap();
+        let mut store = StateStore::load(&state_path, 0).unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut store
+            .find_mut(ObjectKind::Component, "skillfs")
+            .unwrap()
+            .binding
+        {
+            let mut obsolete = anolisa_file(registry.clone());
+            obsolete.sha256 = Some("0".repeat(64));
+            artifact.files.push(obsolete);
+        }
+        store.save(&state_path).unwrap();
         let before = fs::read_to_string(&state_path).expect("read state");
         let fake = FakeRpm::new("unrelated", None);
 
@@ -3242,10 +3256,24 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let (state_path, binary) = seed_damaged_owned(tmp.path(), &ctx);
+        let layout = common::resolve_layout(&ctx);
+        let registry = layout.contract_path("skillfs");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        fs::write(&registry, "distribution registry").unwrap();
+        let mut store = StateStore::load(&state_path, 0).unwrap();
+        let record = store.find_mut(ObjectKind::Component, "skillfs").unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut record.binding {
+            artifact.files.push(anolisa_file(registry.clone()));
+        }
+        store.save(&state_path).unwrap();
         let fake = FakeRpm::new("unrelated", None);
 
         repair_with_deps("skillfs", &ctx, &fake, &fake, false).expect("repair ok");
 
+        assert_eq!(
+            fs::read_to_string(&registry).unwrap(),
+            "distribution registry"
+        );
         // The artifact's payload was re-placed on disk.
         let placed = fs::read_to_string(&binary).expect("read replayed binary");
         assert!(placed.contains("echo skillfs"), "got: {placed}");
@@ -3257,6 +3285,7 @@ mod tests {
             .expect("record");
         match &record.binding {
             ProviderBinding::Owned { artifact } => {
+                assert!(!artifact.files.iter().any(|file| file.path == registry));
                 assert_eq!(artifact.version, "1.0.0", "replay never upgrades");
                 assert!(artifact.files.iter().any(|f| f.path == binary));
             }

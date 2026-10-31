@@ -27,6 +27,27 @@ pub const RENDER_ANOLISA_PATHS_V1: &str = "anolisa-paths-v1";
 /// Render layout placeholders in the command field of a JSON document.
 pub const RENDER_ANOLISA_JSON_COMMAND_V1: &str = "anolisa-json-command-v1";
 
+/// Whether a path is a discovery contract shipped by ANOLISA itself.
+///
+/// Old component archives and ownership records may still claim this path;
+/// component lifecycle operations must leave the distribution registry intact.
+pub fn is_distribution_discovery_contract(
+    layout: &anolisa_platform::fs_layout::FsLayout,
+    component: &str,
+    path: &Path,
+) -> bool {
+    matches!(
+        component,
+        "cosh-ng"
+            | "sec-core"
+            | "agentsight"
+            | "tokenless"
+            | "skillfs"
+            | "ws-ckpt"
+            | "agent-memory"
+    ) && path == layout.contract_path(component)
+}
+
 // ---------------------------------------------------------------------------
 // ComponentManifest
 // ---------------------------------------------------------------------------

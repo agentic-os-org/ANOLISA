@@ -216,6 +216,22 @@ impl StateStore {
                 ),
             });
         }
+        // Retire obsolete component claims before integrity probes, backup,
+        // removal, or rollback consume them. Read-only loads never write state.
+        for installation in &mut store.installations {
+            if installation.kind == ObjectKind::Component
+                && let crate::domain::ProviderBinding::Owned { artifact } =
+                    &mut installation.binding
+            {
+                artifact.files.retain(|file| {
+                    !crate::manifest::is_distribution_discovery_contract(
+                        layout,
+                        &installation.name,
+                        &file.path,
+                    )
+                });
+            }
+        }
         Ok(store)
     }
 
@@ -676,6 +692,85 @@ source_repo = "anolisa"
 
         assert_eq!(store.install_mode, InstallMode::System);
         assert_eq!(store.prefix, layout.prefix);
+    }
+
+    #[test]
+    fn scoped_load_retires_only_distribution_discovery_ownership() {
+        use crate::state::{FileOwner, OwnedFile, OwnedFileKind};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        for layout in [
+            FsLayout::system(Some(tmp.path().join("system"))),
+            FsLayout::user_with_overrides(tmp.path().join("home"), None, None, None, None, None),
+        ] {
+            let path = layout.state_dir.join("installed.toml");
+            let mut store = StateStore::empty_for_layout(&layout);
+            for name in [
+                "cosh-ng",
+                "sec-core",
+                "agentsight",
+                "tokenless",
+                "skillfs",
+                "ws-ckpt",
+                "agent-memory",
+                "cosh",
+                "os-skills",
+            ] {
+                let mut installation = owned_installation(name, "1.0.0");
+                installation.scope = match layout.mode {
+                    LayoutInstallMode::System => InstallationScope::System,
+                    LayoutInstallMode::User => InstallationScope::User { uid: 1000 },
+                };
+                let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+                    unreachable!("owned fixture");
+                };
+                for path in [
+                    layout.contract_path(name),
+                    layout.contract_path("other-component"),
+                    layout.snapshot_path(name),
+                ] {
+                    artifact.files.push(OwnedFile {
+                        path,
+                        owner: FileOwner::Anolisa,
+                        sha256: None,
+                        kind: OwnedFileKind::File,
+                        referent: None,
+                        mode: None,
+                        capabilities: Vec::new(),
+                    });
+                }
+                store.upsert(installation);
+            }
+            store.save(&path).expect("seed state");
+            let before = fs::read(&path).expect("state bytes");
+            let loaded = StateStore::load_for_layout(&path, 1000, &layout).expect("load state");
+            assert_eq!(fs::read(&path).expect("read-only load"), before);
+            for installation in &loaded.installations {
+                let ProviderBinding::Owned { artifact } = &installation.binding else {
+                    unreachable!("owned fixture");
+                };
+                assert_eq!(
+                    artifact.files.len(),
+                    if ["cosh", "os-skills"].contains(&installation.name.as_str()) {
+                        3
+                    } else {
+                        2
+                    }
+                );
+                assert!(
+                    artifact
+                        .files
+                        .iter()
+                        .any(|file| file.path == layout.snapshot_path(&installation.name))
+                );
+                assert!(
+                    artifact
+                        .files
+                        .iter()
+                        .any(|file| file.path == layout.contract_path("other-component"))
+                );
+            }
+        }
     }
 
     #[test]

@@ -30,11 +30,6 @@ packages = { rpm = "bash", deb = "bash" }
 modes = ["user", "system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/cosh-ng/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/cosh-cli"
 target = "{bindir}/cosh-cli"
 mode = "0755"

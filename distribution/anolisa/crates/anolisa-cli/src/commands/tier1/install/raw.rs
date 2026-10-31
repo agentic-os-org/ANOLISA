@@ -899,6 +899,10 @@ fn resolve_manifest_files(
             render,
         });
     }
+    // Published archives predate the transfer of discovery ownership to ANOLISA.
+    files.retain(|file| {
+        !anolisa_core::manifest::is_distribution_discovery_contract(layout, component, &file.dest)
+    });
     Ok(files)
 }
 

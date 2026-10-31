@@ -57,11 +57,6 @@ packages = { rpm = "jq", deb = "jq" }
 modes = ["system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/sec-core/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/agent-sec-cli"
 target = "{bindir}/agent-sec-cli"
 mode = "0755"
