@@ -241,6 +241,29 @@ fn is_message_record(event: &serde_json::Value) -> bool {
     message_id(event).is_some() && event.get("$patch").is_none()
 }
 
+/// Whether a complete history operation authoritatively removed all messages.
+pub(crate) fn explicitly_cleared(events: &[serde_json::Value]) -> bool {
+    let has_reset = events.iter().any(|event| {
+        event
+            .get("$rewindTo")
+            .is_some_and(|value| value.is_string())
+            || event
+                .pointer("/$patch/removeIds")
+                .and_then(|value| value.as_array())
+                .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|id| id.is_string()))
+            || event
+                .pointer("/$set/messages")
+                .and_then(|value| value.as_array())
+                .is_some_and(|messages| messages.is_empty())
+            || (is_partial_metadata(event)
+                && event
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|messages| messages.is_empty()))
+    });
+    has_reset && replay_conversation(events).messages.is_empty()
+}
+
 /// The leading/conversation metadata record.
 fn is_partial_metadata(event: &serde_json::Value) -> bool {
     event.get("sessionId").and_then(|v| v.as_str()).is_some()
