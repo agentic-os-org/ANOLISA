@@ -538,7 +538,9 @@ impl InterruptionDetector {
     ///   1. AuthError       — 401/403
     ///   2. RateLimit       — 429
     ///   3. NetworkTimeout  — 408/504
-    ///   4. ServiceUnavailable — 502/503
+    ///   4. ServiceUnavailable — 502/503 / overloaded, or a provider
+    ///                        server-pressure finish reason (DeepSeek's
+    ///                        `insufficient_system_resource`)
     ///   5. ContextOverflow — keywords in error body
     ///   5.5. ResourceExhaustion — quota/billing keywords
     ///   6. SafetyFilter    — finish_reason is a provider safety stop
@@ -711,17 +713,28 @@ impl InterruptionDetector {
         }
 
         // ── 4. ServiceUnavailable (502/503 / overloaded) ──────────────────────
+        // DeepSeek reports the same server pressure as a terminal finish
+        // reason (`insufficient_system_resource`, its documented value for a
+        // server short of system resources) on an otherwise clean 200
+        // response rather than as an error body — the same shape Gemini uses
+        // for `MALFORMED_FUNCTION_CALL` — so the reason is read here,
+        // case-insensitively like the other finish-reason arms. Without this
+        // arm a streamed stop fell to rule 8 and was reported as a transport
+        // cut, and a non-streamed one produced no event at all.
         if status_code == 502
             || status_code == 503
             || combined_error.contains("overloaded")
             || combined_error.contains("service_unavailable")
             || combined_error.contains("server is overloaded")
             || combined_error.contains("model is overloaded")
+            || finish_reason
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("insufficient_system_resource"))
         {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
                 "error": effective_error,
+                "finish_reason": finish_reason,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ServiceUnavailable,
@@ -1504,6 +1517,61 @@ mod tests {
                 "{reason} is a complete provider response, got {events:?}"
             );
         }
+    }
+
+    /// DeepSeek ends an otherwise successful 200 SSE stream with the finish
+    /// reason `insufficient_system_resource` — its documented value for a
+    /// server under pressure (insufficient system resources). The reason
+    /// matched no list: not a normal finish, not a token limit, not a safety
+    /// stop, so rule 8 answered `sse_truncated` (high) and blamed the
+    /// transport for a stop the provider had chosen deliberately, while the
+    /// same reason on a non-streamed response produced no event at all.
+    /// Server pressure is what rule 4 already owns for the `overloaded`
+    /// wordings, so the finish reason is read there, keyed case-insensitively
+    /// like the other finish-reason arms.
+    #[test]
+    fn test_deepseek_resource_stop_is_service_pressure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("insufficient_system_resource".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ServiceUnavailable),
+            "a server-pressure stop is service unavailability, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "the provider ended the stream deliberately; it was not cut, got {events:?}"
+        );
+
+        // The same stop on a non-streamed response must not be dropped: the
+        // pressure is a property of the finish reason, not of the transport.
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("insufficient_system_resource".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ServiceUnavailable),
+            "a non-SSE response reports the same pressure stop, got {events:?}"
+        );
     }
 
     /// Gemini's `OTHER` and `LANGUAGE` are generation stops of their own: the
