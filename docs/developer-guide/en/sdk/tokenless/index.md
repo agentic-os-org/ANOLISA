@@ -38,15 +38,25 @@ CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the targe
 
 Intel Mac and Windows x64 wheels are available starting with v0.9.0.
 
-The lifecycle API examples below require Tokenless 0.8.0. Install v0.9.1 on Linux x86_64
-into a virtual environment:
+The lifecycle API examples below require Tokenless 0.8.0 or later. Set `TOKENLESS_VERSION` to the
+release you install — any published release, not necessarily the version this checkout builds —
+and install its Linux x86_64 wheel into a virtual environment:
 
 ```bash
+TOKENLESS_VERSION=0.9.0   # any published tokenless release
+
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless-0.9.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless-${TOKENLESS_VERSION}-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
+
+Only a published release serves wheel assets, so a version whose release is still pending answers
+HTTP 404 — a bump reaches `main` before the matching `tokenless/vX.Y.Z` release exists. When
+`pip install` reports that 404, set `TOKENLESS_VERSION` to the newest entry on the
+[`tokenless` releases page](https://github.com/agentic-os-org/ANOLISA/releases?q=tokenless); the
+[troubleshooting guide](../../../../user-guide/en/tokenless/troubleshooting.md) walks through
+the same 404 for adapter bundles.
 
 The Linux assets target glibc-based distributions compatible with `manylinux_2_17`; they do not
 support Alpine Linux or other musl-based distributions. The Release also includes

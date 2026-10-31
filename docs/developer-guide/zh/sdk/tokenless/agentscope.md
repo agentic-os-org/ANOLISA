@@ -19,20 +19,26 @@ OpenCode 等产品 Adapter 单独记录在 [Agent 集成](../../../../user-guide
 
 ## 安装
 
-AgentScope 集成 Wheel 要求原生 Runtime Wheel 的版本与它完全相同。请从同一个
-Tokenless GitHub Release 同时安装两个产物。例如，在 Linux x86_64 上安装
-[v0.9.1](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.9.1)：
+AgentScope 集成 Wheel 要求原生 Runtime Wheel 的版本与它完全相同。请从同一个已发布的
+Tokenless GitHub Release 一次性安装两个产物：把 `TOKENLESS_VERSION` 设为要安装的 Release
+（任意已发布的 Release 即可，不必是当前 checkout 构建的版本），并安装它对应的
+Linux x86_64 产物：
 
 ```bash
+TOKENLESS_VERSION=0.9.0   # 任意已发布的 tokenless Release
+
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless-0.9.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless_agentscope-0.9.1-py3-none-any.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless-${TOKENLESS_VERSION}-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless_agentscope-${TOKENLESS_VERSION}-py3-none-any.whl"
 ```
 
 在其他受支持的系统上，请按 [SDK 概览](index.md) 替换原生 Runtime
-URL，并保持两个包的版本完全一致。
+URL，并保持两个包的版本完全一致。Release 尚未发布时两个资产都会返回 HTTP 404，此时请把
+`TOKENLESS_VERSION` 改为
+[`tokenless` Release 列表](https://github.com/agentic-os-org/ANOLISA/releases?q=tokenless)
+中最新的一项，详见[故障排查](../../../../user-guide/zh/tokenless/troubleshooting.md)。
 
 ### 从源码构建
 

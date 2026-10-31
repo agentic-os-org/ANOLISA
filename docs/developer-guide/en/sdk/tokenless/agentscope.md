@@ -21,19 +21,26 @@ AgentScope layer. Product adapters such as Claude Code and OpenCode are document
 ## Install
 
 The AgentScope integration wheel requires the exact same version of the native Runtime wheel.
-Install both assets from the same Tokenless GitHub Release in one command. For example, install
-[v0.9.1](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.9.1) on Linux x86_64:
+Install both assets from one published Tokenless GitHub Release in a single command. Set
+`TOKENLESS_VERSION` to the release you install — any published release, not necessarily the version
+this checkout builds — and fetch its Linux x86_64 assets:
 
 ```bash
+TOKENLESS_VERSION=0.9.0   # any published tokenless release
+
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless-0.9.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless_agentscope-0.9.1-py3-none-any.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless-${TOKENLESS_VERSION}-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless_agentscope-${TOKENLESS_VERSION}-py3-none-any.whl"
 ```
 
 For other supported systems, replace the native Runtime URL with the matching asset
-listed in the [SDK overview](index.md); keep both package versions identical.
+listed in the [SDK overview](index.md); keep both package versions identical. A release that has
+not been published yet serves neither asset and answers HTTP 404 — set `TOKENLESS_VERSION` to the
+newest entry on the
+[`tokenless` releases page](https://github.com/agentic-os-org/ANOLISA/releases?q=tokenless), as
+described in [Troubleshooting](../../../../user-guide/en/tokenless/troubleshooting.md).
 
 ### Build from source
 

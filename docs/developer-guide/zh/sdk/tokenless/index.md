@@ -37,14 +37,25 @@ Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 �
 
 Intel Mac 和 Windows x64 Wheel 从 v0.9.0 开始提供。
 
-下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.9.1 安装到虚拟环境：
+下文的生命周期 API 示例要求 Tokenless 0.8.0 或更高版本。把 `TOKENLESS_VERSION` 设为要安装的
+Release（任意已发布的 Release 即可，不必是当前 checkout 构建的版本），再把它对应的
+Linux x86_64 Wheel 安装到虚拟环境：
 
 ```bash
+TOKENLESS_VERSION=0.9.0   # 任意已发布的 tokenless Release
+
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.1/anolisa_tokenless-0.9.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless-${TOKENLESS_VERSION}-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
+
+只有已发布的 Release 才提供 Wheel 资产，因此 Release 尚未发布的版本会返回 HTTP 404 ——
+版本号会先合入 `main`，对应的 `tokenless/vX.Y.Z` Release 才发布。若 `pip install` 报出这个
+404，请把 `TOKENLESS_VERSION` 改为
+[`tokenless` Release 列表](https://github.com/agentic-os-org/ANOLISA/releases?q=tokenless)
+中最新的一项；Adapter 安装包遇到同一个 404 时的排查步骤见
+[故障排查](../../../../user-guide/zh/tokenless/troubleshooting.md)。
 
 Linux 产物面向兼容 `manylinux_2_17` 的 glibc 发行版，不支持 Alpine Linux 等 musl 发行版。
 Release 同时提供 `SHA256SUMS-python-wheels.txt`，可用于校验下载内容。
