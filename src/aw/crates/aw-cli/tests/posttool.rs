@@ -10,6 +10,8 @@ mod native;
 
 use serde_json::{json, Value};
 use std::fs;
+use std::thread;
+use std::time::{Duration, Instant};
 use support::{Fixture, Service};
 
 #[path = "posttool/openclaw_scope.rs"]
@@ -70,9 +72,22 @@ fn optional_projection_does_not_remove_large_results_from_the_journal() {
 fn qoder_waiting_after_steps_cannot_renew_an_exhausted_budget() {
     let fixture = Fixture::new();
     let mut document = fixture.document();
-    document["spec"]["execution"]["default_event_budget_ms"] = json!(300);
+    // The observer synchronizes with the test through marker files instead
+    // of timing: it writes its pid and an `observer-ready` marker as its
+    // first statements, then parks until an `observer-release` marker
+    // appears (30 s cap, never satisfied by the service). The budget is
+    // 2 s — wide enough that python interpreter startup on a loaded
+    // runner stays far inside the event window (the original 300 ms
+    // budget turned interpreter startup into a second race, see #9262) —
+    // while the parked observer makes expiry deterministic rather than a
+    // `sleep(2)` racing the teardown. Two earlier orderings failed: a pid
+    // written after `stdin.read()` landed when the engine closed the
+    // stream (i.e. at budget-exhaustion teardown, racing the SIGKILL), and
+    // blocking on stdin is no handoff at all because the executor closes
+    // stdin as soon as the input is written.
+    document["spec"]["execution"]["default_event_budget_ms"] = json!(2000);
     document["spec"]["providers"] = json!({
-        "observer":{"protocol":"native-hook/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,"-c","import os,pathlib,sys,time; sys.stdin.read(); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(2)",fixture.root.join("sleeper.pid")]},"timeout_ms":2000,"max_output_bytes":4096},
+        "observer":{"protocol":"native-hook/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,"-c","import os,pathlib,sys,time; root=pathlib.Path(sys.argv[1]); (root/'sleeper.pid').write_text(str(os.getpid())); (root/'observer-ready').write_text('ready'); deadline=time.monotonic()+30\nwhile not (root/'observer-release').exists() and time.monotonic()<deadline: time.sleep(0.005)",fixture.root.join(".")]},"timeout_ms":5000,"max_output_bytes":4096},
         "compression":{"protocol":"aw-provider/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,fixture.action(),"--root",fixture.root,"--protocol","provider","--behavior","replace"]},"timeout_ms":2000,"max_output_bytes":4096}
     });
     document["spec"]["events"] = json!({"tool.after":{"enabled":true,"steps":[
@@ -83,11 +98,22 @@ fn qoder_waiting_after_steps_cannot_renew_an_exhausted_budget() {
     let mut command = fixture.launch(&[], None);
     command.env("FAKE_QODER_RESULT_TEXT", "original");
     let report = fixture.successful(command);
+    // Readiness handshake: the observer proves it started inside the
+    // event window before any pid-based assertion. Without this gate the
+    // test would race interpreter startup against the budget on a busy
+    // runner and panic on a missing file.
+    let ready = fixture.root.join("observer-ready");
+    let deadline = Instant::now() + support::TIMEOUT;
+    while !ready.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(ready.exists(), "observer never became ready before deadline");
     for hook in report["events"][1]["hooks"].as_array().unwrap() {
         assert_eq!(hook["status"], 0);
         assert!(!hook["stderr"].as_str().unwrap().is_empty());
         assert_eq!(hook["stdout"], "7b7d");
     }
+    // The budget-exhaustion teardown must have reaped the parked observer.
     let pid = fs::read_to_string(fixture.root.join("sleeper.pid")).unwrap();
     assert!(!std::path::Path::new("/proc").join(pid).exists());
     for entry in fs::read_dir(&fixture.root)
@@ -195,7 +221,7 @@ fn qoder_callback_delivers_one_replacement_and_keeps_audit_metadata_only() {
 #[test]
 fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
     use aw_service::{Binding, Capabilities, Operation};
-    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Instant};
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
     for agent in native::agents() {
         let adapter = agent.as_str();
         let fixture = Fixture::new();
