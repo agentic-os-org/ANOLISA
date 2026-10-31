@@ -718,6 +718,11 @@ fn flatten_result_content(payload: &serde_json::Value) -> String {
     }
     match payload {
         serde_json::Value::String(s) => s.clone(),
+        // An explicit null is "the producer recorded no output", not the
+        // four-character string "null": the shared ATIF message reader maps a
+        // null *message* to empty text, and stringifying the result here would
+        // hand the classifiers a fabricated output.
+        serde_json::Value::Null => String::new(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
@@ -2114,6 +2119,57 @@ pub(crate) mod tests {
         assert_eq!(
             results[0].content.as_ref().and_then(|c| c.as_str()),
             Some("raw-a.txt")
+        );
+    }
+
+    /// An explicit `null` tool-result payload means the producer recorded no
+    /// output, not the four-character string "null".
+    ///
+    /// The observation content is the text every downstream consumer reads:
+    /// `outcome::classify_call` scans it for a line starting with an error
+    /// token and the evidence pool's haystack carries it, so a null flattened
+    /// to `"null"` fabricates an output the tool never produced — and the
+    /// trajectory then serialises that fabricated text back. The shared ATIF
+    /// message reader maps an explicit null *message* to the empty string for
+    /// the same reason.
+    #[test]
+    fn an_explicit_null_tool_result_is_empty_not_the_text_null() {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-null".into()),
+                name: "Read".into(),
+                arguments: Some(serde_json::json!({"file_path": "/tmp/empty"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let replayed = vec![InputMessage {
+            role: "user".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-null".into()),
+                response: serde_json::Value::Null,
+            }],
+            name: None,
+        }];
+
+        let doc = convert_trace_to_atif(
+            "trace-null",
+            vec![
+                call_event(1, 1_000_000_000, Some(agent_turn), None, Some("read it")),
+                call_event(2, 3_000_000_000, None, Some(replayed), None),
+            ],
+        )
+        .expect("trace converts");
+        let results = &doc.steps[2]
+            .observation
+            .as_ref()
+            .expect("the call carries a result")
+            .results;
+        assert_eq!(results[0].source_call_id.as_deref(), Some("tc-null"));
+        assert_eq!(
+            results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("")
         );
     }
 
