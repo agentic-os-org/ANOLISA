@@ -266,21 +266,21 @@ fn extract_title_and_description(content: &str, fallback_path: &str) -> (String,
     let mut title = fallback_path.to_string();
     let mut description = String::new();
 
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---") {
-            let fm = &rest[..end];
-            for line in fm.lines() {
-                if let Some((key, value)) = line.split_once(": ") {
-                    match key.trim() {
-                        "title" => title = value.trim().trim_matches('"').to_string(),
-                        "hint" | "description" => {
-                            description = value.trim().trim_matches('"').to_string();
-                        }
-                        "category" if description.is_empty() => {
-                            description = format!("[{}]", value.trim());
-                        }
-                        _ => {}
+    // `body` doubles as the fallback description source, so resolve the
+    // split once and reuse it below.
+    let split = super::frontmatter::split(content);
+    if let Some((fm, _)) = split {
+        for line in fm.lines() {
+            if let Some((key, value)) = line.split_once(": ") {
+                match key.trim() {
+                    "title" => title = value.trim().trim_matches('"').to_string(),
+                    "hint" | "description" => {
+                        description = value.trim().trim_matches('"').to_string();
                     }
+                    "category" if description.is_empty() => {
+                        description = format!("[{}]", value.trim());
+                    }
+                    _ => {}
                 }
             }
         }
@@ -288,10 +288,7 @@ fn extract_title_and_description(content: &str, fallback_path: &str) -> (String,
 
     // Fallback description: first line of body
     if description.is_empty() {
-        let body = content
-            .find("\n---\n")
-            .map(|pos| &content[pos + 5..])
-            .unwrap_or(content);
+        let body = split.map(|(_, body)| body).unwrap_or(content);
         let first_line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
         description = first_line.chars().take(80).collect::<String>();
     }
@@ -302,6 +299,32 @@ fn extract_title_and_description(content: &str, fallback_path: &str) -> (String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn description_fallback_after_fence_at_end_of_file_is_not_the_fence() {
+        // The fallback description reads the body past the closing fence; a
+        // fence that ends the file used to surface as a literal `---`
+        // description via the whole-file fallback.
+        let (_, description) = extract_title_and_description("---\n\n---", "fallback.md");
+        assert_eq!(description, "");
+        let (_, description) =
+            extract_title_and_description("---\n\n---\nReal body line", "fallback.md");
+        assert_eq!(description, "Real body line");
+        // The genuinely-empty frontmatter form: the fence directly follows
+        // the opening fence. The offset-of-the-preceding-newline contract
+        // could not represent this position, so the description regressed
+        // to a literal "---".
+        let (_, description) = extract_title_and_description("---\n---", "fallback.md");
+        assert_eq!(description, "");
+        let (_, description) = extract_title_and_description("---\n---\nBody line", "fallback.md");
+        assert_eq!(description, "Body line");
+        // A CRLF opening fence must not regress the description to the
+        // fence itself (main coped with this by searching the whole
+        // content; the helper initially required exactly `---\n`).
+        let (_, description) =
+            extract_title_and_description("---\r\nid: abc\n---\nbody", "fallback.md");
+        assert_eq!(description, "body");
+    }
 
     #[test]
     fn parse_index_basic() {

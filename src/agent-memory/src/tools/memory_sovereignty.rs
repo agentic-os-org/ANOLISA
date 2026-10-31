@@ -393,18 +393,15 @@ pub fn is_source_allowed(svc: &MemoryService, source: &str) -> bool {
 fn parse_frontmatter_flat(content: &str) -> HashMap<String, String> {
     let mut fm = HashMap::new();
 
-    // Handle both LF and CRLF line endings
-    let content = content.replace("\r\n", "\n");
-
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---") {
-            for line in rest[..end].lines() {
-                if let Some((key, value)) = line.split_once(": ") {
-                    let key = key.trim();
-                    let value = value.trim().trim_matches('"');
-                    if !key.starts_with(' ') && !key.starts_with('-') {
-                        fm.insert(key.to_string(), value.to_string());
-                    }
+    // Routed through the canonical `frontmatter::split` (GH-3580) so every
+    // reader agrees on the same fence rule.
+    if let Some((fm_str, _)) = super::frontmatter::split(content) {
+        for line in fm_str.lines() {
+            if let Some((key, value)) = line.split_once(": ") {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                if !key.starts_with(' ') && !key.starts_with('-') {
+                    fm.insert(key.to_string(), value.to_string());
                 }
             }
         }
