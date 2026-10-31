@@ -70,6 +70,12 @@ SQLite completion 在获取连接锁前序列化 JSON。容量选择使用存储
 避免持锁加载并逐字扫描整份 payload。投递仍为同步执行；这些修改缩短其临界区，不增加持久化队列。
 完成事件的 JSON 按保留 payload 的估算预留容量，并释放序列化产生的多余容量。SQLite 消息列需要完整
 数组时，从该 JSON 借用 `RawValue`；增量子集保留原有序列化方式及完整字段内容。
+
+Pending-match 指纹以固定长度 digest 缓存在 parsed request 中，供 idle 或 crash snapshot 后复用。
+路由、source timestamp、编码或 body 替换会使缓存失效。Raw 投递直接 hash 保留的已序列化 body，
+semantic 投递通过 streaming writer hash 已解析 JSON。非 LLM 记录在这些 hash 计算前被过滤。
+两条路径都不额外保留 payload 副本，并保持 match key 的字节兼容。
+
 直接插入与 promotion 的回退插入复用同一份序列化结果，包括容量错误后的重试。
 
 GenAI 维护通过注册路径打开独立连接，不等待写锁，也不触发自动 WAL checkpoint。按时间和容量删除

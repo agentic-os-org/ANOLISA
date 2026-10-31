@@ -41,20 +41,51 @@ impl GenAIBuilder {
 
         // Need at least HttpRecord to build LLMCall
         let http = http_record?;
+        // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
+        let path_match = crate::parser::llm::is_llm_api_path(&http.path);
+        let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
+        let is_llm = path_match || body_match;
+        if !is_llm && !http.is_sse {
+            return None;
+        }
+
         let context = results.iter().find_map(|result| match result {
             AnalysisResult::HttpContext(context) => Some(context),
             _ => None,
         });
         let pending_match_key = context
-            .and_then(|context| context.request.as_ref())
-            .map(|body| {
-                Self::pending_match_key_json(
-                    http.pid,
-                    http.timestamp_ns,
-                    &http.method,
-                    &http.path,
-                    body,
+            .and_then(|context| context.request_fingerprint)
+            .map(|digest| {
+                format!(
+                    "pmk-{:x}",
+                    sha2::digest::Output::<sha2::Sha256>::from(digest)
                 )
+            })
+            .or_else(|| {
+                context
+                    .filter(|context| context.retain_raw && http.request_body.is_some())
+                    .map(|_| {
+                        Self::pending_match_key(
+                            http.pid,
+                            http.timestamp_ns,
+                            &http.method,
+                            &http.path,
+                            http.request_body.as_deref(),
+                        )
+                    })
+            })
+            .or_else(|| {
+                context
+                    .and_then(|context| context.request.as_ref())
+                    .map(|body| {
+                        Self::pending_match_key_json(
+                            http.pid,
+                            http.timestamp_ns,
+                            &http.method,
+                            &http.path,
+                            body,
+                        )
+                    })
             })
             .unwrap_or_else(|| {
                 Self::pending_match_key(
@@ -65,14 +96,6 @@ impl GenAIBuilder {
                     http.request_body.as_deref(),
                 )
             });
-
-        // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
-        let path_match = crate::parser::llm::is_llm_api_path(&http.path);
-        let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
-        let is_llm = path_match || body_match;
-        if !is_llm && !http.is_sse {
-            return None;
-        }
 
         let internal_id = self.generate_id();
 
@@ -1940,6 +1963,7 @@ mod tests {
         };
         let context = HttpContext {
             retain_raw: false,
+            request_fingerprint: None,
             http,
             request: None,
             response: None,

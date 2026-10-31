@@ -101,6 +101,36 @@ fn build_full(results: &[AnalysisResult]) -> Value {
     call_value(call)
 }
 
+#[test]
+fn serialized_request_pending_key_matches_streamed_json() {
+    let text = "雪|\"\n\0".repeat(128 * 1024);
+    let request = json!({"z": 1, "messages": [{"role": "user", "content": text}], "model": "fixture", "a": "\\\""});
+    let response = json!({"id":"serialization-fixture","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]});
+    let captured = captured("/v1/chat/completions", request.clone(), response, false);
+    let mut keys = Vec::new();
+    for retain_raw in [false, true] {
+        let analyzed = Analyzer::new().analyze_for_delivery(&captured, retain_raw);
+        let (output, _) = GenAIBuilder::new().build_for_delivery(
+            &analyzed,
+            &ResponseSessionMapper::new(),
+            &HashMap::new(),
+            false,
+        );
+        let GenAISemanticEvent::LLMCall(call) = &output.events[0] else {
+            panic!("expected LLM call");
+        };
+        keys.push(call.metadata["pending_match_key"].clone());
+        assert_eq!(
+            call.request.raw_body.as_deref(),
+            retain_raw.then(|| request.to_string()).as_deref()
+        );
+        assert!(
+            matches!(&call.request.messages[0].parts[0], crate::genai::semantic::MessagePart::Text { content } if content == &text)
+        );
+    }
+    assert_eq!(keys[0], keys[1]);
+}
+
 fn call_value(call: &crate::genai::LLMCall) -> Value {
     let mut value = serde_json::to_value(call).unwrap();
     // Native envelopes without an API id legitimately use a fresh generated id.

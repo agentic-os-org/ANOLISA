@@ -110,6 +110,7 @@ impl HttpParser {
         let body_len = data.len().saturating_sub(header_end);
 
         Ok(ParsedRequest {
+            cached_fingerprint: Default::default(),
             method,
             path,
             version,

@@ -810,6 +810,7 @@ mod latency_tests {
         let saved = crate::config::min_duration_us();
 
         let request = ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
             version: 1,

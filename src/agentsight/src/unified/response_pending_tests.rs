@@ -682,6 +682,16 @@ fn response_pending_idle_snapshot_persists_once_and_can_resume() {
                     buf,
                 });
             }
+            let cached_analysis = Analyzer::new().analyze_for_delivery(&completed[0], true);
+            assert!(cached_analysis.iter().any(|result| matches!(result,
+                crate::analyzer::AnalysisResult::HttpContext(context) if context.request_fingerprint.is_some()
+            )));
+            let (_, cached_pending) =
+                GenAIBuilder::new().build_with_pending(&cached_analysis, &mapper, &HashMap::new());
+            assert_eq!(
+                cached_pending.unwrap().pending_match_key,
+                pending.pending_match_key
+            );
             let analyzed = Analyzer::new().analyze_aggregated(&completed[0]);
             let (mut output, formal) =
                 GenAIBuilder::new().build_with_pending(&analyzed, &mapper, &HashMap::new());

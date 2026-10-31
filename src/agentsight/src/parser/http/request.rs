@@ -4,6 +4,8 @@
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, ns_to_us};
 use crate::probes::sslsniff::SslEvent;
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -20,6 +22,8 @@ pub struct ParsedRequest {
     pub source_event: Rc<SslEvent>, // 原始 SslEvent (Rc 避免拷贝)
     /// 重组后的完整 body（跨多事件聚合时使用）
     pub reassembled_body: Option<Vec<u8>>,
+    /// Request-scoped fingerprint and its routing/body revision; never retains payload bytes.
+    pub(crate) cached_fingerprint: Cell<Option<([u8; 32], [u8; 32])>>,
 }
 
 impl ParsedRequest {
@@ -44,8 +48,43 @@ impl ParsedRequest {
     /// entirely when it is zero — then see an empty body while `body()` holds
     /// the prompt. Assigning through this method keeps the pair in step.
     pub fn set_reassembled_body(&mut self, body: Vec<u8>) {
+        self.cached_fingerprint.set(None);
         self.body_len = body.len();
         self.reassembled_body = Some(body);
+    }
+
+    fn fingerprint_scope(&self, pid: u32) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(pid.to_le_bytes());
+        hash.update(self.source_event.timestamp_ns.to_le_bytes());
+        hash.update((self.body().as_ptr() as usize).to_le_bytes());
+        hash.update(self.body().len().to_le_bytes());
+        for field in [
+            self.method.as_str(),
+            self.path.as_str(),
+            self.headers
+                .get("content-encoding")
+                .map_or("", String::as_str),
+            self.headers
+                .get("transfer-encoding")
+                .map_or("", String::as_str),
+        ] {
+            hash.update(field.len().to_le_bytes());
+            hash.update(field.as_bytes());
+        }
+        hash.finalize().into()
+    }
+
+    /// Reuse a fingerprint only while routing metadata and body storage still match.
+    pub(crate) fn fingerprint(&self, pid: u32) -> Option<[u8; 32]> {
+        let (scope, digest) = self.cached_fingerprint.get()?;
+        (scope == self.fingerprint_scope(pid)).then_some(digest)
+    }
+
+    /// Cache a complete-body fingerprint; replace bodies through `set_reassembled_body`.
+    pub(crate) fn cache_fingerprint(&self, pid: u32, digest: [u8; 32]) {
+        self.cached_fingerprint
+            .set(Some((self.fingerprint_scope(pid), digest)));
     }
 
     /// `Content-Encoding` of the request, the same view `ParsedResponse` uses.
@@ -221,6 +260,31 @@ fn format_body(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn request_fingerprint_rejects_changed_metadata_and_body() {
+        let mut request = make_request(br#"{"value":"old"}"#, &[]);
+        let pid = request.source_event.pid;
+        request.cache_fingerprint(pid, [7; 32]);
+        assert_eq!(request.fingerprint(pid), Some([7; 32]));
+        assert!(request.fingerprint(pid + 1).is_none());
+        let mut changed = request.clone();
+        changed.path.push_str("/other");
+        assert!(changed.fingerprint(pid).is_none());
+        let mut changed = request.clone();
+        changed.method = "GET".into();
+        assert!(changed.fingerprint(pid).is_none());
+        let mut changed = request.clone();
+        changed
+            .headers
+            .insert("content-encoding".into(), "gzip".into());
+        assert!(changed.fingerprint(pid).is_none());
+        request.set_reassembled_body(br#"{"value":"new"}"#.to_vec());
+        assert!(request.fingerprint(pid).is_none());
+        request.cache_fingerprint(pid, [8; 32]);
+        request.set_reassembled_body(br#"{"value":"end"}"#.to_vec());
+        assert!(request.fingerprint(pid).is_none());
+    }
+
     fn make_ssl_event(data: &[u8]) -> Rc<SslEvent> {
         Rc::new(SslEvent {
             source: 0,
@@ -243,6 +307,7 @@ mod tests {
         let body = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
         let event = make_ssl_event(body);
         let req = ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/api".to_string(),
             version: 1,
@@ -264,6 +329,7 @@ mod tests {
         let event = make_ssl_event(bytes);
         let body_offset = bytes.len() - json_str.len();
         let req = ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/".to_string(),
             version: 1,
@@ -281,6 +347,7 @@ mod tests {
     fn test_parsed_request_json_body_empty() {
         let event = make_ssl_event(b"GET / HTTP/1.1\r\n\r\n");
         let req = ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "GET".to_string(),
             path: "/".to_string(),
             version: 1,
@@ -332,6 +399,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("Host".to_string(), "api.openai.com".to_string());
         let req = ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
             version: 1,
@@ -350,6 +418,7 @@ mod tests {
     fn test_to_chrome_trace_events() {
         let event = make_ssl_event(b"GET / HTTP/1.1\r\n\r\n");
         let req = ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "GET".to_string(),
             path: "/health".to_string(),
             version: 1,
@@ -391,6 +460,7 @@ mod tests {
     fn test_debug_format() {
         let event = make_ssl_event(b"GET / HTTP/1.1\r\n\r\n");
         let req = ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "GET".to_string(),
             path: "/".to_string(),
             version: 1,
@@ -411,6 +481,7 @@ mod tests {
         let body_offset = full.len() - body.len();
         let event = make_ssl_event(&full);
         ParsedRequest {
+            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/api".to_string(),
             version: 1,
