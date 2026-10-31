@@ -56,7 +56,8 @@ impl MemoryService {
         // Configs built in code skip `AppConfig::load`, and `IndexHandle::open`
         // below hands the raw decay values to the BM25 scorer, so re-check the
         // ranges here: a negative lambda would otherwise invert recency
-        // ranking for every query without a single log line.
+        // ranking for every query without a single log line, and a non-finite
+        // conflict_bm25_threshold would corrupt conflict detection.
         config.validate()?;
 
         // `pick_strategy` below may unshare into a user namespace, after

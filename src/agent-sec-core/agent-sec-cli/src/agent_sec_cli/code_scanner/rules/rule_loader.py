@@ -66,7 +66,10 @@ def load_rules(language: Language) -> List[RuleDefinition]:
                 raise ErrRuleYamlParse(yaml_file.stem)
         if data is None:
             continue
-        data["regex"] = data["regex"].replace("\n", "")
+        try:
+            data["regex"] = data["regex"].replace("\n", "")
+        except (KeyError, TypeError, AttributeError):
+            raise ErrRuleValidation(yaml_file.stem)
         _resolve_refs(data, shared, yaml_file.stem)
         try:
             rules.append(RuleDefinition(**data))

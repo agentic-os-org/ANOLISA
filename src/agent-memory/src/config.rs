@@ -395,6 +395,17 @@ fn lambda_override_is_usable(n: f64) -> bool {
     n.is_finite() && n >= 0.0
 }
 
+/// Whether `n` may override `[memory.consolidation].conflict_bm25_threshold`
+/// from the environment.
+///
+/// Same rationale as `lambda_override_is_usable`: `AppConfig::load` validates
+/// *after* `apply_env_overrides`, so a non-finite value that slips past the
+/// override becomes a hard startup failure instead of the warn-and-keep
+/// contract.  The rule is `AppConfig::validate`'s threshold rule.
+fn threshold_override_is_finite(n: f64) -> bool {
+    n.is_finite()
+}
+
 /// Read an env var that ought to be a valid `user_id`, validate it, and
 /// return `Some` only on success. Invalid values are dropped with a
 /// `warn!` log so the caller can fall back to the next source instead of
@@ -453,13 +464,16 @@ impl AppConfig {
     /// `apply_env_overrides` range-checks the `MEMORY_INDEX_TIME_DECAY_*`
     /// overrides and keeps the current value on a violation, but the config
     /// file — the path operators are told to use — accepted anything TOML
-    /// can express, as does a config built in code. Both fields feed
+    /// can express, as does a config built in code. Both decay fields feed
     /// `exp(-lambda * age_days)` straight into every search score, so a sign
     /// typo makes the decay factor *grow* with age and stale memories
     /// outrank fresh ones, while `nan` (TOML floats accept it) degenerates
-    /// the ordering entirely. Neither leaves a trace in the index or the
-    /// audit log, so both are load-time errors, matching the
-    /// `deny_unknown_fields` policy on the structs above.
+    /// the ordering entirely. `conflict_bm25_threshold` feeds a `*score >=
+    /// threshold` comparison in conflict detection, where a non-finite
+    /// value either disables it (NaN/+inf) or flags every document
+    /// (-inf). None of these leave a trace in the index or the audit log,
+    /// so all are load-time errors, matching the `deny_unknown_fields`
+    /// policy on the structs above.
     pub fn validate(&self) -> crate::error::Result<()> {
         let lambda = self.memory.index.time_decay_lambda;
         if !lambda.is_finite() || lambda < 0.0 {
@@ -920,6 +934,41 @@ mod tests {
                 !lambda_override_is_usable(candidate) || validated,
                 "the override accepts {candidate} but validate() rejects it, \
                  so MEMORY_INDEX_TIME_DECAY_LAMBDA={candidate} would fail startup"
+            );
+        }
+    }
+
+    #[test]
+    fn threshold_override_and_validate_agree() {
+        // Same invariant as `lambda_override_and_validate_agree`: the env
+        // override for MEMORY_CONFLICT_THRESHOLD must not accept a value
+        // that `validate` rejects, or the env var becomes a startup failure
+        // instead of a warn-and-ignore.
+        let mut cfg = AppConfig::default();
+        for candidate in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -2.0, 0.0, 1.0e6] {
+            cfg.memory.consolidation.conflict_bm25_threshold = candidate;
+            let validated = cfg.validate().is_ok();
+            assert!(
+                !threshold_override_is_finite(candidate) || validated,
+                "the override accepts {candidate} but validate() rejects it, \
+                 so MEMORY_CONFLICT_THRESHOLD={candidate} would fail startup"
+            );
+        }
+    }
+
+    #[test]
+    fn load_rejects_non_finite_conflict_threshold() {
+        // TOML floats accept `nan`, `inf`, and `-inf`.  These used to load
+        // cleanly and then corrupt conflict detection at runtime.
+        for val in ["nan", "inf", "-inf"] {
+            let err = load_toml_file(&format!(
+                "[memory.consolidation]\nconflict_bm25_threshold = {val}\n"
+            ))
+            .expect_err(&format!("{val} must not load"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("[memory.consolidation].conflict_bm25_threshold"),
+                "{msg}"
             );
         }
     }
