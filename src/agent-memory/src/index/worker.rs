@@ -1020,7 +1020,12 @@ mod tests {
         let reopened = super::super::IndexHandle::open(&mount, None, 0.0, 0.0, false).unwrap();
         assert_eq!(reopened.search("heliotrope", 10).unwrap().len(), 2);
         assert!(reopened.search("cobaltzebra", 10).unwrap().is_empty());
-        assert!(reopened.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
+        assert!(
+            reopened
+                .search_vec(&[1.0, 0.0], 10, None)
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             reopened
                 .store
