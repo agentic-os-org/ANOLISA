@@ -477,6 +477,8 @@ Marketplace Plugin 在 Claude Code 重启后生效，也可以按照安装脚本
 
 ### Codex
 
+Codex 生命周期和检测脚本仅在 `HOME` 为绝对路径时，才从中查找用户级 Codex 和 Tokenless CLI。未设置、空值或相对路径的 `HOME` 不会增加用户级候选；包含空格的绝对路径仍受支持。显式 `CODEX_BIN`、`PATH` 和系统 CLI 查找保留原有优先级。此规则仅针对 CLI 查找，不改变独立的安装前缀和配置目录覆盖参数。
+
 Plugin 在新的 Codex 会话中加载。关闭旧会话并重新启动后验证行为。Codex 的 PostToolUse Hook 不能替换或抑制原始输出，因此 Plugin 不追加压缩内容，也不记录响应压缩候选，只对识别出的环境失败追加上下文。真正的首轮节省来自 RTK 在执行前重写受支持的 Shell 命令。
 
 ### DeepSeek Harness

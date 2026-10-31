@@ -17,12 +17,25 @@ fi
 
 # Fallback paths
 if [[ -z "$TOKENLESS_BIN" ]]; then
+    USER_HOME="${HOME:-}"
+    case "$USER_HOME" in
+        /*) ;;
+        *) USER_HOME="" ;;
+    esac
+    USER_BIN=""
+    USER_SHARE_BIN=""
+    USER_LIB_BIN=""
+    if [[ -n "$USER_HOME" ]]; then
+        USER_BIN="$USER_HOME/.local/bin/tokenless"
+        USER_SHARE_BIN="$USER_HOME/.local/share/anolisa/tokenless/tokenless"
+        USER_LIB_BIN="$USER_HOME/.local/lib/anolisa/tokenless/tokenless"
+    fi
     for fp in \
-        "$HOME/.local/bin/tokenless" \
+        "$USER_BIN" \
         "/usr/local/bin/tokenless" \
         "/usr/bin/tokenless" \
-        "$HOME/.local/share/anolisa/tokenless/tokenless" \
-        "$HOME/.local/lib/anolisa/tokenless/tokenless"; do
+        "$USER_SHARE_BIN" \
+        "$USER_LIB_BIN"; do
         if [[ -f "$fp" && -x "$fp" ]]; then
             TOKENLESS_BIN="$fp"
             break
