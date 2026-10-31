@@ -231,6 +231,10 @@ const PYTHON_DOCUMENTS: &[(&str, &str)] = &[
         include_str!("../rules/python/py-sensitive-file-access.yaml"),
     ),
     (
+        "py-shell-exec",
+        include_str!("../rules/python/py-shell-exec.yaml"),
+    ),
+    (
         "py-tls-bypass",
         include_str!("../rules/python/py-tls-bypass.yaml"),
     ),
