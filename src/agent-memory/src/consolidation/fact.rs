@@ -154,8 +154,90 @@ fn sanitize_hint(s: &str) -> String {
         .collect()
 }
 
+/// Values interpolated into the backtick-quoted spans fact bodies build.
+/// A raw backtick in a value would break the span structure —
+/// `normalize_relative_dates` pairs runs of equal length, so a stray
+/// backtick either mis-pairs delimiters or disables normalization for
+/// the rest of the fact. Swap it for an apostrophe; the value stays one
+/// span and stays readable.
+///
+/// Only fact content needs this: titles never go through the date
+/// normalizer, so their interpolated values stay verbatim.
+pub(crate) fn span_safe(value: &str) -> String {
+    value.replace('`', "'")
+}
+
+/// Quote a value as a code span, sanitized. Backticks and sanitization
+/// are inseparable here, so a rule cannot add the quoting without the
+/// sanitization.
+pub(crate) fn code_span(value: &str) -> String {
+    format!("`{}`", span_safe(value))
+}
+
+/// Quote a value as a code span, preserving every byte. The delimiter is
+/// one backtick longer than the longest run inside the value, so
+/// `normalize_relative_dates`' run-length pairing sees the outer run as
+/// the span and inner runs as content — a value with a backtick stays
+/// byte-identical and still excluded from date rewriting.
+///
+/// This is the quoting for **path-class** values (directories, files,
+/// episode inputs and triggers): a backtick is a legal byte in a POSIX
+/// filename, and `span_safe`'s irreversible ` -> ' swap would make the
+/// persisted body disagree with `related_paths` and name a file that
+/// does not exist. Query-class values (search queries, tool names) keep
+/// `code_span`, where readability of the sanitized form matters more
+/// than byte fidelity.
+pub(crate) fn code_span_verbatim(value: &str) -> String {
+    let longest = value
+        .as_bytes()
+        .split(|&b| b != b'`')
+        .map(|r| r.len())
+        .max()
+        .unwrap_or(0);
+    let delim = "`".repeat(longest + 1);
+    // CommonMark forbids a span whose content starts or ends with a
+    // backtick run of the delimiter's own length: the closing delimiter
+    // must be the *first* run of exactly that length, and a value
+    // beginning with `` ` `` would fuse into the opener (or a trailing
+    // one into the closer), leaving the span unclosable —
+    // normalize_relative_dates then freezes date normalization for the
+    // whole remainder of the fact. Pad such values with one space at
+    // each affected end; the padding never removes a byte the path
+    // needs (the span is display quoting, not the path itself) and
+    // keeps the value parseable out of the span verbatim.
+    let pad_start = value.starts_with('`');
+    let pad_end = value.ends_with('`');
+    match (pad_start, pad_end) {
+        (true, true) => format!("{delim} {value} {delim}"),
+        (true, false) => format!("{delim} {value}{delim}"),
+        (false, true) => format!("{delim}{value} {delim}"),
+        (false, false) => format!("{delim}{value}{delim}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::code_span_verbatim;
+
+    #[test]
+    fn code_span_verbatim_round_trips_backtick_runs() {
+        // The delimiter is one longer than the longest run inside, so a
+        // value carrying backticks survives byte-identically and the
+        // span still closes for the date normalizer's run pairing.
+        let q = code_span_verbatim("notes/we`ird/a.md");
+        assert!(q.contains("notes/we`ird/a.md"), "{q}");
+        // A value with a leading/trailing backtick run is padded with a
+        // space on the affected side: an unpadded span would fuse the
+        // value's run into the delimiter and become unclosable,
+        // freezing date normalization for the rest of the fact.
+        let lead = code_span_verbatim("`leading");
+        assert!(lead.starts_with("`` `leading"), "{lead}");
+        let trail = code_span_verbatim("trailing`");
+        assert!(trail.contains("trailing` ``"), "{trail}");
+        // Empty value: the span is empty, still closable.
+        assert_eq!(code_span_verbatim(""), "``");
+    }
+
     use super::*;
 
     #[test]
