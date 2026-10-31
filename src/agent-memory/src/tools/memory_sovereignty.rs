@@ -328,7 +328,8 @@ fn write_consent(config: &ConsentConfig, svc: &MemoryService) -> Result<()> {
     let rel = std::path::Path::new(".anolisa/consent.toml");
     crate::safe_fs::write(svc.mount.root_fd.as_fd(), rel, content.as_bytes())?;
 
-    // Update cache
+    // Preserve the deprecated public field for existing consumers, never for authorization.
+    #[allow(deprecated)]
     let mut cache = svc.consent_cache.lock().unwrap_or_else(|e| e.into_inner());
     *cache = Some(config.clone());
 
@@ -337,55 +338,48 @@ fn write_consent(config: &ConsentConfig, svc: &MemoryService) -> Result<()> {
 
 /// Read capture consent for each hook invocation, including changes by other clients.
 pub(super) fn capture_allowed(svc: &MemoryService) -> Result<bool> {
-    // OpenClaw owns a long-lived MCP child; users may change consent through
-    // another client. Its cached settings cannot authorize the next capture.
+    read_consent(svc, "capture").map(|config| config.auto_capture.is_allowed())
+}
+
+fn read_consent(svc: &MemoryService, operation: &str) -> Result<ConsentConfig> {
+    // All clients share one persisted file, so every authorization gate reads it.
+    // A missing file retains the default; a broken file cannot grant consent.
     let path = std::path::Path::new(".anolisa/consent.toml");
     let content = match crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), path) {
         Ok(content) => content,
-        Err(MemoryError::NotFound(_)) => return Ok(true),
+        Err(MemoryError::NotFound(_)) => return Ok(ConsentConfig::default()),
         Err(e) => return Err(e),
     };
-    let config: ConsentConfig = toml::from_str(&content).map_err(|_| {
-        // TOML diagnostics include source text, which must not reach the MCP caller.
-        MemoryError::InvalidArgument(
-            "cannot read capture consent from .anolisa/consent.toml: invalid TOML".into(),
-        )
-    })?;
-    Ok(config.auto_capture.is_allowed())
+    toml::from_str(&content).map_err(|_| {
+        // TOML diagnostics include source text, which must not reach callers.
+        MemoryError::InvalidArgument(format!(
+            "cannot read {operation} consent from .anolisa/consent.toml: invalid TOML"
+        ))
+    })
 }
 
-/// Check whether a given source is allowed by consent config.
-/// Uses cached consent config from MemoryService for performance.
+/// Check current persisted consent for an automatic source.
+/// Invalid or unreadable settings deny automatic writes; manual sources remain allowed.
+/// Actual capture writes use `capture_allowed` to propagate read errors to the caller;
+/// this boolean inspection instead logs those errors and returns `false`.
 pub fn is_source_allowed(svc: &MemoryService, source: &str) -> bool {
-    // Hold lock throughout to avoid TOCTOU: another thread could modify
-    // the consent file between our cache miss and our file read.
-    let config = {
-        let mut cache = svc.consent_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref cfg) = *cache {
-            cfg.clone()
-        } else {
-            // Not cached yet — load from disk while holding the lock.
-            let consent_path = svc.mount.meta_dir.join("consent.toml");
-            let config = if consent_path.exists() {
-                fs::read_to_string(&consent_path)
-                    .ok()
-                    .and_then(|c| toml::from_str::<ConsentConfig>(&c).ok())
-                    .unwrap_or_default()
-            } else {
-                ConsentConfig::default()
-            };
-            *cache = Some(config.clone());
-            config
+    let allowed = match source {
+        "auto-consolidation" => {
+            read_consent(svc, "consolidation").map(|config| config.auto_consolidation.is_allowed())
         }
+        "auto-capture" => {
+            read_consent(svc, "capture").map(|config| config.auto_capture.is_allowed())
+        }
+        _ => return true,
     };
-
-    match source {
-        "auto-consolidation" => config.auto_consolidation.is_allowed(),
-        // Legacy cached inspection only. Actual capture writes must use
-        // capture_allowed, which reads fresh consent and fails closed.
-        "auto-capture" => config.auto_capture.is_allowed(),
-        _ => true, // Manual sources are always allowed
-    }
+    allowed.unwrap_or_else(|error| {
+        // Invalid settings require operator action, including with the default log filter.
+        tracing::error!(
+            source,
+            "automatic memory skipped: cannot read consent: {error}"
+        );
+        false
+    })
 }
 
 // ── Helpers ─────────────────────────────────────────────────────

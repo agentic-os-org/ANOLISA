@@ -369,15 +369,63 @@ them on its own initiative. A denied or failed attempt can be retried by a later
 hook invocation; successful captures and overlapping identical calls remain
 deduplicated.
 
+Consolidation also reads the persisted settings before each pass, including
+incremental, explicit `mem_consolidate`, and shutdown passes. Use scope
+`consolidation` (or `all`) to stop subsequent passes in other running clients.
+Unreadable or malformed settings, including a symlinked `.anolisa` directory or
+`consent.toml`, skip consolidation and log an error, visible with `RUST_LOG` unset.
+For symlinks, follow the link recovery steps below. `mem_consolidate` still returns
+`consolidation complete: 0 facts written` for a skipped pass; that response alone
+does not distinguish a skip from a pass that found no facts.
+
+A missing file, valid empty TOML, or omitted fields retain default allow. Unknown
+keys are ignored for compatibility, so a misspelled key does not revoke consent.
+Writes are not atomic: a reader can still observe a temporarily empty file and
+use default allow, or invalid partial TOML that skips the pass with a read error.
+Repairing the file or granting consent takes effect on the next pass. A pass
+that already passed its consent check is not cancelled, and existing facts are
+not deleted.
+
 The source field identifies automatic notes; audit entries and git commit labels
 still use `memory_observe` to preserve existing versioning and consolidation
-behavior. The existing consent query and consolidation reader keep their prior
-policies: malformed settings can be reported as default allow by the query even
-though automatic capture rejects them. For a malformed regular settings file,
-repair it with an explicit `memory_consent` allow/deny operation. If the
-settings path is a symlink, safe writes reject it too: inspect and remove the
-link itself (not its target), then repeat the allow/deny operation to create
-a regular settings file. The server does not remove symlinks automatically.
+behavior. The existing consent query retains its prior policy: malformed settings
+can be reported as default allow, and symlinked settings paths are followed rather
+than rejected. The query can therefore show allow even though automatic capture
+and consolidation reject those settings. For invalid TOML in a readable UTF-8
+regular settings file, first use `memory_consent` with `action="deny"` and
+`scope="all"` to restore
+a valid deny-all policy, then explicitly re-apply your intended settings for
+each scope. The operation reads malformed TOML as all-default: repairing only
+one scope otherwise resets the other scope to default allow.
+
+If the file contains invalid UTF-8, `memory_consent` fails before changing it.
+Stop the memory services using this mount and confirm that both `.anolisa` and
+`consent.toml` are real paths, not symlinks, and the consent file is a regular
+file. Repair that file as UTF-8 with this deny-all content:
+
+```toml
+auto_capture = "deny"
+auto_consolidation = "deny"
+```
+
+Do not delete the file: a missing file means default allow. After repair, restart
+the services and explicitly re-apply your intended settings for each scope.
+For other read errors, resolve the underlying cause rather than using this
+encoding repair as a general fallback.
+
+If the settings path is a symlink, safe writes reject it too. For a `consent.toml`
+link, inspect and remove the link itself (not its target), then repeat the
+allow/deny operation to create a regular settings file. For a linked `.anolisa`
+directory, stop the memory services using this mount before restoration.
+Preserve the link target and its existing audit, index, manifest and snapshot
+data when restoring a real metadata directory before retrying. Remove
+only the link itself, not its target. The consent writer needs a real parent
+directory and does not create it; creating an empty directory is sufficient to
+write consent but does not restore existing metadata. Restart those services
+after restoration so they reopen the audit log and index and start session
+logging in the restored directory. Running services retain the previous audit,
+index and session-log handles even if files are copied.
+The server does not remove symlinks automatically.
 
 Upgrade the server and adapter together. The four tools exposed to the OpenClaw
 agent remain unchanged; `memory_capture` is used by the hook. If the server lacks

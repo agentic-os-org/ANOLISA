@@ -115,6 +115,11 @@ capture consent before writing and marks the source as `auto-capture`. Explicit
 Upgrade the server and adapter together; an older server rejects automatic
 capture requests without falling back to a manual write.
 
+Consolidation also reads persisted consent before each pass, including changes
+from other clients. Invalid, unreadable or symlinked settings skip the pass and
+log an error; a missing file retains default allow. Revocation does not cancel a
+pass that already started. See the user guide for consent scopes and recovery.
+
 For single-line list entries, `memory_summary` concept and file rankings remain
 available after a `mem_export` / `mem_import` round trip, including literal commas.
 Import replaces ASCII control characters in frontmatter, including newlines, with spaces.
