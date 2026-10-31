@@ -374,6 +374,7 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	@echo "==> Testing OpenCode adapter..."
 	bash tests/test-opencode-adapter-install.sh
 	node tests/test-opencode-plugin.mjs
+	node tests/test-opencode-plugin-v2.mjs
 	@echo "==> Testing QwenPaw adapter installer..."
 	bash tests/test-qwenpaw-adapter-install.sh
 	# Run after npm packaging has restored its stale-version fixture.

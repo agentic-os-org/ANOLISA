@@ -4,6 +4,22 @@
  * The adapter translates OpenCode's in-process hooks to the shared Tokenless
  * JSON hook protocol, keeping compression and readiness behavior consistent
  * with the other agent integrations.
+ *
+ * One module serves both host generations from one hook implementation:
+ * OpenCode 2 decodes the default definition (`id` + `setup`), and OpenCode
+ * 1.3.4+ reads the same default export's `server()` entrypoint. Only the host's
+ * event shapes differ, never Tokenless policy.
+ *
+ * OpenCode 1.0.0-1.3.3 are outside the supported range. Their loader calls
+ * every module export as a plugin function
+ * (`for (const [, fn] of Object.entries(mod)) await fn(input)`), so the object
+ * default export OpenCode 2 requires makes initialization throw
+ * `TypeError: fn is not a function`. A callable default export would satisfy
+ * that loader but not OpenCode 2's module schema, which decodes `default` as a
+ * record. The two contracts are mutually exclusive, so the manifest floor
+ * (`targets.opencode.compatibleVersions`) starts at 1.3.4, the first release
+ * that reads an object default export; `tests/test-opencode-plugin-v2.mjs`
+ * pins the export shape to that floor.
  */
 
 import { spawn } from "node:child_process";
@@ -13,11 +29,33 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const AGENT_ID = "opencode";
+const PLUGIN_ID = "tokenless";
 const HOOK_TIMEOUT_MS = 15_000;
 const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
 const MAX_CACHE_ENTRIES = 256;
 const PLUGIN_FILE = fileURLToPath(import.meta.url);
 const PLUGIN_DIR = dirname(realpathSync(PLUGIN_FILE));
+
+// OpenCode 1 named its built-in shell tool "bash"; OpenCode 2 names it "shell".
+// The shared hooks classify the whole shell family (common/hooks/
+// tool_categories.json, layer_2_shell), so both entrypoints gate on that family
+// instead of one host's spelling: a "bash"-only gate silently disabled command
+// rewriting and shell failure evidence on OpenCode 2.
+const SHELL_TOOLS = new Set([
+  "bash",
+  "shell",
+  "exec",
+  "terminal",
+  "process",
+  "run_shell_command",
+  "run_in_terminal",
+  "get_terminal_output",
+  "execute_command",
+]);
+
+function isShellTool(name) {
+  return typeof name === "string" && SHELL_TOOLS.has(name.trim().toLowerCase());
+}
 
 function isFile(path) {
   try {
@@ -170,7 +208,83 @@ function isJsonSchema(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-export const TokenlessPlugin = async () => {
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isTextPart(part) {
+  return (
+    !!part && typeof part === "object" && part.type === "text" && typeof part.text === "string"
+  );
+}
+
+/**
+ * Splits one model-visible tool result into the text slots Tokenless may
+ * replace, plus an `apply(texts)` that rebuilds the host's original shape.
+ *
+ * OpenCode 1 hands the plugin a string. OpenCode 2 hands it either a string or
+ * an ordered content-part list, where only `text` parts are prose and `file`
+ * parts stay untouched. Content parts are ordered model input, so a replacement
+ * must never move text past a non-text part: collapsing every text part into
+ * the first one would turn `[text A, file, text B]` into `[A+B, file]` and pull
+ * B ahead of the file.
+ *
+ * A slot is therefore one maximal run of *adjacent* text parts, replaced at
+ * that run's first position. A run is the largest unit whose collapse cannot
+ * reorder anything, so `[text A, text B, file]` still costs one hook call while
+ * `[text A, file, text B]` costs two and keeps both texts where the host put
+ * them. Returns null when there is no model-visible text to replace.
+ */
+function resultTextLayout(content) {
+  if (typeof content === "string") {
+    return {
+      slots: [{ text: content }],
+      apply: (texts) => (typeof texts[0] === "string" ? texts[0] : content),
+    };
+  }
+  if (!Array.isArray(content)) return null;
+
+  const runs = [];
+  let run = null;
+  content.forEach((part, index) => {
+    if (!isTextPart(part)) {
+      run = null;
+      return;
+    }
+    if (!run) {
+      run = { first: index, texts: [], indexes: [] };
+      runs.push(run);
+    }
+    run.texts.push(part.text);
+    run.indexes.push(index);
+  });
+  if (!runs.length) return null;
+
+  const slots = runs.map((entry) => ({ first: entry.first, text: entry.texts.join("\n") }));
+  const slotByIndex = new Map();
+  runs.forEach((entry, slot) => {
+    for (const index of entry.indexes) slotByIndex.set(index, slot);
+  });
+
+  return {
+    slots,
+    // Only a run whose replacement differs from its own joined text is rebuilt.
+    // A run Core returned unchanged keeps every one of its original parts, so
+    // its shape and part identity survive even when another run in the same
+    // result did change -- collapsing it would replace the host's head part and
+    // delete its tail for text nobody touched.
+    apply: (texts) =>
+      content.flatMap((part, index) => {
+        const slot = slotByIndex.get(index);
+        if (slot === undefined) return [part];
+        const text = texts[slot];
+        if (typeof text !== "string" || text === slots[slot].text) return [part];
+        return index === slots[slot].first ? [{ ...part, text }] : [];
+      }),
+  };
+}
+
+function createHooks() {
   const runner = findHookRunner();
   const readinessContext = new Map();
   const schemaCache = new Map();
@@ -192,54 +306,144 @@ export const TokenlessPlugin = async () => {
     return value;
   };
 
+  /**
+   * Runs the readiness gate and, for shell-family tools, the RTK rewrite.
+   *
+   * `call` is the host-neutral shape `{ tool, sessionID, callID, args }`.
+   * Returns the rewritten command, or null when nothing changed. Throws when
+   * Tokenless blocks the call; both host generations surface that as a failed
+   * tool call.
+   */
+  async function beforeTool(call) {
+    const payload = toolPayload(call, call.args);
+    const readyResult = await runHook(runner, "tool_ready_hook.sh", payload);
+    if (readyResult?.decision === "block") {
+      throw new Error(readyResult.reason || "Tokenless reports that the tool is not ready");
+    }
+
+    const readyOutput = hookSpecificOutput(readyResult);
+    if (typeof readyOutput?.additionalContext === "string") {
+      cacheValue(
+        readinessContext,
+        `${call.sessionID}:${call.callID}`,
+        readyOutput.additionalContext,
+      );
+    }
+
+    if (!isShellTool(call.tool) || typeof call.args?.command !== "string") return null;
+    const rewriteResult = await runHook(runner, "rewrite_hook.py", payload);
+    const rewritten = hookSpecificOutput(rewriteResult)?.updatedInput?.command;
+    return typeof rewritten === "string" && rewritten ? rewritten : null;
+  }
+
+  /**
+   * Compresses one model-visible text slot and returns its replacement text.
+   *
+   * `context` is supplied by the caller, so a result split into several slots
+   * carries the readiness context exactly once instead of once per slot.
+   * Diagnostics Core attaches to this call still prefix the slot they came from.
+   */
+  async function afterTool(call, content, isError, context) {
+    const payload = toolPayload(call, call.args, content);
+    if (isError) payload.is_error = true;
+    const result = await runHook(runner, "compress_response_hook.py", payload);
+    const hookOutput = hookSpecificOutput(result);
+    const compressedOutput = hookOutput?.updatedToolOutput;
+    const text = typeof compressedOutput === "string" ? compressedOutput : content;
+    const prefix = [context, hookOutput?.additionalContext]
+      .filter((value) => typeof value === "string" && value)
+      .join("\n");
+    return prependContext(prefix, text);
+  }
+
+  /** Takes the readiness context Core attached to this call, at most once. */
+  function takeReadyContext(call) {
+    const key = `${call.sessionID}:${call.callID}`;
+    const value = readinessContext.get(key);
+    readinessContext.delete(key);
+    return value;
+  }
+
+  /**
+   * Compresses tool declarations in one hook call and returns the results keyed
+   * by tool name. A declaration Core did not return, or returned under another
+   * name, is omitted so its caller keeps the host's own definition. Unchanged
+   * declarations are served from the bounded cache, so a host that re-declares
+   * its tools on every model request costs one subprocess per new shape.
+   */
+  async function compressDeclarations(declarations) {
+    const compressed = new Map();
+    const pending = [];
+    for (const declaration of declarations) {
+      let cacheKey;
+      try {
+        cacheKey = JSON.stringify(declaration);
+      } catch {
+        continue;
+      }
+      const cached = cachedValue(schemaCache, cacheKey);
+      if (cached) {
+        compressed.set(declaration.name, cached);
+        continue;
+      }
+      pending.push({ declaration, cacheKey });
+    }
+    if (!pending.length) return compressed;
+
+    const result = await runHook(runner, "compress_schema_hook.py", {
+      llm_request: { config: { tools: pending.map((entry) => entry.declaration) } },
+    });
+    const tools = hookSpecificOutput(result)?.llm_request?.config?.tools;
+    if (!Array.isArray(tools)) return compressed;
+    for (const entry of pending) {
+      const name = entry.declaration.name;
+      const matches = tools.filter((tool) => tool?.name === name);
+      if (matches.length !== 1) continue;
+      const value = { description: matches[0].description, parameters: matches[0].parameters };
+      cacheValue(schemaCache, entry.cacheKey, value);
+      compressed.set(name, value);
+    }
+    return compressed;
+  }
+
+  return { beforeTool, afterTool, takeReadyContext, compressDeclarations };
+}
+
+/** Shell failure evidence both host generations keep outside the model-visible text. */
+function isFailedShellCall(tool, metadata) {
+  const exit = metadata?.exit;
+  return isShellTool(tool) && Number.isInteger(exit) && exit !== 0;
+}
+
+export const TokenlessPlugin = async () => {
+  const hooks = createHooks();
+
   return {
     "tool.execute.before": async (input, output) => {
-      const payload = toolPayload(input, output.args);
-      const readyResult = await runHook(runner, "tool_ready_hook.sh", payload);
-      if (readyResult?.decision === "block") {
-        throw new Error(readyResult.reason || "Tokenless reports that the tool is not ready");
-      }
-
-      const readyOutput = hookSpecificOutput(readyResult);
-      if (typeof readyOutput?.additionalContext === "string") {
-        cacheValue(
-          readinessContext,
-          `${input.sessionID}:${input.callID}`,
-          readyOutput.additionalContext,
-        );
-      }
-
-      if (input.tool !== "bash" || typeof output.args?.command !== "string") return;
-      const rewriteResult = await runHook(runner, "rewrite_hook.py", payload);
-      const rewritten = hookSpecificOutput(rewriteResult)?.updatedInput?.command;
-      if (typeof rewritten === "string" && rewritten) output.args.command = rewritten;
+      const rewritten = await hooks.beforeTool({
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        args: output.args,
+      });
+      if (rewritten) output.args.command = rewritten;
     },
 
     "tool.execute.after": async (input, output) => {
-      const key = `${input.sessionID}:${input.callID}`;
-      const readyContext = readinessContext.get(key);
-      readinessContext.delete(key);
-
-      const payload = toolPayload(input, input.args, output.output);
-      // OpenCode keeps Bash's exit code outside the model-visible text.
+      const call = {
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        args: input.args,
+      };
+      // OpenCode keeps the shell exit code outside the model-visible text.
       // Forward failure evidence so Core preserves it and can add diagnostics.
-      if (
-        input.tool === "bash" &&
-        Number.isInteger(output.metadata?.exit) &&
-        output.metadata.exit !== 0
-      ) {
-        payload.is_error = true;
-      }
-      const result = await runHook(runner, "compress_response_hook.py", payload);
-      const hookOutput = hookSpecificOutput(result);
-      const compressedOutput = hookOutput?.updatedToolOutput;
-      if (typeof compressedOutput === "string") {
-        output.output = compressedOutput;
-      }
-      const context = [readyContext, hookOutput?.additionalContext]
-        .filter((value) => typeof value === "string" && value)
-        .join("\n");
-      output.output = prependContext(context, output.output);
+      output.output = await hooks.afterTool(
+        call,
+        output.output,
+        isFailedShellCall(input.tool, output.metadata),
+        hooks.takeReadyContext(call),
+      );
     },
 
     "tool.definition": async (input, output) => {
@@ -247,33 +451,108 @@ export const TokenlessPlugin = async () => {
       const parameters = output[schemaField];
       // Older hosts expose only a runtime codec. Leave it intact until they expose a JSON schema.
       if (!isJsonSchema(parameters)) return;
-      const declaration = {
-        name: input.toolID,
-        description: output.description,
-        parameters,
-      };
-      let cacheKey;
-      try {
-        cacheKey = JSON.stringify(declaration);
-      } catch {
-        return;
-      }
-      let tools = cachedValue(schemaCache, cacheKey);
-      if (!tools) {
-        const result = await runHook(runner, "compress_schema_hook.py", {
-          llm_request: { config: { tools: [declaration] } },
-        });
-        tools = hookSpecificOutput(result)?.llm_request?.config?.tools;
-        if (Array.isArray(tools)) cacheValue(schemaCache, cacheKey, tools);
-      }
-      if (!Array.isArray(tools) || tools.length !== 1 || tools[0]?.name !== input.toolID) {
-        return;
-      }
+      const compressed = await hooks.compressDeclarations([
+        { name: input.toolID, description: output.description, parameters },
+      ]);
+      const declaration = compressed.get(input.toolID);
+      if (!declaration) return;
 
-      if (typeof tools[0].description === "string") output.description = tools[0].description;
-      if (isJsonSchema(tools[0].parameters)) {
-        output[schemaField] = JSON.parse(JSON.stringify(tools[0].parameters));
+      if (typeof declaration.description === "string") output.description = declaration.description;
+      if (isJsonSchema(declaration.parameters)) {
+        output[schemaField] = cloneJson(declaration.parameters);
       }
     },
   };
+};
+
+/**
+ * OpenCode 2 entrypoint. V2 hands each hook one mutable event instead of the
+ * V1 `(input, output)` pair: the tool-call id is `event.id`, a completed result
+ * carries `content` as a string or a content-part list, and the outgoing model
+ * request exposes its declarations as a `name -> { description, input }` record
+ * that Core matches by object identity, so entries are edited in place.
+ */
+async function setup(ctx) {
+  const hooks = createHooks();
+
+  await ctx.tool.hook("execute.before", async (event) => {
+    const rewritten = await hooks.beforeTool({
+      tool: event.tool,
+      sessionID: event.sessionID,
+      callID: event.id,
+      args: event.input,
+    });
+    if (!rewritten) return;
+    try {
+      event.input.command = rewritten;
+    } catch {
+      // A frozen argument object still accepts the replacement Core re-reads.
+      event.input = { ...event.input, command: rewritten };
+    }
+  });
+
+  await ctx.tool.hook("execute.after", async (event) => {
+    if (event.status !== "completed" || !event.result) return;
+    // A result carrying only structured output has no model-visible text yet:
+    // the host renders it after the hooks, so there is nothing to replace.
+    const layout = resultTextLayout(event.result.content);
+    if (!layout) return;
+    const call = {
+      tool: event.tool,
+      sessionID: event.sessionID,
+      callID: event.id,
+      args: event.input,
+    };
+    const isError = isFailedShellCall(event.tool, event.result.metadata);
+    const readyContext = hooks.takeReadyContext(call);
+
+    const texts = [];
+    let changed = false;
+    for (const [slot, view] of layout.slots.entries()) {
+      const text = await hooks.afterTool(
+        call,
+        view.text,
+        isError,
+        slot === 0 ? readyContext : undefined,
+      );
+      texts.push(text);
+      if (typeof text === "string" && text !== view.text) changed = true;
+    }
+    if (!changed) return;
+    event.result.content = layout.apply(texts);
+  });
+
+  await ctx.session.hook("context", async (event) => {
+    const tools = event.tools;
+    if (!tools || typeof tools !== "object") return;
+    const entries = [];
+    for (const [name, entry] of Object.entries(tools)) {
+      // Hosts exposing only a runtime codec keep it: plain JSON schemas only.
+      if (!entry || typeof entry !== "object" || !isJsonSchema(entry.input)) continue;
+      entries.push({ name, entry });
+    }
+    if (!entries.length) return;
+    const compressed = await hooks.compressDeclarations(
+      entries.map(({ name, entry }) => ({
+        name,
+        description: entry.description,
+        parameters: entry.input,
+      })),
+    );
+    for (const { name, entry } of entries) {
+      const declaration = compressed.get(name);
+      if (!declaration) continue;
+      if (typeof declaration.description === "string") entry.description = declaration.description;
+      if (isJsonSchema(declaration.parameters)) entry.input = cloneJson(declaration.parameters);
+    }
+  });
+}
+
+// The documented dual shape: OpenCode 2 reads `id` + `setup`, and OpenCode
+// 1.3.4+ reads `server()`. Releases before 1.3.4 call every export as a
+// function and are excluded by the manifest's supported-version floor.
+export default {
+  id: PLUGIN_ID,
+  setup,
+  server: TokenlessPlugin,
 };

@@ -18,7 +18,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
-| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
+| OpenCode | `opencode` | Hard-disabled | Replaces shell-family input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
 
@@ -26,7 +26,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 Cosh-NG uses the adapter value `cosh` and the existing `.copilot-shell` extension directory.
 
-Schema compression reaches the model path differently per host: cosh and Cosh-NG fire the `BeforeModel` hook; OpenCode compresses each tool definition through its `tool.definition` plugin hook (MCP tools do not pass through that hook); Qwen Code's manifest declares a `BeforeModel` hook, but current Qwen Code releases skip that unknown event name at registration, so the schema hook does not run there and the matrix marks it unavailable. The entry stays registered, so a future Qwen Code release that implements the event picks it up automatically.
+Schema compression reaches the model path differently per host: cosh and Cosh-NG fire the `BeforeModel` hook; OpenCode 1 compresses each tool definition through its `tool.definition` plugin hook (MCP tools do not pass through that hook), while OpenCode 2 compresses the declarations of the outgoing model request through its `session` `context` hook; Qwen Code's manifest declares a `BeforeModel` hook, but current Qwen Code releases skip that unknown event name at registration, so the schema hook does not run there and the matrix marks it unavailable. The entry stays registered, so a future Qwen Code release that implements the event picks it up automatically.
 
 Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool failure attribution is independent.
 
@@ -546,6 +546,34 @@ records the profile names, so disable does not accept another `--profile`.
 Schema compression uses the host's model-facing JSON Schema while preserving its runtime
 parameter validator. Hosts that expose only a runtime validator skip schema compression;
 response compression and command rewriting remain available.
+
+One `plugin.js` serves both host generations. OpenCode 2 loads its default definition
+(`id` + `setup`), and OpenCode 1.3.4 and newer load the same export's `server()` entrypoint.
+OpenCode 1.0.0 through 1.3.3 are not supported: their plugin loader calls every module export as
+a plugin function, which the object default export OpenCode 2 requires cannot satisfy. The two
+loader contracts are mutually exclusive, so the supported range starts at 1.3.4, the first
+release that reads an object default export. On a host below that floor the bundled installer
+removes a registration left over from when the release was still supported, so replacing the
+adapter source in place cannot hand the old host a module it fails to initialize; `detect.sh`
+names that stale registration. An npm package upgrade runs that reconciliation automatically,
+in a mode that clears a stale registration but never creates one. Command rewriting and shell failure evidence match
+the shell tool family the shared hooks classify — OpenCode 1 names its built-in shell tool
+`bash`, OpenCode 2 names it `shell` — instead of a single host spelling.
+
+The bundled installer recognizes a managed link by its target alone; it does not read or write
+ANOLISA receipts. It therefore also removes a registration created by `anolisa adapter enable`,
+which would leave that receipt claiming a link that is gone. To keep the link and its receipt
+together it hands the removal to `anolisa adapter disable tokenless opencode` when that CLI is
+reachable — the command is idempotent and clears both — and otherwise removes the link itself and
+reports that the receipt still needs clearing by hand. An `anolisa update` runs none of these
+scripts, so on that path the registration survives the bundle replacement until
+`anolisa adapter disable tokenless opencode` is run.
+
+OpenCode 2 registers the same three paths as the `tool` hooks `execute.before` and
+`execute.after` plus the `session` hook `context`, which carries the tool declarations of the
+outgoing model request. Because that request declares no marker-authorized recovery path, Core
+currently returns the declarations unchanged; the registration takes effect as soon as such a
+path is declared.
 
 OpenCode discovers global local plugins at startup. For an ANOLISA-managed installation, use:
 

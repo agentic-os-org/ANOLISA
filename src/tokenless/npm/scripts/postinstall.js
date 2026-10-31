@@ -309,6 +309,61 @@ function enableClaudeAdapter(adapterDir) {
 }
 
 /**
+ * Reconcile the OpenCode plugin registration after the shared adapter tree has
+ * been replaced in place.
+ *
+ * The registration is a symlink into that tree, so an upgrade swaps the module
+ * an already-registered host loads without touching the link. OpenCode
+ * 1.0.0-1.3.3 call every module export as a plugin function and cannot
+ * initialize the object default export OpenCode 2 requires, so the installer
+ * clears a registration made while those releases were still supported.
+ *
+ * It runs in reconcile-only mode (ANOLISA_ADAPTER_RECONCILE=1): it must never
+ * register a host the user did not enable, which is why this is not a call to
+ * the plain installer. Fail-open like enableClaudeAdapter — this is
+ * supplementary to installing the package, so a failure warns and leaves the
+ * adapter files in place for a manual retry.
+ */
+function reconcileOpenCodeAdapter(adapterDir) {
+  const installScript = join(adapterDir, 'opencode', 'scripts', 'install.sh');
+  if (!existsSync(installScript)) {
+    return;
+  }
+
+  try {
+    const out = execFileSync('bash', [installScript], {
+      env: { ...process.env, ANOLISA_ADAPTER_RECONCILE: '1' },
+      stdio: 'pipe',
+    }).toString();
+    // Only a removal is worth reporting: every other outcome is a no-op for a
+    // host that either is supported or never had Tokenless registered.
+    if (out.includes('removed the now-unsupported registration')) {
+      console.log(
+        'anolisa-tokenless: removed the OpenCode plugin registration left for an ' +
+        'unsupported host (OpenCode 1.3.4 or newer is required)',
+      );
+    }
+    // The installer exits 0 after a removal it could not finish receipt-wise and
+    // reports that on stdout, because this call site consumes stdout only. An
+    // npm install has no other channel to tell the user a claim is left behind.
+    if (out.includes('partial cleanup')) {
+      console.warn(
+        'anolisa-tokenless: the OpenCode plugin link was removed for an unsupported host,',
+      );
+      console.warn(
+        'anolisa-tokenless: but an ANOLISA receipt may still claim it. Reconcile with:',
+      );
+      console.warn('anolisa-tokenless:   anolisa adapter disable tokenless opencode');
+    }
+  } catch (err) {
+    console.warn(
+      `anolisa-tokenless: Could not reconcile the opencode adapter registration: ${err.message}`,
+    );
+    console.warn(`anolisa-tokenless: Re-run it manually with: bash ${installScript}`);
+  }
+}
+
+/**
  * Install the bundled Agent adapters (hook scripts and install helpers —
  * plain bash/python, OS independent) into the user-level data directory that
  * the hook dispatcher (common/hooks/run-hook.sh) already searches:
@@ -384,6 +439,7 @@ function installAdapters() {
     console.log(`anolisa-tokenless: Installed Agent adapters to ${dest}`);
     if (platform() !== 'win32') enableClaudeAdapter(dest);
     else console.log('anolisa-tokenless: Windows supports the QwenWork adapter; Claude auto-enable is skipped.');
+    reconcileOpenCodeAdapter(dest);
   } catch (err) {
     rmSync(staged, { recursive: true, force: true });
     console.warn(`anolisa-tokenless: Could not install adapters to ${dest}: ${err.message}`);
