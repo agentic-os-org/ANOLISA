@@ -32,12 +32,18 @@ def merge(json_str, config_path):
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"WARNING: Could not parse {config_path}: {e}", file=sys.stderr)
+                raw = f.read()
+            # An empty or whitespace-only file holds no data to lose; treat it
+            # like a missing config so an interrupted first write self-heals.
+            existing = json.loads(raw) if raw.strip() else {}
+        except (json.JSONDecodeError, UnicodeError, OSError) as e:
+            print(f"ERROR: Cannot merge unreadable config {config_path}: {e}", file=sys.stderr)
+            sys.exit(1)
 
     if not isinstance(existing, dict):
-        existing = {}
+        print(f"ERROR: Cannot merge into non-object config {config_path}: "
+              f"top level must be a JSON object", file=sys.stderr)
+        sys.exit(1)
 
     # Merge
     if "mcpServers" not in existing:
