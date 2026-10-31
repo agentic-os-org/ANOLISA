@@ -86,7 +86,7 @@ def unpack(xlsx_path: str, output_dir: str) -> None:
     for dirpath, _, filenames in os.walk(output_dir):
         for fname in filenames:
             rel = os.path.relpath(os.path.join(dirpath, fname), output_dir)
-            all_files.append(rel)
+            all_files.append(rel.replace(os.sep, "/"))
 
     # Collect worksheets
     for rel in sorted(all_files):
