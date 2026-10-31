@@ -37,11 +37,6 @@ min_kernel = "5.8"
 modes = ["system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/agentsight/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/agentsight"
 target = "{bindir}/agentsight"
 mode = "0755"

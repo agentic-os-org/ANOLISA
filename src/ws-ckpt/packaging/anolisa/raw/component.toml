@@ -43,11 +43,6 @@ min_kernel = "5.4"
 modes = ["system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/ws-ckpt/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/ws-ckpt"
 target = "{bindir}/ws-ckpt"
 mode = "0755"

@@ -98,8 +98,14 @@ Raw archives may also carry the source contract at:
 .anolisa/component.toml
 ```
 
-ANOLISA should normalize that source contract into the installed datadir layout
-or directly into the installed-state snapshot described below.
+ANOLISA stores the archive's source contract in the installed-state snapshot
+below. For the seven distribution registry components (`cosh-ng`, `sec-core`,
+`agentsight`, `tokenless`, `skillfs`, `ws-ckpt`, and `agent-memory`), component
+raw installation, repair, update, rollback, and uninstall leave the discovery
+contract under `{datadir}/components/` to ANOLISA's own delivery. This also
+applies to older archives and installed records that still claim that path;
+archive digest verification and installed-state snapshot integrity checks remain
+in use.
 
 ## Installed-State Snapshot
 

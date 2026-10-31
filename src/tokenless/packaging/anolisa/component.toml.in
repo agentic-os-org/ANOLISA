@@ -35,11 +35,6 @@ packages = { rpm = "bash", deb = "bash" }
 modes = ["user", "system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/tokenless/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/tokenless"
 target = "{bindir}/tokenless"
 mode = "0755"
