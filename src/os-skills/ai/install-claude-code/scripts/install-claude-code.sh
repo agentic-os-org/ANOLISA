@@ -241,12 +241,18 @@ write_config() {
 
   if [[ -z "$api_key" ]]; then
     echo ""
-    read -rp "Enter your DashScope API Key: " api_key
+    # A closed stdin (non-interactive run) makes read return non-zero on EOF;
+    # under `set -e` that used to abort the whole install. Keep whatever was
+    # read and fall through to the skip path below.
+    read -rp "Enter your DashScope API Key: " api_key || true
   fi
 
   if [[ -z "$api_key" ]]; then
+    # Skipping the configuration is a supported outcome, not a failure: the
+    # caller runs under `set -e`, so returning non-zero here would abort the
+    # remaining install steps (tokenless plugin, final banner).
     warn "No API key provided — skipping configuration."
-    return 1
+    return 0
   fi
 
   mkdir -p "$HOME/.claude"
