@@ -20,6 +20,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 
 ### AI Tools
 - **install-claude-code** — Install and configure Claude Code IDE
+- **install-hermes** — Install and configure Hermes Agent (providers, messaging platforms, web UI)
 - **install-qwenpaw** — Deploy QwenPaw AI assistant with DingTalk integration
 - **install-openclaw** — Install and configure OpenClaw
 - **install-tokenless** — Install and configure Tokenless (LLM token optimization)
@@ -29,6 +30,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### System Admin
 - **alinux-admin** — ALinux 4 system management (systemd, SSH, firewalld, NetworkManager)
 - **backup-restore** — System backup and restore
+- **ktuner** — Kernel parameter auto-tuning (analyze, apply, rollback)
 - **regex-mastery** — Regular expression guide
 - **shell-scripting** — Bash/Zsh scripting and automation
 - **storage-resize** — Alibaba Cloud disk expansion (XFS/EXT4/Btrfs)
@@ -47,7 +49,14 @@ A curated collection of operational skills for AI Agents, covering system admini
 - **alinux-cve-query** — Query Alibaba Cloud Linux CVE vulnerability info
 
 ### Other
+- **anolisa-guide** — ANOLISA components usage, configuration, and billing guide
+- **anolisa-register** — Manage ANOLISA registration and data upload status
+- **clawhub-skill-mng** — Search, install, update, and manage agent skills
 - **cosh-guide** - Copilot Shell user guide
+- **humanizer** — Remove signs of AI-generated writing from text
+- **image-gen** — Generate images from text prompts via DashScope/Qwen
+- **pdf-reader** — Extract text from PDF files
+- **xlsx** — Read, create, edit, and validate Excel/spreadsheet files (.xlsx, .xlsm, .csv, .tsv)
 
 ## Skill Format
 
