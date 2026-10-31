@@ -25,9 +25,11 @@ export function githubSourceAnchors(markdown) {
     if (node.type === 'heading') anchors.add(slugger.slug(headingText(node)));
     if (node.type === 'html') {
       const html = node.value.replace(/<!--[\s\S]*?-->/g, '');
-      for (const tag of html.matchAll(/<[a-z][\w:-]*\b[^>]*>/gi)) {
-        for (const attribute of tag[0].matchAll(/\s(?:id|name)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
-          anchors.add(attribute[1] ?? attribute[2] ?? attribute[3]);
+      for (const tag of html.matchAll(/<[a-z][\w:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
+        for (const attribute of tag[0].matchAll(/\s([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
+          if (/^(?:id|name)$/i.test(attribute[1])) {
+            anchors.add(attribute[2] ?? attribute[3] ?? attribute[4]);
+          }
         }
       }
     }
