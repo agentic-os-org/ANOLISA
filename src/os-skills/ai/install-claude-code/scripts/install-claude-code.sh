@@ -255,6 +255,8 @@ write_config() {
   if [[ -f "$settings_file" ]]; then
     local backup="$settings_file.bak.$(date +%s)"
     cp "$settings_file" "$backup"
+    # The backup keeps the previous token in cleartext — restrict it too.
+    chmod 600 "$backup" 2>/dev/null || true
     info "Existing settings backed up to $backup"
   fi
 
@@ -268,6 +270,11 @@ write_config() {
   }
 }
 JSONEOF
+
+  # settings.json carries ANTHROPIC_AUTH_TOKEN in cleartext. A default umask
+  # (022) would leave it world-readable, so tighten it to owner-only. Best
+  # effort only: a filesystem without POSIX modes must not fail the install.
+  chmod 600 "$settings_file" 2>/dev/null || true
 
   ok "Configuration written to $settings_file"
 }
