@@ -17,6 +17,8 @@ python3 SKILL_DIR/scripts/read_pdf.py -f <pdf_path> [options]
 
 Options: `-p "1-5,7"` page range, `--format json` structured output, `--metadata` include doc info, `-t/--tables` per-page table bboxes and cell rows (JSON only), `-m 8000` max chars.
 
+Decode standalone CLI reports from stdout as UTF-8, regardless of the inherited locale encoding.
+
 Tables: `--tables --format json` adds a `tables` array to each selected page: `{"bbox": [x0,y0,x1,y1], "rows": [[cell, ...], ...]}` from PyMuPDF table detection; pages without ruled tables report `"tables": []`. Plain page text and the default schemas are unchanged; the flag is rejected for text output.
 
 Setup: `pip install PyMuPDF`
