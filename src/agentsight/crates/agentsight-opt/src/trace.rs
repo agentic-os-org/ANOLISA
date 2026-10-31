@@ -292,6 +292,15 @@ fn extract_user_turns(traj: &AtifTrajectory) -> Vec<UserTurn> {
 /// Also strips system-injected context blocks.
 fn extract_final_answer(traj: &AtifTrajectory) -> String {
     for step in traj.steps.iter().rev() {
+        // An unanswered follow-up must not inherit a previous turn's claims.
+        // Match user-turn extraction so injected context is not a boundary.
+        if step.is_user()
+            && !strip_system_context(step.message.as_deref().unwrap_or(""))
+                .trim()
+                .is_empty()
+        {
+            break;
+        }
         if !step.is_agent() {
             continue;
         }
