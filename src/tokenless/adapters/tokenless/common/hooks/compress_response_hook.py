@@ -178,21 +178,42 @@ def _shell_text_field(tool_name: str, envelope, agent_id: str) -> tuple | None:
     return best
 
 
+def _read_cached_claude_version(cache_key: str) -> tuple | None:
+    """The cached probe answer for ``cache_key``, or ``None`` on a miss.
+
+    Undecodable or unparseable cache content is a miss, never an answer: an
+    interrupted write leaves the key with no version after it, and trusting
+    that would pin "version unknown" for the lifetime of the binary, so every
+    later tool call would lose replacement until the CLI changed or the cache
+    was removed by hand. ``errors="replace"`` keeps a non-UTF-8 cache file on
+    the same miss path instead of raising out of the hook.
+    """
+    try:
+        with open(_CLAUDE_VERSION_CACHE, encoding="utf-8", errors="replace") as f:
+            key, _, ver_str = f.read().strip().partition("\n")
+    except (OSError, ValueError):
+        return None
+    if key != cache_key:
+        return None
+    return parse_version(ver_str)
+
+
 def _cached_claude_version(claude_bin: str) -> tuple | None:
-    """Return the Claude Code version tuple, caching `claude --version`."""
+    """Return the Claude Code version tuple, caching `claude --version`.
+
+    Any cache miss falls through to the bounded live probe below, and a probe
+    that parses rebuilds the cache — so a corrupt cache costs one extra probe
+    instead of disabling compression permanently.
+    """
     try:
         st = os.stat(claude_bin)
         cache_key = f"{claude_bin}:{int(st.st_mtime)}:{st.st_size}"
     except OSError:
         cache_key = claude_bin
 
-    try:
-        with open(_CLAUDE_VERSION_CACHE) as f:
-            key, _, ver_str = f.read().strip().partition("\n")
-        if key == cache_key:
-            return parse_version(ver_str)
-    except OSError:
-        pass
+    cached = _read_cached_claude_version(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         proc = subprocess.run(
