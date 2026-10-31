@@ -39,6 +39,8 @@ managed MCP and background PII result delivery require separate acceptance.
 See [PII policy setup](security.md#check-tool-pii-with-qoder-sdk-or-qwenpaw) and
 [runnable native cases](../../../../contribute/en/aw/testing.md#tool-pii-acceptance).
 
+Qoder SDK foreground `Read` text results support PII replacement of file content while preserving file metadata. Image and other non-text Read results require separate acceptance.
+
 ## 16 common Hooks
 
 Public Provider Hook status; see the matrix above for effects supported by each Adapter.

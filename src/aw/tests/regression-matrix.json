@@ -988,6 +988,14 @@
     "qoder-sdk-skill-resolution": {
       "target": "aw-cli/test/qoder_sdk",
       "test": "skill_catalog_resolution_matches_native_names_and_rejects_ambiguity"
+    },
+    "qoder-sdk-read-result": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "projection::tests::qoder_sdk_read_projects_and_replaces_only_its_native_text_slot"
+    },
+    "qoder-sdk-read-pii": {
+      "target": "aw-provider-sec-core/test/pii",
+      "test": "qoder_read_projection_allows_replacement_only_with_a_safe_retained_envelope"
     }
   },
   "agents": {
@@ -1395,7 +1403,9 @@
           ],
           "replace_result": [
             "final-replacement",
-            "qoder-sdk-post-drain"
+            "qoder-sdk-post-drain",
+            "qoder-sdk-read-result",
+            "qoder-sdk-read-pii"
           ]
         },
         "input.submit": {

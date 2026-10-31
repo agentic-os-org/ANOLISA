@@ -76,8 +76,17 @@ def sdk_turns(root, output, processes, aw, fault):
         ("tool-error", "exit 7"),
     ]
     cases = [{"name": name, "secret": SECRET,
-              "prompt": f"Use Bash exactly once to run: {command} . Then stop. Never retry."}
+              "prompt": f"Use Bash exactly once to run this command: `{command}`. Then stop. Never retry."}
              for name, command in commands]
+    cases.extend({"name": name, "secret": SECRET, "tools": ["Read"],
+                  "prompt": f"Use Read exactly once to read {path}. Then stop. Never retry."}
+                 for name, path in [
+                     ("read-clean", "public.txt"),
+                     ("tool-output-pii-read", "pii.txt"),
+                     ("tool-output-pii-read-newline", "pii-newline.txt"),
+                     ("tool-output-pii-read-tab", "pii-tab.txt"),
+                     ("read-error", "missing.txt"),
+                 ])
     if fault:
         cases = [{"name": fault, "fault": True, "cancel": fault == "cancel", "tools": ["Read"],
                   "prompt": "Use Read exactly once to read pii.txt. Then stop. Never retry."}]
@@ -191,6 +200,7 @@ def main():
             (root / name).mkdir(mode=0o700)
         environment.update(HOME=str(root / "home"), QODER_CONFIG_DIR=str(root / "config"))
         (root / "work/pii.txt").write_text("api_key=" + SECRET)
+        (root / "work/public.txt").write_text("PUBLIC_READ_OK")
         (root / "work/pii-newline.txt").write_text("header\n" + SECRET)
         (root / "work/pii-tab.txt").write_text("header\t" + SECRET)
         (root / "work/delete-fixture").mkdir()

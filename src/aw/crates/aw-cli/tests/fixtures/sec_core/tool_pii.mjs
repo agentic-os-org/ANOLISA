@@ -36,8 +36,13 @@ try {
         assert(!JSON.stringify(results).includes(entry.secret));
         assert(JSON.stringify(results).includes("content withheld"));
         assert(!JSON.stringify(messages.filter(m => m.type === "assistant")).includes(entry.secret));
+        const delivered = messages.findIndex(m => m.type === "user" &&
+          m.message.content.some(block => block.type === "tool_result"));
+        assert(messages.slice(delivered + 1).some(m => m.type === "assistant"),
+          "replacement did not allow the next model response");
       }
-      if (entry.name === "tool-error") assert(results.some(result => result.is_error));
+      if (entry.name === "read-clean") assert(JSON.stringify(results).includes("PUBLIC_READ_OK"));
+      if (["tool-error", "read-error"].includes(entry.name)) assert(results.some(result => result.is_error));
     }
     rows.push({ case: entry.name, status: "passed", results: results.length, error });
   }

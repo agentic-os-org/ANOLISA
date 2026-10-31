@@ -114,6 +114,32 @@ fn retained_sensitive_fields_and_unsupported_slots_stop_result_delivery() {
 }
 
 #[test]
+fn qoder_read_projection_allows_replacement_only_with_a_safe_retained_envelope() {
+    for retained_secret in [false, true] {
+        let d = support::Directory::new(json!({"pii":true}));
+        let native = json!({"hook_event_name":"PostToolUse", "tool_name":"Read",
+            "tool_input":{"file_path":"file.txt"},
+            "tool_response":{"type":"text", "file":{"filePath":"file.txt",
+                "content":"SENSITIVE", "numLines":1, "startLine":1, "totalLines":1},
+                "metadata":if retained_secret {"SENSITIVE other"} else {"retained"}}});
+        let mut req = request(true);
+        req["budget_ms"] = json!(5000);
+        req["event"]["agent"]["adapter"] = json!("qoder-sdk");
+        req["event"]["tool"]["result"] = native["tool_response"].clone();
+        req["event"]["tool"]["result_projection"] =
+            aw_adapter::projection::project("qoder-sdk", &native).unwrap();
+        let response = run(req, &d);
+        if retained_secret {
+            assert_eq!(response["error_code"], "unsupported_pii_result");
+        } else {
+            assert_eq!(response["status"], "ok");
+            assert_eq!(response["effects"][0]["type"], "replace_result");
+        }
+        assert!(!response.to_string().contains("SENSITIVE"));
+    }
+}
+
+#[test]
 fn observe_modes_preserve_risk_and_enforcement_requires_admission() {
     for output in [false, true] {
         let d = support::Directory::new(json!({"pii":true}));

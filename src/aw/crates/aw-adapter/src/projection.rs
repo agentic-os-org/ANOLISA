@@ -23,7 +23,11 @@ fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
 
 // Only one text block is replaceable: media and multiple blocks retain their
 // native structure and ordering. Qoder/Hermes also expose whole string slots.
-fn text_slot<'a>(adapter: &str, result: &'a Value) -> Option<(&'static str, &'a str)> {
+fn text_slot<'a>(
+    adapter: &str,
+    native: &Value,
+    result: &'a Value,
+) -> Option<(&'static str, &'a str)> {
     if adapter == "claude-sdk" {
         return result["stdout"].as_str().map(|text| ("/stdout", text));
     }
@@ -49,6 +53,11 @@ fn text_slot<'a>(adapter: &str, result: &'a Value) -> Option<(&'static str, &'a 
                 text,
             ));
         }
+    }
+    if adapter == "qoder-sdk" && native["tool_name"] == "Read" && result["type"] == "text" {
+        return result["file"]["content"]
+            .as_str()
+            .map(|text| ("/file/content", text));
     }
     None
 }
@@ -141,7 +150,7 @@ pub fn project(adapter: &str, native: &Value) -> Option<Value> {
         return crate::adapters::claude_mcp::project(native);
     }
     let value = decoded_result(adapter, native);
-    let (_, text) = text_slot(adapter, &value)?;
+    let (_, text) = text_slot(adapter, native, &value)?;
     let (name, input) = tool(adapter, native);
     let qwen_input = if adapter == "qwenpaw" {
         serde_json::from_str::<Value>(native["tool_call"]["input"].as_str()?).ok()
@@ -210,7 +219,7 @@ pub fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
     }
     let mut value = decoded_result(adapter, native);
     let (pointer, _) =
-        text_slot(adapter, &value).ok_or("native result has no replaceable text slot")?;
+        text_slot(adapter, native, &value).ok_or("native result has no replaceable text slot")?;
     let pointer = pointer.to_owned();
     *value
         .pointer_mut(&pointer)
@@ -391,6 +400,70 @@ mod tests {
             encoded["hookSpecificOutput"]["updatedToolOutput"],
             r#"{"content":[{"text":"compact","type":"text"}],"metadata":{"kept":true}}"#
         );
+    }
+
+    #[test]
+    fn qoder_sdk_read_projects_and_replaces_only_its_native_text_slot() {
+        let native = json!({"hook_event_name":"PostToolUse", "tool_name":"Read",
+            "tool_input":{"file_path":"file.txt"},
+            "tool_response":{"type":"text", "file":{"filePath":"file.txt",
+                "content":"original", "numLines":1, "startLine":1, "totalLines":1},
+                "metadata":{"kept":true}}});
+        assert_eq!(
+            project("qoder-sdk", &native),
+            Some(json!({"text":"original", "status":"success", "content_origin":"file_content"}))
+        );
+        let output: Value =
+            serde_json::from_slice(&reply("qoder-sdk", &native, "safe").unwrap().stdout).unwrap();
+        let adopted: Value = serde_json::from_str(
+            output["hookSpecificOutput"]["updatedToolOutput"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut expected = native["tool_response"].clone();
+        expected["file"]["content"] = json!("safe");
+        assert_eq!(adopted, expected);
+
+        for (key, value) in [
+            ("tool_name", json!("Bash")),
+            ("hook_event_name", json!("PostToolUseFailure")),
+            (
+                "tool_response",
+                json!({"type":"image", "file":{"content":"pixels"}}),
+            ),
+            (
+                "tool_response",
+                json!({"type":"text", "file":{"content":42}}),
+            ),
+            (
+                "tool_response",
+                json!({"type":"text", "file":{"content":"original"},
+                    "content":[{"type":"image","data":"opaque"}]}),
+            ),
+            (
+                "tool_response",
+                json!({"type":"text", "file":{"content":"original"},
+                    "content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}),
+            ),
+        ] {
+            let mut unsupported = native.clone();
+            unsupported[key] = value;
+            assert!(project("qoder-sdk", &unsupported).is_none());
+            assert!(reply("qoder-sdk", &unsupported, "safe").is_err());
+        }
+        for adapter in [
+            "qoder",
+            "claude-sdk",
+            "openclaw",
+            "qwenpaw",
+            "pi",
+            "agentscope",
+            "hermes",
+        ] {
+            assert!(project(adapter, &native).is_none());
+            assert!(reply(adapter, &native, "safe").is_err());
+        }
     }
 
     #[test]
