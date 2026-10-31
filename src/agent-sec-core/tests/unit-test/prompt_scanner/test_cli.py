@@ -362,6 +362,19 @@ def test_scan_prompt_multi_turn_rejects_non_list_history():
     assert "history" in rv.output
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["[]", '"hello"', "123", "null"],
+)
+def test_scan_prompt_multi_turn_rejects_non_object_payload(raw: str):
+    with _patch_invoke() as invoke_mock:
+        rv = runner.invoke(scanner_app, ["--mode", "multi_turn"], input=raw)
+
+    assert rv.exit_code == 1
+    assert "payload must be a JSON object" in rv.output
+    invoke_mock.assert_not_called()
+
+
 def test_scan_prompt_warmup_subcommand(monkeypatch):
     native = MagicMock()
     # The override is read from the environment, so clear it to assert the
