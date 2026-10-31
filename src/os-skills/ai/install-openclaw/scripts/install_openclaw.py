@@ -352,7 +352,6 @@ def build_config(args):
             "native": "auto",
             "nativeSkills": "auto",
             "restart": True,
-            "ownerDisplay": "raw",
         },
         "session": {
             "dmScope": "per-channel-peer",
