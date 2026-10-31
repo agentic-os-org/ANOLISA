@@ -42,6 +42,57 @@ current product scope. Network blocking, process execution blocking, taint
 propagation, and temporal policy enforcement remain follow-up profiles and
 must not be presented as enabled by this profile.
 
+## Content-Loss Mediation Coverage
+
+Delete protection alone does not preserve file content, so the file-guard
+backend mediates the content-loss entries that the validated kernel permits:
+
+- `truncate(2)` is mediated by `enforce_path_truncate` without `bpf_d_path`:
+  the inode-only variant matches the registered canonical path of the target,
+  and structured policies classify the parent/dentry pair from the hook
+  arguments. `ftruncate(2)` and `O_TRUNC` opens are mediated by
+  `enforce_file_truncate`, which the kernel also invokes for truncating opens.
+- Exact-file ordinary-write protection installs an `INODE_GUARD_WRITE` inode
+  guard at activation, checked by the mediation hooks before their deep
+  chains at constant stack cost: the inode-only profile denies writable
+  opens at `enforce_file_open`, the advanced profile denies new writable
+  mappings at `enforce_mmap_file` (its `enforce_file_open` resolves paths
+  instead of checking the guard), and both deny `write(2)` and truncates at
+  the permission and truncate hooks.
+- Denying writable opens of guarded inodes closes new-mapping entries that
+  need a fresh open. A descriptor already held at apply time needs no new
+  open, so the apply-time preflight also rejects writable file descriptors
+  of protected paths (via `/proc/<pid>/fd` and `fdinfo` access modes) in
+  addition to shared mappings. Profiles with the advanced tracepoint budget
+  additionally attach `enforce_mmap_file` and `enforce_file_mprotect`.
+- Mappings that already exist when a binding is applied cannot be revoked by
+  any LSM hook. Apply therefore scans `/proc/<pid>/maps` over the whole target
+  process tree and rejects the binding with `preexisting_writable_map` when a
+  shared mapping of a protected path is present, instead of claiming coverage
+  it cannot enforce.
+- Path stability: the inode entry also guards every ancestor directory of a
+  guarded file against rename and removal inside the bound domain, so path
+  relation changes cannot detach a protected entry from its authored path.
+
+Known boundaries: stores through a shared writable mapping created after
+binding are not mediated for directory-tree targets in either profile,
+because mapping stores never reach the write or truncate hooks and neither
+profile denies writable opens of tree members; exact-file targets close this
+entry at the writable-open denial in the inode-only profile and at the
+mapping hook in the advanced profile, and pre-existing mappings and writable
+descriptors are rejected at apply time. Unknown path
+classifications remain fail-open for phase-one ordinary writes. The apply-time
+scan renders paths and resolves exact identities in the enforcer's mount
+namespace while topology resolution uses the target's view, so tree-scope
+prefix matching can silently fail open for targets inside a different mount
+namespace, and an exact path that resolves to different files in the two
+namespaces can mismatch silently as well; tree paths whose authored form
+contains symlink components mismatch for the same reason, because the
+topology follows symlinks while the scan matches the canonical paths rendered
+by `/proc` lexically (exact scope stays identity-based and unaffected); with
+the advanced kernel object and a legacy DSL policy the scan has no protected
+identities to match and is a no-op.
+
 ## Build Contract
 
 `make build-enforcer` invokes `scripts/build-enforcer.sh`. The script:

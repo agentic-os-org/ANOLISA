@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -13,17 +14,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use actplane_ifc_compiler::{Compiled, compile_str};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction, HealthStatus,
-    NetworkAction, NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode,
-    ReplaceFailureCode, ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy,
-    SecurityEvent, SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
+    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction,
+    FileProtectionExclusionKind, FileProtectionTargetKind, HealthStatus, NetworkAction,
+    NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode, ReplaceFailureCode,
+    ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy, SecurityEvent,
+    SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
     classify_public_ipv4_destination,
 };
 use ebpf_ifc_engine::capability::{
     AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE, AUTH_NARROW_SCOPE,
     AUTH_REQUIRE_GATE, CapState, TARGET_CHILD, TARGET_SELF,
 };
-use ebpf_ifc_engine::{GLOBAL_ACTIVE_DOMAIN_ID, PinnedEngine, ReloadHandle, Violation};
+use ebpf_ifc_engine::{
+    GLOBAL_ACTIVE_DOMAIN_ID, INODE_GUARD_WRITE, PinnedEngine, ReloadHandle, Violation,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -39,6 +43,7 @@ mod file_protection_resolver;
 mod file_protection_runtime;
 mod file_protection_topology;
 mod inode_policy;
+mod preexisting_maps;
 use file_protection_policy::NormalizedFileProtectionPolicy;
 use file_protection_runtime::{ActiveFileProtection, PreparedFileProtection};
 use inode_policy::InodePolicy;
@@ -58,6 +63,53 @@ fn normalize_actplane_policy_payload(
     let normalized = file_protection_policy::normalize(policy)
         .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
     Ok(Some(normalized))
+}
+
+/// Maps structured targets onto the identities scanned in `/proc` maps before
+/// attach: exact files by device/inode, trees by path prefix minus exclusions.
+fn structured_protected_entries(
+    policy: &NormalizedFileProtectionPolicy,
+) -> Result<Vec<preexisting_maps::ProtectedEntry>, BackendError> {
+    let mut entries = Vec::new();
+    for target in &policy.targets {
+        let scope = match target.kind {
+            FileProtectionTargetKind::ExactFile => {
+                let metadata = fs::metadata(&target.path).map_err(|error| {
+                    BackendError::CompileFailure(format!(
+                        "cannot stat protected path '{}': {error}",
+                        target.path
+                    ))
+                })?;
+                preexisting_maps::ProtectedScope::Exact {
+                    dev: inode_policy::userspace_dev_to_kernel(metadata.dev()),
+                    ino: metadata.ino(),
+                }
+            }
+            FileProtectionTargetKind::DirectoryTree => {
+                let mut subtree_prefixes = Vec::new();
+                let mut exact_entries = Vec::new();
+                for exclusion in &target.exclusions {
+                    match exclusion.kind {
+                        FileProtectionExclusionKind::DirectorySubtree => {
+                            subtree_prefixes.push(format!("{}/", exclusion.path))
+                        }
+                        FileProtectionExclusionKind::ExactEntry => {
+                            exact_entries.push(exclusion.path.clone())
+                        }
+                    }
+                }
+                preexisting_maps::ProtectedScope::Tree {
+                    subtree_prefixes,
+                    exact_entries,
+                }
+            }
+        };
+        entries.push(preexisting_maps::ProtectedEntry {
+            path: target.path.clone(),
+            scope,
+        });
+    }
+    Ok(entries)
 }
 
 fn source_label(compiled: Option<&Compiled>) -> Result<u64, BackendError> {
@@ -298,6 +350,12 @@ impl ActPlaneBackend {
             });
         }
         if let Some(policy) = normalized {
+            // Writable shared mappings held before attach bypass every LSM
+            // hook, so refuse the binding instead of claiming coverage.
+            preexisting_maps::reject_preexisting_write_access(
+                request.root_pid,
+                &structured_protected_entries(&policy)?,
+            )?;
             let topology = file_protection_topology::prepare(
                 &policy,
                 request.root_pid,
@@ -328,6 +386,10 @@ impl ActPlaneBackend {
             &compiled,
             self.engine.inode_guard_mode(),
         )?;
+        preexisting_maps::reject_preexisting_write_access(
+            request.root_pid,
+            &inode_policy.protected_identities(),
+        )?;
         Ok(PreparedBinding {
             request,
             credential_policy,
@@ -352,6 +414,35 @@ impl ActPlaneBackend {
         } = prepared;
         let label = source_label(compiled.as_ref())?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
+        // Exact-file ordinary-write protection rides the inode-guard fast
+        // path: writable opens, writes and truncates of the held inode are
+        // denied in every mediation hook without adding classification stack
+        // depth to the hooks. Identities are collected before staging, but the
+        // guards are installed only after staging succeeds: main's contract is
+        // that a staging failure returns without kernel state, and the guard
+        // stays inert until the domain is seeded below. Detach clears it with
+        // the other inode guards.
+        let write_guard_identities: Vec<(u64, u32, u32)> = file_protection
+            .as_ref()
+            .map(|prepared| {
+                prepared
+                    .topology
+                    .direct_targets
+                    .iter()
+                    .filter(|record| {
+                        let target = &prepared.policy.targets[record.target_id as usize - 1];
+                        target.ordinary_write && target.kind == FileProtectionTargetKind::ExactFile
+                    })
+                    .map(|record| {
+                        (
+                            record.path.identity.ino,
+                            record.path.identity.dev,
+                            record.target_id,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let structured_target_count = file_protection
             .as_ref()
             .map_or(0, |prepared| prepared.policy.targets.len());
@@ -364,6 +455,14 @@ impl ActPlaneBackend {
             )?),
             None => None,
         };
+        for (ino, dev, target_id) in write_guard_identities {
+            self.engine
+                .guard_inode(ino, dev, INODE_GUARD_WRITE, id, target_id)
+                .map_err(|error| {
+                    let cleanup = self.cleanup_binding(&request, id, None);
+                    kernel_error_with_cleanup("guard exact-file write inode", error, cleanup)
+                })?;
+        }
         self.engine
             .seed_label_in_domain(request.root_pid, id, label)
             .map_err(|error| {
@@ -931,14 +1030,7 @@ fn credential_apply_request(
 }
 
 fn replacement_failure_code(error: &BackendError) -> ReplaceFailureCode {
-    match error {
-        BackendError::BindingConflict(_) | BackendError::MissingBinding(_) => {
-            ReplaceFailureCode::BindingConflict
-        }
-        BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
-        BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
-        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
-    }
+    crate::backend::backend_failure_code(error)
 }
 
 fn validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode {

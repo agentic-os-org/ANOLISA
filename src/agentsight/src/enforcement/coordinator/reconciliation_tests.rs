@@ -777,3 +777,14 @@ fn acknowledgement_store_failure_remains_generation_fatal() {
         ))
     ));
 }
+
+#[test]
+fn preexisting_write_access_codes_are_terminal_rejections() {
+    for code in ["preexisting_writable_map", "preexisting_writable_fd"] {
+        assert!(is_binding_rejection(code), "{code} must end reconciliation");
+        assert!(
+            remote_rejection_message(code, "raw detail").contains("pre-existing write access"),
+            "{code} must render a typed operator message"
+        );
+    }
+}

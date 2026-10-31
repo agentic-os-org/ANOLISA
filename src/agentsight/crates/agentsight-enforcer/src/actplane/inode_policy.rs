@@ -27,6 +27,10 @@ struct InodeFile {
 #[derive(Clone, Debug, Default)]
 pub(super) struct InodePolicy {
     files: Vec<InodeFile>,
+    /// Directory inodes above every guarded file. Guarding them keeps the
+    /// configured path reachable: renaming or removing an ancestor would
+    /// otherwise detach the protected entry from its authored path.
+    ancestors: Vec<InodeFile>,
 }
 
 impl InodePolicy {
@@ -54,6 +58,7 @@ impl InodePolicy {
         for (path, rule_id) in guards {
             prepared.add_file(&path, Some(rule_id))?;
         }
+        prepared.add_ancestors()?;
         Ok(prepared)
     }
 
@@ -82,6 +87,62 @@ impl InodePolicy {
         Ok(())
     }
 
+    /// Hold every directory above each guarded file so path-relation changes
+    /// (rename or removal of an ancestor) cannot detach the guarded entry from
+    /// its authored path while the binding is active.
+    fn add_ancestors(&mut self) -> Result<(), BackendError> {
+        let guarded: Vec<(String, Option<u32>)> = self
+            .files
+            .iter()
+            .filter(|file| file.rule_id.is_some())
+            .map(|file| (file.path.clone(), file.rule_id))
+            .collect();
+        for (path, rule_id) in guarded {
+            let mut ancestor = Path::new(&path);
+            while let Some(parent) = ancestor.parent() {
+                if parent.as_os_str().is_empty() || parent.as_os_str() == "/" {
+                    break;
+                }
+                ancestor = parent;
+                let parent_path = parent.to_str().ok_or_else(|| {
+                    invalid(format!("'{path}': ancestor path is not valid UTF-8"))
+                })?;
+                if self.known_inode(parent_path).is_some() {
+                    continue;
+                }
+                self.ancestors.push(pin_dir(parent_path, rule_id)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reports an already held identity for the path, in files or ancestors.
+    fn known_inode(&self, path: &str) -> Option<&InodeFile> {
+        let canonical = fs::canonicalize(path).ok()?;
+        let metadata = fs::metadata(&canonical).ok()?;
+        let ino = metadata.ino();
+        let dev = userspace_dev_to_kernel(metadata.dev());
+        self.files
+            .iter()
+            .chain(&self.ancestors)
+            .find(|entry| entry.ino == ino && entry.dev == dev)
+    }
+
+    /// Device/inode identities of guarded files for the pre-attach map scan.
+    pub(super) fn protected_identities(&self) -> Vec<super::preexisting_maps::ProtectedEntry> {
+        self.files
+            .iter()
+            .filter(|file| file.rule_id.is_some())
+            .map(|file| super::preexisting_maps::ProtectedEntry {
+                path: file.path.clone(),
+                scope: super::preexisting_maps::ProtectedScope::Exact {
+                    dev: file.dev,
+                    ino: file.ino,
+                },
+            })
+            .collect()
+    }
+
     /// Register paths for source matching/audit, and guards only for block clauses.
     /// The caller must batch-clean both maps if any insertion fails.
     pub(super) fn install(&self, engine: &PinnedEngine, domain: u32) -> io::Result<()> {
@@ -96,7 +157,22 @@ impl InodePolicy {
                     rule_id,
                 )
             },
-        )
+        )?;
+        // Ancestor directories carry no registered path: they only keep the
+        // guarded entry's authored path reachable inside the bound domain.
+        for ancestor in &self.ancestors {
+            let rule_id = ancestor.rule_id.unwrap_or(0);
+            engine
+                .guard_inode(
+                    ancestor.ino,
+                    ancestor.dev,
+                    INODE_GUARD_UNLINK | INODE_GUARD_RENAME,
+                    domain,
+                    rule_id,
+                )
+                .map_err(|error| registration_error("guard ancestor inode", ancestor, error))?;
+        }
+        Ok(())
     }
 
     fn populate(
@@ -255,6 +331,34 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
     })
 }
 
+/// Hold one ancestor directory of a guarded file for path-stability guards.
+fn pin_dir(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            invalid(format!(
+                "'{path}': cannot hold ancestor with O_PATH: {error}"
+            ))
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| invalid(format!("'{path}': cannot stat held ancestor: {error}")))?;
+    if !metadata.is_dir() {
+        return Err(invalid(format!(
+            "'{path}': guarded file ancestors must be directories"
+        )));
+    }
+    Ok(InodeFile {
+        ino: metadata.ino(),
+        dev: userspace_dev_to_kernel(metadata.dev()),
+        path: path.into(),
+        rule_id,
+        _file: Arc::new(file),
+    })
+}
+
 // Translate glibc's encoded st_dev into the kernel's MKDEV(major, minor).
 pub(super) fn userspace_dev_to_kernel(dev: u64) -> u32 {
     (libc::major(dev) << 20) | libc::minor(dev)
@@ -326,13 +430,48 @@ mod tests {
     }
 
     #[test]
+    fn guarded_files_hold_their_ancestor_directories() {
+        let fixture = Fixture::new();
+        let nested = fixture.path("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        let path = fixture.file("a/b/keep");
+        let prepared = prepare(&guard_dsl(&path, "if AGENT")).unwrap();
+        let ancestors: Vec<String> = prepared
+            .ancestors
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert!(ancestors.contains(&nested), "{ancestors:?}");
+        assert!(ancestors.contains(&fixture.path("a")), "{ancestors:?}");
+        assert!(!ancestors.iter().any(|entry| entry == "/"), "{ancestors:?}");
+        assert_eq!(prepared.files.len(), 1);
+        assert_eq!(prepared.files[0].path, path);
+        // Shared ancestors of two guarded files are held once.
+        let sibling = fixture.file("a/b/keep2");
+        let dsl = format!(
+            "source AGENT = exec \"**\"\nrule one:\n block unlink file \"{path}\" if AGENT\n because \"one\"\nrule two:\n block unlink file \"{sibling}\" if AGENT\n because \"two\"\n"
+        );
+        let prepared = prepare(&dsl).unwrap();
+        let held = prepared
+            .ancestors
+            .iter()
+            .filter(|entry| entry.path == nested)
+            .count();
+        assert_eq!(held, 1);
+    }
+
+    #[test]
     fn lowered_index_accounts_for_dnf_and_clause_offset_and_first_guard_wins() {
         let fixture = Fixture::new();
         let path = fixture.file("p");
         let dsl = format!(
             "source AGENT = exec \"**\"\nsource OTHER = exec \"**\"\n\
              rule prior:\n notify connect endpoint \"*\" if AGENT or OTHER\n because \"prior\"\n\
-             rule protect:\n notify connect endpoint \"*\"\n block write file \"{path}\" if AGENT\n because \"keep file\"\n\
+             rule protect:
+ notify connect endpoint \"*\"
+ block write file \"{path}\" if AGENT
+ because \"keep file\"
+\
              rule later:\n block unlink file \"{path}\"\n because \"later\"\n"
         );
         let compiled = compile_str(&dsl).unwrap();
