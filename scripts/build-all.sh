@@ -427,9 +427,9 @@ ensure_user_mode() {
     USER_COSH_EXTENSIONS_DIR="$USER_COSH_DIR/extensions"
     USER_COSH_SKILLS_DIR="$USER_COSH_DIR/skills"
     INSTALL_EXTENSIONS_DIR="$USER_COSH_EXTENSIONS_DIR"
-    [[ "$INSTALL_MODE" == "system" ]] && INSTALL_EXTENSIONS_DIR="/usr/share/anolisa/extensions"
-
-    load_sec_core_make_paths
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        INSTALL_EXTENSIONS_DIR="/usr/share/anolisa/extensions"
+    fi
 }
 
 system_service_dir() {
@@ -2562,6 +2562,10 @@ preflight_runtime_dependencies() {
 
 install_sec_core() {
     step "Installing agent-sec-core"
+
+    # Dependency setup must be able to install make before it is invoked.
+    # Other components and dependency-only runs do not need these paths.
+    load_sec_core_make_paths
 
     local staged build_dir
     staged="$(component_target_dir sec-core)"

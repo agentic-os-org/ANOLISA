@@ -242,6 +242,8 @@ jobs:
 
       - name: Test aggregated runtime dependency preflight
         run: bash tests/test-build-all-runtime-deps.sh
+      - name: Test dependency bootstrap without make
+        run: bash tests/test-build-all-bootstrap.sh
 
   # =========================================================================
   # Step 3: Build & Lint copilot-shell
