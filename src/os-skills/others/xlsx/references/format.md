@@ -154,6 +154,10 @@ fontId=3 -> color rgb="00008000" (green, cross-sheet reference role)
 fontId=4 -> <b/> + color rgb="00000000" (bold black, header)
 ```
 
+`<b/>` enables bold by default; `<b val="0"/>` and `<b val="false"/>` explicitly
+disable it. The style audit uses that value when deciding whether a bold header
+is exempt from hardcoded numeric-input warnings.
+
 **Step 3**: Read `<fills>` and confirm that fills[0] and fills[1] are spec-mandated reserved entries (never delete):
 ```
 fillId=0 -> patternType="none" (spec-mandated)
