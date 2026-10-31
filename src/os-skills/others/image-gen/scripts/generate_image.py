@@ -15,8 +15,10 @@ def _key():
             for p in (c.get("providers") or {}).values():
                 if isinstance(p,dict) and p.get("apiKey"): return p["apiKey"]
             # 格式2: {"models":{"providers":{"xxx":{"apiKey":"..."}}}}
-            for p in (c.get("models",{}).get("providers") or {}).values():
-                if isinstance(p,dict) and p.get("apiKey"): return p["apiKey"]
+            models = c.get("models")
+            if isinstance(models, dict):
+                for p in (models.get("providers") or {}).values():
+                    if isinstance(p,dict) and p.get("apiKey"): return p["apiKey"]
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
     print("ERROR: No API key. Set DASHSCOPE_API_KEY or configure ~/.openclaw/openclaw.json",file=sys.stderr); sys.exit(1)
