@@ -75,7 +75,8 @@ class StatsAttribution:
     """Net-savings attribution over the active records of a summary.
 
     The retrieve fields are ``None`` when retrieve totals were unavailable
-    (the summary then reports gross savings only).
+    or the selected window omits stored rows. Gross savings still describe
+    only the selected active records.
     """
 
     gross_savings_tokens: int
@@ -86,6 +87,15 @@ class StatsAttribution:
     retrieve_hits: int | None
     retrieve_misses: int | None
     retrieve_errors: int | None
+
+
+@dataclass(frozen=True)
+class StatsSummaryScope:
+    """Record coverage before dry-run exclusion, from the same read snapshot."""
+
+    records_selected: int
+    records_total: int
+    complete: bool
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,7 @@ class StatsSummary:
     by_operation: Mapping[StatsOperation, StatsSavings]
     dry_run_records_excluded: int
     attribution: StatsAttribution
+    summary_scope: StatsSummaryScope | None = None
 
 
 @dataclass(frozen=True)
@@ -306,10 +317,13 @@ class TokenlessStats:
         """Return aggregate savings for the newest records within ``limit``.
 
         ``None`` uses the recorder's default cap of 10,000 newest records.
+        An incomplete window omits retrieval/net totals; ``summary_scope``
+        reports coverage before dry-run exclusion from the same read snapshot.
         """
         _validate_limit(limit, optional=True)
         value = _load_json(self._native.summary_json(limit))
         attribution = value["attribution"]
+        scope = value.get("summary_scope")
         return StatsSummary(
             schema_version=value["schema_version"],
             total=_parse_savings(value["total"]),
@@ -329,6 +343,7 @@ class TokenlessStats:
                 retrieve_misses=attribution.get("retrieve_misses"),
                 retrieve_errors=attribution.get("retrieve_errors"),
             ),
+            summary_scope=StatsSummaryScope(**scope) if scope is not None else None,
         )
 
     def list(self, *, limit: int = 20) -> tuple[StatsRecord, ...]:

@@ -21,8 +21,8 @@ use tokenless_stats::{
 };
 use tokenless_stats::{
     ensure_state_dir, format_compare, format_compare_json, format_diff_report, format_list,
-    format_show, format_summary, record_report, resolve_data_dir, session_report, tool_use_report,
-    validate_database_path,
+    format_show, format_summary_window, record_report, resolve_data_dir, session_report,
+    tool_use_report, validate_database_path,
 };
 
 #[derive(Parser)]
@@ -1015,24 +1015,19 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         }
                         return Ok(());
                     }
-                    let records = recorder
-                        .all_records(limit)
+                    let window = recorder
+                        .summary_window(limit)
                         .map_err(|e| (format!("Failed to query records: {e}"), 1))?;
-                    let retrieve = recorder
-                        .retrieve_totals()
+                    window
+                        .retrieve_totals
+                        .as_ref()
                         .map_err(|e| (format!("Failed to query retrieve events: {e}"), 1))?;
                     if json {
-                        write_stdout(&tokenless_stats::format_summary_json(
-                            &records,
-                            None,
-                            Some(&retrieve),
-                        ))?;
+                        write_stdout(&tokenless_stats::format_summary_window_json(&window))?;
                     } else {
-                        write_stdout(&format_summary(
-                            &records,
+                        write_stdout(&format_summary_window(
+                            &window,
                             Some("Tokenless Statistics Summary"),
-                            None,
-                            Some(&retrieve),
                         ))?;
                     }
                 }

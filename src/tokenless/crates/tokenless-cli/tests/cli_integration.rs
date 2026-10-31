@@ -4374,3 +4374,196 @@ fn mode_mismatch_notice_survives_an_unwritable_stderr() {
         },
     );
 }
+
+fn scope_summary(data: &std::path::Path, limit: Option<usize>, json: bool) -> String {
+    let mut command = tokenless_bin();
+    command
+        .env("TOKENLESS_DATA_DIR", data)
+        .env_remove("TOKENLESS_STATS_DB")
+        .env_remove("TOKENLESS_STASH_DB")
+        .args(["stats", "summary"]);
+    if let Some(limit) = limit {
+        command.args(["--limit", &limit.to_string()]);
+    }
+    if json {
+        command.arg("--json");
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn scope_record(mode: CompressionMode) -> StatsRecord {
+    StatsRecord::new(
+        OperationType::CompressResponse,
+        "scope-test".into(),
+        100,
+        20,
+        50,
+        10,
+    )
+    .with_mode(mode)
+}
+
+#[test]
+fn summary_limited_window_does_not_mix_global_retrieval_costs() {
+    let temp = tempfile::tempdir().unwrap();
+    let recorder = StatsRecorder::new(temp.path().join("stats.db")).unwrap();
+    for _ in 0..2 {
+        recorder
+            .record(&scope_record(CompressionMode::Active))
+            .unwrap();
+    }
+    recorder
+        .record_retrieve_event(
+            "0123456789abcdef01234567",
+            "hit",
+            "cli",
+            Some(15),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    for limit in [Some(1), Some(2), Some(3), None] {
+        let report: serde_json::Value =
+            serde_json::from_str(&scope_summary(temp.path(), limit, true)).unwrap();
+        let text = scope_summary(temp.path(), limit, false);
+        let selected = if limit == Some(1) { 1 } else { 2 };
+        assert_eq!(report["total"]["records"], selected);
+        assert_eq!(
+            report["summary_scope"],
+            serde_json::json!({
+                "records_selected": selected, "records_total": 2, "complete": selected == 2,
+            })
+        );
+        assert_eq!(report["attribution"]["gross_savings_tokens"], selected * 10);
+        if selected == 1 {
+            for key in [
+                "retrieved_tokens",
+                "net_savings_tokens",
+                "retrieve_hits",
+                "retrieve_misses",
+                "retrieve_errors",
+            ] {
+                assert!(report["attribution"].get(key).is_none(), "{key}: {report}");
+            }
+            assert!(text.contains("1 of 2 stored records"));
+            assert!(text.contains("Retrieval and net savings omitted"));
+            assert!(!text.contains("Net Savings:"));
+        } else {
+            assert_eq!(report["attribution"]["net_savings_tokens"], 5);
+            assert_eq!(report["attribution"]["retrieved_tokens"], 15);
+            assert!(text.contains("Net Savings:    5 tokens"));
+        }
+    }
+}
+
+#[test]
+fn summary_scope_counts_dry_run_rows_before_filtering() {
+    let temp = tempfile::tempdir().unwrap();
+    let recorder = StatsRecorder::new(temp.path().join("stats.db")).unwrap();
+    recorder
+        .record(&scope_record(CompressionMode::Active))
+        .unwrap();
+    recorder
+        .record(&scope_record(CompressionMode::DryRun))
+        .unwrap();
+    for (limit, complete, active) in [(Some(1), false, 0), (Some(2), true, 1)] {
+        let report: serde_json::Value =
+            serde_json::from_str(&scope_summary(temp.path(), limit, true)).unwrap();
+        assert_eq!(report["total"]["records"], active);
+        assert_eq!(report["dry_run_records_excluded"], 1);
+        assert_eq!(report["summary_scope"]["records_total"], 2);
+        assert_eq!(report["summary_scope"]["complete"], complete);
+        assert_eq!(
+            report["attribution"].get("net_savings_tokens").is_some(),
+            complete
+        );
+    }
+}
+
+#[test]
+fn summary_default_cap_discloses_incomplete_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("stats.db");
+    let recorder = StatsRecorder::new(&path).unwrap();
+    recorder
+        .record(&scope_record(CompressionMode::Active))
+        .unwrap();
+    // Populate the large fixture in one SQL statement without 10,000 fsyncs.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<10000)
+        INSERT INTO stats (timestamp,timestamp_ns,operation,agent_id,before_chars,before_tokens,after_chars,after_tokens,mode)
+        SELECT timestamp,timestamp_ns,operation,agent_id,before_chars,before_tokens,after_chars,after_tokens,mode
+        FROM stats,n WHERE stats.id=1;").unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&scope_summary(temp.path(), None, true)).unwrap();
+    assert_eq!(
+        report["summary_scope"],
+        serde_json::json!({
+            "records_selected": 10000, "records_total": 10001, "complete": false,
+        })
+    );
+    assert_eq!(report["total"]["records"], 10000);
+    assert!(report["attribution"].get("net_savings_tokens").is_none());
+    assert!(scope_summary(temp.path(), None, false).contains("10000 of 10001 stored records"));
+}
+
+#[test]
+fn summary_empty_history_keeps_complete_zero_attribution() {
+    let temp = tempfile::tempdir().unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&scope_summary(temp.path(), Some(1), true)).unwrap();
+    assert_eq!(
+        report["summary_scope"],
+        serde_json::json!({
+            "records_selected": 0, "records_total": 0, "complete": true,
+        })
+    );
+    assert_eq!(report["attribution"]["net_savings_tokens"], 0);
+}
+
+#[test]
+fn summary_preserves_strict_retrieve_errors_for_complete_windows() {
+    let temp = tempfile::tempdir().unwrap();
+    let recorder = StatsRecorder::new(temp.path().join("stats.db")).unwrap();
+    for _ in 0..2 {
+        recorder
+            .record(&scope_record(CompressionMode::Active))
+            .unwrap();
+    }
+    // A synthetic aggregate overflow exercises the existing strict CLI policy.
+    for cost in [i64::MAX, 1] {
+        recorder
+            .record_retrieve_event(
+                "0123456789abcdef01234567",
+                "hit",
+                "cli",
+                Some(cost),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    let partial: serde_json::Value =
+        serde_json::from_str(&scope_summary(temp.path(), Some(1), true)).unwrap();
+    assert!(partial["attribution"].get("net_savings_tokens").is_none());
+    let complete = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", temp.path())
+        .env_remove("TOKENLESS_STATS_DB")
+        .env_remove("TOKENLESS_STASH_DB")
+        .args(["stats", "summary", "--limit", "2", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(complete.status.code(), Some(1));
+    assert!(complete.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&complete.stderr).contains("Failed to query retrieve events"));
+}

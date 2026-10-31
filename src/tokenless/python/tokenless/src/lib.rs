@@ -16,7 +16,7 @@ use tokenless_runtime::{
 };
 use tokenless_stats::{
     DiffSort, StatsRecord, StatsRecorder, ensure_state_dir, format_compare_json,
-    format_summary_json, get_home_dir, record_report, resolve_data_dir, session_report,
+    format_summary_window_json, get_home_dir, record_report, resolve_data_dir, session_report,
     tool_use_report, validate_data_dir, validate_database_path,
 };
 
@@ -127,16 +127,11 @@ impl PyStatsQuery {
     #[pyo3(signature = (limit=None))]
     fn summary_json(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<String> {
         let recorder = self.require_recorder()?;
-        let (records, retrieve) = py
-            .allow_threads(|| {
-                let records = recorder.all_records(limit)?;
-                // Fail-soft: a broken retrieve aggregate degrades the report,
-                // never the query.
-                let retrieve = recorder.retrieve_totals().ok();
-                Ok((records, retrieve))
-            })
+        let window = py
+            .allow_threads(|| recorder.summary_window(limit))
             .map_err(to_stats_error)?;
-        Ok(format_summary_json(&records, None, retrieve.as_ref()))
+        // Preserve best-effort retrieval attribution for the Python API.
+        Ok(format_summary_window_json(&window))
     }
 
     #[pyo3(signature = (limit=20))]

@@ -495,6 +495,14 @@ tokenless stats disable
 tokenless stats clear --yes
 ```
 
+摘要中的压缩节省量只覆盖选中的最新记录（默认最多 10,000 条），并排除 dry-run。
+如果窗口未覆盖全部存储记录，则省略取回成本和净节省量，避免把全历史取回成本
+错误归入有限窗口。文本输出会说明原因；JSON 新增 `summary_scope`，包含
+`records_selected`、`records_total` 和 `complete`，这些条数在排除 dry-run 前统计。
+完整窗口仍提供取回成本和净节省量。记录、条数与成本来自同一 SQLite 读取快照，
+无需迁移已存储的数据。
+
+
 双跑对比：
 
 ```bash

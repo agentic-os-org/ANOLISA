@@ -605,6 +605,14 @@ tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
 tokenless stats diff 42 --json
 ```
 
+摘要中的压缩节省量只覆盖选中的最新记录（默认最多 10,000 条），并排除 dry-run。
+如果窗口未覆盖全部存储记录，则省略取回成本和净节省量，避免把全历史取回成本
+错误归入有限窗口。文本输出会说明原因；JSON 新增 `summary_scope`，包含
+`records_selected`、`records_total` 和 `complete`，这些条数在排除 dry-run 前统计。
+完整窗口仍提供取回成本和净节省量。记录、条数与成本来自同一 SQLite 读取快照，
+无需迁移已存储的数据。
+
+
 `stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝。
 `--compare` 在任一 Session 没有记录时失败，而不是报告 0% 节省。Session
 总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
