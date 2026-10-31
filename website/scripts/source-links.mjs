@@ -53,11 +53,18 @@ export function markdownSourceLinks(markdown) {
 export function resolveMarkdownSourceLink(root, source, url) {
   if (/^(?:[a-z][\w+.-]*:|\/\/)/i.test(url)) return undefined;
   const hash = url.indexOf('#');
-  const pathname = (hash < 0 ? url : url.slice(0, hash)).split('?', 1)[0];
-  const fragment = hash < 0 ? '' : decodeURIComponent(url.slice(hash + 1));
+  const rawPathname = (hash < 0 ? url : url.slice(0, hash)).split('?', 1)[0];
+  let pathname;
+  let fragment = '';
+  try {
+    pathname = decodeURIComponent(rawPathname);
+    if (hash >= 0) fragment = decodeURIComponent(url.slice(hash + 1));
+  } catch {
+    return {invalid: true};
+  }
   const target = pathname
     ? path.resolve(pathname.startsWith('/') ? root : path.dirname(path.resolve(root, source)),
-      decodeURIComponent(pathname.replace(/^\//, '')))
+      pathname.replace(/^\//, ''))
     : path.resolve(root, source);
   return target.endsWith('.md') ? {target, fragment} : undefined;
 }
@@ -65,6 +72,7 @@ export function resolveMarkdownSourceLink(root, source, url) {
 export async function checkMarkdownSourceLink(root, source, url) {
   const resolved = resolveMarkdownSourceLink(root, source, url);
   if (!resolved) return undefined;
+  if (resolved.invalid) return `${source}: invalid Markdown link encoding ${url}`;
   let markdown;
   try {
     markdown = await readFile(resolved.target, 'utf8');
