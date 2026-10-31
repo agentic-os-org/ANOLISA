@@ -304,8 +304,26 @@ def main() -> None:
         if r:
             row_map[int(r)] = row_el
 
-    # Add header cell
-    if args.header and 1 in row_map:
+    # Add header cell. A sheet whose first row element starts below row 1
+    # (or has no rows yet) still gets its header: create row 1 the same way
+    # the formula path creates missing rows instead of silently dropping it.
+    if args.header:
+        if 1 not in row_map:
+            row_el = ET.Element(_tag("row"))
+            row_el.set("r", "1")
+            first_row = next(
+                (
+                    existing
+                    for existing in sheet_data
+                    if existing.get("r") and int(existing.get("r")) > 1
+                ),
+                None,
+            )
+            if first_row is not None:
+                sheet_data.insert(list(sheet_data).index(first_row), row_el)
+            else:
+                sheet_data.append(row_el)
+            row_map[1] = row_el
         cell = ET.SubElement(row_map[1], _tag("c"))
         cell.set("r", f"{col}1")
         cell.set("s", str(header_style))
