@@ -14,7 +14,12 @@ async function targetFile(urlPath) {
   else if (basePath && decoded.startsWith(`${basePath}/`)) {
     decoded = decoded.slice(basePath.length + 1);
   }
-  const direct = path.join(buildDir, decoded);
+  const buildRoot = path.resolve(buildDir);
+  const direct = path.resolve(buildRoot, decoded);
+  const relative = path.relative(buildRoot, direct);
+  if (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return null;
+  }
   if (await exists(direct)) {
     const info = await stat(direct);
     return info.isDirectory() ? path.join(direct, 'index.html') : direct;
