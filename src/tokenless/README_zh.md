@@ -228,6 +228,11 @@ PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有
 请求/响应契约和可执行示例见
 [CLI 参考](../../docs/user-guide/zh/tokenless/cli-reference.md#compress)。
 
+当已采纳的 `before_model` 压缩复用已有 Schema 恢复数据时，统计仍记录本次输出的
+恢复关联，并标记为 `retrievable`。刷新数据不会把截断变成无损操作，也不会转移
+回滚删除权限。未采纳的候选不记录已输出恢复关联；已有数据仍可供先前调用者恢复。
+本次修正不重写历史统计记录。
+
 ### Schema 压缩 CLI
 
 `compress-schema` 支持单个工具定义、工具定义 JSON 数组，以及包含顶层

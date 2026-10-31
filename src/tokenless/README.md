@@ -346,6 +346,13 @@ still requires its separate authorized recovery capability. See the
 [CLI reference](../../docs/user-guide/en/tokenless/cli-reference.md#compress)
 for the request/response contract and an executable example.
 
+When an accepted `before_model` compression reuses an existing schema recovery
+payload, its statistics still record the emitted artifact and classify it as
+`retrievable`. Refreshing a payload does not make truncation lossless or transfer
+rollback ownership. Rejected candidates do not acquire emitted-artifact records;
+existing payloads remain available to earlier callers. Historical statistics are
+not rewritten by this correction.
+
 ### compress-schema
 
 Compress a single tool schema:

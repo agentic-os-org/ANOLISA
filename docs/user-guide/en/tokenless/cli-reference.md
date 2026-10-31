@@ -118,6 +118,13 @@ Operations:
 | `post_tool` | Result kind, tool name, content, status, explicit content origin, carried output optimization, and output capabilities | Output, disposition, detected type, applied operations, recoverability, token counts, and Stash keys |
 | `retrieve` | Hash or Marker plus the Marker set currently visible to the model | Normalized hash and byte-identical payload after authorization |
 
+When an accepted `before_model` compression reuses an existing schema recovery
+payload, its statistics still record the emitted artifact and classify it as
+`retrievable`. Refreshing a payload does not make truncation lossless or transfer
+rollback ownership. Rejected candidates do not acquire emitted-artifact records;
+existing payloads remain available to earlier callers. Historical statistics are
+not rewritten by this correction.
+
 `post_tool` is the only operation that enters `PostToolPipeline`. Current production routing is:
 
 - Retrieve results and interrupted or denied calls bypass compression.

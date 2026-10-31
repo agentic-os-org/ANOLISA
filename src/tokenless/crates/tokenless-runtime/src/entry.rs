@@ -203,7 +203,8 @@ pub(crate) fn before_model_with_store(
                 .collect(),
         );
         let candidate_text = serde_json::to_string(&candidate).map_err(RuntimeError::Serialize)?;
-        pending_keys = compressor.stash_keys();
+        // The finalizer clears the session on both acceptance and rollback.
+        pending_keys = compressor.referenced_stash_keys();
         finish_schema_compression(
             &input,
             candidate_text,
@@ -2713,21 +2714,15 @@ mod tests {
         assert_eq!(outcome.artifact_keys.len(), 2);
         assert_eq!(outcome.stats.recoverability, Recoverability::Retrievable);
 
-        // `artifact_keys` mirrors the compressor's pending-key HashMap, whose
-        // iteration order is an implementation detail with no tie to the
-        // read/write input order — zip-positioning `originals` against it
-        // only passes when the hash seed happens to cooperate. The stash key
-        // of each original is its BLAKE3, so pair every original with its
-        // expected key, sort by key, and compare against the sorted emitted
-        // keys: the expectation is derived from the keys themselves, and the
-        // retrieve loop below stays key-aligned.
+        // Reference keys are sorted independently of the tool input order.
+        // Pair each original with its content key so both the identity check
+        // and the retrieval assertions below use the matching payload.
         let mut expected: Vec<(String, &String)> = originals
             .iter()
             .map(|original| (compute_key(original.as_bytes()), original))
             .collect();
         expected.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut emitted = outcome.artifact_keys.clone();
-        emitted.sort();
+        let emitted = outcome.artifact_keys.clone();
         assert_eq!(
             emitted,
             expected

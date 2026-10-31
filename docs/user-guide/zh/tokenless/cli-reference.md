@@ -112,6 +112,11 @@ jq -n \
 | `post_tool` | Result Kind、工具名、内容、状态、明确 Content Origin、上游输出优化状态和输出能力 | Output、Disposition、检测类型、实际操作、Recoverability、Token 计数和 Stash Keys |
 | `retrieve` | Hash 或 Marker，以及模型当前可见的 Marker 集合 | 授权后的规范化 Hash 和字节级一致 Payload |
 
+当已采纳的 `before_model` 压缩复用已有 Schema 恢复数据时，统计仍记录本次输出的
+恢复关联，并标记为 `retrievable`。刷新数据不会把截断变成无损操作，也不会转移
+回滚删除权限。未采纳的候选不记录已输出恢复关联；已有数据仍可供先前调用者恢复。
+本次修正不重写历史统计记录。
+
 只有 `post_tool` 会进入 `PostToolPipeline`。当前生产路由为：
 
 - Retrieve Result 和 Interrupted/Denied 调用绕过压缩。
