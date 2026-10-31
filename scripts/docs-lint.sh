@@ -30,7 +30,7 @@ list_tree() {
 
 filter_exempt() {
   if [ -n "$exemptions" ]; then
-    grep -Fxv -f <(echo "$exemptions") || true
+    grep -Fxv -f <(printf '%s\n' "$exemptions" | sed 's|^\./||; s|^|./|') || true
   else
     cat
   fi
