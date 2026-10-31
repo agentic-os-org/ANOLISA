@@ -89,6 +89,17 @@ pub enum CheckpointOutcome {
     Busy,
 }
 
+/// Frame counts returned by a passive checkpoint, including reader-pinned backlog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointStats {
+    /// Whether every frame visible to this checkpoint was copied.
+    pub outcome: CheckpointOutcome,
+    /// Frames in the WAL; zero when SQLite reports no WAL.
+    pub frames: u64,
+    /// Frames already copied to the main database.
+    pub copied: u64,
+}
+
 /// Flushes WAL frames and reports whether lock contention prevented truncation.
 ///
 /// # Errors
@@ -123,14 +134,33 @@ pub fn disable_auto_checkpoint(connection: &Connection) -> Result<(), LifecycleE
 ///
 /// Returns an error when SQLite cannot execute the checkpoint query.
 pub fn checkpoint_passive(connection: &Connection) -> Result<CheckpointOutcome, LifecycleError> {
+    Ok(checkpoint_passive_stats(connection)?.outcome)
+}
+
+/// Copies available WAL frames and reports backlog without waiting for readers.
+///
+/// The operation can copy the entire available WAL in one call; frame counts
+/// describe its result and do not impose a work or time limit.
+///
+/// # Errors
+///
+/// Returns an error when SQLite cannot execute the checkpoint query.
+pub fn checkpoint_passive_stats(
+    connection: &Connection,
+) -> Result<CheckpointStats, LifecycleError> {
     let (busy, frames, copied): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
-    Ok(if busy == 0 && copied >= frames {
+    let outcome = if busy == 0 && copied >= frames {
         CheckpointOutcome::Completed
     } else {
         CheckpointOutcome::Busy
+    };
+    Ok(CheckpointStats {
+        outcome,
+        frames: frames.max(0) as u64,
+        copied: copied.max(0) as u64,
     })
 }
 
@@ -297,6 +327,9 @@ mod tests {
             checkpoint_passive(&writer).unwrap(),
             CheckpointOutcome::Busy
         );
+        let pinned = checkpoint_passive_stats(&writer).unwrap();
+        assert_eq!(pinned.outcome, CheckpointOutcome::Busy);
+        assert!(pinned.frames > pinned.copied);
         writer
             .execute("INSERT INTO records VALUES (zeroblob(8192))", [])
             .unwrap();
@@ -305,6 +338,8 @@ mod tests {
             checkpoint_passive(&writer).unwrap(),
             CheckpointOutcome::Completed
         );
+        let released = checkpoint_passive_stats(&writer).unwrap();
+        assert_eq!(released.frames, released.copied);
         drop(reader);
         drop(writer);
         fs::remove_file(path).unwrap();

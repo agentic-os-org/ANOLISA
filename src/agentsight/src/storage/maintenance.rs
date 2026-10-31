@@ -9,6 +9,7 @@ pub(crate) struct MaintenanceCursor {
     table: usize,
     cutoff: Option<u64>,
     retry_after: Option<std::time::Instant>,
+    capacity_dirty: bool,
 }
 
 impl Storage {
@@ -49,7 +50,8 @@ impl Storage {
         }
         if cursor.phase == 4 {
             if self.audit_store.checkpoint_passive()? == CheckpointOutcome::Completed
-                && self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Completed
+                && (cursor.capacity_dirty
+                    || self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Completed)
             {
                 cursor.phase = 5;
                 cursor.retry_after = None;
@@ -62,8 +64,16 @@ impl Storage {
         let size = self.audit_store.size_snapshot()?;
         if limit_bytes == 0
             || size.physical_bytes <= limit_bytes
-            || size.logical_bytes <= limit_bytes.saturating_mul(9) / 10
+            || self.audit_store.live_bytes()? <= limit_bytes.saturating_mul(9) / 10
         {
+            if cursor.capacity_dirty
+                && (self.audit_store.checkpoint_passive()? == CheckpointOutcome::Busy
+                    || self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Busy)
+            {
+                cursor.retry_after =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                return Ok(false);
+            }
             *cursor = MaintenanceCursor::default();
             return Ok(true);
         }
@@ -80,8 +90,17 @@ impl Storage {
                 break;
             }
         }
+        cursor.capacity_dirty |= deleted > 0;
         cursor.phase = 4;
         if deleted == 0 {
+            if cursor.capacity_dirty
+                && (self.audit_store.checkpoint_passive()? == CheckpointOutcome::Busy
+                    || self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Busy)
+            {
+                cursor.retry_after =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                return Ok(false);
+            }
             *cursor = MaintenanceCursor::default();
             return Ok(true);
         }
@@ -152,10 +171,17 @@ mod tests {
         };
         let storage = Storage::with_sqlite_config(&config).unwrap();
         let db = rusqlite::Connection::open(config.db_path()).unwrap();
-        db.execute_batch("CREATE TABLE extension_data(payload BLOB); INSERT INTO extension_data VALUES (zeroblob(2097152));").unwrap();
+        db.execute_batch(
+            "INSERT INTO audit_events(event_type,timestamp_ns,pid,comm)
+             VALUES ('fixture',1,1,'fixture');
+             CREATE TABLE extension_data(payload BLOB);
+             INSERT INTO extension_data VALUES (zeroblob(2097152));",
+        )
+        .unwrap();
         let mut cursor = MaintenanceCursor::default();
         assert!((0..16).any(|_| storage.maintain_step(1024 * 1024, &mut cursor).unwrap()));
         assert!(storage.audit_store.size_snapshot().unwrap().logical_bytes > 1024 * 1024);
+        assert_eq!(storage.audit_store.size_snapshot().unwrap().wal_bytes, 0);
         drop(db);
         drop(storage);
         std::fs::remove_dir_all(dir).unwrap();

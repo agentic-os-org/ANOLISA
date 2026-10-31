@@ -1549,10 +1549,8 @@ impl AgentSight {
 
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
-            // Rate-limited internally, and deliberately outside the idle branch:
-            // a saturated byte budget keeps the queue non-empty, which is exactly
-            // when the watermarks matter most.
-            self.tick();
+            // try_process ticks before receiving, including on a busy channel.
+            // Publish watermarks even when that channel never becomes idle.
             self.maybe_log_buffer_watermarks();
             self.maybe_export_runtime_metrics();
             if let Some(result) = self.try_process() {
