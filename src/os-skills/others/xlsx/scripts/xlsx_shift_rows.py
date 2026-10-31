@@ -39,6 +39,8 @@ import re
 import xml.etree.ElementTree as ET
 import xml.dom.minidom
 
+from xlsx_xml import parse_xml, write_xml
+
 
 def col_letter(n: int) -> str:
     """Convert 1-based column number to Excel column letter(s)."""
@@ -157,7 +159,7 @@ def _tag(local: str) -> str:
 
 def process_worksheet(path: str, at: int, delta: int) -> int:
     """Update row/cell references in a worksheet XML. Returns change count."""
-    tree = ET.parse(path)
+    tree = parse_xml(path)
     root = tree.getroot()
     changes = 0
 
@@ -254,7 +256,7 @@ def process_chart(path: str, at: int, delta: int) -> int:
 
 def process_table(path: str, at: int, delta: int) -> int:
     """Update the ref attribute on the <table> root element."""
-    tree = ET.parse(path)
+    tree = parse_xml(path)
     root = tree.getroot()
     # The root element IS the table
     old = root.get("ref", "")
@@ -270,7 +272,7 @@ def process_table(path: str, at: int, delta: int) -> int:
 
 def process_pivot_cache(path: str, at: int, delta: int) -> int:
     """Update worksheetSource ref in a pivot cache definition."""
-    tree = ET.parse(path)
+    tree = parse_xml(path)
     root = tree.getroot()
     changes = 0
     # Look for <worksheetSource ref="A1:D100" ...>
@@ -289,7 +291,7 @@ def process_pivot_cache(path: str, at: int, delta: int) -> int:
 
 def _write_tree(tree: ET.ElementTree, path: str) -> None:
     """Write ElementTree back to file with pretty-printing."""
-    tree.write(path, encoding="unicode", xml_declaration=False)
+    write_xml(tree, path)
     # Re-pretty-print for readability
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()

@@ -34,6 +34,8 @@ import sys
 import xml.dom.minidom
 import xml.etree.ElementTree as ET
 
+from xlsx_xml import parse_xml, write_xml
+
 NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
@@ -50,7 +52,7 @@ def _tag(local: str) -> str:
 
 
 def _write_tree(tree: ET.ElementTree, path: str) -> None:
-    tree.write(path, encoding="unicode", xml_declaration=False)
+    write_xml(tree, path)
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()
     try:
@@ -97,7 +99,7 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
 
 def add_shared_string(work_dir: str, text: str) -> int:
     ss_path = os.path.join(work_dir, "xl", "sharedStrings.xml")
-    tree = ET.parse(ss_path)
+    tree = parse_xml(ss_path)
     root = tree.getroot()
 
     idx = 0
@@ -181,7 +183,7 @@ def main() -> None:
 
     # Step 2: Resolve worksheet path and get reference styles
     ws_path = find_ws_path(args.work_dir, args.sheet)
-    ws_tree = ET.parse(ws_path)
+    ws_tree = parse_xml(ws_path)
 
     ref_styles = {}
     if args.copy_style_from is not None:
@@ -195,7 +197,7 @@ def main() -> None:
         print(f"  Added shared string: \"{text}\" → index {text_indices[col]}")
 
     # Step 4: Re-parse worksheet and build new row
-    ws_tree = ET.parse(ws_path)
+    ws_tree = parse_xml(ws_path)
     root = ws_tree.getroot()
     sheet_data = root.find(_tag("sheetData"))
 
