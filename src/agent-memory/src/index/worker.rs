@@ -511,7 +511,9 @@ fn flush(
     // small batch of upserts/removes per debounce window instead of the
     // entire walk+extract pass.
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-    let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+    let agent_id = std::env::var("MCP_CLIENT_NAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     for rel in to_remove {
         if let Err(e) = store.remove(&rel) {
             tracing::warn!("index remove failed for {rel}: {e}");
@@ -557,7 +559,9 @@ fn full_scan(
     {
         let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen: HashSet<String> = HashSet::new();
-        let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+        let agent_id = std::env::var("MCP_CLIENT_NAME")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
 
         for entry in WalkDir::new(&mount.root)
             .follow_links(false)

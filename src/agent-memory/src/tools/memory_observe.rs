@@ -184,7 +184,9 @@ fn write_observation(
             .unwrap_or_else(|_| Utc::now().timestamp_millis());
         // Match watcher attribution before its deduplication can skip this
         // row: NULL hides it from its isolated agent and shares it with others.
-        let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+        let agent_id = std::env::var("MCP_CLIENT_NAME")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
         if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n, agent_id.as_deref()) {
             tracing::warn!("synchronous reindex after observe failed for {path}: {e}");
         }

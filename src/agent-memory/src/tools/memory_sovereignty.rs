@@ -30,7 +30,11 @@ pub fn memory_about(svc: &MemoryService, topic: &str, limit: usize) -> Result<St
         .as_ref()
         .ok_or_else(|| MemoryError::NotImplemented("index required for memory_about"))?;
 
-    let hits = index.search(topic, limit.max(1))?;
+    // Apply the same agent-scope resolution as memory_search: the isolation
+    // contract ("the agent never sees another agent's memories") must hold
+    // for every search-driven tool, not just memory_search.
+    let scope = crate::tools::memory_search::resolve_effective_scope(svc, None)?;
+    let hits = index.search_scoped(topic, limit.max(1), scope.as_deref(), None)?;
 
     if hits.is_empty() {
         return Ok(format!("I have no memories about '{topic}'."));
@@ -69,7 +73,14 @@ pub fn memory_forget(svc: &MemoryService, topic: &str, confirm: bool) -> Result<
         .as_ref()
         .ok_or_else(|| MemoryError::NotImplemented("index required for memory_forget"))?;
 
-    let hits = index.search(topic, 20)?;
+    // Same isolation contract as memory_about, but failing CLOSED: forget
+    // deletes files, so a configured isolated/filter scope that cannot be
+    // resolved (missing or invalid MCP_CLIENT_NAME) is a hard error rather
+    // than a degrade-to-shared — the read-side helper's read-anyway
+    // tradeoff would let a misconfigured deployment forget every agent's
+    // memories.
+    let scope = crate::tools::memory_search::resolve_effective_scope_strict(svc)?;
+    let hits = index.search_scoped(topic, 20, scope.as_deref(), None)?;
 
     // BM25 scores are negative (closer to 0 = better match). We rely on the
     // search engine's own ranking (top-20) rather than a secondary score
