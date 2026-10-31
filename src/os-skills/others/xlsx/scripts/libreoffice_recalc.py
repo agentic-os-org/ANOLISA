@@ -21,13 +21,13 @@ Exit codes:
     1 — LibreOffice found but recalculation failed (timeout, crash, bad file)
 """
 
+import argparse
+import os
+import shutil
 import subprocess
 import sys
-import shutil
-import os
 import tempfile
-import argparse
-
+from pathlib import Path
 
 # ── LibreOffice discovery ───────────────────────────────────────────────────
 
@@ -102,11 +102,15 @@ def recalculate(
 
         cmd = [
             soffice,
+            # A fresh profile avoids sharing settings and locks with other runs.
+            f"-env:UserInstallation={(Path(tmpdir) / 'profile').resolve().as_uri()}",
             "--headless",
-            "--norestore",           # do not attempt to restore crashed sessions
+            "--norestore",  # do not attempt to restore crashed sessions
             "--infilter=Calc MS Excel 2007 XML",
-            "--convert-to", "xlsx",
-            "--outdir", tmpdir,
+            "--convert-to",
+            "xlsx",
+            "--outdir",
+            tmpdir,
             tmp_input,
         ]
 

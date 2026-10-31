@@ -323,6 +323,12 @@ Exit codes from `libreoffice_recalc.py`:
 
 LibreOffice's `--convert-to xlsx` command opens the file using the full Calc engine with the `--infilter="Calc MS Excel 2007 XML"` filter, executes every formula, writes computed values into the `<v>` cache elements, and saves the output. This is the closest server-side equivalent of "open in Excel and press Save." The script also passes `--norestore` to prevent LibreOffice from attempting to restore previous sessions, which can cause hangs in automated environments.
 
+Each conversion uses a fresh temporary user profile through
+`-env:UserInstallation=`. This isolates settings and profile locks from the
+desktop session and other recalculation runs. The profile is removed with the
+temporary workspace after success or a handled conversion failure; desktop
+profile customizations are not loaded.
+
 **If LibreOffice is not installed:**
 
 macOS:
