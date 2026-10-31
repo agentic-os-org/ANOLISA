@@ -32,6 +32,10 @@ import zipfile
 import xml.etree.ElementTree as ET
 import re
 import json
+import os
+import stat
+import tempfile
+from pathlib import Path
 
 # OOXML SpreadsheetML namespace
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -320,6 +324,38 @@ def build_report(results: dict) -> dict:
     }
 
 
+def write_report(output_file: str, input_file: str, output: str) -> None:
+    """Publish a complete report without replacing the workbook or a partial output."""
+    target = Path(output_file).resolve()
+    source = Path(input_file).resolve()
+    if target == source or (
+        target.exists() and source.exists() and os.path.samefile(target, source)
+    ):
+        raise ValueError("report output must not refer to the input workbook")
+
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=".formula-report-",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(output + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if mode is not None:
+            temporary.chmod(mode)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main() -> None:
     use_json = "--json" in sys.argv
     use_report = "--report" in sys.argv
@@ -353,8 +389,11 @@ def main() -> None:
         report = build_report(results)
         output = json.dumps(report, indent=2, ensure_ascii=False)
         if output_file:
-            with open(output_file, "w", encoding="utf-8") as f:
-                f.write(output + "\n")
+            try:
+                write_report(output_file, args_clean[0], output)
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(f"Error: cannot write report to {output_file}: {exc}", file=sys.stderr)
+                sys.exit(1)
         else:
             print(output)
         sys.exit(1 if results["error_count"] > 0 else 0)
