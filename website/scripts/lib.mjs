@@ -42,7 +42,9 @@ export function toPosix(filePath) {
 
 export function titleFromMarkdown(markdown, fallback) {
   const heading = markdown.match(/^#\s+(.+)$/m)?.[1];
-  return heading?.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim() || fallback;
+  if (heading) return heading.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim();
+  const setext = markdown.match(/^(?!\s*#)([^\n]+)\r?\n(?:=+|-+)\s*$/m)?.[1];
+  return setext?.trim() || fallback;
 }
 
 export function kebabCase(value) {
