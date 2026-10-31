@@ -116,12 +116,19 @@ def _probe_exec(sandbox_url: str, max_attempts: int = 5):
             r = httpx.post(endpoint, json=payload, timeout=10)
             if r.status_code == 200:
                 body = r.json()
-                if "ok" in body.get("stdout", ""):
+                if (
+                    isinstance(body, dict)
+                    and isinstance(body.get("stdout"), str)
+                    and body["stdout"].strip() == "ok"
+                    and not body.get("error")
+                    and not body.get("isError")
+                    and body.get("status") != "error"
+                ):
                     return
         except Exception:
             pass
         if attempt < max_attempts - 1:
-            wait = backoff[attempt]
+            wait = backoff[min(attempt, len(backoff) - 1)]
             log(f"  [sandbox] probe /exec attempt {attempt + 1}/{max_attempts} "
                 f"failed, retrying in {wait}s")
             time.sleep(wait)
