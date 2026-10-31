@@ -25,6 +25,12 @@ SOURCE = ROOT / "npm/dist/tokenless/adapters/tokenless/qwenwork"
 BIN = Path(os.environ.get("TOKENLESS_TEST_BIN", ROOT / "target/npm-prebuilt/win32-x64"))
 
 
+def desktop_host_only(test):
+    """Identify tests whose prerequisites cannot be supplied by a hosted runner."""
+    test.desktop_host_only = True
+    return test
+
+
 @unittest.skipUnless(sys.platform == "win32", "requires native Windows")
 class WindowsHookTests(unittest.TestCase):
     def setUp(self):
@@ -94,6 +100,7 @@ class WindowsHookTests(unittest.TestCase):
         payload["tool_input"]["command"] = "Write-Output 'unchanged'"
         self.assertEqual(self.hook("PreToolUse", payload), {})
 
+    @desktop_host_only
     @unittest.skipUnless(os.environ.get("TOKENLESS_TEST_QWENWORK_APP"), "optional installed QwenWork host contract")
     def test_managed_bash_uses_installed_host_manifest(self):
         app = Path(os.environ["TOKENLESS_TEST_QWENWORK_APP"])
@@ -109,6 +116,7 @@ class WindowsHookTests(unittest.TestCase):
                     with self.subTest(engine=engine_name, tool=tool):
                         self.assert_native_call(tool, engine_name + "-" + tool)
 
+    @desktop_host_only
     @unittest.skipUnless(os.environ.get("TOKENLESS_TEST_QWENWORK_APP"), "optional installed QwenWork hook runner")
     def test_installed_host_executes_registered_hooks(self):
         self.install()
@@ -444,5 +452,42 @@ try {
                 self.assertEqual({name for name in files if name.startswith(prefix)}, {prefix + "keep.py"})
 
 
+def windows_test_cases():
+    """Expose the suite inventory so CI selections cannot silently omit new classes."""
+    return tuple(
+        value for value in globals().values()
+        if isinstance(value, type) and issubclass(value, unittest.TestCase)
+    )
+
+
+def desktop_host_test_ids():
+    """Derive fully qualified exemptions from the desktop-host markers."""
+    return {
+        f"{case.__module__}.{case.__qualname__}.{name}"
+        for case in windows_test_cases()
+        for name in unittest.defaultTestLoader.getTestCaseNames(case)
+        if getattr(getattr(case, name), "desktop_host_only", False)
+    }
+
+
+def main(argv=None):
+    """Require portable Windows coverage in CI while reporting desktop-only skips."""
+    arguments = list(sys.argv if argv is None else argv)
+    strict = "--ci" in arguments
+    if strict:
+        arguments.remove("--ci")
+    result = unittest.main(argv=arguments, exit=False).result
+    unexpected = []
+    if strict:
+        desktop_tests = desktop_host_test_ids()
+        unexpected = [
+            (test, reason) for test, reason in result.skipped
+            if test.id() not in desktop_tests
+        ]
+        for test, reason in unexpected:
+            print(f"Required Windows test skipped: {test.id()}: {reason}", file=sys.stderr)
+    return 0 if result.wasSuccessful() and not unexpected else 1
+
+
 if __name__ == "__main__":
-    unittest.main()
+    sys.exit(main())

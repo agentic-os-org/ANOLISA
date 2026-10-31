@@ -80,6 +80,8 @@ Linux 打包主机 `src/tokenless` 下的同一位置。两台主机使用相同
 任一二进制都会失败；`--target x64` 也包含 Windows。仅打包 Linux 或 macOS 时，
 使用 `--target linux` 或 `--target darwin`。Linux CI builder 也会构建 Windows
 二进制，因此生成产物不再必须使用原生 Windows 构建主机。
+[Windows CI ???](../../../../.github/workflows/tokenless-windows-ci.yaml)
+??????? Windows ???????????????
 
 本地验证运行 `cargo fmt --all -- --check`、
 `cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`，
@@ -92,7 +94,8 @@ Windows smoke 测试调用真实 PowerShell Hook 和原生二进制；应用界�
 中的 Node 调用已安装的 OpenCode Hook 执行器。设置 `TOKENLESS_TEST_BASH` 为 Git Bash
 可执行文件可加入旧版执行测试。数据库拒绝测试使用系统临时目录（Windows 为
 `%SystemRoot%/Temp`，Unix 为 `/tmp`），不依赖可能位于用户目录中的 `TEMP`、`TMP` 或
-`TMPDIR`；若系统临时目录不可写或处于受信用户目录内，测试会提示 fixture 不可用。
+`TMPDIR`。若 fixture 创建失败，包括系统临时目录不可写或处于受信用户目录内，
+测试会直接失败，不会跳过断言。
 允许写入受信用户目录的行为由另一项独立测试覆盖。设置 `TOKENLESS_TEST_POWERSHELL`
 为 `pwsh.exe`，可在 PowerShell 7 上重跑 Rust `powershell_binding` 测试，以及已安装
 宿主 smoke 测试中改写后的工具命令；默认使用 Windows PowerShell 5.1。宿主仍按安装器
@@ -100,6 +103,16 @@ Windows smoke 测试调用真实 PowerShell Hook 和原生二进制；应用界�
 验证 npm 安装后的启动器时，将 `TOKENLESS_TEST_BIN` 指向已安装的
 `anolisa-tokenless/bin`，并将 `TOKENLESS_TEST_NODE` 指向待验证的 Node 可执行文件
 （包括最低支持版本 16.7.0）。
+
+配置好上述二进制、Node 和 Git Bash 路径后，可在
+`python -X utf8 -B tests/test_windows.py` 后添加 `--ci`，严格检查跳过的测试。
+此模式下，除两个带有桌面宿主标记的测试外，任何测试被跳过都会导致失败。
+这两个测试分别检查托管 Bash manifest 和已安装的 OpenCode Hook 执行器，
+需要 `TOKENLESS_TEST_QWENWORK_APP`，在托管 CI 中仍为可选项。
+
+工作流先执行打包回归测试，再重新生成干净的 npm 制品用于安装，避免安装临时测试
+fixture。本地 tarball 安装使用离线模式，排除 registry 可选依赖，并显式安装
+Windows 平台 tarball。
 
 
 ## Linux CI 与发布产物

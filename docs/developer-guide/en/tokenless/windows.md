@@ -102,6 +102,8 @@ run `make npm-package-all` after staging the other four platform directories.
 `--target x64` also includes Windows. Use `--target linux` or `--target darwin`
 when packaging only those platforms. The Linux CI builder also produces the Windows
 binaries, so a native build host is optional for artifact generation.
+The [Windows CI workflow](../../../../.github/workflows/tokenless-windows-ci.yaml)
+builds and tests native Windows artifacts; it does not publish or transfer them.
 
 For local verification, run `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
@@ -115,8 +117,9 @@ for both engines and both MCP aliases, and to exercise the installed OpenCode
 hook runner using Node on PATH. Set `TOKENLESS_TEST_BASH` to Git Bash's executable
 to include legacy execution tests. The database rejection fixtures use system
 temporary storage (`%SystemRoot%/Temp` on Windows, `/tmp` on Unix), independently
-of a home-backed `TEMP`/`TMP`/`TMPDIR`; they report unavailable fixtures if that
-directory is unwritable or inside the trusted home. A separate test covers
+of a home-backed `TEMP`/`TMP`/`TMPDIR`. Fixture setup failures, including an
+unwritable directory or a root inside the trusted home, fail the test instead
+of skipping its assertions. A separate test covers
 allowed home paths. Set `TOKENLESS_TEST_POWERSHELL` to `pwsh.exe` when rerunning
 the Rust `powershell_binding` tests and the installed-host smoke test's rewritten
 tool command on PowerShell 7; their default is Windows PowerShell 5.1. The host
@@ -124,6 +127,17 @@ still executes the registered Python hooks with the installer's `powershell` set
 To test installed npm launchers, set `TOKENLESS_TEST_BIN` to the installed
 `anolisa-tokenless/bin` directory and `TOKENLESS_TEST_NODE` to the Node executable
 to verify (including the supported minimum, 16.7.0).
+
+After configuring these binary, Node, and Git Bash paths, add `--ci` to
+`python -X utf8 -B tests/test_windows.py` for strict skip checking. Any skipped
+test fails this mode except the two marked desktop-host tests: the managed Bash
+manifest check and the installed OpenCode hook runner check. They require
+`TOKENLESS_TEST_QWENWORK_APP` and remain optional on hosted CI.
+
+The workflow runs the packaging regression first, then rebuilds clean npm
+artifacts before installation so temporary test fixtures are not installed.
+Its local tarball installation uses offline mode and omits registry optional
+dependencies, while installing the Windows platform tarball explicitly.
 
 
 ## Linux CI and release artifacts

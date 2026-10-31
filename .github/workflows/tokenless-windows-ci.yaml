@@ -1,0 +1,124 @@
+name: CI / Tokenless Windows
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'src/tokenless/**'
+      - '.github/workflows/tokenless-windows-ci.yaml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'src/tokenless/**'
+      - '.github/workflows/tokenless-windows-ci.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  # Share the target directory with build-windows.ps1's explicit MSVC target.
+  CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  test:
+    name: Test Tokenless Windows x64
+    runs-on: [self-hosted, Windows, X64, tokenless-windows]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: src/tokenless
+    steps:
+      # Exercise the checkout used without Windows Developer Mode.
+      - name: Configure checkout
+        working-directory: ${{ github.workspace }}
+        run: |
+          git config --global core.symlinks false
+          git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/tokenless
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # Preserve the fetched RTK source and its separate target directory together.
+      - name: Cache pinned RTK source and build
+        uses: actions/cache@v4
+        with:
+          path: src/tokenless/third_party/rtk
+          key: tokenless-windows-rtk-v1-${{ runner.arch }}-1.93.0-${{ hashFiles('src/tokenless/scripts/setup-rtk.sh', 'src/tokenless/scripts/build-windows.ps1', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        # Deliberately check every target on the Windows toolchain, beyond Linux's MSRV gate.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run native tests with Windows PowerShell
+        # External-root fixtures now fail the test directly if they cannot be created.
+        run: cargo test --workspace --locked -- --test-threads=1
+
+      - name: Test PowerShell 7 bindings
+        run: |
+          $env:TOKENLESS_TEST_POWERSHELL = (Get-Command pwsh).Source
+          cargo test -p tokenless-runtime --locked powershell_binding -- --test-threads=1
+
+      - name: Build native Tokenless and pinned RTK
+        run: ./scripts/build-windows.ps1 -Debug
+
+      - name: Test CI skip policy
+        run: python -X utf8 -B tests/test_windows_ci.py -v
+
+      - name: Package and test checkout without symlinks
+        run: python -X utf8 -B tests/test_windows.py --ci WindowsPackagingTests -v
+
+      - name: Package clean Windows artifacts
+        run: node npm/scripts/package-npm.js --target win32-x64
+
+      - name: Install local npm artifacts
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'tokenless-npm'
+          $root = Get-Item 'npm/dist/tokenless/*.tgz'
+          $native = Get-Item 'npm/dist/tokenless-win32-x64/*.tgz'
+          npm install --prefix $prefix --offline --omit=optional --install-strategy=nested --foreground-scripts --no-audit --no-fund $root.FullName $native.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "TOKENLESS_TEST_BIN=$prefix/node_modules/anolisa-tokenless/bin" >> $env:GITHUB_ENV
+
+      - name: Select minimum supported launcher runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16.7.0'
+
+      - name: Test installed npm launchers and registered hooks
+        run: |
+          $gitRoot = Split-Path (Split-Path (Get-Command git).Source -Parent) -Parent
+          $env:TOKENLESS_TEST_BASH = Join-Path $gitRoot 'bin/bash.exe'
+          if (!(Test-Path -LiteralPath $env:TOKENLESS_TEST_BASH)) { throw 'Git Bash is required.' }
+          $env:TOKENLESS_TEST_NODE = (Get-Command node).Source
+          python -X utf8 -B tests/test_windows.py --ci WindowsHookTests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Real QwenWork desktop host tests require TOKENLESS_TEST_QWENWORK_APP and are not covered by this runner.' >> $env:GITHUB_STEP_SUMMARY

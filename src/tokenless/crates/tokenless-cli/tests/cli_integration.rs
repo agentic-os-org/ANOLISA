@@ -79,36 +79,49 @@ struct TempDataDir {
 impl TempDataDir {
     /// Use system-wide temporary storage so rejection tests also run when the
     /// default temporary directory is inside the trusted user profile.
-    fn new_external() -> Option<Self> {
+    fn new_external() -> Self {
         #[cfg(windows)]
-        let base = std::path::PathBuf::from(std::env::var_os("SystemRoot")?).join("Temp");
+        let base = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").expect("SystemRoot is required for external-root tests"),
+        )
+        .join("Temp");
         #[cfg(unix)]
         let base = std::path::PathBuf::from("/tmp");
+        Self::external_in(&base)
+    }
+
+    fn external_in(base: &std::path::Path) -> Self {
+        // A missing fixture must fail the rejection test, never skip its assertions.
         let temp_dir = tempfile::Builder::new()
             .prefix("tokenless-external-data-dir-")
-            .tempdir_in(&base)
-            .inspect_err(|error| {
-                eprintln!(
-                    "external-root fixture unavailable at {}: {error}",
+            .tempdir_in(base)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Cannot create external-root fixture at {}: {error}",
                     base.display()
                 )
-            })
-            .ok()?;
-        let root = temp_dir.path().canonicalize().ok()?;
+            });
+        let root = temp_dir
+            .path()
+            .canonicalize()
+            .expect("Cannot canonicalize external-root fixture");
         let home = get_home_dir();
-        if !home.is_empty() && root.starts_with(std::path::Path::new(&home).canonicalize().ok()?) {
-            eprintln!(
-                "external-root fixture is inside the trusted home: {}",
-                root.display()
+        if !home.is_empty() {
+            let home = std::path::Path::new(&home)
+                .canonicalize()
+                .expect("Cannot canonicalize trusted home for external-root tests");
+            assert!(
+                !root.starts_with(home),
+                "External-root fixture must be outside the trusted home: {}",
+                root.display(),
             );
-            return None;
         }
         let data_dir = root.join("databases");
-        Some(Self {
+        Self {
             _temp_dir: temp_dir,
             root,
             data_dir,
-        })
+        }
     }
 
     fn new() -> Option<Self> {
@@ -275,11 +288,26 @@ fn valid_stats_db_override_wins_over_invalid_data_dir() {
 }
 
 #[test]
+#[should_panic(expected = "Cannot create external-root fixture")]
+fn external_root_fixture_rejects_missing_storage() {
+    let directory = tempfile::tempdir().unwrap();
+    TempDataDir::external_in(&directory.path().join("missing"));
+}
+
+#[test]
+#[should_panic(expected = "must be outside the trusted home")]
+fn external_root_fixture_rejects_trusted_home() {
+    let home = get_home_dir();
+    assert!(
+        !home.is_empty(),
+        "Trusted home is required for this fixture test"
+    );
+    TempDataDir::external_in(std::path::Path::new(&home));
+}
+
+#[test]
 fn stats_db_override_cannot_escape_selected_data_dir() {
-    let fixture = match TempDataDir::new_external() {
-        Some(fixture) => fixture,
-        None => return,
-    };
+    let fixture = TempDataDir::new_external();
     let outside_db = fixture.root.join("outside-stats.db");
     let output = fixture
         .command()
@@ -4148,9 +4176,7 @@ fn post_tool_no_savings_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new_external() else {
-        return;
-    };
+    let fixture = TempDataDir::new_external();
     // The fixture root is never under the real home (`TempDataDir::new_external`
     // refuses that case), so this path is outside both trusted roots.
     let rejected = fixture.root.join("rejected-stats.db");
@@ -4174,9 +4200,7 @@ fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new_external() else {
-        return;
-    };
+    let fixture = TempDataDir::new_external();
     let rejected = fixture.root.join("rejected-stash.db");
     assert_notices_survive_unwritable_stderr(
         &["rejecting --stash-db"],
@@ -4197,9 +4221,7 @@ fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_env_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new_external() else {
-        return;
-    };
+    let fixture = TempDataDir::new_external();
     let rejected = fixture.root.join("rejected-stash.db");
     assert_notices_survive_unwritable_stderr(
         &["ignoring TOKENLESS_STASH_DB"],
