@@ -316,6 +316,40 @@ fn build_json_result_not_ready() {
 }
 
 #[test]
+fn build_json_result_not_ready_without_missing_names_permissions_cause() {
+    // A tool whose required deps are all present can still be NotReady
+    // because a permission check failed (check_tool: Write with a denied
+    // file_write). The diagnostic must carry a real cause instead of the
+    // degenerate "NOT_READY — . Skip retry." with an empty reason.
+    let result = build_json_result("Write", &ReadyStatus::NotReady, &[], &[]);
+    assert_eq!(result["status"], "NOT_READY");
+    assert!(result.get("missing").is_none());
+    let diag = result["diagnostic"].as_str().unwrap();
+    assert!(
+        diag.contains("permission"),
+        "diagnostic must name a cause: {diag}"
+    );
+    assert!(
+        !diag.contains("— ."),
+        "diagnostic must not carry an empty cause: {diag}"
+    );
+    assert!(diag.contains("Skip retry"));
+}
+
+#[test]
+fn build_json_result_not_ready_diagnostic_labels_each_missing_dep() {
+    let result = build_json_result(
+        "Shell",
+        &ReadyStatus::NotReady,
+        &[],
+        &["bash".to_string(), "jq".to_string()],
+    );
+    let diag = result["diagnostic"].as_str().unwrap();
+    assert!(diag.contains("required dependency missing: bash"));
+    assert!(diag.contains("required dependency missing: jq"));
+}
+
+#[test]
 fn build_json_result_unknown() {
     let result = build_json_result("UnknownTool", &ReadyStatus::Unknown, &[], &[]);
     assert_eq!(result["tool"], "UnknownTool");

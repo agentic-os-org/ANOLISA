@@ -1431,16 +1431,24 @@ fn build_json_result(
         );
     }
     if *status == ReadyStatus::NotReady {
-        let diag_parts: Vec<String> = missing
-            .iter()
-            .map(|m| format!("required dependency missing: {m}"))
-            .collect();
+        // `check_tool` reports NotReady when a required dependency is
+        // missing/outdated or a required permission check failed. When the
+        // caller passes no missing names, permissions are the only
+        // remaining cause — name it instead of emitting a cause-less
+        // "NOT_READY — . Skip retry." diagnostic.
+        let reason = if missing.is_empty() {
+            "required permission check failed".to_string()
+        } else {
+            missing
+                .iter()
+                .map(|m| format!("required dependency missing: {m}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         obj.insert(
             "diagnostic".to_string(),
             Value::String(format!(
-                "[tokenless:ready] {}: NOT_READY — {}. Skip retry.",
-                tool_name,
-                diag_parts.join(", ")
+                "[tokenless:ready] {tool_name}: NOT_READY — {reason}. Skip retry."
             )),
         );
     }
