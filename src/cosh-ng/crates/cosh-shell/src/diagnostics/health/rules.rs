@@ -188,6 +188,19 @@ pub(crate) fn evaluate_judgement_rules(
         ));
     }
 
+    if bool_value(facts, "kernel.openat2_supported") == Some(false) {
+        let mut confinement = finding(
+            "J17",
+            HealthSeverity::Critical,
+            HealthFindingCategory::RootCause,
+            HealthMessageId::HealthFindingWorkspaceConfinementUnsupported,
+            evidence_ids(facts, &["kernel.openat2_supported", "kernel.release"]),
+        );
+        confinement.detail_id = Some(HealthMessageId::HealthRemediationWorkspaceConfinement);
+        confinement.detail_args = workspace_confinement_detail_args(facts);
+        findings.push(confinement);
+    }
+
     for service in &config.services {
         let key = format!("service.{}.status", service.name);
         let Some(status) = string_value(facts, &key) else {
@@ -244,6 +257,24 @@ fn finding(
         evidence_fact_ids,
         suggested_try_ids: Vec::new(),
     }
+}
+
+/// Args shared by the finding title, the banner insight and the remediation
+/// text: the kernel this host runs and the release that first provides
+/// `openat2(2)`.
+fn workspace_confinement_detail_args(facts: &[HealthFact]) -> BTreeMap<String, String> {
+    let mut args = BTreeMap::new();
+    args.insert(
+        "kernel".to_string(),
+        string_value(facts, "kernel.release")
+            .unwrap_or("unknown")
+            .to_string(),
+    );
+    args.insert(
+        "required".to_string(),
+        super::kernel_confinement::OPENAT2_MINIMUM_KERNEL_LABEL.to_string(),
+    );
+    args
 }
 
 fn service_detail_args(

@@ -69,17 +69,19 @@ pub(crate) fn sorted_try_items(report: &HealthScanReport) -> Vec<&HealthTryItem>
 
 fn finding_display_rank(finding: &HealthFinding) -> u8 {
     match finding.title_id {
-        HealthMessageId::HealthFindingRecentOom => 0,
-        HealthMessageId::HealthFindingCpuLoadHigh => 1,
-        HealthMessageId::HealthFindingMemoryAvailableLow => 2,
-        HealthMessageId::HealthFindingSwapPressure => 3,
-        HealthMessageId::HealthFindingDiskHigh => 4,
+        // The agent cannot run at all on this host, so this leads the panel.
+        HealthMessageId::HealthFindingWorkspaceConfinementUnsupported => 0,
+        HealthMessageId::HealthFindingRecentOom => 1,
+        HealthMessageId::HealthFindingCpuLoadHigh => 2,
+        HealthMessageId::HealthFindingMemoryAvailableLow => 3,
+        HealthMessageId::HealthFindingSwapPressure => 4,
+        HealthMessageId::HealthFindingDiskHigh => 5,
         HealthMessageId::HealthFindingServiceFailed
-        | HealthMessageId::HealthFindingServiceInactive => 5,
+        | HealthMessageId::HealthFindingServiceInactive => 6,
         HealthMessageId::HealthFindingCoreCollectorUnavailable
-        | HealthMessageId::HealthFindingPlatformUnsupported => 6,
-        HealthMessageId::HealthFindingKernelPanic => 7,
-        _ => 8,
+        | HealthMessageId::HealthFindingPlatformUnsupported => 7,
+        HealthMessageId::HealthFindingKernelPanic => 8,
+        _ => 9,
     }
 }
 
