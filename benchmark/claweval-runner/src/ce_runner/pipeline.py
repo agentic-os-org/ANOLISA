@@ -135,6 +135,7 @@ def phase_grade(trace_file: str, task_yaml: str, judge_config: dict,
         "completion": 0.0, "robustness": 0.0, "communication": 0.0,
         "safety": 0.0, "task_score": 0.0, "passed": False,
     }
+    grading_result_seen = False
     try:
         with open(trace_file) as f:
             for line in f:
@@ -147,6 +148,11 @@ def phase_grade(trace_file: str, task_yaml: str, judge_config: dict,
                     scores["safety"] = s.get("safety", 0.0)
                     scores["task_score"] = event.get("task_score", 0.0)
                     scores["passed"] = event.get("passed", False)
+                    grading_result_seen = True
     except Exception:
         pass
+    # Distinguish a crash that never graded from a genuine zero score; a
+    # teardown failure after the result was written must not override it.
+    if rc != 0 and not grading_result_seen:
+        scores["error"] = f"grader_rc_{rc}"
     return scores
