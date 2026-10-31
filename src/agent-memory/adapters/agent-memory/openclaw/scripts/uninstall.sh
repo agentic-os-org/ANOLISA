@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall.sh — Remove agent-memory plugin via OpenClaw CLI + clean config.
+# uninstall.sh — Remove agent-memory through the host-owned plugin lifecycle.
 set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-openclaw}"
@@ -10,7 +10,6 @@ OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
 OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-OPENCLAW_CFG="${OPENCLAW_STATE_DIR}/openclaw.json"
 
 # Earlier installers recorded an explicit memory-core disable. Keep that record
 # for the operator: enabling it here would also change the selected memory slot.
@@ -24,69 +23,62 @@ fi
 echo "[${COMPONENT}] Removing ${AGENT} plugin..."
 
 if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
-    # Preview before the first removal, in the branch the resolved state takes:
-    # with a CLI the deregistration is the CLI's, without one the files are
-    # removed directly, and the config rewrite follows either way.
     if command -v "$OPENCLAW_BIN" &>/dev/null; then
         echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=${OPENCLAW_STATE_DIR} ${OPENCLAW_BIN} plugins uninstall ${PLUGIN_ID} --force"
     else
-        echo "DRY-RUN: rm -rf ${OPENCLAW_STATE_DIR}/plugins/${PLUGIN_ID} (no ${OPENCLAW_BIN} on PATH)"
-        echo "DRY-RUN: rm -rf ${OPENCLAW_STATE_DIR}/extensions/memory-anolisa (no ${OPENCLAW_BIN} on PATH)"
-    fi
-    if [ -f "$OPENCLAW_CFG" ]; then
-        # Mirror the real path's three branches (jq, python3, neither): the
-        # preview may not promise an edit this host cannot make.
-        if command -v jq &>/dev/null; then
-            echo "DRY-RUN: drop ${PLUGIN_ID} from plugins.allow, plugins.entries and plugins.slots in ${OPENCLAW_CFG} (jq)"
-        elif command -v python3 &>/dev/null; then
-            echo "DRY-RUN: drop ${PLUGIN_ID} from plugins.allow, plugins.entries and plugins.slots in ${OPENCLAW_CFG} (python3)"
-        else
-            echo "DRY-RUN: WARN: neither jq nor python3 is on PATH — a real uninstall would leave ${PLUGIN_ID} referenced in ${OPENCLAW_CFG}; edit it manually"
-        fi
+        echo "DRY-RUN: ${OPENCLAW_BIN} is not on PATH — a real uninstall would fail without changing plugin files or configuration."
     fi
     exit 0
 fi
 
 if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
-    echo "[${COMPONENT}] openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}) — removing plugin files manually."
-    rm -rf "${OPENCLAW_STATE_DIR}/plugins/${PLUGIN_ID}" 2>/dev/null || true
-    rm -rf "${OPENCLAW_STATE_DIR}/extensions/memory-anolisa" 2>/dev/null || true
-else
-    env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins uninstall "$PLUGIN_ID" --force || true
+    echo "[${COMPONENT}] ERROR: openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}); uninstall not completed." >&2
+    echo "[${COMPONENT}]        Plugin files and configuration were left untouched. Restore the CLI and re-run this script." >&2
+    exit 1
 fi
 
-# Clean openclaw.json config entries (plugins.allow + plugins.entries + plugins.slots).
-# Only this plugin's own keys go: a slot the operator moved to another backend
-# is theirs.
-if [ -f "$OPENCLAW_CFG" ]; then
-    if command -v jq &>/dev/null; then
-        jq '(.plugins.allow // [] | map(select(. != "'"$PLUGIN_ID"'"))) as $allow |
-            (.plugins.entries // {} | del(.["'"$PLUGIN_ID"'"])) as $entries |
-            (.plugins.slots // {} | to_entries | map(select(.value != "'"$PLUGIN_ID"'")) | from_entries) as $slots |
-            .plugins.allow = $allow | .plugins.entries = $entries | .plugins.slots = $slots' \
-            "$OPENCLAW_CFG" > "${OPENCLAW_CFG}.tmp" && mv "${OPENCLAW_CFG}.tmp" "$OPENCLAW_CFG"
-        echo "[${COMPONENT}] Cleaned ${AGENT} config entries from openclaw.json (via jq)."
-    elif command -v python3 &>/dev/null; then
-        # Fallback when jq isn't installed: same edit with stdlib JSON.
-        python3 - "$OPENCLAW_CFG" "$PLUGIN_ID" <<'PYEOF'
-import json, sys
-cfg_path, pid = sys.argv[1], sys.argv[2]
-with open(cfg_path) as f:
-    cfg = json.load(f)
-plugins = cfg.setdefault("plugins", {})
-plugins["allow"] = [x for x in plugins.get("allow", []) if x != pid]
-plugins["entries"] = {k: v for k, v in plugins.get("entries", {}).items() if k != pid}
-plugins["slots"] = {k: v for k, v in plugins.get("slots", {}).items() if v != pid}
-with open(cfg_path + ".tmp", "w") as f:
-    json.dump(cfg, f, indent=2)
-import os
-os.replace(cfg_path + ".tmp", cfg_path)
-PYEOF
-        echo "[${COMPONENT}] Cleaned ${AGENT} config entries from openclaw.json (via python3)."
+# OpenClaw owns both its install records and configuration routing (JSON5,
+# $include and OPENCLAW_CONFIG_PATH). Rewriting openclaw.json after a successful
+# uninstall can turn a writable include into unsupported sibling overrides.
+# Retain the complete diagnostic: only the host's exact missing-plugin result
+# is idempotent. Other errors must not be hidden by a substring match.
+UNINSTALL_LOG="$(mktemp)"
+trap 'rm -f "$UNINSTALL_LOG"' EXIT
+set +e
+env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" NO_COLOR=1 \
+    "$OPENCLAW_BIN" plugins uninstall "$PLUGIN_ID" --force 2>&1 | tee "$UNINSTALL_LOG"
+UNINSTALL_STATUS=("${PIPESTATUS[@]}")
+set -e
+UNINSTALL_RC="${UNINSTALL_STATUS[0]}"
+if [ "$UNINSTALL_RC" -ne 0 ]; then
+    DIAGNOSTIC="$(awk 'NF {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print tolower($0)}' "$UNINSTALL_LOG")"
+    if [ "$UNINSTALL_RC" -eq 1 ] && [ "${UNINSTALL_STATUS[1]}" -eq 0 ] && \
+        [ "$DIAGNOSTIC" = "plugin not found: ${PLUGIN_ID}" ]; then
+        echo "[${COMPONENT}] ${PLUGIN_ID} is already unregistered."
     else
-        echo "[${COMPONENT}] WARN: neither jq nor python3 found — openclaw.json may still" >&2
-        echo "[${COMPONENT}]       reference '${PLUGIN_ID}'. Edit ${OPENCLAW_CFG} manually." >&2
+        echo "[${COMPONENT}] ERROR: OpenClaw uninstall failed (rc=${UNINSTALL_RC}); no additional cleanup was attempted." >&2
+        echo "[${COMPONENT}]        Check the CLI output, repair the reported problem and re-run this script." >&2
+        exit "$UNINSTALL_RC"
     fi
+elif [ "${UNINSTALL_STATUS[1]}" -ne 0 ]; then
+    echo "[${COMPONENT}] ERROR: could not capture the complete OpenClaw uninstall result." >&2
+    exit 1
 fi
 
-echo "[${COMPONENT}] ${AGENT} plugin removed."
+# A successful host command can still warn that directory removal failed.
+# Report known residual paths without deleting untracked files or rolling back
+# configuration changes already made by the host. Include dangling symlinks.
+RESIDUE=0
+for PLUGIN_PATH in "${OPENCLAW_STATE_DIR}/extensions/${PLUGIN_ID}" \
+    "${OPENCLAW_STATE_DIR}/plugins/${PLUGIN_ID}"; do
+    if [ -e "$PLUGIN_PATH" ] || [ -L "$PLUGIN_PATH" ]; then
+        echo "[${COMPONENT}] ERROR: plugin path remains after host uninstall: ${PLUGIN_PATH}" >&2
+        RESIDUE=1
+    fi
+done
+if [ "$RESIDUE" -ne 0 ]; then
+    echo "[${COMPONENT}]        Inspect the remaining paths and host output; no additional cleanup was attempted." >&2
+    exit 1
+fi
+
+echo "[${COMPONENT}] ${AGENT} plugin unregistered; no plugin paths remain under extensions/ or plugins/."
