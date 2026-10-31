@@ -75,6 +75,11 @@ Enable Tokenless in QwenWorkCN native Bash and macOS workspace Shell sessions wi
 check activation there; CLI status verifies files but reports activation as
 `unknown`. Existing script installations must be uninstalled before CLI enable.
 
+Cosh adapters select and enable their delivered user source through cosh's native
+registry. Use a cosh-ng build supporting conditional adapter source cleanup;
+restart existing cosh sessions after enable or disable. Status verifies catalog
+configuration and reports resident-session loading as `unknown`.
+
 ## Install Modes
 
 | Mode | Prefix | When |

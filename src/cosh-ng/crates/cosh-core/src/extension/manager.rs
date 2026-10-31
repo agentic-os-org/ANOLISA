@@ -441,6 +441,14 @@ impl ExtensionManager {
             .ok_or_else(|| format!("extension not found after source selection: {name}"))
     }
 
+    /// Releases a matching adapter-owned user selection, including after removal.
+    pub fn clear_user_source(&mut self, name: &str, source_identity: &str) -> Result<(), String> {
+        state::clear_user_source(name, source_identity, self.state_dir_override.as_deref())
+            .map_err(|error| error.to_string())?;
+        self.refresh();
+        Ok(())
+    }
+
     /// Returns hook local names for compatibility cleanup in hook state.
     pub fn extension_hook_names(&self, extension_name: &str) -> HashSet<String> {
         let Some(extension) = self

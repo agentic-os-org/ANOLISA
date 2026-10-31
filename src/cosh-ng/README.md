@@ -19,6 +19,9 @@ import. Enhanced Bash login sessions capture the resulting PATH once, before the
 first prompt, and pass it only to provider child processes. Set
 `COSH_SHELL_BOOTSTRAP_PATH=0` to disable this startup PATH handoff.
 
+`COSH_HOME` can relocate user extensions and state; see the
+[Extension guide](../../docs/user-guide/en/cosh-ng/core/extensions.md).
+
 ## Why cosh-ng
 
 | In a conventional terminal | In cosh-ng |

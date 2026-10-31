@@ -72,6 +72,10 @@ ANOLISA 管理插件链接；启用或禁用后需重启 OpenCode。
 `anolisa adapter enable tokenless qwenwork` 接入 Tokenless。完成后重启应用并在应用内
 检查激活状态；CLI 验证文件，但激活状态为 `unknown`。已有脚本安装需先卸载再通过 CLI 启用。
 
+Cosh adapter 通过 cosh 原生 registry 选择并启用交付的用户来源。需使用支持按身份清理
+adapter 来源选择的 cosh-ng；enable 或 disable 后重启已有 cosh 会话。status 验证
+catalog 配置，已有会话的加载情况报告为 `unknown`。
+
 ## 安装模式
 
 | 模式 | 前缀 | 使用场景 |

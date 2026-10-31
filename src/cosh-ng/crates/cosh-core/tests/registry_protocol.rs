@@ -215,6 +215,8 @@ fn run_registry_request_with_args_and_env(
         .arg("--registry")
         .args(args)
         .env("HOME", home)
+        .env_remove("COSH_HOME")
+        .env_remove("COSH_STATES_DIR")
         .env_remove("XDG_DATA_HOME")
         .env_remove("COSH_AI_PROVIDER")
         .env_remove("COSH_MODEL")
@@ -442,6 +444,73 @@ fn registry_enable_rolls_back_when_required_runtime_health_fails() {
     let listed =
         run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
     assert_eq!(listed["data"][0]["desired_state"], "disabled");
+}
+
+#[test]
+fn registry_extensions_adapter_cleanup_preserves_other_choices() {
+    let home = tempfile::tempdir().unwrap();
+    let cosh_home = home.path().join("custom-cosh");
+    let extension = cosh_home.join("extensions/example.adapter");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{"name":"example.adapter","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let invoke = |action: &str, params: Value| {
+        run_registry_request_with_args_and_env(
+            "extensions",
+            action,
+            params,
+            home.path(),
+            None,
+            &[],
+            &[("COSH_HOME", cosh_home.to_str().unwrap())],
+        )
+    };
+    let capability = invoke("adapter-capabilities", serde_json::json!({}));
+    assert_eq!(capability["data"]["conditional_clear_user_source"], true);
+    let selected = invoke(
+        "select-source",
+        serde_json::json!({"name":"example.adapter","source":"user"}),
+    );
+    assert_eq!(selected["success"], true, "{selected}");
+    let state_path = cosh_home.join("states/extensions.json");
+    let read_state =
+        || serde_json::from_slice::<Value>(&std::fs::read(&state_path).unwrap()).unwrap();
+    let identity = extension
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let selected_state = read_state();
+    // Conditional cleanup cannot erase a different identity.
+    let wrong = invoke(
+        "clear-user-source",
+        serde_json::json!({"name":"example.adapter", "source_identity":"/some/other/user"}),
+    );
+    assert_eq!(wrong["success"], true, "{wrong}");
+    assert_eq!(read_state(), selected_state);
+    std::fs::remove_dir_all(cosh_home.join("extensions")).unwrap();
+    let cleared = invoke(
+        "clear-user-source",
+        serde_json::json!({"name":"example.adapter", "source_identity":identity}),
+    );
+    assert_eq!(cleared["success"], true, "{cleared}");
+    assert!(read_state()["sourceSelections"]
+        .get("example.adapter")
+        .is_none());
+    let mut system_selected = read_state();
+    system_selected["sourceSelections"]["example.adapter"] =
+        serde_json::json!({"source":"system", "sourceIdentity":identity});
+    system_selected["disabled"] = serde_json::json!(["another.extension"]);
+    std::fs::write(&state_path, serde_json::to_vec(&system_selected).unwrap()).unwrap();
+    let preserved = invoke(
+        "clear-user-source",
+        serde_json::json!({"name":"example.adapter", "source_identity":identity}),
+    );
+    assert_eq!(preserved["success"], true, "{preserved}");
+    assert_eq!(read_state(), system_selected);
 }
 
 #[test]

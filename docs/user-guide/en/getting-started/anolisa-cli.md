@@ -304,6 +304,31 @@ needs a retry, even if the active link matches. Retry enable or complete disable
 does not prove a running OpenCode process loaded it. `--dry-run` previews the
 operation without modifying plugin files or receipts.
 
+#### Cosh
+
+```bash
+anolisa adapter enable sec-core cosh
+anolisa adapter status sec-core
+anolisa adapter disable sec-core cosh
+```
+
+Enable selects and enables ANOLISA's delivered user extension through the native
+cosh registry, including when an RPM also supplies the system copy. Cosh must
+support conditional adapter source cleanup; older versions fail before files
+are changed and report that cosh-ng needs updating. `COSH_CORE_PATH` can select
+the native executable; `COSH_HOME` selects its extension and state root.
+
+Status checks the selected identity, enabled catalog state, and receipt files.
+Conflicts or disabled extensions report `degraded`; resident-session loading
+remains `unknown`. Restart existing cosh sessions after enable or disable.
+Disable removes only the ANOLISA-owned user copy and clears its matching user
+selection; package-owned system files and later source choices are preserved.
+When a component upgrade changes its extension identity, re-enable removes the
+previous managed copy and releases its matching selection before replacing the
+receipt. Failed cleanup retains the prior receipt; failed activation retains
+the replacement receipt so disable or re-enable can retry. Resolve changed
+managed files before re-enabling or disabling an extension.
+
 #### QwenWorkCN (macOS)
 
 ```bash

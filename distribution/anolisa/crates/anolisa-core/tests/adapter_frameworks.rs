@@ -47,6 +47,7 @@ const MANAGED_ENV: &[&str] = &[
     "CLAUDE_BIN",
     "COSH_BIN",
     "COSH_HOME",
+    "COSH_CORE_PATH",
     "XDG_DATA_HOME",
     "FAKE_CODEX_LOG",
     "FAKE_CODEX_STATE",
@@ -516,6 +517,59 @@ fn write_exec(path: &Path, body: &str) {
 // Cosh
 // ---------------------------------------------------------------------------
 
+fn stage_cosh_registry(prefix: &Path, guard: &EnvGuard) {
+    let script = prefix.join("cosh-core-fixture");
+    write_exec(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+r = json.loads(sys.stdin.readline())
+p = r["params"]
+home = Path(os.environ["COSH_HOME"])
+name = p.get("name", "tokenless")
+path = str((home / "extensions" / name).resolve())
+a = r["action"]
+state_path = home / "fixture-selections.json"
+selections = json.loads(state_path.read_text()) if state_path.exists() else {}
+failure_path = home / "fixture-fail-action"
+failure = failure_path.read_text() if failure_path.exists() else ""
+error = "injected registry failure" if failure == a + ":" + name else None
+
+def stale_selection():
+    return any(choice["source"] == "user"
+               and not Path(choice["source_identity"]).exists()
+               and (home / "fixture-system" / key).exists()
+               for key, choice in selections.items())
+
+if a == "adapter-capabilities":
+    data = {"conditional_clear_user_source": True}
+elif a == "detail":
+    choice = selections.get(name)
+    identity = choice["source_identity"] if choice else path
+    health = "conflict" if (choice and not Path(identity).exists()) else "healthy"
+    data = {"name": name, "available_source_identities": {"user": path}, "path": identity,
+            "source_identity": identity, "desired_state": "enabled", "health": health}
+else:
+    if not error:
+        if a == "select-source":
+            selections[name] = {"source": "user", "source_identity": path}
+        elif a == "clear-user-source":
+            choice = selections.get(name)
+            if choice == {"source": "user", "source_identity": p["source_identity"]}:
+                del selections[name]
+        if stale_selection():
+            error = "extension_candidate_validation_failed: stale user source"
+        else:
+            state_path.write_text(json.dumps(selections))
+    data = {"name": name}
+print(json.dumps({"type": "registry_response", "request_id": r["request_id"],
+                  "success": error is None, "error": error, "data": data}))
+"#,
+    );
+    guard.set("COSH_CORE_PATH", &script);
+}
+
 fn stage_cosh_bundle(root: &Path) {
     std::fs::create_dir_all(root.join("hooks")).expect("hooks");
     std::fs::write(root.join("cosh-extension.json"), br#"{"name":"tokenless"}"#).expect("manifest");
@@ -535,6 +589,7 @@ fn cosh_rpm_enable_uses_declared_subpackage_inventory() {
     let cosh_home = world.prefix.join("cosh-home");
     std::fs::create_dir_all(&cosh_home).expect("cosh home");
     guard.set("COSH_HOME", &cosh_home);
+    stage_cosh_registry(&world.prefix, &guard);
 
     let mut manager = AdapterManager::new(
         world.layout.clone(),
@@ -569,6 +624,7 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
     let cosh_home = world.prefix.join("cosh-home");
     std::fs::create_dir_all(&cosh_home).expect("cosh home");
     guard.set("COSH_HOME", &cosh_home);
+    stage_cosh_registry(&world.prefix, &guard);
     // A sibling extension owned by someone else must survive disable.
     let sibling = cosh_home.join("extensions").join("other");
     std::fs::create_dir_all(&sibling).expect("sibling");
@@ -605,7 +661,7 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
     );
 
     let status = manager.status(Some(COMPONENT)).expect("status");
-    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Unknown);
     assert!(
         status.entries[0]
             .report
@@ -622,9 +678,20 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
     let status = manager
         .status(Some(COMPONENT))
         .expect("status with runtime file");
-    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Unknown);
 
+    manager
+        .enable(COMPONENT, Some("cosh"), false)
+        .expect("repeat enable");
     std::fs::write(ext_dir.join("hooks/run-hook.sh"), b"changed").expect("mutate copied hook");
+    assert!(
+        manager.enable(COMPONENT, Some("cosh"), false).is_err(),
+        "re-enable preserves user edits"
+    );
+    assert_eq!(
+        std::fs::read(ext_dir.join("hooks/run-hook.sh")).unwrap(),
+        b"changed"
+    );
     let status = manager
         .status(Some(COMPONENT))
         .expect("status with changed copy");
@@ -633,6 +700,19 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
         condition.kind == AdapterConditionKind::MaterializedBundleMatches
             && condition.status == ConditionStatus::False
     }));
+    for _ in 0..2 {
+        let blocked = manager
+            .disable(COMPONENT, Some("cosh"), false)
+            .expect("disable edited copy");
+        assert!(
+            !blocked.claim_removed,
+            "retry must preserve edited managed files"
+        );
+        assert_eq!(
+            std::fs::read(ext_dir.join("hooks/run-hook.sh")).unwrap(),
+            b"changed"
+        );
+    }
     std::fs::write(ext_dir.join("hooks/run-hook.sh"), b"#!/bin/sh\n").expect("restore copied hook");
 
     let disabled = manager
@@ -654,6 +734,167 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
 }
 
 #[test]
+fn cosh_reenable_releases_replaced_identity_with_retryable_ownership() {
+    let guard = EnvGuard::acquire();
+    for mode in [
+        "success",
+        "cleanup-failure",
+        "activation-failure",
+        "later-system-choice",
+    ] {
+        let world = stage(
+            "cosh",
+            "extension",
+            "{datadir}/adapters/{component}/common/",
+            stage_cosh_bundle,
+        );
+        let cosh_home = world.prefix.join("cosh-home");
+        std::fs::create_dir_all(&cosh_home).unwrap();
+        guard.set("COSH_HOME", &cosh_home);
+        stage_cosh_registry(&world.prefix, &guard);
+        let system = cosh_home.join("fixture-system/tokenless");
+        std::fs::create_dir_all(&system).unwrap();
+        let system_manifest = system.join("cosh-extension.json");
+        std::fs::copy(
+            world.resource_root.join("cosh-extension.json"),
+            &system_manifest,
+        )
+        .unwrap();
+        let manager = world.manager();
+        manager.enable(COMPONENT, Some("cosh"), false).unwrap();
+        let old_dir = cosh_home.join("extensions/tokenless");
+        let new_dir = cosh_home.join("extensions/tokenless.v2");
+        let selections_path = cosh_home.join("fixture-selections.json");
+        let read_selections = || {
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&selections_path).unwrap())
+                .unwrap()
+        };
+        if mode == "later-system-choice" {
+            let choice = serde_json::json!({"tokenless": {
+                "source": "system", "source_identity": system.canonicalize().unwrap(),
+            }});
+            std::fs::write(&selections_path, serde_json::to_vec(&choice).unwrap()).unwrap();
+        }
+        let prior_choices = read_selections();
+        let snapshot = world.layout.snapshot_path(COMPONENT);
+        let contract = std::fs::read_to_string(&snapshot)
+            .unwrap()
+            .replace("plugin_id = \"tokenless\"", "plugin_id = \"tokenless.v2\"");
+        std::fs::write(&snapshot, contract).unwrap();
+        std::fs::write(
+            world.resource_root.join("cosh-extension.json"),
+            br#"{"name":"tokenless.v2"}"#,
+        )
+        .unwrap();
+        record_owned_adapter_files(&world.layout, &world.resource_root);
+        let preview = manager.enable(COMPONENT, Some("cosh"), true).unwrap();
+        let EnableOutcome::Planned { plan, .. } = preview else {
+            panic!("expected dry-run plan");
+        };
+        assert!(
+            plan.actions
+                .iter()
+                .any(|action| action.contains("release its matching source selection"))
+        );
+        assert!(old_dir.exists());
+        assert!(!new_dir.exists());
+        assert_eq!(read_selections(), prior_choices);
+        if mode == "success" {
+            let old_hook = old_dir.join("hooks/run-hook.sh");
+            std::fs::write(&old_hook, b"user edit").unwrap();
+            assert!(manager.enable(COMPONENT, Some("cosh"), false).is_err());
+            assert_eq!(std::fs::read(&old_hook).unwrap(), b"user edit");
+            assert_eq!(
+                world
+                    .load_state()
+                    .find_adapter_claim(COMPONENT, "cosh")
+                    .unwrap()
+                    .plugin_id
+                    .as_deref(),
+                Some("tokenless")
+            );
+            assert_eq!(read_selections(), prior_choices);
+            assert!(!new_dir.exists());
+            std::fs::write(&old_hook, b"#!/bin/sh\n").unwrap();
+        }
+        let failure_path = cosh_home.join("fixture-fail-action");
+        if mode == "cleanup-failure" {
+            std::fs::write(&failure_path, "clear-user-source:tokenless").unwrap();
+            assert!(manager.enable(COMPONENT, Some("cosh"), false).is_err());
+            assert_eq!(
+                world
+                    .load_state()
+                    .find_adapter_claim(COMPONENT, "cosh")
+                    .unwrap()
+                    .plugin_id
+                    .as_deref(),
+                Some("tokenless")
+            );
+            assert!(!old_dir.exists());
+            assert!(!new_dir.exists());
+            assert_eq!(
+                read_selections(),
+                prior_choices,
+                "failed cleanup retains old selection and receipt"
+            );
+            std::fs::remove_file(&failure_path).unwrap();
+        }
+        if mode == "activation-failure" {
+            std::fs::write(&failure_path, "enable:tokenless.v2").unwrap();
+            assert!(manager.enable(COMPONENT, Some("cosh"), false).is_err());
+            let state = world.load_state();
+            let claim = state.find_adapter_claim(COMPONENT, "cosh").unwrap();
+            assert_eq!(claim.plugin_id.as_deref(), Some("tokenless.v2"));
+            assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+            assert!(read_selections().get("tokenless").is_none());
+            assert!(
+                manager
+                    .disable(COMPONENT, Some("cosh"), false)
+                    .unwrap()
+                    .claim_removed
+            );
+            assert!(
+                !new_dir.exists(),
+                "replacement receipt can clean up failed activation"
+            );
+            std::fs::remove_file(&failure_path).unwrap();
+        }
+        manager
+            .enable(COMPONENT, Some("cosh"), false)
+            .unwrap_or_else(|error| panic!("{mode}: {error}"));
+        assert!(!old_dir.exists());
+        assert!(new_dir.join("cosh-extension.json").is_file());
+        assert!(system_manifest.is_file(), "system copy survives {mode}");
+        let choices = read_selections();
+        if mode == "later-system-choice" {
+            assert_eq!(choices["tokenless"], prior_choices["tokenless"]);
+        } else {
+            assert!(choices.get("tokenless").is_none());
+        }
+        assert_eq!(
+            choices["tokenless.v2"]["source_identity"],
+            new_dir.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, "cosh")
+                .unwrap()
+                .plugin_id
+                .as_deref(),
+            Some("tokenless.v2")
+        );
+        assert!(
+            manager
+                .disable(COMPONENT, Some("cosh"), false)
+                .unwrap()
+                .claim_removed
+        );
+        assert!(system_manifest.is_file());
+    }
+}
+
+#[test]
 fn cosh_dry_run_enable_writes_nothing() {
     let guard = EnvGuard::acquire();
     let world = stage(
@@ -665,6 +906,7 @@ fn cosh_dry_run_enable_writes_nothing() {
     let cosh_home = world.prefix.join("cosh-home");
     std::fs::create_dir_all(&cosh_home).expect("cosh home");
     guard.set("COSH_HOME", &cosh_home);
+    stage_cosh_registry(&world.prefix, &guard);
 
     let manager = world.manager();
     let outcome = manager
@@ -706,6 +948,7 @@ fn cosh_disable_keeps_receipt_when_ownership_marker_missing() {
     let cosh_home = world.prefix.join("cosh-home");
     std::fs::create_dir_all(&cosh_home).expect("cosh home");
     guard.set("COSH_HOME", &cosh_home);
+    stage_cosh_registry(&world.prefix, &guard);
 
     let manager = world.manager();
     manager

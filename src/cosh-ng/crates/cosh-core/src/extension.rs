@@ -22,6 +22,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::skill::COPILOT_CONFIG_DIR;
+
 pub use agent::AgentRegistry;
 pub use config::{ExtensionConfig, ExtensionHooks};
 pub use generation::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
@@ -31,8 +33,6 @@ pub use manifest::{ContextContribution, McpServerContribution, SettingDefinition
 pub use mcp::McpRuntime;
 pub use runtime::RuntimeSnapshotBuilder;
 pub use runtime_context::ExtensionContextSnapshot;
-
-use crate::skill::COPILOT_CONFIG_DIR;
 
 /// Sub-directory under `~/.copilot-shell/` containing installed extensions.
 pub const USER_EXTENSIONS_DIR: &str = "extensions";
@@ -196,7 +196,11 @@ pub struct InstallMetadata {
 
 /// Returns the user-level extension directory.
 pub fn user_extensions_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(COPILOT_CONFIG_DIR).join(USER_EXTENSIONS_DIR))
+    std::env::var_os("COSH_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(COPILOT_CONFIG_DIR)))
+        .map(|home| home.join(USER_EXTENSIONS_DIR))
 }
 
 /// Returns system extension directories for the running installation.

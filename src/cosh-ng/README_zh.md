@@ -15,6 +15,9 @@ JSONL 接口。
 记录最终 PATH，并仅传给 Provider 子进程。设置 `COSH_SHELL_BOOTSTRAP_PATH=0`
 可关闭该启动 PATH 交接。
 
+`COSH_HOME` 可统一指定用户扩展和状态根目录，详见
+[Extension 指南](../../docs/user-guide/zh/cosh-ng/core/extensions.md)。
+
 ## 为什么使用 cosh-ng
 
 | 传统终端 | cosh-ng |
