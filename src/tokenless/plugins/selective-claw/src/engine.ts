@@ -192,8 +192,6 @@ export class SelectiveContextEngine implements ContextEngine {
         : 128_000;
 
     const turns = this.deriveTurns(messages);
-    this.cacheTurnMessages(params.sessionId, turns);
-
     const bindings = this.bindSummaryTurns(params.sessionId, turns, records);
     const summaries = await this.generateMissingSummaries(params.sessionId, turns, bindings);
 
@@ -209,6 +207,8 @@ export class SelectiveContextEngine implements ContextEngine {
         `[selective-claw] assembled context (${result.estimatedTokens} tokens) exceeds budget (${tokenBudget})`
       );
     }
+
+    this.saveRecallWindow(params.sessionId, turns, bindings);
 
     return {
       messages: result.messages,
@@ -233,10 +233,8 @@ export class SelectiveContextEngine implements ContextEngine {
 
     const messages = stored.map((message) => this.restoreMessage(message));
     const turns = this.deriveTurns(messages);
-    this.cacheTurnMessages(params.sessionId, turns);
-
     if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
-      const bindings = this.bindSummaryTurns(params.sessionId, turns, stored);
+      const bindings = this.bindSummaryTurns(params.sessionId, turns, stored, stored);
       await this.generateMissingSummaries(params.sessionId, turns, bindings);
     }
   }
@@ -272,11 +270,25 @@ export class SelectiveContextEngine implements ContextEngine {
     }
 
     const missingTurns = requestedTurns.filter((seq) => !turnMap.has(seq));
-    const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, missingTurns);
-    for (const m of storeMessages) {
-      const arr = turnMap.get(m.turnSeq) ?? [];
-      arr.push({ role: m.role, content: m.content });
-      turnMap.set(m.turnSeq, arr);
+    if (missingTurns.length > 0) {
+      const aliases = this.store.getRecallAliases(sessionId, missingTurns);
+      // Numbers outside the latest window retain legacy direct-archive lookup.
+      const resolved = new Map(missingTurns.map((seq) => [
+        seq, aliases.has(seq) ? aliases.get(seq) ?? null : seq,
+      ]));
+      const archiveIds = [...new Set([...resolved.values()].filter((seq) => seq !== null))];
+      const archived = new Map<number, Array<{ role: string; content: string }>>();
+      for (const message of this.store.getMessagesByTurnSeqs(sessionId, archiveIds)) {
+        const group = archived.get(message.turnSeq) ?? [];
+        const restored = this.restoreMessage(message);
+        group.push({ role: restored.role, content: this.extractContent(restored) });
+        archived.set(message.turnSeq, group);
+      }
+      for (const [liveTurn, archiveTurn] of resolved) {
+        if (archiveTurn === null) continue;
+        const messages = archived.get(archiveTurn);
+        if (messages) turnMap.set(liveTurn, messages);
+      }
     }
 
     const result = requestedTurns
@@ -351,9 +363,10 @@ export class SelectiveContextEngine implements ContextEngine {
     sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
     records: MessageRecord[],
+    archiveRecords: MessageRecord[] = this.store.getMessages(sessionId),
   ): Map<number, number> {
     const archived = new Map<number, MessageRecord[]>();
-    for (const record of this.store.getMessages(sessionId)) {
+    for (const record of archiveRecords) {
       const group = archived.get(record.turnSeq) ?? [];
       group.push(record);
       archived.set(record.turnSeq, group);
@@ -420,17 +433,21 @@ export class SelectiveContextEngine implements ContextEngine {
     return summaries;
   }
 
-  private cacheTurnMessages(
+  private saveRecallWindow(
     sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
+    bindings: Map<number, number>,
   ): void {
-    if (!this.turnMessagesCache.has(sessionId)) {
-      this.turnMessagesCache.set(sessionId, new Map());
-    }
-    const cache = this.turnMessagesCache.get(sessionId)!;
-    for (const turn of turns) {
-      cache.set(turn.turnSeq, turn.messages);
-    }
+    // Failure must abort assembly before publishing new labels or cache entries:
+    // continuing with the previous durable window would return unrelated turns.
+    this.store.replaceRecallAliases(sessionId, new Map(
+      turns.map((turn) => [turn.turnSeq, bindings.get(turn.turnSeq) ?? null]),
+    ));
+    // Summary generation awaited: re-track a session evicted before this publication.
+    this.touchSession(sessionId);
+    this.turnMessagesCache.set(sessionId, new Map(
+      turns.map((turn) => [turn.turnSeq, turn.messages]),
+    ));
   }
 
   private touchSession(sessionId: string): void {

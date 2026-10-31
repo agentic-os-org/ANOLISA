@@ -514,6 +514,29 @@ is `selective-claw.db` under `OPENCLAW_STATE_DIR`, or under `~/.openclaw` when t
 variable is unset. Setting the plugin's `enabled` option to `false` skips database,
 context engine and recall tool registration.
 
+`expand_turn` uses the turn numbers of the last successfully assembled context window.
+Each `assemble` replaces both the in-memory recall window and its SQLite mapping to the
+original archived turns. `afterTurn` continues archiving messages and generating summaries
+without changing that published window. Complete turns keep their identity after cache
+eviction or a restart; archived raw messages preserve the original role and content extraction.
+A partial or rewritten turn without a complete archive anchor is returned as missing after
+its live cache is gone, never replaced by an unrelated archived turn. Numbers outside the
+saved window retain the existing direct-archive fallback. A label retained from an older
+window is resolved against the latest successful window: if that number now identifies a
+different turn, `expand_turn` returns that turn's content without indicating the remap,
+rather than reporting the stale label as missing. For example, label `1` can change from
+archive turn 3 to turn 6 after a later assembly. Calls in one session have no window or
+run identifier to distinguish those labels; concurrent runs share this same limitation.
+
+Saving the mapping is required: a SQLite write failure rejects `assemble` before new recall-cache
+entries or a context result are published, retaining the previous complete mapping. The host
+receives a context-assembly error; the plugin does not silently fall back or retry the write.
+An operator must repair the archive's write access, available space, or other reported SQLite
+problem before retrying the operation. Message imports that happened earlier in the call are
+not rolled back. `afterTurn` does not write recall aliases. The additive `recall_aliases` table
+does not rewrite archived messages; older versions ignore it and reverting restores the
+previous recall behavior.
+
 ### Hermes
 
 The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the
