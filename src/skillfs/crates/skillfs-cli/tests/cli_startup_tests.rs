@@ -2889,6 +2889,11 @@ fn stop_terminates_a_legacy_underscore_instance() {
 
     // A stand-in "old supervisor": alive, holding the legacy pid file and
     // state record exactly as the previous binary would have left them.
+    // The seeded `worker_program` must name the stand-in's real executable:
+    // stop verifies the recorded program against /proc/<pid>/exe before
+    // signaling, so a record naming a binary the stand-in is not would make
+    // stop spare it as a recycled pid. The identity gate itself is covered
+    // by the managed.rs unit tests; this test pins legacy-id resolution.
     let mut incumbent = Command::new("sleep")
         .arg("300")
         .spawn()
@@ -2903,7 +2908,7 @@ fn stop_terminates_a_legacy_underscore_instance() {
     let state = format!(
         "{{\"schema_version\":1,\"instance_id\":\"{legacy_id}\",\
          \"mountpoint\":\"{mp}\",\"source\":\"{src}\",\
-         \"worker_program\":\"skillfs\",\"worker_args\":[],\
+         \"worker_program\":\"/usr/bin/sleep\",\"worker_args\":[],\
          \"desired_state\":\"mounted\"}}",
         mp = normalized.display(),
         src = source_norm.display(),
