@@ -94,6 +94,8 @@ SSE → `{"mcpServers": {"<名称>": {"url": "..."}}}`
 
 不要加 `type`、`transport`、`disabled`、`alwaysAllow`、`scope` 这些字段——cosh 不认，加了只会出问题。
 
+运行下面的合并和检查命令时，按 UTF-8 解码子进程 stdout；报告编码不受继承的区域设置影响。
+
 ### 3. 写入配置文件
 
 用脚本合并写入，这样不会覆盖用户已有的其他配置：

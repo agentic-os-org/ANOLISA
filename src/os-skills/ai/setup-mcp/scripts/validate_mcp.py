@@ -116,4 +116,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Preserve the host error policy while changing only the report encoding.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors=sys.stdout.errors)
     main()
