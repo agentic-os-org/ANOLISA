@@ -3,15 +3,17 @@
 ANOLISA 文档爬取脚本
 使用 markdownify 将 HTML 转换为标准 Markdown 格式
 """
+import json
 import os
 import sys
-import requests
-from bs4 import BeautifulSoup
-import markdownify
-import json
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin
+
+import markdownify
+import requests
+from bs4 import BeautifulSoup
 
 BASE_URL = "https://help.aliyun.com"
 
@@ -50,7 +52,7 @@ def get_page_content(url):
 def extract_markdown(html, url):
     """使用 markdownify 提取并转换为 Markdown 格式"""
     soup = BeautifulSoup(html, 'html.parser')
-    
+
     # 提取标题
     title_tag = soup.find('h1')
     if not title_tag:
@@ -61,14 +63,14 @@ def extract_markdown(html, url):
         title = title.split(' - ')[0]
     if 'Alibaba Cloud Linux' in title:
         title = title.replace(' - Alibaba Cloud Linux(Alinux)-阿里云帮助中心', '').strip()
-    
+
     # 提取 meta 信息
     meta_modified = soup.find('meta', {'name': 'last-modified'})
     last_mod = meta_modified.get('content', '') if meta_modified else ''
-    
+
     # 找到 markdown-body 容器
     markdown_body = soup.find('div', class_='markdown-body')
-    
+
     if not markdown_body:
         print(f"  ⚠️ 未找到 markdown-body 容器")
         # 尝试其他容器
@@ -76,38 +78,46 @@ def extract_markdown(html, url):
             markdown_body = soup.find('div', class_=cls)
             if markdown_body:
                 break
-    
+
     content = ""
     if markdown_body:
         # 清理不需要的元素
         for tag in markdown_body.find_all(['script', 'style', 'nav', 'footer', 'header']):
             tag.decompose()
-        
+
+        # Cached Markdown no longer has the source page's URL context.
+        for element, attribute in (("a", "href"), ("img", "src")):
+            for tag in markdown_body.find_all(element):
+                target = tag.get(attribute)
+                if isinstance(target, str) and target:
+                    try:
+                        tag[attribute] = urljoin(BASE_URL + url, target)
+                    except ValueError:
+                        # Keep malformed source targets rather than aborting the page.
+                        continue
+
         # 使用 markdownify 转换
         # heading_style='ATX' 使用 # 标题格式
         # bullets='- 使用 - 作为无序列表
         content = markdownify.markdownify(
-            str(markdown_body),
-            heading_style='ATX',
-            bullets='-',
-            strip=['script', 'style']
+            str(markdown_body), heading_style="ATX", bullets="-", strip=["script", "style"]
         )
-        
+
         # 后处理：优化格式
         content = post_process_markdown(content)
-    
+
     return {
-        'url': url,
-        'full_url': BASE_URL + url,
-        'title': title,
-        'last_modified': last_mod,
-        'content': content
+        "url": url,
+        "full_url": BASE_URL + url,
+        "title": title,
+        "last_modified": last_mod,
+        "content": content,
     }
 
 def post_process_markdown(content):
     """Markdown 后处理：优化格式"""
     import re
-    
+
     # 1. 清理标题中的多余加粗标记：#### **标题** → #### 标题
     content = re.sub(r'^(#{1,6}) \*{2}(.+?)\*{2}$', r'\1 \2', content, flags=re.MULTILINE)
     
