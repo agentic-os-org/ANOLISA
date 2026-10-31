@@ -85,7 +85,7 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
     let tmp_path = dir.join(format!("{id}.tar.gz.partial"));
 
     // 1. Stream mount tree → tmp tarball, skipping .anolisa/.
-    {
+    let archived = (|| -> Result<()> {
         let f = File::create(&tmp_path)?;
         let gz = GzEncoder::new(f, Compression::default());
         let mut tar = ::tar::Builder::new(gz);
@@ -124,17 +124,42 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
             .map_err(|e| MemoryError::Other(format!("tar finish: {e}")))?;
         // GzEncoder::finish runs in Drop; explicit shutdown via `into_inner`
         // not necessary because Builder::finish already flushed payload.
-    }
+        Ok(())
+    })();
 
-    let size = std::fs::metadata(&tmp_path)?.len();
-    // 2. Crash-safe atomic rename: sync the tmp file first so the
-    //    inode data is on disk before the rename updates the dirent.
-    //    Then sync the parent directory so the dirent is durable.
-    let tmp_file = File::open(&tmp_path)?;
-    tmp_file.sync_all()?;
-    std::fs::rename(&tmp_path, &archive_path)?;
-    let dir_fd = File::open(&dir)?;
-    dir_fd.sync_all()?;
+    // 2. Crash-safe atomic rename: sync the tmp file first so the inode data
+    //    is on disk before the rename updates the dirent, then sync the
+    //    parent directory so the dirent is durable. These steps share the
+    //    cleanup below: a failure here (delayed ENOSPC/EIO from `sync_all`,
+    //    for example) leaves the partial file behind.
+    let mut renamed = false;
+    let staged = archived.and_then(|()| -> Result<u64> {
+        let size = std::fs::metadata(&tmp_path)?.len();
+        File::open(&tmp_path)?.sync_all()?;
+        std::fs::rename(&tmp_path, &archive_path)?;
+        renamed = true;
+        File::open(&dir)?.sync_all()?;
+        Ok(size)
+    });
+
+    let size = match staged {
+        Ok(size) => size,
+        Err(e) => {
+            // Every early return above happens after `File::create`, so an
+            // aborted snapshot leaves a file behind. Repeat failures (a
+            // symlink in the mount aborts every attempt) would otherwise
+            // grow `.anolisa/snapshots/` without bound.
+            //
+            // Before the rename that file is the partial one. After it, the
+            // archive is complete but has no sidecar yet, and `list_tarballs`
+            // never shows it — the same invisible-file leak, one full archive
+            // at a time. Remove whichever of the two this call created, and
+            // leave `archive_path` alone when the rename did not happen: with
+            // a reused id it may hold an earlier good snapshot.
+            remove_quietly(if renamed { &archive_path } else { &tmp_path });
+            return Err(e);
+        }
+    };
 
     // 3. Write sidecar JSON metadata.
     let info = SnapshotInfo {
@@ -144,8 +169,24 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
         size,
         backend: BACKEND_TAG.into(),
     };
-    write_sidecar(&dir.join(format!("{id}.json")), &info)?;
+    if let Err(e) = write_sidecar(&dir.join(format!("{id}.json")), &info) {
+        // Same hazard as above: without its sidecar the archive is invisible
+        // to `list_tarballs`, so it would sit in the meta directory forever.
+        remove_quietly(&archive_path);
+        return Err(e);
+    }
     Ok(info)
+}
+
+/// Remove a file left behind by a failed snapshot, keeping the failure
+/// observable: a silent `let _ =` here would hide exactly the case (read-only
+/// meta dir, EIO) where the leak survives.
+fn remove_quietly(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("snapshot cleanup {}: {e}", path.display()),
+    }
 }
 
 pub fn list_tarballs(mount: &MountPoint) -> Result<Vec<SnapshotInfo>> {
