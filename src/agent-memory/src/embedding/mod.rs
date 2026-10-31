@@ -123,3 +123,32 @@ fn resolve_api_key(config_value: &str, env_name: &str) -> String {
     }
     std::env::var(env_name).unwrap_or_default()
 }
+
+#[cfg(test)]
+pub(crate) mod testutil {
+    /// Spawn a one-shot HTTP server on the loopback interface that answers
+    /// the first request with `status` and `json_body`, returning its base
+    /// URL. Lets the provider clients be exercised against canned API
+    /// responses without a real backend.
+    pub(crate) fn serve_once(status: u16, json_body: &'static str) -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Drain the request (head + JSON body) so the client does
+                // not hit a reset before the response is written.
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+                    json_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+}
