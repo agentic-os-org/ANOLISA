@@ -513,16 +513,40 @@ pub trait StorageBackend: Send + Sync {
 
 | BackendType   | 适用场景                              | 数据存放                                                                     |
 | ------------- | ------------------------------------- | ---------------------------------------------------------------------------- |
-| `BtrfsBase` | 宿主根分区已经是 btrfs                | 直接在宿主 btrfs 上创建 subvolume                                            |
+| `BtrfsBase` | 已挂载且可写的原生 btrfs 文件系统 | `<btrfs_mount>/ws-ckpt-data` 下的 subvolume |
 | `BtrfsLoop` | 宿主是 ext4 / xfs 等非 btrfs 文件系统 | `/var/lib/ws-ckpt/btrfs-data.img` loop 镜像 + losetup + mkfs.btrfs + mount |
 
 ### 后端选择
 
 `backend_detect.rs` 在 daemon 启动期决定后端：
 
-1. **持久化优先**：`state.json` 记录上次使用的 backend，重启时沿用，避免数据漂移
-2. **配置覆盖**：`/etc/ws-ckpt/config.toml` 的 `backend.type = "btrfs-base" | "btrfs-loop"` 强制指定
-3. **auto 模式**：宿主根分区是 btrfs → `BtrfsBase`，否则 → `BtrfsLoop`
+1. **类型选择**：显式 `backend.type = "btrfs-base" | "btrfs-loop"` 优先；`auto`
+   沿用 `state.json` 的类型。只有未恢复既有后端时才进行首次选择。
+2. **BtrfsBase 位置选择**：`[backend.btrfs-base] btrfs_mount` > 同类型恢复时
+   `BackendPaths::BtrfsBase.data_root` 的父目录 > 首次检测。配置接受挂载点，
+   backend 再拼接 `ws-ckpt-data`。旧 manifest 的 `mount_path` 可能也写成数据目录，
+   因此恢复以 `data_root` 为准；它必须是 `<absolute mount>/ws-ckpt-data`。
+3. **检测**：无既有 BtrfsBase 根目录可恢复、也无显式挂载点时，按 `/proc/mounts`
+   顺序选择第一个可写物理 btrfs 挂载，排除 loop 设备。候选多于一个时记录所有设备和
+   挂载点、最终选择及显式 pin 建议。首次 `auto` 选择没有候选则使用 BtrfsLoop。
+   首次 `auto` 指定挂载点会选 Base；已有 Loop 的 `auto` 不因 Base 配置而换类型。
+4. **验证**：选定路径必须绝对、存在、是目录、在 `/proc/mounts` 中精确挂载为 btrfs
+   且可写；再检查实际文件系统和只读挂载标志。缺失、未挂载、类型错误和只读分别报错，
+   不寻找另一个可用盘。恢复失败、损坏的 manifest 或配置解析失败都不能成为首次检测。
+
+这个契约标识路径，不绑定设备或文件系统 UUID。同一路径换挂另一个文件系统是操作者的
+责任；记录的挂载移到另一位置则硬错误，不自动跟随。
+
+显式修改 `btrfs_mount` 是有意换根，允许启动但在 bootstrap/reconciliation 前警告：
+旧快照不再可见，`state_dir/indexes` 中未 pinned 的记录可能被 reconciliation 清除，
+切回原根不会恢复已清除记录。显式换后端类型也不采用旧后端数据，并输出同样的索引风险。
+同类型 Loop 恢复仍要求镜像存在；从 Base 显式切到 Loop 则可创建自己的新镜像。
+`btrfs_mount` 为 restart-only，reload 不改运行中的根目录；`--mount-path` 只服务 Loop，
+Base 发现自定义该参数时提示它不会选择 Base 位置。
+
+已知边界：`WorkspaceEntry.origin_backend` 目前只写入，不参与恢复过滤，不能据此承诺
+换类型时旧 workspace 注册会自动隔离。该消费者和数据迁移不在此位置选择契约中；
+详见维护者对[配置与恢复范围的确认](https://github.com/agentic-os-org/ANOLISA/pull/5082#issuecomment-6078030886)。
 
 `BtrfsLoop` image 大小由两个配置共同约束（默认 `img_size = 30` GB，`img_max_percent = 40`）：
 

@@ -298,7 +298,67 @@ Inspect the cause with `sudo journalctl -u ws-ckpt -n 100 --no-pager`. After fix
 
 The daemon configuration file is located at `/etc/ws-ckpt/config.toml`. This is a system-level configuration for the ws-ckpt daemon process.
 
-There is no user-side global config file. Auto-checkpoint and cleanup behavior are controlled per-plugin:
+There is no user-side global config file. Plugin-specific auto-checkpoint behavior is configured separately below.
+
+### Storage backend selection
+
+To use a particular native btrfs filesystem, edit `/etc/ws-ckpt/config.toml`:
+
+```toml
+[backend]
+type = "btrfs-base"
+
+[backend.btrfs-base]
+btrfs_mount = "/data"
+```
+
+`btrfs_mount` is an absolute **mount point**, not a device or the data directory.
+The mount must already exist, have an exact entry in `/proc/mounts`, use btrfs,
+and be mounted read-write. The daemon checks the live filesystem and read-only
+flags too. Data is stored in `/data/ws-ckpt-data`; do not set the option to that
+child directory. A missing, unmounted, non-btrfs or read-only selection is an
+error, even if another usable btrfs mount exists.
+
+Backend type and location are selected separately:
+
+- `[backend] type = "auto"` retains the backend type in
+  `/var/lib/ws-ckpt/state.json`. An explicit `btrfs-base` or `btrfs-loop`
+  overrides that type on restart.
+- For BtrfsBase, an explicit `btrfs_mount` takes precedence over the mount
+  derived from the persisted `data_root`. Detection is used only for a fresh
+  backend selection without a BtrfsBase root to restore. A pin also selects
+  BtrfsBase on a fresh `auto` install; it does not implicitly switch an existing
+  BtrfsLoop installation while the type remains `auto`.
+- Fresh detection chooses the first writable physical btrfs mount in kernel
+  mount-table order, excluding loop devices. When several are available, the
+  log lists all device/mount-point pairs and the choice, and recommends a pin.
+  Without any suitable candidate, a fresh `auto` install uses BtrfsLoop.
+
+On restart, the recorded BtrfsBase mount must still be mounted at the same
+path. Moving it elsewhere does not cause automatic discovery of its new
+location. This policy identifies paths, not filesystem UUIDs or devices:
+replacing the filesystem mounted at the same path is the operator's
+responsibility. Legacy manifests that put the data directory in both path
+fields remain supported through their `data_root`.
+
+Changing a configured pin is an intentional root change and emits a warning;
+it is not rejected as implicit drift. An explicit backend-type switch also
+does not adopt data from the previous backend. In either case, previous
+snapshots become invisible and startup reconciliation can prune unpinned
+snapshot records from `/var/lib/ws-ckpt/indexes`. **Pointing back does not
+recover pruned records.** Stop the daemon and back up the manifest, indexes
+and snapshot data before an intentional switch. This setting does not migrate
+any data.
+
+Upgrade the CLI and daemon from the same build together; the reload reply
+contains the expanded backend configuration. Use `sudo systemctl restart ws-ckpt`
+after upgrading or editing backend settings.
+`ws-ckpt reload` warns about a changed mount pin and keeps the active root until
+restart. `ws-ckpt daemon --mount-path` configures only BtrfsLoop; it does not
+select a BtrfsBase filesystem. Malformed configuration or an unreadable
+`state.json` stops startup instead of silently choosing a default backend.
+Repair the configuration or restore the original mount/state before retrying;
+removing the manifest starts a fresh selection and is not a recovery procedure.
 
 ### OpenClaw Plugin Configuration
 

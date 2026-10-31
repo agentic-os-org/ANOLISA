@@ -176,6 +176,13 @@ ws-ckpt reload
 
 `config -g` 写入全局配置后会校验 daemon 重载了相同的设置——若有字段不一致会以非零退出并逐项列出。Kubernetes sidecar 部署下 CLI 与 daemon 运行在不同容器，`/etc/ws-ckpt` 必须挂在两容器共享的卷上，否则全局设置无法送达 daemon。
 
+使用 BtrfsBase 时，可设置 `[backend.btrfs-base] btrfs_mount = "/data"`，固定到
+已挂载且可写的 btrfs 挂载点；数据位于 `/data/ws-ckpt-data`。后端设置需重启生效。
+未指定时，重启沿用持久化挂载点；该挂载不可用就报错。修改此配置会有意切换数据根，
+旧快照不再可见，启动可能清除未 pinned 的索引记录；修改前请备份状态和数据。
+`daemon --mount-path` 仅配置 BtrfsLoop。
+详见[存储后端选择](../../docs/user-guide/zh/ws-ckpt/index.md#存储后端选择)。
+
 ## 命令总览
 
 | 命令 | 说明 |

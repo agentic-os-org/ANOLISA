@@ -547,6 +547,20 @@ fn apply_global_config(state: &Arc<DaemonState>, file_config: &FileConfig) {
         .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS);
     cfg.backend_type = file_config.backend.r#type.clone();
 
+    let new_btrfs_mount = file_config
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|b| b.btrfs_mount.as_ref());
+    if new_btrfs_mount != cfg.btrfs_mount.as_ref() {
+        tracing::warn!(
+            "BtrfsBase btrfs_mount changed from {:?} to {:?}; restart ws-ckpt to apply. \
+             The active storage root is unchanged until restart.",
+            cfg.btrfs_mount,
+            new_btrfs_mount
+        );
+    }
+
     // img_* are bootstrap-only: warn if changed but don't mutate cfg
     // (loop image size is fixed until the next restart, where
     // bootstrap reconciles target = min(img_size GiB, total * pct/100)).
@@ -858,11 +872,45 @@ mod tests {
             auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: 30,
             img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,
             min_free_percent: 1.0,
         }
+    }
+
+    #[test]
+    fn reload_keeps_active_btrfs_mount_until_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.btrfs_mount = Some(PathBuf::from("/old-mount"));
+        let state = Arc::new(DaemonState::new(
+            config,
+            test_backend(),
+            temp.path().to_path_buf(),
+        ));
+        let original_root = state.backend.data_root().to_path_buf();
+        let file = FileConfig {
+            backend: ws_ckpt_common::BackendConfig {
+                btrfs_base: Some(ws_ckpt_common::BtrfsBaseConfig {
+                    btrfs_mount: Some(PathBuf::from("/new-mount")),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_global_config(&state, &file);
+        assert_eq!(
+            state.config_snapshot().btrfs_mount.as_deref(),
+            Some(std::path::Path::new("/old-mount"))
+        );
+        assert_eq!(state.backend.data_root(), original_root);
+        apply_global_config(&state, &FileConfig::default());
+        assert_eq!(
+            state.config_snapshot().btrfs_mount.as_deref(),
+            Some(std::path::Path::new("/old-mount"))
+        );
     }
 
     // The dispatcher routes all Request variants to handlers. For handlers that
