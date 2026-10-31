@@ -89,6 +89,9 @@ HTML 等文件来源保护；命令匹配可防止重试失效操作失败时误
 宿主 PostTool 替换与恢复能力，因此这项命令所有权选择对所有宿主一致；无法应用 Build Log
 缩减的宿主可能暂时原样接收这些命令的输出。
 
+RTK 为什么留在 PreTool（而不是迁移为 PostTool 输出过滤）、以及下游风险分类器需要遵守的包装形态契约，见
+[RTK Hook 接入位置评估](design/rtk-hook-placement_zh.md)。
+
 ## 四、集成路径
 
 ### 路径 1：OpenClaw 插件（实时工具结果 middleware）
