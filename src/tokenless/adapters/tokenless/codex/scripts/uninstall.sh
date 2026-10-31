@@ -35,7 +35,7 @@ if [[ "${1:-}" == "--non-interactive" ]]; then
     INTERACTIVE=0
 fi
 
-PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
+PREFIX="${TOKENLESS_INSTALL_PREFIX:-${HOME:-}/.local}"
 BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
