@@ -150,6 +150,14 @@ pub fn memory_search(
                     // corpus supplement) can safely request hybrid without
                     // checking config first. Uses search_scoped for consistent
                     // agent scope filtering.
+                    //
+                    // Degrading swaps the *ranking algorithm* and nothing else; the
+                    // rest of the request contract still applies. `category` rides
+                    // into `search_scoped` (SQL, before the `top_k` limit) exactly as
+                    // it does on the bm25 arm, so a `category=lesson` request cannot
+                    // silently widen to every category on the path most deployments
+                    // take — no provider is the default — and `tokens` is recorded
+                    // here too, keeping the audit accounting equal on all three.
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
@@ -158,10 +166,15 @@ pub fn memory_search(
                         .map_err(|e| {
                             audit_index_error(svc, &fallback_query_mode(mode), query, e)
                         })?;
+                    let tokens = hits
+                        .iter()
+                        .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
+                        .sum();
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(sanitized_query_path(&fallback_query_mode(mode), query))
-                            .bytes(hits.len() as u64),
+                            .bytes(hits.len() as u64)
+                            .tokens(tokens),
                     );
                     return Ok(hits);
                 }

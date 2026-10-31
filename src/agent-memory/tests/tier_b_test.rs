@@ -635,6 +635,149 @@ fn search_category_filter_is_case_sensitive() {
     assert_eq!(paths, vec!["facts/Interest/mixedcase.md"]);
 }
 
+/// Regression for PR #3479, replayed on top of #8721. `mode=vector|hybrid`
+/// degrades to a *scoped* BM25 search whenever no embedding provider is
+/// configured (the default, `[memory.embedding]` is opt-in) or an `agent_scope`
+/// is in play. That branch used to drop parts of the request contract: it
+/// ignored `category` entirely, and its audit entry reported `bytes` without
+/// `tokens`, unlike the bm25 and embedded vector/hybrid paths. Degrading swaps
+/// the ranking algorithm and nothing else.
+///
+/// #8721 already pushes `category` into SQL on every `search_scoped` caller,
+/// this fallback included; the assertions below pin that for the two fallback
+/// triggers (no provider, `filter:<agent>` scoping) and for the audit row, so a
+/// future `search_scoped` -> `search` swap here cannot silently widen the
+/// result set again.
+#[test]
+fn search_category_filter_survives_the_bm25_fallback() {
+    let (_tmp, svc) = setup();
+    let baseline = svc.index.as_ref().unwrap().count().unwrap();
+
+    // Two facts that both match every query term, one per category. The
+    // interest fact repeats the phrase so bm25 ranks it above the lesson fact
+    // and owns a top_k=1 window; the lesson fact mentions it once.
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/lesson").unwrap();
+    svc.write(
+        "facts/interest/01J1A2B3C4D5E6F7G8H9ABCDEF.md",
+        "---\ncategory: interest\ntitle: rust borrow checker\n---\n\n\
+         rust borrow checker rust borrow checker rust borrow checker",
+        false,
+    )
+    .unwrap();
+    svc.write(
+        "facts/lesson/01J1A2B3C4D5E6F7G8H9UVWXYZ.md",
+        "---\ncategory: lesson\ntitle: rust error\n---\n\n\
+         Agent hit a rust borrow checker error once",
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_index(&svc, baseline + 2));
+
+    // Fixture guard: unfiltered, the fallback really does see both categories,
+    // so the assertions below cannot pass on an empty result set.
+    let unfiltered = svc
+        .memory_search("rust borrow checker", 10, Some("hybrid"), None, None)
+        .unwrap();
+    assert!(
+        unfiltered
+            .iter()
+            .any(|h| h.path.starts_with("facts/interest/"))
+            && unfiltered
+                .iter()
+                .any(|h| h.path.starts_with("facts/lesson/")),
+        "fixture broken: expected both facts unfiltered:\n{unfiltered:#?}"
+    );
+
+    // Premise for the top_k=1 checks: the interest fact owns that window, so a
+    // category filter applied *after* LIMIT would return nothing for lesson.
+    let window = svc
+        .memory_search("rust borrow checker", 1, Some("hybrid"), None, None)
+        .unwrap();
+    assert_eq!(window.len(), 1, "expected a single-hit window");
+    assert!(
+        window[0].path.starts_with("facts/interest/"),
+        "premise broken, the interest fact does not own the top_k=1 window:\n{window:#?}"
+    );
+
+    for mode in ["hybrid", "vector"] {
+        let hits = svc
+            .memory_search("rust borrow checker", 10, Some(mode), Some("lesson"), None)
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "{mode}: expected the lesson fact on the BM25 fallback"
+        );
+        assert!(
+            hits.iter().all(|h| h.path.starts_with("facts/lesson/")),
+            "{mode}: category filter dropped on the BM25 fallback:\n{hits:#?}"
+        );
+
+        // The filter still runs before the limit on this path.
+        let hits = svc
+            .memory_search("rust borrow checker", 1, Some(mode), Some("lesson"), None)
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{mode}: category filter applied after the top_k limit:\n{hits:#?}"
+        );
+        assert!(hits[0].path.starts_with("facts/lesson/"));
+    }
+
+    // An explicit agent_scope forces the same BM25 fallback even when a
+    // provider is configured, so it must filter identically.
+    let hits = svc
+        .memory_search(
+            "rust borrow checker",
+            10,
+            Some("hybrid"),
+            Some("lesson"),
+            Some("filter:tester"),
+        )
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "scoped fallback lost the lesson fact:\n{hits:#?}"
+    );
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/lesson/")),
+        "scoped fallback dropped the category filter:\n{hits:#?}"
+    );
+
+    // Every fallback audit row reports tokens, as the bm25 and embedded
+    // vector/hybrid rows do, and both fallback spellings were exercised.
+    let audit = std::fs::read_to_string(svc.mount.audit_log_path()).unwrap();
+    let markers: Vec<String> = ["hybrid", "vector"]
+        .iter()
+        .map(|mode| format!("{}:", agent_memory::audit::fallback_query_mode(mode)))
+        .collect();
+    let rows: Vec<serde_json::Value> = audit
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("audit line is valid JSONL")
+        })
+        .filter(|row| {
+            row["tool"] == "memory_search"
+                && row["path"]
+                    .as_str()
+                    .is_some_and(|p| markers.iter().any(|m| p.starts_with(m)))
+        })
+        .collect();
+    for marker in &markers {
+        assert!(
+            rows.iter()
+                .any(|row| row["path"].as_str().is_some_and(|p| p.starts_with(marker))),
+            "no audit row for the {marker} fallback in:\n{audit}"
+        );
+    }
+    for row in &rows {
+        assert!(
+            row["tokens"].is_u64(),
+            "fallback audit row is missing tokens: {row}"
+        );
+    }
+}
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic
