@@ -1,16 +1,22 @@
 # OS Skills
 
-OS Skills is a system management and DevOps skill library for AI Agents. It provides pre-built skills that enable Agents to perform common system administration and automation tasks.
+OS Skills is a skill library for AI Agents that operate the system. It ships pre-built skills that let an Agent carry out system administration, kernel development, cloud operations, and document processing tasks.
 
 ---
 
 ## Overview
 
-OS Skills covers three main areas:
+Each skill lives in its own directory under `src/os-skills/`, grouped by category:
 
-- **System Administration** — user management, service control, package operations, filesystem tasks
-- **Cloud Integration** — cloud resource queries, instance management, network configuration
-- **DevOps Automation** — CI/CD pipeline management, container operations, deployment workflows
+| Category | Directory | Covers |
+|----------|-----------|--------|
+| **AI Tools** | `ai/` | Installing and configuring AI coding tools, MCP server setup |
+| **Alibaba Cloud** | `aliyun/` | ECS lifecycle management through the Alibaba Cloud CLI |
+| **DevOps** | `devops/` | GitHub workflows, kernel development, SysOM and AgentSight diagnostics |
+| **Monitoring & Perf** | `monitor-perf/` | Reserved for monitoring and performance skills; ships no skills yet |
+| **Others** | `others/` | Product guides, skill management, image, PDF, and spreadsheet tools |
+| **Security** | `security/` | Alibaba Cloud Linux CVE queries |
+| **System Admin** | `system-admin/` | ALinux administration, backup and restore, kernel tuning and upgrade, storage resize, shell scripting |
 
 ---
 
@@ -20,6 +26,8 @@ OS Skills covers three main areas:
 anolisa install os-skills
 ```
 
+Skills are installed to `/usr/share/anolisa/skills/` and discovered automatically by Copilot Shell.
+
 ---
 
 ## Quick Start
@@ -27,33 +35,74 @@ anolisa install os-skills
 Once installed, OS Skills are available to any ANOLISA-compatible Agent runtime. The Agent can invoke skills via natural language:
 
 ```
-> "Check disk usage on all mounted filesystems"
-> "Restart the nginx service"
-> "Show running containers and their resource usage"
+> "Grow the partition and the XFS filesystem after the cloud disk expansion"
+> "Check whether this CVE affects my Alibaba Cloud Linux host"
+> "Extract the tables from report.pdf"
 ```
 
 ---
 
-## Skill Categories
+## Included Skills
 
-### System Administration
+The names below are the skill directory names. Each directory holds a `SKILL.md` that defines the skill.
 
-| Skill | Description |
-|-------|-------------|
-| `disk-usage` | Check filesystem disk usage |
-| `service-ctl` | Start/stop/restart system services |
-| `process-mgmt` | List and manage processes |
-| `user-mgmt` | User and group management |
-| `package-ops` | Package install/remove/query |
-
-### DevOps Automation
+### AI Tools (`ai/`)
 
 | Skill | Description |
 |-------|-------------|
-| `container-ops` | Docker/Podman container management |
-| `log-analysis` | Search and analyze system logs |
-| `network-diag` | Network diagnostics (ping, traceroute, port check) |
-| `cron-mgmt` | Cron job management |
+| `install-claude-code` | Install and configure Claude Code on RPM-based Linux systems |
+| `install-hermes` | One-click installation and configuration of the Hermes Agent |
+| `install-openclaw` | Install and configure OpenClaw non-interactively with Alibaba Cloud Model Studio |
+| `install-qwenpaw` | Deploy the QwenPaw AI assistant on Alibaba Cloud Linux 4, including the model API key and the DingTalk channel |
+| `install-tokenless` | Install and configure Tokenless, the LLM token optimization toolkit |
+| `qwenpaw-usage` | QwenPaw CLI usage: heartbeat configuration, scheduled tasks, Docker packaging, workspace migration |
+| `setup-mcp` | Add and configure MCP servers in Copilot Shell, converting formats and keeping the JSON valid |
+
+### Alibaba Cloud (`aliyun/`)
+
+| Skill | Description |
+|-------|-------------|
+| `aliyun-ecs` | Manage Elastic Compute Service through the `aliyun` CLI: instances, disks, snapshots, images, security groups, key pairs, and elastic network interfaces |
+
+### DevOps (`devops/`)
+
+| Skill | Description |
+|-------|-------------|
+| `github` | Interact with GitHub through the `gh` CLI: issues, pull requests, CI runs, and API calls |
+| `kernel-dev` | Linux kernel development automation: SRPM and upstream builds, module development environment, dependency setup |
+| `sysom-agentsight` | Query AgentSight token consumption, token savings, audit events, and session interruptions |
+| `sysom-diagnosis` | Diagnose Linux server performance and stability problems and surface recommendations |
+
+### Others (`others/`)
+
+| Skill | Description |
+|-------|-------------|
+| `anolisa-guide` | Answer questions about ANOLISA, Alibaba Cloud Linux 4 Agentic Edition, and Copilot Shell |
+| `anolisa-register` | Manage Agentic OS registration, including joining and leaving the co-build program |
+| `clawhub-skill-mng` | Search, install, uninstall, update, and manage agent skills |
+| `cosh-guide` | Copilot Shell (cosh) CLI user guide and help |
+| `humanizer` | Remove signs of AI-generated writing so text reads more naturally |
+| `image-gen` | Generate images from text prompts through DashScope/Qwen |
+| `pdf-reader` | Extract text and tables from PDF files |
+| `xlsx` | Open, create, read, analyze, edit, and validate Excel and CSV/TSV files |
+
+### Security (`security/`)
+
+| Skill | Description |
+|-------|-------------|
+| `alinux-cve-query` | Query Alibaba Cloud Linux CVE information and the matching security advisories |
+
+### System Admin (`system-admin/`)
+
+| Skill | Description |
+|-------|-------------|
+| `alinux-admin` | Administer Alibaba Cloud Linux 4: shell scripts, systemd services, and networking |
+| `backup-restore` | Back up and restore workspaces, user data, the operating system, and Alibaba Cloud snapshots |
+| `ktuner` | Tune kernel parameters automatically, with recommendations, one-click apply, and rollback |
+| `regex-mastery` | Write, debug, and optimize regular expressions |
+| `shell-scripting` | Write bash or zsh scripts: argument parsing, error handling, and CLI automation |
+| `storage-resize` | Grow partitions and XFS/EXT4/Btrfs filesystems after a cloud disk expansion |
+| `upgrade-alinux-kernel` | Upgrade the Linux kernel on Alibaba Cloud Linux instances |
 
 ---
 
@@ -64,22 +113,6 @@ OS Skills integrates with cosh and other ANOLISA-compatible runtimes automatical
 ```bash
 # Verify skills are loaded
 anolisa status os-skills
-```
-
----
-
-## Configuration
-
-Configuration file: `~/.config/os-skills/config.toml`
-
-```toml
-[skills]
-# Enabled skill categories
-enabled = ["system", "devops"]
-
-[safety]
-# Require confirmation for destructive operations
-confirm_destructive = true
 ```
 
 ---
