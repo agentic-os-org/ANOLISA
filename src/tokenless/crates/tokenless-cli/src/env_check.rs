@@ -758,9 +758,16 @@ fn expand_path(path: &str) -> String {
 }
 
 /// Check if a config file exists.
+///
+/// The entry names a *file*: a directory or other non-regular node at the
+/// expanded path is a misconfiguration and must stay "missing" instead of
+/// satisfying the check the way a wrong-but-existing path would. Symlinks
+/// that resolve to a regular file keep counting as present.
 fn check_config_file(path: &str) -> bool {
     let expanded = expand_path(path);
-    fs::metadata(&expanded).is_ok()
+    fs::metadata(&expanded)
+        .map(|meta| meta.is_file())
+        .unwrap_or(false)
 }
 
 /// Check a permission type.

@@ -672,6 +672,33 @@ fn check_config_file_tilde_expansion() {
 // Legacy readiness checks require Unix tools or filesystem layouts.
 #[cfg(unix)]
 #[test]
+fn check_config_file_rejects_directory() {
+    // A directory at the configured path is a misconfiguration (e.g. the
+    // user pointed at ~/.tokenless instead of ~/.tokenless/config.json).
+    // `fs::metadata().is_ok()` counts it as present, reporting the tool as
+    // PARTIAL-ready with a "present" config that cannot be read as a file.
+    let dir = std::env::temp_dir();
+    let d = dir.join(format!("tokenless-cfgdir-test-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    assert!(
+        !check_config_file(d.to_str().unwrap()),
+        "a directory must not satisfy a config_files entry"
+    );
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn check_config_file_accepts_symlink_to_regular_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("real-config.json");
+    std::fs::write(&target, "{}").unwrap();
+    let link = dir.path().join("linked-config.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(check_config_file(link.to_str().unwrap()));
+}
+
+#[test]
 fn check_permission_file_read() {
     assert!(check_permission("file_read"));
 }
