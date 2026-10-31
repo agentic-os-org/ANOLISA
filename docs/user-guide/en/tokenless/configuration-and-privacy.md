@@ -140,6 +140,12 @@ category. Pages whose
 rendered body is shorter than 64 characters, such as application shells, pass through,
 and so do pages whose markup nests deeper than 512 elements: HTML parsing time grows
 quadratically with nesting depth, so such pages are not parsed at all.
+Ordered lists are rendered only when their visible items keep ascending decimal
+numbering with markers of at most nine digits. If a rendered list uses `reversed`,
+`li value`, a non-decimal `type`, an invalid or unsupported `start`, or contains an
+empty/removed item or non-item text that would change its numbering, the complete
+received page passes through unchanged. Pages with supported lists remain eligible;
+lists outside the selected content root do not block rendering.
 It only adopts output when both characters decrease and the heuristic token estimate
 saves at least 16 tokens, including the notice and recovery instruction.
 

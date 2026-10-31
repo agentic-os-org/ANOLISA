@@ -151,7 +151,8 @@ impl HtmlExtractor {
     /// part of the page and follows the end marker as written, except that
     /// lines imitating the view's wrapper are escaped like page text. Returns
     /// `None` when the rendered body is too short to be a page or the markup
-    /// nests deeper than the parse limit; callers keep the original then.
+    /// nests deeper than the parse limit, or a rendered ordered list cannot keep
+    /// its numbering in Markdown; callers keep the original then.
     #[must_use]
     pub fn render(&self, input: &str) -> Option<HtmlView> {
         let (document, trailer) = split_trailer(input);
@@ -233,6 +234,7 @@ impl HtmlExtractor {
             nodes: &nodes,
             removed: [0; REMOVED_CATEGORIES],
             depth: 0,
+            unsupported_list_numbering: false,
         };
         if let Some(head) = head {
             renderer.count_removals(head, false);
@@ -242,7 +244,7 @@ impl HtmlExtractor {
         // renderer.
         let body_markdown =
             escape_wrapper_lines(&renderer.blocks(root, is_sectioning(&nodes[root])));
-        if body_markdown.chars().count() < MIN_BODY_CHARS {
+        if renderer.unsupported_list_numbering || body_markdown.chars().count() < MIN_BODY_CHARS {
             return None;
         }
 
@@ -802,6 +804,7 @@ struct Renderer<'a> {
     nodes: &'a [Node],
     removed: [usize; REMOVED_CATEGORIES],
     depth: usize,
+    unsupported_list_numbering: bool,
 }
 
 impl Renderer<'_> {
@@ -974,17 +977,47 @@ impl Renderer<'_> {
     }
 
     fn list(&mut self, id: usize, in_sectioning: bool) -> String {
-        let ordered = self.nodes[id].is_element("ol");
-        let start = self.nodes[id]
-            .attr("start")
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(1);
+        let node = &self.nodes[id];
+        let ordered = node.is_element("ol");
+        let mut start = 1;
+        if ordered {
+            let parsed_start = node
+                .attr("start")
+                .map_or(Some(1), |value| value.trim().parse::<usize>().ok());
+            let item_count = node
+                .children
+                .iter()
+                .filter(|&&child| self.nodes[child].is_element("li"))
+                .count();
+            // Markdown lists support ascending decimal markers of at most nine
+            // digits; later markers cannot reset the displayed counter. Keep the
+            // whole page when this renderer cannot preserve the HTML numbering.
+            let supported = node.attr("reversed").is_none()
+                && node.attr("type").is_none_or(|kind| kind == "1")
+                && parsed_start.is_some_and(|first| {
+                    first
+                        .checked_add(item_count.saturating_sub(1))
+                        .is_some_and(|last| last <= 999_999_999)
+                })
+                && !node.children.iter().any(|&child| {
+                    let item = &self.nodes[child];
+                    item.is_element("li") && item.attr("value").is_some()
+                });
+            if !supported {
+                self.unsupported_list_numbering = true;
+                return String::new();
+            }
+            start = parsed_start.unwrap_or(1);
+        }
         let mut items = Vec::new();
         let mut number = start;
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
                 self.removed[category as usize] += 1;
+                if ordered && node.is_element("li") {
+                    self.unsupported_list_numbering = true;
+                }
                 continue;
             }
             // Stray inline content between items renders as its own item.
@@ -995,6 +1028,15 @@ impl Renderer<'_> {
                 self.inline(child, &mut text, in_sectioning);
                 text.trim().to_owned()
             };
+            // Dropping an empty li or numbering stray text would also change
+            // every following ordinal, even with ordinary start/type attributes.
+            if ordered
+                && ((node.is_element("li") && body.is_empty())
+                    || (!node.is_element("li") && !body.is_empty()))
+            {
+                self.unsupported_list_numbering = true;
+                return String::new();
+            }
             if body.is_empty() {
                 continue;
             }
