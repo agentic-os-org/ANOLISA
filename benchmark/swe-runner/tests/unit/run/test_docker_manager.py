@@ -47,6 +47,14 @@ def _mock_run_success(stdout: str = "fake-container-id\n", returncode: int = 0):
     return CommandResult(args=("docker",), stdout=stdout, stderr="", returncode=returncode)
 
 
+_LAST_CALLS: list = []
+
+
+def _run_command_calls() -> list:
+    """Calls captured by the capture_run_command patch helper."""
+    return _LAST_CALLS
+
+
 class TestStart:
     def test_default_pull_timeout_is_1200_seconds(self):
         manager = DockerManager(image_name="test-image:latest", instance_id="django__django-1234")
@@ -147,6 +155,77 @@ class TestStart:
             manager.start()
 
             assert manager.work_dir.exists()
+
+
+class TestStartFailureCleanup:
+    def test_start_removes_container_when_copy_fails(self, manager: DockerManager, tmp_path: Path) -> None:
+        """A failure after `docker run -d` must remove the container.
+
+        The cleanup callback that would remove the container is only
+        registered after start() returns (CoshAdapter.prepare), so without
+        an explicit removal here the container keeps running its sleep and
+        holds the work_dir bind mount until the timeout.
+        """
+
+        def _side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            _LAST_CALLS.append((cmd,))
+            if cmd[:2] == ["docker", "cp"]:
+                raise subprocess.CalledProcessError(1, cmd)
+            return _mock_run_success()
+
+        with patch("swe_runner.run.workspace.docker.run_command", side_effect=_side_effect):
+            with pytest.raises(subprocess.CalledProcessError):
+                manager.start()
+
+        calls = [cmd for (cmd,) in _LAST_CALLS]
+        run_index = next(
+            i for i, cmd in enumerate(calls) if cmd[:2] == ["docker", "run"]
+        )
+        cleanup_rms = [
+            cmd
+            for cmd in calls[run_index + 1 :]
+            if cmd == ["docker", "rm", "-f", manager.container_name]
+        ]
+        assert cleanup_rms, "container was not force-removed after the failure"
+        assert manager.container_id is None
+
+    def test_start_removes_container_when_repo_exclude_fails(self, manager: DockerManager, tmp_path: Path) -> None:
+        """The same cleanup must cover a repo-exclude installation failure."""
+
+        def _side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            _LAST_CALLS.append((cmd,))
+            if cmd[:2] == ["docker", "cp"]:
+                return _mock_run_success()
+            if cmd[:2] == ["docker", "run"]:
+                return _mock_run_success()
+            if cmd[:2] == ["docker", "rm"]:
+                return _mock_run_success()
+            if cmd[:2] == ["docker", "pull"]:
+                return _mock_run_success()
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch(
+            "swe_runner.run.workspace.docker.run_command", side_effect=_side_effect
+        ), patch(
+            "swe_runner.run.workspace.docker.install_repo_exclude_rules",
+            side_effect=OSError("read-only .git/info"),
+        ):
+            with pytest.raises(OSError):
+                manager.start()
+
+        calls = [cmd for (cmd,) in _LAST_CALLS]
+        run_index = next(
+            i for i, cmd in enumerate(calls) if cmd[:2] == ["docker", "run"]
+        )
+        cleanup_rms = [
+            cmd
+            for cmd in calls[run_index + 1 :]
+            if cmd == ["docker", "rm", "-f", manager.container_name]
+        ]
+        assert cleanup_rms, "container was not force-removed after the failure"
+        assert manager.container_id is None
 
 
 class TestExecute:
