@@ -746,6 +746,11 @@ jobs:
           python3 scripts/check-sqlite-entrypoints.py --self-test
           python3 scripts/check-sqlite-entrypoints.py
 
+      - name: Check Codex offset extraction
+        run: |
+          cd src/agentsight
+          python3 tests/test_extract_codex_offsets.py
+
       - name: Lint
         run: |
           cd src/agentsight
