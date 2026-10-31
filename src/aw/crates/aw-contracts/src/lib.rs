@@ -9,6 +9,7 @@ pub mod canonical;
 pub mod evidence;
 pub mod orchestration;
 pub mod registry;
+mod session_scope;
 pub mod validation;
 
 pub use registry::Registry;

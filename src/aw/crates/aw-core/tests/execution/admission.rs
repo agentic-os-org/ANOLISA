@@ -119,3 +119,34 @@ fn scopes_have_separate_claims_and_wrong_runtime_binding_is_rejected() {
         .all(|call| call.result().receipt["scope"]["session_id"] == "other-session"));
     assert_eq!(journal.claims.len(), 2);
 }
+
+#[test]
+fn scope_session_claim_requires_binding_confirmation() {
+    let core = Core::new().unwrap();
+    let host = Host::new();
+    let mut unbound_session = request(false);
+    unbound_session
+        .runtime
+        .as_object_mut()
+        .unwrap()
+        .remove("session_id");
+    assert!(matches!(
+        core.prepare(unbound_session, &host, 1000),
+        Err(Error::Preparation(
+            "scope session is not confirmed by the runtime binding"
+        ))
+    ));
+    assert!(host.invoked.is_empty());
+
+    let mut sessionless = request(false);
+    sessionless
+        .runtime
+        .as_object_mut()
+        .unwrap()
+        .remove("session_id");
+    sessionless.plan["scope"]
+        .as_object_mut()
+        .unwrap()
+        .remove("session_id");
+    core.prepare(sessionless, &host, 1000).unwrap();
+}
