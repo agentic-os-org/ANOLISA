@@ -31,3 +31,7 @@ jobs:
           python3 -m unittest discover -s src/os-skills/tests -p test_raw_packaging.py
           python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
           bash .github/actions/build-os-skills-prebuilt/test.sh
+      - name: Verify guide cache integrity
+        run: |
+          python3 -m pip install requests==2.34.2 beautifulsoup4==4.15.0 markdownify==1.2.3
+          python3 -m unittest discover -s src/os-skills/others/anolisa-guide/scripts -p test_crawl_docs.py
