@@ -63,6 +63,8 @@ pub mod analyzer;
 #[cfg(target_os = "linux")]
 pub(crate) mod background;
 #[cfg(target_os = "linux")]
+pub mod capture;
+#[cfg(target_os = "linux")]
 pub mod container;
 #[cfg(target_os = "linux")]
 pub mod discovery;
