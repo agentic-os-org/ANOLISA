@@ -20,6 +20,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 
 ### AI Tools
 - **install-claude-code** — Install and configure Claude Code IDE
+- **install-hermes** — Install and configure Hermes agent
 - **install-qwenpaw** — Deploy QwenPaw AI assistant with DingTalk integration
 - **install-openclaw** — Install and configure OpenClaw
 - **install-tokenless** — Install and configure Tokenless (LLM token optimization)
@@ -29,6 +30,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### System Admin
 - **alinux-admin** — ALinux 4 system management (systemd, SSH, firewalld, NetworkManager)
 - **backup-restore** — System backup and restore
+- **ktuner** — Deterministic kernel-tuning engine (diagnose, tune, rollback)
 - **regex-mastery** — Regular expression guide
 - **shell-scripting** — Bash/Zsh scripting and automation
 - **storage-resize** — Alibaba Cloud disk expansion (XFS/EXT4/Btrfs)
@@ -47,7 +49,14 @@ A curated collection of operational skills for AI Agents, covering system admini
 - **alinux-cve-query** — Query Alibaba Cloud Linux CVE vulnerability info
 
 ### Other
-- **cosh-guide** - Copilot Shell user guide
+- **anolisa-guide** — ANOLISA documentation reader and checker
+- **anolisa-register** — ANOLISA Co-Build Program registration helper
+- **clawhub-skill-mng** — ClawHub skill marketplace management
+- **cosh-guide** — Copilot Shell user guide
+- **humanizer** — Text humanization
+- **image-gen** — Image generation
+- **pdf-reader** — PDF reading and extraction
+- **xlsx** — Excel spreadsheet processing
 
 ## Skill Format
 
