@@ -26,6 +26,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
+    ErrInvalidManifestPath,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigMissing,
@@ -119,6 +120,50 @@ class TestVerifyManifestHashes(unittest.TestCase):
 
         manifest = {"files": [{"path": "main.py", "hash": self.file_hash}]}
         verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+    def test_absolute_path_rejected(self):
+        manifest = {"files": [{"path": "/etc/passwd", "hash": "somehash"}]}
+        with self.assertRaises(ErrInvalidManifestPath):
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+    def test_parent_dir_path_rejected(self):
+        manifest = {"files": [{"path": "../outside.py", "hash": "somehash"}]}
+        with self.assertRaises(ErrInvalidManifestPath):
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+    def test_nested_parent_dir_path_rejected(self):
+        manifest = {"files": [{"path": "sub/../../outside.py", "hash": "somehash"}]}
+        with self.assertRaises(ErrInvalidManifestPath):
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+    def test_symlink_target_rejected(self):
+        outside_dir = tempfile.mkdtemp()
+        try:
+            outside_file = os.path.join(outside_dir, "secret.txt")
+            with open(outside_file, "w") as f:
+                f.write("secret")
+            os.remove(self.test_file)
+            os.symlink(outside_file, self.test_file)
+
+            manifest = {"files": [{"path": "main.py", "hash": "somehash"}]}
+            with self.assertRaises(ErrInvalidManifestPath):
+                verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        finally:
+            shutil.rmtree(outside_dir)
+
+    def test_symlinked_dir_rejected(self):
+        outside_dir = tempfile.mkdtemp()
+        try:
+            outside_file = os.path.join(outside_dir, "secret.txt")
+            with open(outside_file, "w") as f:
+                f.write("secret")
+            os.symlink(outside_dir, os.path.join(self.tmpdir, "sub"))
+
+            manifest = {"files": [{"path": "sub/secret.txt", "hash": "somehash"}]}
+            with self.assertRaises(ErrInvalidManifestPath):
+                verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        finally:
+            shutil.rmtree(outside_dir)
 
 
 class TestVerifySkill(unittest.TestCase):
