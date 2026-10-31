@@ -93,7 +93,7 @@ def deduplicate(strings: list[str]) -> list[str]:
 
 def load_from_file(path: str) -> list[str]:
     """Read one string per non-empty line from a file."""
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:
         return [line.rstrip("\n") for line in f if line.strip()]
 
 
@@ -127,6 +127,9 @@ def main() -> None:
             raw = load_from_file(args.file)
         except FileNotFoundError:
             print(f"ERROR: File not found: {args.file}", file=sys.stderr)
+            sys.exit(1)
+        except UnicodeError as e:
+            print(f"ERROR: Input file must contain valid UTF-8 text: {e}", file=sys.stderr)
             sys.exit(1)
         except OSError as e:
             print(f"ERROR: Cannot read file: {e}", file=sys.stderr)
