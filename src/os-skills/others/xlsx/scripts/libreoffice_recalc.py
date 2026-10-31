@@ -70,6 +70,29 @@ def get_libreoffice_version(soffice: str) -> str:
 
 # ── Recalculation ───────────────────────────────────────────────────────────
 
+def _publish_output(source: str, output_path: str) -> None:
+    """Stage beside the destination so a failed copy cannot truncate the workbook."""
+    destination = os.path.realpath(output_path)
+    if os.path.isdir(destination):
+        destination = os.path.join(destination, os.path.basename(source))
+    parent = os.path.dirname(destination)
+    os.makedirs(parent, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".xlsx-recalc-", suffix=".xlsx", dir=parent)
+    try:
+        os.close(descriptor)
+        shutil.copy(source, temporary)
+        if os.path.exists(destination):
+            shutil.copymode(destination, temporary)
+        os.replace(temporary, destination)
+    finally:
+        try:
+            if os.name == "nt":
+                os.chmod(temporary, 0o600)
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def recalculate(
     input_path: str,
     output_path: str,
@@ -151,9 +174,10 @@ def recalculate(
                     f"Files in tmpdir: {os.listdir(tmpdir)}"
                 )
 
-        # Copy recalculated file to final destination
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        shutil.copy(tmp_output, output_path)
+        try:
+            _publish_output(tmp_output, output_path)
+        except OSError as error:
+            return False, f"Failed to publish recalculated workbook to {output_path}: {error}"
 
     return True, f"Recalculation complete. LibreOffice {version}. Output: {output_path}"
 
