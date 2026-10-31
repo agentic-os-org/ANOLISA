@@ -27,10 +27,10 @@ Notes:
     - Leading/trailing spaces are preserved with xml:space="preserve".
 """
 
-import sys
-import html
 import argparse
-
+import html
+import re
+import sys
 
 HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 SST_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -41,7 +41,21 @@ def escape_text(s: str) -> tuple[str, bool]:
     Return (escaped_text, needs_preserve).
     needs_preserve is True if the string has leading or trailing whitespace.
     """
-    escaped = html.escape(s, quote=False)
+    # Protect literal escape sequences before introducing new Xstring escapes.
+    encoded = re.sub(r"_(?=x[0-9A-Fa-f]{4}_)", "_x005F_", s)
+    encoded = "".join(
+        (
+            f"_x{ord(character):04X}_"
+            if (
+                (ord(character) < 0x20 and character not in "\t\n\r")
+                or 0xD800 <= ord(character) <= 0xDFFF
+                or character in "\ufffe\uffff"
+            )
+            else character
+        )
+        for character in encoded
+    )
+    escaped = html.escape(encoded, quote=False).replace("\r", "&#13;")
     needs_preserve = s != s.strip()
     return escaped, needs_preserve
 
