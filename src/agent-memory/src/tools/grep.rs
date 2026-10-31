@@ -123,14 +123,16 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
                 line.truncate(MAX_LINE_LEN);
             }
             if re.is_match(&line) {
+                // Check the cap before the push: an explicit `max = 0` asks for
+                // no hits at all, and a post-push check would still return one.
+                if hits.len() >= max {
+                    break 'outer;
+                }
                 hits.push(GrepHit {
                     path: rel_path.clone(),
                     line: idx + 1,
                     text: line,
                 });
-                if hits.len() >= max {
-                    break 'outer;
-                }
             }
         }
     }
