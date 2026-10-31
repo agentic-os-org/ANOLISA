@@ -216,6 +216,13 @@ pub enum Request {
         /// Opaque continuation token returned by the previous page.
         cursor: Option<String>,
     },
+    /// File-watcher health: which workspaces run without a live watcher,
+    /// and how many inotify queue overflows the shared watcher instance
+    /// observed. A dedicated request rather than a `StatusReport` field:
+    /// the report crosses the IPC in bincode frames, which encode
+    /// positionally, so inserting a field would break older clients and
+    /// the cosh-ng mirror of the status layout.
+    WatcherHealth,
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -393,6 +400,20 @@ pub enum Response {
     ListPageOk {
         snapshots: Vec<SnapshotListItem>,
         next_cursor: Option<String>,
+    },
+    /// Reply to [`Request::WatcherHealth`]. Field order is wire-frozen
+    /// (bincode encodes positionally).
+    WatcherHealthOk {
+        /// Workspaces currently running without a live file watcher:
+        /// change detection (automatic snapshot triggering, write
+        /// monitoring) is degraded for them. Empty when every workspace
+        /// has a healthy watcher.
+        workspaces_without_watcher: Vec<String>,
+        /// Cumulative inotify queue overflows observed on the shared
+        /// watcher instance. Each one interrupted event delivery; the
+        /// daemon treats every watched workspace as actively written
+        /// across an overflow until quiescence is re-observed.
+        watcher_queue_overflows: u64,
     },
 }
 
@@ -1032,6 +1053,13 @@ pub struct WorkspaceInfo {
 }
 
 /// Status report for the daemon and its managed workspaces.
+///
+/// Field order is wire-frozen: this struct crosses the daemon IPC inside
+/// bincode frames, which encode structs positionally — `#[serde(default)]`
+/// cannot make an inserted field compatible, and older clients plus the
+/// cosh-ng mirror (`cosh-types/src/checkpoint.rs`) decode exactly these
+/// four fields. New health data must ride a dedicated request/response
+/// pair (see [`Request::WatcherHealth`]), never a new field here.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct StatusReport {
     pub uptime_secs: u64,
@@ -2675,6 +2703,64 @@ mod tests {
                 assert_eq!(report.fs_used_bytes, 500_000_000);
             }
             _ => panic!("expected StatusOk variant"),
+        }
+    }
+
+    #[test]
+    fn status_report_keeps_the_four_field_wire_layout() {
+        // #7592 review: StatusReport crosses the daemon IPC in bincode
+        // frames, which encode structs positionally, and the cosh-ng mirror
+        // (cosh-types/src/checkpoint.rs) decodes daemon status through the
+        // four-field layout. An inserted field made a new client reading an
+        // older daemon fail with UnexpectedEof (it read fs_total_bytes as a
+        // Vec length) and an older client read the shifted frame silently
+        // wrong (empty list => fs_total 0, fs_used = real total). Pin the
+        // positional layout in both directions.
+        let legacy_frame = (
+            42u64,
+            vec![WorkspaceInfo {
+                ws_id: "ws-abc".to_string(),
+                path: "/home/user/ws".to_string(),
+                snapshot_count: 5,
+            }],
+            1_000_000_000u64,
+            500_000_000u64,
+        );
+        // Older daemon -> this client.
+        let bytes = bincode::serialize(&legacy_frame).unwrap();
+        let report: StatusReport = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(report.uptime_secs, 42);
+        assert_eq!(report.workspaces.len(), 1);
+        assert_eq!(report.fs_total_bytes, 1_000_000_000);
+        assert_eq!(report.fs_used_bytes, 500_000_000);
+        // This daemon -> older client (and the cosh-ng mirror).
+        let report = StatusReport {
+            uptime_secs: 7,
+            workspaces: vec![],
+            fs_total_bytes: 9,
+            fs_used_bytes: 8,
+        };
+        let bytes = bincode::serialize(&report).unwrap();
+        let decoded: (u64, Vec<WorkspaceInfo>, u64, u64) = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, (7, vec![], 9, 8));
+    }
+
+    #[test]
+    fn response_watcher_health_ok_round_trip() {
+        let resp = Response::WatcherHealthOk {
+            workspaces_without_watcher: vec!["ws-degraded".to_string()],
+            watcher_queue_overflows: 3,
+        };
+        let decoded = round_trip_response(&resp);
+        match decoded {
+            Response::WatcherHealthOk {
+                workspaces_without_watcher,
+                watcher_queue_overflows,
+            } => {
+                assert_eq!(workspaces_without_watcher, vec!["ws-degraded".to_string()]);
+                assert_eq!(watcher_queue_overflows, 3);
+            }
+            _ => panic!("expected WatcherHealthOk variant"),
         }
     }
 

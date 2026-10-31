@@ -217,6 +217,7 @@ pub(crate) async fn dispatch_with_context(
             Ok(()) => crate::workspace_mgr::unregister_missing_workspace(state, &workspace).await,
         },
         Request::HealthAdvisory => Ok(handle_health_advisory(state).await),
+        Request::WatcherHealth => Ok(handle_watcher_health(state).await),
         Request::WorkspaceIdentityV2 { registration_path } => {
             return crate::guarded_checkpoint::workspace_identity(state, &registration_path).await;
         }
@@ -412,6 +413,31 @@ async fn handle_status(
             fs_used_bytes,
         },
     })
+}
+
+/// Handle the WatcherHealth request: name the workspaces running without a
+/// live file watcher and report inotify queue overflows on the shared
+/// watcher instance (#7233).
+///
+/// A dedicated request rather than a `StatusReport` field: the report
+/// crosses the IPC in bincode frames, which encode positionally, so an
+/// inserted field would break older clients and the cosh-ng mirror of the
+/// status layout (#7592 review).
+async fn handle_watcher_health(state: &Arc<DaemonState>) -> Response {
+    // Watcher health: a workspace whose watcher failed to start (or was
+    // never started) silently loses change detection unless something
+    // names it (#7233).
+    let workspaces_without_watcher: Vec<String> = state
+        .get_all_workspace_info()
+        .await
+        .into_iter()
+        .map(|ws| ws.ws_id)
+        .filter(|ws_id| !state.has_watcher(ws_id))
+        .collect();
+    Response::WatcherHealthOk {
+        workspaces_without_watcher,
+        watcher_queue_overflows: crate::fs_watcher::shared_queue_overflows().unwrap_or(0),
+    }
 }
 
 /// Handle the Config request: return the current daemon configuration.
@@ -1393,6 +1419,53 @@ mod tests {
             }
             other => panic!("expected StatusOk, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn watcher_health_names_workspaces_without_a_live_watcher() {
+        // #7233: a watcher that failed to start (or was never started) used
+        // to be invisible; the watcher-health surface must name the degraded
+        // workspaces. It is a dedicated request so the bincode status layout
+        // stays byte-compatible with older clients (#7592 review).
+        let (state, _ws_id, _ws_link, _temp) = live_topology("ws-no-watch");
+        let resp = dispatch(&state, Request::WatcherHealth).await;
+        let Response::WatcherHealthOk {
+            workspaces_without_watcher,
+            watcher_queue_overflows,
+        } = resp
+        else {
+            panic!("{resp:?}")
+        };
+        assert_eq!(
+            workspaces_without_watcher,
+            vec!["ws-no-watch".to_string()],
+            "watcher health must name workspaces running without a file watcher"
+        );
+        assert_eq!(
+            watcher_queue_overflows, 0,
+            "no inotify queue overflow has occurred in this daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_health_omits_workspaces_with_a_live_watcher() {
+        let (state, ws_id, ws_link, _temp) = live_topology("ws-live-watch");
+        state.register_watcher(
+            ws_id.clone(),
+            crate::fs_watcher::WorkspaceWatcher::start(&ws_link).unwrap(),
+        );
+        let resp = dispatch(&state, Request::WatcherHealth).await;
+        let Response::WatcherHealthOk {
+            workspaces_without_watcher,
+            ..
+        } = resp
+        else {
+            panic!("{resp:?}")
+        };
+        assert!(
+            workspaces_without_watcher.is_empty(),
+            "a workspace with a live watcher must not be listed degraded: {workspaces_without_watcher:?}"
+        );
     }
 
     fn recovery_snapshot() -> ws_ckpt_common::SnapshotMeta {
