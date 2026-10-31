@@ -32,7 +32,9 @@ async function document(source, language) {
     name: displayName(source),
     source,
     language,
-    markdown: markdown.replace(/(!?)\[([^\]]*)\]\((?!https?:|#|mailto:)([^)]+)\)/g, (_match, image, label, target) => {
+    // Protocol-relative links already point at an external host; rewriting
+    // them as repository paths silently breaks changelog badges and assets.
+    markdown: markdown.replace(/(!?)\[([^\]]*)\]\((?!https?:|\/\/|#|mailto:)([^)]+)\)/g, (_match, image, label, target) => {
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), target));
       return `${image}[${label}](https://github.com/agentic-os-org/ANOLISA/blob/main/${resolved})`;
     }),
