@@ -888,3 +888,23 @@ fn insight_intercept_ai_off_preserves_health_ghost_routing() {
         AgentContextBinding::StartupHealthFollowUp
     );
 }
+
+#[test]
+fn path_prompt_notice_starts_on_new_line() {
+    let state = InlineState::default();
+    let input = "read ./README.md";
+    let event = path_prompt_event(input, false);
+    let request = agent_request_from_intercepted_input(&event, 1, true).expect("plain request");
+    let mut output = Vec::new();
+
+    render_path_prompt_notice(&event, &request, &state, &mut output).expect("plain notice");
+    let rendered = String::from_utf8(output).expect("UTF-8 notice");
+    assert!(
+        rendered.starts_with('\n'),
+        "notice must start on its own line: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains(&format!("{input}\u{256d}")),
+        "top border must not be glued to the echoed input: {rendered:?}"
+    );
+}
