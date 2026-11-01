@@ -198,6 +198,28 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+### 汇总难度分组
+
+```bash
+python scripts/summarize_results.py \
+  --input claw-eval/traces/<run>/batch_results.json \
+  --group-by difficulty \
+  --format csv \
+  --output difficulty.csv
+```
+
+`--group-by` 默认 `task`，保留原有逐任务/试验布局。`difficulty` 视图支持
+table 和 CSV，按标签确定性排序，缺失或空标签归入 `unknown`。它展示任务/
+试验/错误数量、有效判定和通过试验数、通过率、有效评分试验数/平均评分，以及
+有效计时试验数/平均 wall seconds。平均值按每个有效试验加权。错误试验计入
+数量，但不参与通过率和平均值；缺失、布尔、负数或非有限的数值指标视为不可用。
+平均值或通过率为空表示没有有效证据。通过率只使用实际布尔类型的 `passed`
+指标，范围为 0 到 1。
+
+难度输出使用 UTF-8，保留 CSV 转义/Unicode 标签，并支持空分组。无效的任务/
+试验容器会在写出前报错。`--report-dir` 的逐试验失败分类仍用于 task 视图；
+difficulty 聚合不会加载这些报告。
+
 ## 故障排查
 
 | 问题 | 修复 |

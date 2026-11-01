@@ -198,6 +198,31 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+### Summarize difficulty cohorts
+
+```bash
+python scripts/summarize_results.py \
+  --input claw-eval/traces/<run>/batch_results.json \
+  --group-by difficulty \
+  --format csv \
+  --output difficulty.csv
+```
+
+`--group-by` defaults to `task`, preserving the per-task/trial layout. The
+`difficulty` view supports both table and CSV, sorts labels deterministically,
+and groups missing/empty labels as `unknown`. It shows task/trial/error counts,
+eligible and passed trial counts, pass rate, scored trial count/mean score and
+timed trial count/mean wall seconds. Means weight individual eligible trials.
+Errored trials are counted but excluded from measured rates and means; missing,
+boolean, negative or nonfinite numeric measurements are unavailable. Blank means
+or rates indicate no eligible evidence. Pass rate uses only actual boolean
+`passed` measurements and ranges from 0 to 1.
+
+Difficulty output uses UTF-8, preserves CSV quoting/Unicode labels and supports
+empty cohorts. Invalid task/trial containers fail before writing the output.
+Per-trial report classifications from `--report-dir` remain part of the task
+view; they are not loaded for difficulty aggregates.
+
 ## Troubleshooting
 
 | Issue | Fix |
