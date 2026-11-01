@@ -53,12 +53,6 @@ except ImportError:
     print("Error: pyyaml is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
-try:
-    from openai import OpenAI
-except ImportError:
-    print("Error: openai is required. Install with: pip install openai", file=sys.stderr)
-    sys.exit(1)
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
 
@@ -87,11 +81,12 @@ def load_config(config_path: str | None, args) -> dict:
         "judge_api_key": "",
         "judge_base_url": "",
         "judge_model_id": "",
+        "classify_failures": not getattr(args, "no_llm", False),
     }
 
     if config_path:
         cfg_file = Path(config_path)
-        with open(cfg_file) as f:
+        with open(cfg_file, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
 
         judge = cfg.get("judge", {})
@@ -138,6 +133,11 @@ def load_config(config_path: str | None, args) -> dict:
 
 
 def get_llm_client(api_key: str, base_url: str):
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("Error: openai is required. Install with: pip install openai", file=sys.stderr)
+        sys.exit(1)
     return OpenAI(
         api_key=api_key,
         base_url=base_url,
@@ -160,7 +160,7 @@ def load_task_info(task_id: str, tasks_dir: str) -> dict:
     if not os.path.exists(yaml_path):
         return {"task_id": task_id, "error": f"task.yaml not found"}
 
-    with open(yaml_path) as f:
+    with open(yaml_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     return {
@@ -180,7 +180,7 @@ def load_grading_result(trace_path: str) -> tuple:
     """Read jsonl trace and extract grading_result + trace_end."""
     grading = None
     trace_end = None
-    with open(trace_path) as f:
+    with open(trace_path, encoding="utf-8") as f:
         for line in f:
             obj = json.loads(line)
             if obj.get("type") == "grading_result":
@@ -366,12 +366,12 @@ def process_one_trace(trace_path: str, settings: dict) -> tuple:
             report["total_turns"] = trace_end.get("total_turns")
             report["wall_time_s"] = trace_end.get("wall_time_s")
 
-        # LLM classification
-        classification = llm_classify_failure(
-            task_info, grading, trace_end,
-            settings["judge_api_key"], settings["judge_base_url"], settings["judge_model_id"],
-        )
-        report["failure_classification"] = classification
+        if settings.get("classify_failures", True):
+            classification = llm_classify_failure(
+                task_info, grading, trace_end,
+                settings["judge_api_key"], settings["judge_base_url"], settings["judge_model_id"],
+            )
+            report["failure_classification"] = classification
 
     return trace_filename, report
 
@@ -395,6 +395,8 @@ def main():
                         help="Override judge API base URL")
     parser.add_argument("--judge-api-key", default=None,
                         help="Override judge API key")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Generate local reports without LLM classification or judge credentials")
     args = parser.parse_args()
 
     settings = load_config(args.config, args)
@@ -403,10 +405,10 @@ def main():
     output_dir = settings["output_dir"]
 
     # Validate judge config
-    if not settings["judge_api_key"]:
+    if settings["classify_failures"] and not settings["judge_api_key"]:
         print("Error: judge api_key is not configured. Set it via --config YAML or --judge-api-key.", file=sys.stderr)
         sys.exit(1)
-    if not settings["judge_model_id"]:
+    if settings["classify_failures"] and not settings["judge_model_id"]:
         print("Error: judge model_id is not configured. Set it via --config YAML or --judge-model.", file=sys.stderr)
         sys.exit(1)
 
@@ -428,24 +430,28 @@ def main():
             succ_count += 1
         elif report["status"] == "fail":
             fail_count += 1
-            fc = report.get("failure_classification", {})
-            if fc.get("category", "other") != "other" or "key_reason_zh" in fc:
-                llm_ok += 1
-            else:
-                llm_err += 1
+            if settings["classify_failures"]:
+                fc = report.get("failure_classification", {})
+                if fc.get("category", "other") != "other" or "key_reason_zh" in fc:
+                    llm_ok += 1
+                else:
+                    llm_err += 1
         else:
             error_count += 1
 
         out_name = trace_filename.replace(".jsonl", ".json")
         out_path = os.path.join(output_dir, out_name)
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
 
         if i % 20 == 0:
             print(f"  Processed {i}/{len(trace_files)} (succ={succ_count}, fail={fail_count}, err={error_count})")
 
     print(f"\nDone: {succ_count} succ, {fail_count} fail, {error_count} error")
-    print(f"LLM classification: {llm_ok} ok, {llm_err} errors")
+    if settings["classify_failures"]:
+        print(f"LLM classification: {llm_ok} ok, {llm_err} errors")
+    else:
+        print("LLM classification: disabled (--no-llm)")
     print(f"Reports written to: {output_dir}")
 
 
