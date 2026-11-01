@@ -110,14 +110,28 @@ def main():
     ap.add_argument("--run", help="only one run dir name; default: scan all")
     ap.add_argument("--detail", action="store_true", help="print per-trial rows even when matched")
     ap.add_argument("--csv", help="optional CSV output path")
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 1 after reporting/export if discrepancies exist or no pairs are found",
+    )
     args = ap.parse_args()
+
+    if args.check:
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
 
     root = Path(args.root)
     if not root.is_dir():
         print(f"no such dir: {root}", file=sys.stderr)
         sys.exit(1)
 
-    runs = [root / args.run] if args.run else sorted(p for p in root.iterdir() if p.is_dir())
+    runs = (
+        [root / args.run]
+        if args.run
+        else sorted(p for p in root.iterdir() if p.is_dir())
+    )
 
     rows = []
     summary = {
@@ -218,6 +232,13 @@ def main():
                     (t or {}).get("end_input"), (t or {}).get("end_output"), (t or {}).get("end_total"),
                 ])
         print(f"\nCSV written: {args.csv}")
+
+    if args.check:
+        if not rows:
+            print("Token comparison check failed: no session/trace pairs found", file=sys.stderr)
+            sys.exit(1)
+        if bad:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
