@@ -226,6 +226,7 @@ def analyze_traces_command(
         trace_root=effective_trace_root,
         output_dir=analyze_output,
         trim_ratio=trim_ratio,
+        trace_files=trace_files,
     )
     return TraceAnalysisCommandResult(
         recorded_trace_count=len(trace_files) if trace_files is not None else None,
