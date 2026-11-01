@@ -200,6 +200,11 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 
 ## 故障排查
 
+`scripts/analyze.py` 与 `scripts/summarize_results.py` 选择最新的含有 `batch_results.json`
+的目录，因此较新的单任务运行或未完成的批次不会遮蔽已完成的批量结果。
+配置中的 `defaults.trace_dir` 可以指向批次目录或其父目录；相对路径以配置文件所在目录
+为基准解析。`summarize_results.py` 的 `--input` 仍然精确选择指定的文件。
+
 | 问题 | 修复 |
 |---|---|
 | setup 后 `uv` 命令找不到 | `python -m pip install --upgrade uv`(重跑 setup) |

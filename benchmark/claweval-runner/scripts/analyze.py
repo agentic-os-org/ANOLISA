@@ -47,6 +47,8 @@ import os
 import sys
 from pathlib import Path
 
+from report_paths import find_latest_batch_dir
+
 try:
     import yaml
 except ImportError:
@@ -614,10 +616,13 @@ Examples:
         trace_dir = args.trace_dir
     elif settings["trace_dir"] and os.path.isdir(settings["trace_dir"]):
         # If trace_dir points to the parent "traces" dir, find latest
-        trace_dirs = [d for d in Path(settings["trace_dir"]).iterdir() if d.is_dir()]
-        if trace_dirs:
-            trace_dir = str(max(trace_dirs, key=lambda d: d.stat().st_mtime))
+        latest = find_latest_batch_dir(Path(settings["trace_dir"]))
+        if latest:
+            trace_dir = str(latest)
             print(f"Using latest trace dir: {trace_dir}", file=sys.stderr)
+        else:
+            print(f"Error: no batch results found in: {trace_dir}", file=sys.stderr)
+            sys.exit(1)
 
     if not os.path.isdir(trace_dir):
         print(f"Error: trace directory not found: {trace_dir}", file=sys.stderr)
