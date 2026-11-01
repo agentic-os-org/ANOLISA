@@ -312,6 +312,11 @@ When enabled, runner:
 | `--redo` | `false` | Rerun instances that already have result files |
 | `--verbose, -v` | `false` | Write DEBUG logs |
 
+Dataset selectors are validated before environment checks or dataset loading.
+`--slice` accepts `start:end`, with either bound omitted and negative bounds
+counting from the end as in Python; for example, `0:-1` excludes the last
+selected instance. Malformed slices and regular expressions are usage errors.
+
 ## Agent Adapters
 
 ### `cosh`

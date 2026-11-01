@@ -126,6 +126,16 @@ def build_run_settings(
         raise CommandUsageError(f"--tokenless is not supported by agent '{agent}'")
 
     instance_ids = [item.strip() for item in instance_id.split(",")] if instance_id else None
+    try:
+        dataset = DatasetConfig(
+            subset=subset,
+            split=split,
+            filter_regex=filter_regex,
+            slice_range=slice_range,
+            instance_ids=instance_ids,
+        )
+    except ValueError as exc:
+        raise CommandUsageError(str(exc)) from exc
     return Settings(
         agent=AgentConfig(
             name=agent,
@@ -139,13 +149,7 @@ def build_run_settings(
             per_case_prompt=per_case_prompt,
             prompts_dir=prompts_dir,
         ),
-        dataset=DatasetConfig(
-            subset=subset,
-            split=split,
-            filter_regex=filter_regex,
-            slice_range=slice_range,
-            instance_ids=instance_ids,
-        ),
+        dataset=dataset,
         output=OutputConfig(output_dir=command_output_dir(output, RUN_OUTPUT_SUBDIR)),
     )
 

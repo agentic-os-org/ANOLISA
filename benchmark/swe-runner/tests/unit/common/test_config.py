@@ -88,9 +88,9 @@ class TestDatasetConfig:
         config = DatasetConfig(slice_range="0:5")
         assert config.get_slice() == (0, 5)
 
-        # "10:" -> (10, -1)
+        # "10:" -> (10, None)
         config = DatasetConfig(slice_range="10:")
-        assert config.get_slice() == (10, -1)
+        assert config.get_slice() == (10, None)
 
         # ":5" -> (0, 5)
         config = DatasetConfig(slice_range=":5")

@@ -305,6 +305,10 @@ swe-runner run \
 | `--redo` | `false` | 重新运行已经有 result 文件的实例 |
 | `--verbose, -v` | `false` | 写入 DEBUG 级别日志 |
 
+数据集筛选表达式会在环境检查或数据集加载前完成校验。`--slice` 接受
+`start:end`，两端均可省略，负数边界与 Python 一样从末尾计数；例如
+`0:-1` 会排除筛选结果的最后一个实例。无效切片或正则表达式会作为用法错误报告。
+
 ## Agent adapter
 
 ### `cosh`
