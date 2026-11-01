@@ -198,6 +198,26 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+### Select tasks for trial reports
+
+Use repeatable `--task-id` to generate detailed reports for only the requested
+tasks, including every trial belonging to each task:
+
+```bash
+python scripts/generate_trial_reports.py \
+  --config claw-eval/config_general.yaml \
+  --trace-dir /path/to/traces --output-dir /path/to/selected-reports \
+  --task-id C01zh_mortgage_prepay --task-id C01en_mortgage_prepay
+```
+
+IDs match the existing trace filename convention: `TASK_ID_TRIAL_ID.jsonl`
+resolves to `TASK_ID` by removing its last underscore-separated suffix. Matching
+is exact, preserves sorted filename order, and repeated IDs do not duplicate
+trials. Surrounding selector whitespace is ignored. Empty or unknown IDs stop
+with a usage error before output creation or trial classification. Without
+`--task-id`, every discovered trace is processed as before. Only selected trials
+can trigger judge calls; existing report files for other tasks are left intact.
+
 ## Troubleshooting
 
 | Issue | Fix |
