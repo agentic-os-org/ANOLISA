@@ -762,7 +762,7 @@ class TestTraceAnalysis:
         with open(metrics_csv, encoding="utf-8", newline="") as f:
             metrics_header = next(csv.reader(f))
 
-        assert detail_header == ["用例ID", "任务ID", "模型", "总输入Token数", "总输出Token数", "总执行步数"]
+        assert detail_header == ["用例ID", "任务ID", "模型", "总输入Token数", "总输出Token数", "总执行步数", "记录总成本"]
         assert summary_header == [
             "用例ID",
             "执行次数",
@@ -777,6 +777,9 @@ class TestTraceAnalysis:
             "截尾平均总Token数",
             "最小总Token数",
             "最大总Token数",
+            "成本记录次数",
+            "记录成本合计",
+            "平均记录成本",
         ]
         assert "工具结果近似Token数" in metrics_header
         assert "工具结果近似Token数" not in detail_header

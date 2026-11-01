@@ -27,6 +27,7 @@ _DETAIL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("总输入Token数", "total_input_tokens"),
     ("总输出Token数", "total_output_tokens"),
     ("总执行步数", "total_steps"),
+    ("记录总成本", "total_cost"),
 )
 
 _SUMMARY_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -43,6 +44,9 @@ _SUMMARY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("截尾平均总Token数", "trimmed_avg_total_tokens"),
     ("最小总Token数", "min_total_tokens"),
     ("最大总Token数", "max_total_tokens"),
+    ("成本记录次数", "recorded_cost_count"),
+    ("记录成本合计", "total_recorded_cost"),
+    ("平均记录成本", "avg_recorded_cost"),
 )
 
 _METRIC_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -52,6 +56,7 @@ _METRIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("总输入Token数", "total_input_tokens"),
     ("总输出Token数", "total_output_tokens"),
     ("总执行步数", "total_steps"),
+    ("记录总成本", "total_cost"),
     ("LLM轮次数", "llm_turn_count"),
     ("缓存读取Token数", "total_cache_read_tokens"),
     ("缓存写入Token数", "total_cache_write_tokens"),
