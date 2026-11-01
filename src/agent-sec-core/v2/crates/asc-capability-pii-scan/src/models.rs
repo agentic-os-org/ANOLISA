@@ -247,6 +247,8 @@ pub(crate) struct Candidate<'a> {
     pub span: Span,
     pub bytes: Range<usize>,
     pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Fixed whole-value mask overriding the type's default partial mask.
+    pub mask: Option<&'static str>,
 }
 
 impl Candidate<'_> {

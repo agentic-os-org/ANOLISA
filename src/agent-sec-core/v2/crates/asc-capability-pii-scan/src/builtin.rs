@@ -1,5 +1,6 @@
 //! Shipped regexes plus v1 context scoring and validators.
 
+use crate::aliyun;
 use crate::models::{Candidate, ScanError, Severity, Span, check_deadline};
 use crate::python_unicode::{DECIMAL_RANGES, WORD_RANGES};
 use crate::validators;
@@ -51,6 +52,9 @@ const RESERVED: &[&str] = &[
     "test",
 ];
 const EMAIL_SENTENCE_DELIMITERS: &str = "\"')]}>,;:!?，。；：！？、）］｝】〕》〉」』”’";
+// Overlapping assignments may require revisiting the same bytes. Stop with a
+// scan error before adversarial nesting can consume unbounded work.
+const ALIYUN_NESTED_SCAN_LIMIT: usize = 32 * 1024 * 1024;
 
 // Frozen WORD_RANGES intersected with Unicode 16 Han/Hiragana/Katakana/Hangul
 // Script_Extensions from the locked regex-syntax 0.8.11 tables. Keep other
@@ -214,8 +218,11 @@ fn python_pattern(pattern: &str) -> String {
 
 impl BuiltinDetector {
     pub(crate) fn new() -> Result<Self, ScanError> {
-        let source: BTreeMap<String, String> =
+        let mut source: BTreeMap<String, String> =
             serde_json::from_str(PATTERNS).map_err(|_| ScanError::InvalidBuiltin)?;
+        // Built from the alias table so the recognized names and their roles
+        // cannot drift apart; see `aliyun::ALIASES`.
+        source.insert("_ALIYUN_ENV_RE".to_owned(), aliyun::pattern());
         // Shipped patterns use a larger fixed allowance so ordinary multi-MiB
         // inputs remain compatible. Administrator-supplied rules use 1M instead.
         let patterns = source
@@ -274,11 +281,11 @@ impl BuiltinDetector {
             deadline,
             failed: false,
             cursors: [
+                "_ALIYUN_ENV_RE",
                 "_PRIVATE_KEY_RE",
                 "_BEARER_RE",
                 "_SECRET_FIELD_RE",
                 "_API_KEY_RE",
-                "_ALIYUN_ACCESS_KEY_ID_RE",
                 "_JWT_RE",
                 "_CREDIT_CARD_RE",
                 "_CN_ID_RE",
@@ -290,6 +297,13 @@ impl BuiltinDetector {
                 position: 0,
                 command_scanned_to: 0,
                 command_start: 0,
+                handoff_position: 0,
+                handoff_next: None,
+                handoff_done: false,
+                provider_covered_until: 0,
+                handoff_covered_until: 0,
+                provider_nested_work: 0,
+                handoff_nested_work: 0,
                 next: None,
                 done: false,
             }),
@@ -312,6 +326,13 @@ struct Cursor<'a> {
     position: usize,
     command_scanned_to: usize,
     command_start: usize,
+    handoff_position: usize,
+    handoff_next: Option<(usize, Range<usize>)>,
+    handoff_done: bool,
+    provider_covered_until: usize,
+    handoff_covered_until: usize,
+    provider_nested_work: usize,
+    handoff_nested_work: usize,
     next: Option<Candidate<'a>>,
     done: bool,
 }
@@ -363,6 +384,14 @@ impl<'a> Cursor<'a> {
             .ok_or(ScanError::InvalidBuiltin)?;
         let result = match self.id {
             "_API_KEY_RE" => api_key(text, pattern, &mut self.position, deadline),
+            "_ALIYUN_ENV_RE" => aliyun_env(
+                text,
+                pattern,
+                &mut self.position,
+                &mut self.provider_covered_until,
+                &mut self.provider_nested_work,
+                deadline,
+            ),
             "_EMAIL_RE" => {
                 let remote = detector
                     .patterns
@@ -388,7 +417,26 @@ impl<'a> Cursor<'a> {
                 }
                 self.position = whole.end();
                 let found = if id == "_SECRET_FIELD_RE" {
-                    secret(text, &captures)?
+                    let field = captures.name("full_name").ok_or(ScanError::Matching)?;
+                    let value = captures
+                        .name("double_value")
+                        .or_else(|| captures.name("single_value"))
+                        .or_else(|| captures.name("bare_value"));
+                    let handoff = if aliyun::is_official(field.as_str()) {
+                        match value {
+                            Some(value) => self.provider_covers(
+                                detector,
+                                text,
+                                field.start(),
+                                value.range(),
+                                deadline,
+                            )?,
+                            None => false,
+                        }
+                    } else {
+                        false
+                    };
+                    secret(text, &captures, handoff)?
                 } else {
                     basic(text, id, &captures)?
                 };
@@ -399,6 +447,49 @@ impl<'a> Cursor<'a> {
         };
         check_deadline(deadline)?;
         result
+    }
+
+    // Mirror the provider cursor with a single lookahead. A local syntax check
+    // cannot tell whether a preceding provider match consumed this assignment.
+    fn provider_covers(
+        &mut self,
+        detector: &BuiltinDetector,
+        text: &Text<'_>,
+        field_start: usize,
+        value: Range<usize>,
+        deadline: Option<Instant>,
+    ) -> Result<bool, ScanError> {
+        let pattern = detector
+            .patterns
+            .get("_ALIYUN_ENV_RE")
+            .ok_or(ScanError::InvalidBuiltin)?;
+        loop {
+            check_deadline(deadline)?;
+            if let Some((start, range)) = &self.handoff_next {
+                if *start >= field_start {
+                    return Ok(*start == field_start
+                        && range.start <= value.start
+                        && range.end >= value.end);
+                }
+                self.handoff_next = None;
+            }
+            if self.handoff_done {
+                return Ok(false);
+            }
+            let Some((alias_start, _, matched)) = next_aliyun_assignment(
+                text.input,
+                pattern,
+                &mut self.handoff_position,
+                &mut self.handoff_covered_until,
+                &mut self.handoff_nested_work,
+                deadline,
+            )?
+            else {
+                self.handoff_done = true;
+                return Ok(false);
+            };
+            self.handoff_next = Some((alias_start, matched));
+        }
     }
 }
 
@@ -417,6 +508,79 @@ mod resource_tests {
             Some(Err(ScanError::DeadlineExceeded))
         ));
         assert!(matches.next().is_none());
+    }
+
+    #[test]
+    fn escaped_bytes_cannot_skip_deadline_checkpoints() {
+        let escaped = r"\a".repeat(3_000);
+        let start = 1;
+        let mut offset = start;
+        let mut next_check = start + 4096;
+        let deadline = Some(Instant::now());
+        for pair in escaped.as_bytes().chunks_exact(2) {
+            assert_eq!(pair, b"\\a");
+            if matches!(
+                check_deadline_at_offset(offset, &mut next_check, deadline),
+                Err(ScanError::DeadlineExceeded)
+            ) {
+                assert_eq!(offset, start + 4096);
+                return;
+            }
+            offset += 2;
+        }
+        panic!("escaped input crossed the deadline checkpoint without checking it");
+    }
+
+    #[test]
+    fn nested_provider_work_limit_has_an_exact_failure_boundary() {
+        let detector = BuiltinDetector::new().unwrap();
+        let pattern = detector.patterns.get("_ALIYUN_ENV_RE").unwrap();
+        let input = "ALICLOUD_ACCESS_KEY_SECRET=secret42";
+        for (initial, succeeds) in [
+            (ALIYUN_NESTED_SCAN_LIMIT - 8, true),
+            (ALIYUN_NESTED_SCAN_LIMIT - 7, false),
+        ] {
+            let mut cursor = 0;
+            let mut covered = input.len();
+            let mut work = initial;
+            let result =
+                next_aliyun_assignment(input, pattern, &mut cursor, &mut covered, &mut work, None);
+            if succeeds {
+                assert!(result.unwrap().is_some());
+            } else {
+                assert!(matches!(result, Err(ScanError::Matching)));
+            }
+        }
+    }
+
+    #[test]
+    fn typical_nested_provider_assignments_stay_below_the_work_limit() {
+        let detector = BuiltinDetector::new().unwrap();
+        let pattern = detector.patterns.get("_ALIYUN_ENV_RE").unwrap();
+        let input = format!(
+            "{}ALICLOUD_ACCESS_KEY_SECRET=short123{}",
+            "ALICLOUD_ACCESS_KEY_ID=$(echo ".repeat(32),
+            ")".repeat(32)
+        );
+        let mut cursor = 0;
+        let mut covered = 0;
+        let mut work = 0;
+        let mut count = 0;
+        while next_aliyun_assignment(
+            input.as_str(),
+            pattern,
+            &mut cursor,
+            &mut covered,
+            &mut work,
+            None,
+        )
+        .unwrap()
+        .is_some()
+        {
+            count += 1;
+        }
+        assert_eq!(count, 33);
+        assert!(work > 0 && work < 20_000, "nested byte visits: {work}");
     }
 
     #[test]
@@ -467,6 +631,7 @@ fn candidate<'a>(
         span,
         bytes: matched,
         metadata,
+        mask: None,
     }
 }
 
@@ -492,7 +657,6 @@ fn basic<'a>(
             metadata.insert("context".into(), json!("bearer"));
             ("bearer_token", 0.92, None)
         }
-        "_ALIYUN_ACCESS_KEY_ID_RE" => ("aliyun_access_key_id", 0.92, None),
         "_JWT_RE" if jwt_boundaries(text.input, matched) && validators::jwt(value) => {
             ("jwt", 0.94, Some("jwt_structure"))
         }
@@ -602,6 +766,220 @@ fn api_key<'a>(
     Ok(None)
 }
 
+/// Matches one documented Alibaba Cloud environment assignment.
+///
+/// The credential is the right-hand side only: the variable name and any
+/// `export` keyword stay in the surrounding text and in `redacted_text`, so the
+/// report still shows which credential was found.
+fn aliyun_env<'a>(
+    text: &Text<'a>,
+    pattern: &Regex,
+    cursor: &mut usize,
+    covered_until: &mut usize,
+    nested_work: &mut usize,
+    deadline: Option<Instant>,
+) -> Result<Option<Candidate<'a>>, ScanError> {
+    while let Some((_, role, range)) = next_aliyun_assignment(
+        text.input,
+        pattern,
+        cursor,
+        covered_until,
+        nested_work,
+        deadline,
+    )? {
+        let value = &text.input[range.clone()];
+        let bytes = text.input.as_bytes();
+        let single_quoted = range.start > 0
+            && bytes.get(range.start - 1) == Some(&b'\'')
+            && bytes.get(range.end) == Some(&b'\'');
+        if aliyun::is_placeholder(value, single_quoted) {
+            continue;
+        }
+        // A compound value can contain another credential; partial ID evidence
+        // must not disclose any part of that embedded secret. An ID too short
+        // for the identifier mask to conceal anything needs the same treatment:
+        // an enclosing generic finding would otherwise keep the whole value in
+        // its tail-four suffix, and the audit projection copies it there too.
+        let mask = if role == aliyun::Role::AccessKeyId
+            && (!value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                || value.chars().count() <= aliyun::SHORT_ID_MAX_LEN)
+        {
+            Some("[REDACTED_ACCESS_KEY_ID]")
+        } else {
+            role.mask()
+        };
+        return Ok(Some(Candidate {
+            kind: role.kind(),
+            category: "credential",
+            severity: role.severity(),
+            // There is no scoring component here: the provider comes from a
+            // documented name, so evidence does not have to be corroborated.
+            confidence: 1.0,
+            value,
+            span: text.span(range.start, range.end),
+            bytes: range,
+            metadata: BTreeMap::from([
+                ("detector".into(), json!("regex")),
+                ("engine".into(), json!("regex_v2")),
+                ("provider".into(), json!("alibaba_cloud")),
+                ("credential_kind".into(), json!(role.credential_kind())),
+            ]),
+            mask,
+        }));
+    }
+    Ok(None)
+}
+
+// Parse one shell word in linear time. Quotes and substitutions can contain
+// whitespace; adjacent fragments form one value and must be masked together.
+fn next_aliyun_assignment(
+    input: &str,
+    pattern: &Regex,
+    cursor: &mut usize,
+    covered_until: &mut usize,
+    nested_work: &mut usize,
+    deadline: Option<Instant>,
+) -> Result<Option<(usize, aliyun::Role, Range<usize>)>, ScanError> {
+    while let Some(captures) = pattern
+        .captures_from_pos(input, *cursor)
+        .map_err(|_| ScanError::Matching)?
+    {
+        check_deadline(deadline)?;
+        let whole = captures.get(0).ok_or(ScanError::Matching)?;
+        let alias = captures.name("alias").ok_or(ScanError::Matching)?;
+        let role = aliyun::role(alias.as_str()).ok_or(ScanError::Matching)?;
+        let start = whole.end();
+        let inside_covered = alias.start() < *covered_until;
+        let bytes = input.as_bytes();
+        // Angle-bracket placeholders remain recognized even though an
+        // unquoted '<' otherwise starts a shell redirection.
+        if let Some(end) = angle_placeholder_end(bytes, start, deadline)? {
+            *cursor = start + 1;
+            return Ok(Some((alias.start(), role, start..end)));
+        }
+        let mut end = start;
+        let mut next_deadline_check = start.saturating_add(4096);
+        let mut stack = Vec::new();
+        let mut first_quote_end = None;
+        while end < bytes.len() {
+            if inside_covered {
+                *nested_work += 1;
+                if *nested_work > ALIYUN_NESTED_SCAN_LIMIT {
+                    return Err(ScanError::Matching);
+                }
+            }
+            check_deadline_at_offset(end, &mut next_deadline_check, deadline)?;
+            let byte = bytes[end];
+            if matches!(byte, b'\r' | b'\n') && inside_covered {
+                break;
+            }
+            match stack.last().copied() {
+                Some(b'\'') => {
+                    if byte == b'\'' {
+                        stack.pop();
+                    }
+                }
+                Some(b'`') => {
+                    if byte == b'\\' && end + 1 < bytes.len() {
+                        end += 1;
+                    } else if byte == b'`' {
+                        stack.pop();
+                    }
+                }
+                context => {
+                    if byte == b'\\' && end + 1 < bytes.len() {
+                        end += 1;
+                    } else if byte == b'$' && bytes.get(end + 1) == Some(&b'(') {
+                        stack.push(b'(');
+                        end += 1;
+                    } else if byte == b'$' && bytes.get(end + 1) == Some(&b'{') {
+                        // A parameter expansion can carry whitespace in its
+                        // word — `${NAME:-prefix value}` — which would end the
+                        // value early and leave the word unredacted.
+                        stack.push(b'{');
+                        end += 1;
+                    } else if context == Some(b'(') && byte == b'(' {
+                        stack.push(b'(');
+                    } else if (context == Some(b'(') && byte == b')')
+                        || (context == Some(b'{') && byte == b'}')
+                        || (context == Some(b'"') && byte == b'"')
+                    {
+                        stack.pop();
+                    } else if (context != Some(b'"') && matches!(byte, b'\'' | b'"' | b'`'))
+                        || (context == Some(b'"') && byte == b'`')
+                    {
+                        stack.push(byte);
+                    } else if context.is_none()
+                        && (byte.is_ascii_whitespace()
+                            || matches!(byte, b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')'))
+                    {
+                        break;
+                    }
+                }
+            }
+            end += 1;
+            if first_quote_end.is_none()
+                && stack.is_empty()
+                && end > start
+                && matches!(bytes[start], b'\'' | b'"')
+            {
+                first_quote_end = Some(end);
+            }
+        }
+        // Revisit every value for nested aliases. The explicit work limit
+        // bounds repeated scans of overlapping values.
+        if end > start {
+            *covered_until = (*covered_until).max(end);
+            *cursor = start;
+        } else {
+            *cursor = end;
+        }
+        if end == start {
+            continue;
+        }
+        let range = if first_quote_end == Some(end) {
+            start + 1..end - 1
+        } else {
+            start..end
+        };
+        return Ok(Some((alias.start(), role, range)));
+    }
+    Ok(None)
+}
+
+fn check_deadline_at_offset(
+    offset: usize,
+    next_check: &mut usize,
+    deadline: Option<Instant>,
+) -> Result<(), ScanError> {
+    if offset >= *next_check {
+        check_deadline(deadline)?;
+        *next_check = offset.saturating_add(4096);
+    }
+    Ok(())
+}
+
+fn angle_placeholder_end(
+    bytes: &[u8],
+    start: usize,
+    deadline: Option<Instant>,
+) -> Result<Option<usize>, ScanError> {
+    if bytes.get(start) != Some(&b'<') {
+        return Ok(None);
+    }
+    let mut close = start + 1;
+    while close < bytes.len()
+        && !bytes[close].is_ascii_whitespace()
+        && !matches!(bytes[close], b'<' | b'>' | b';' | b'&' | b'|')
+    {
+        if close.is_multiple_of(4096) {
+            check_deadline(deadline)?;
+        }
+        close += 1;
+    }
+    Ok((close > start + 1 && bytes.get(close) == Some(&b'>')).then_some(close + 1))
+}
+
 fn jwt_boundaries(input: &str, matched: Match<'_>) -> bool {
     let token_byte = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-');
     !matched
@@ -615,11 +993,10 @@ fn jwt_boundaries(input: &str, matched: Match<'_>) -> bool {
 fn secret<'a>(
     text: &Text<'a>,
     captures: &Captures<'_>,
+    handoff: bool,
 ) -> Result<Option<Candidate<'a>>, ScanError> {
-    let field = captures
-        .name("full_name")
-        .ok_or(ScanError::Matching)?
-        .as_str();
+    let field_match = captures.name("full_name").ok_or(ScanError::Matching)?;
+    let field = field_match.as_str();
     let value = captures
         .name("double_value")
         .or_else(|| captures.name("single_value"))
@@ -627,19 +1004,31 @@ fn secret<'a>(
     let Some(value) = value else {
         return Ok(None);
     };
+    let matched = captures.name("quoted_value").ok_or(ScanError::Matching)?;
+    // Only a match actually consumed by the provider can own this value.
+    if handoff {
+        return Ok(None);
+    }
     if value.as_str().chars().count() < 12 && !field.to_lowercase().starts_with("accesskey") {
         return Ok(None);
     }
-    let matched = captures.name("quoted_value").ok_or(ScanError::Matching)?;
     let mut metadata = BTreeMap::new();
     metadata.insert("field".into(), json!(field_label(captures)?));
     let normalized = field.to_lowercase().replace(['-', '_'], "");
+    // `accessKeySecret` without a documented provider name does not establish
+    // Alibaba Cloud ownership, so it keeps the generic type and the denial.
+    // It still gets a whole-value mask: the retained leading and trailing
+    // characters would otherwise narrow a credential that is only a few
+    // characters longer than the shortest accepted value.
     let kind = match normalized.as_str() {
-        "accesskeysecret" => "aliyun_access_key_secret",
         "apikey" => "api_key",
         _ => "generic_secret_field",
     };
-    Ok(Some(candidate(text, matched.range(), kind, 0.82, metadata)))
+    let mut found = candidate(text, matched.range(), kind, 0.82, metadata);
+    found.mask = aliyun::role(field)
+        .and_then(aliyun::Role::mask)
+        .or((normalized == "accesskeysecret").then_some("[REDACTED_SECRET]"));
+    Ok(Some(found))
 }
 
 // The client report retains metadata.field verbatim, so the label must stay
