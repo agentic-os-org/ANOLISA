@@ -71,6 +71,10 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 以下所有命令均假设使用 `uv run`（项目 venv 自动解析）。
 
+省略 `run` 的旧式单任务调用（如 `ce-runner T001 --timeout 300`）沿用
+`ce-runner run T001 --timeout 300` 的同一参数解析器和默认值。`batch`
+子命令及根级帮助、版本选项保持原有行为。
+
 > **除非已 export model/judge 环境变量，否则必须传 `--config`。** `run`/`batch` **不会**自动加载 `claw-eval/config.yaml`；请传 `--config claw-eval/config.yaml`（由 `scripts/configure_model.py` 写入），或 export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` 与 `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`。
 
 ```bash

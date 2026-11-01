@@ -421,7 +421,10 @@ Task filtering examples:
     p_batch.add_argument("--skip-preflight", action="store_true", default=False,
                          help="Skip openclaw plugins + docker pre-flight checks")
 
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    if argv and argv[0] not in {"run", "batch", "--help", "-h", "--version", "-v"}:
+        argv = ["run", *argv]
+    args = parser.parse_args(argv)
 
     if args.command == "batch":
         batch_runner.run_batch(
@@ -434,23 +437,7 @@ Task filtering examples:
     elif args.command == "run":
         run_single(args)
     else:
-        # No subcommand: backward compat — re-parse as single task
-        parser2 = argparse.ArgumentParser()
-        parser2.add_argument("-v", "--version", action="version", version=VERSION)
-        parser2.add_argument("task")
-        parser2.add_argument("--timeout", type=int, default=DEFAULT_AGENT_TIMEOUT_S)
-        parser2.add_argument("--config", default=None)
-        parser2.add_argument("--sandbox-image", default=None)
-        parser2.add_argument("--sandbox", action="store_true", default=False,
-                            help="(deprecated) Always-sandbox mode is now the default")
-        parser2.add_argument("--sandbox-tools", action="store_true", default=False,
-                            help="(deprecated) Always-sandbox mode is now the default")
-        parser2.add_argument("--mcp-server", action="store_true", default=False,
-                            help="(deprecated) MCP server mode is now the default")
-        parser2.add_argument("--trace-prefix", default="openclaw")
-        args2 = parser2.parse_args()
-        args2.command = "run"
-        run_single(args2)
+        parser.error("a command or task is required")
 
 
 if __name__ == "__main__":
