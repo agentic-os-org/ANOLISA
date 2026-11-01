@@ -77,15 +77,16 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
             )
 
         # Check if already running
-        try:
-            if health_method == "POST":
-                r = httpx.post(health_check, json={}, timeout=3)
-            else:
-                r = httpx.get(health_check, timeout=3)
-            if r.status_code == 200:
-                continue
-        except Exception:
-            pass
+        if health_check:
+            try:
+                if health_method == "POST":
+                    r = httpx.post(health_check, json={}, timeout=3)
+                else:
+                    r = httpx.get(health_check, timeout=3)
+                if r.status_code == 200:
+                    continue
+            except Exception:
+                pass
 
         # Start service
         cmd = svc["command"].split()
@@ -104,6 +105,9 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
             preexec_fn=lambda: resource.setrlimit(
                 resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024)),
         )
+
+        if not health_check:
+            continue
 
         # Wait for health
         timeout_s = svc.get("ready_timeout", 15)
