@@ -301,6 +301,22 @@ def run_single(args):
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
+def _positive_int(value: str) -> int:
+    """Parse an execution limit that must be at least one."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    """Parse a worker limit that permits zero for automatic selection."""
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return parsed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run claw-eval tasks using openclaw agent.",
@@ -313,7 +329,7 @@ def main():
     p_run = subparsers.add_parser("run", help="Run a single task")
     p_run.add_argument("task", help="Task directory or task.yaml file path")
     p_run.add_argument(
-        "--timeout", type=int, default=DEFAULT_AGENT_TIMEOUT_S,
+        "--timeout", type=_positive_int, default=DEFAULT_AGENT_TIMEOUT_S,
         help=(f"Per-call agent timeout in seconds (default: {DEFAULT_AGENT_TIMEOUT_S}). "
               "For T/M tasks this is the total wall (single CLI subprocess or HTTP "
               "request). For C tasks each round gets its own budget, so the worst-case "
@@ -392,22 +408,22 @@ Task filtering examples:
                          help="Positional range with optional step (e.g. '1-10' or '1-10:2'). "
                               "Slices the sorted task list by position; step defaults to 1. "
                               "Use --prefix to scope to T/C/M tasks")
-    p_batch.add_argument("--parallel", type=int, default=4, help="Number of parallel workers (default: 4)")
-    p_batch.add_argument("--grade-parallel", type=int, default=0,
+    p_batch.add_argument("--parallel", type=_positive_int, default=4, help="Number of parallel workers (default: 4)")
+    p_batch.add_argument("--grade-parallel", type=_nonnegative_int, default=0,
                          help="Parallel workers for grading (judge API). "
                               "Default: min(parallel, 2) to avoid LLM judge rate-limits")
-    p_batch.add_argument("--chunk-size", type=int, default=4,
+    p_batch.add_argument("--chunk-size", type=_positive_int, default=4,
                          help="Number of tasks to setup/execute/cleanup per chunk. "
                               "Controls peak memory usage by limiting concurrent MCP/mock "
                               "processes. Auto-raised to --parallel if smaller (default: 4)")
     p_batch.add_argument("--config", default=None, help="Path to config.yaml")
     p_batch.add_argument(
-        "--timeout", type=int, default=DEFAULT_AGENT_TIMEOUT_S,
+        "--timeout", type=_positive_int, default=DEFAULT_AGENT_TIMEOUT_S,
         help=(f"Per-call agent timeout in seconds (default: {DEFAULT_AGENT_TIMEOUT_S}). "
               "For T/M tasks this is the total wall (single CLI subprocess or HTTP "
               "request). For C tasks each round gets its own budget, so the worst-case "
               "total wall is approximately this x max_rounds (configured in task.yaml)."))
-    p_batch.add_argument("--trials", type=int, default=1, help="Number of trials per task (default: 1)")
+    p_batch.add_argument("--trials", type=_positive_int, default=1, help="Number of trials per task (default: 1)")
     p_batch.add_argument("--sandbox-image", default=None,
                          help="Docker image for sandbox (default: claw-eval-agent:latest)")
     p_batch.add_argument("--sandbox", action="store_true", default=False,
@@ -438,7 +454,7 @@ Task filtering examples:
         parser2 = argparse.ArgumentParser()
         parser2.add_argument("-v", "--version", action="version", version=VERSION)
         parser2.add_argument("task")
-        parser2.add_argument("--timeout", type=int, default=DEFAULT_AGENT_TIMEOUT_S)
+        parser2.add_argument("--timeout", type=_positive_int, default=DEFAULT_AGENT_TIMEOUT_S)
         parser2.add_argument("--config", default=None)
         parser2.add_argument("--sandbox-image", default=None)
         parser2.add_argument("--sandbox", action="store_true", default=False,
