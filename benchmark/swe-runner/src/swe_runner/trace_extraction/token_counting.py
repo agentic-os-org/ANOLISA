@@ -30,4 +30,5 @@ def _encoding() -> tiktoken.Encoding:
 
 def count_tokens(text: str) -> int:
     """Return the cl100k_base token count for *text*."""
-    return len(_encoding().encode(text))
+    # Transcript text may quote tokenizer markers from source files or tool output.
+    return len(_encoding().encode(text, disallowed_special=()))
