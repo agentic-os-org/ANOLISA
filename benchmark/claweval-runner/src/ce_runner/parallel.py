@@ -20,6 +20,7 @@ import json
 import os
 import re
 import resource
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -56,7 +57,7 @@ def setup_parallel_workers(
     )
 
 
-def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: int):
+def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: int) -> None:
     """Start mock services for a task with the given port offset."""
     task = load_task_yaml(task_yaml)
     project_root = os.path.abspath(os.path.join(task_dir, "..", ".."))
@@ -88,7 +89,7 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
             pass
 
         # Start service
-        cmd = svc["command"].split()
+        cmd = shlex.split(svc["command"])
         env = os.environ.copy()
         env["no_proxy"] = "localhost,127.0.0.1"
         env["NO_PROXY"] = "localhost,127.0.0.1"

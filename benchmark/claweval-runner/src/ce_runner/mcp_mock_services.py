@@ -29,6 +29,7 @@ import argparse
 import inspect
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -106,7 +107,7 @@ class MockServiceManager:
             print(f"[mcp-mock] '{name}' already running on :{port}", file=sys.stderr)
             return
 
-        cmd = svc["command"].split()
+        cmd = shlex.split(svc["command"])
         env = os.environ.copy()
         env["no_proxy"] = "localhost,127.0.0.1"
         env["NO_PROXY"] = "localhost,127.0.0.1"
