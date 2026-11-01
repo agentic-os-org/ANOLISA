@@ -34,7 +34,12 @@ DEFAULT_OPENCLAW_PROFILES_DIR = Path("output/run/openclaw-profiles")
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    # Agent transcripts routinely embed arbitrary bytes; replace them instead
+    # of letting one bad byte abort the whole analyze-traces run (the sibling
+    # agents/openclaw/tokenless_evidence.py reads with the same policy).
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
         line = raw_line.strip()
         if not line:
             continue
