@@ -198,6 +198,9 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+`run_task_compare.py` 仅报告各后端本次执行期间创建或更新的 trace。
+即使同一任务存在历史 trace，本次执行成功退出却未生成 trace 时，仍会报告产物缺失。
+
 ## 故障排查
 
 | 问题 | 修复 |
