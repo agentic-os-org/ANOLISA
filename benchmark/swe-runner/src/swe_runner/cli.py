@@ -95,6 +95,9 @@ def run(
         help="Directory containing per-instance prompt files named by instance_id",
     ),
     redo: bool = typer.Option(False, "--redo", help="Re-run already completed instances"),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Retry unsuccessful saved runs while keeping successful runs; conflicts with --redo"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ) -> None:
     """Run SWE-bench evaluation with the specified agent."""
@@ -117,6 +120,7 @@ def run(
             per_case_prompt=per_case_prompt,
             prompts_dir=prompts_dir,
             redo=redo,
+            retry_failed=retry_failed,
             verbose=verbose,
         )
     except CommandUsageError as e:

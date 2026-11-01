@@ -76,8 +76,11 @@ def run_instances_command(
     prompts_dir: Path | None = None,
     redo: bool,
     verbose: bool,
+    retry_failed: bool = False,
 ) -> RunReport:
     """Build run settings, execute a run session, and return its report."""
+    if redo and retry_failed:
+        raise CommandUsageError("--redo and --retry-failed are mutually exclusive")
     settings = build_run_settings(
         agent=agent,
         subset=subset,
@@ -97,7 +100,7 @@ def run_instances_command(
         prompts_dir=prompts_dir,
     )
     setup_logging(settings.output.output_dir, verbose=verbose, suffix=RUN_OUTPUT_SUBDIR)
-    return RunSession(settings, redo=redo).execute()
+    return RunSession(settings, redo=redo, retry_failed=retry_failed).execute()
 
 
 def build_run_settings(
