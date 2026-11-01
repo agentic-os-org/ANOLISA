@@ -305,6 +305,9 @@ swe-runner run \
 | `--redo` | `false` | 重新运行已经有 result 文件的实例 |
 | `--verbose, -v` | `false` | 写入 DEBUG 级别日志 |
 
+重新运行未能生成 prediction 时，会从 `run/preds.json` 中移除该实例之前的
+条目，使评估反映最新保存的运行结果。其他实例的 prediction 会保留。
+
 ## Agent adapter
 
 ### `cosh`

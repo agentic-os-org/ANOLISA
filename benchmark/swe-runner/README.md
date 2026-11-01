@@ -312,6 +312,10 @@ When enabled, runner:
 | `--redo` | `false` | Rerun instances that already have result files |
 | `--verbose, -v` | `false` | Write DEBUG logs |
 
+When a rerun fails to produce a prediction, its previous entry is removed from
+`run/preds.json` so evaluation reflects the latest saved attempt. Predictions
+for other instances are retained.
+
 ## Agent Adapters
 
 ### `cosh`
