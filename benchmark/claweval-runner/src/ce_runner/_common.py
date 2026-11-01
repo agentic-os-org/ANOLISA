@@ -221,17 +221,25 @@ def init_config_defaults():
     subprocess.run([_PYTHON, script], capture_output=True)
 
 
+def _load_yaml_mapping(path: str, *, allow_empty: bool = False) -> dict:
+    with open(path, encoding="utf-8") as f:
+        value = yaml.safe_load(f)
+    if value is None and allow_empty:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"YAML file {path} must contain a mapping, got {type(value).__name__}")
+    return value
+
+
 def load_task_yaml(task_yaml: str) -> dict:
-    with open(task_yaml) as f:
-        return yaml.safe_load(f)
+    return _load_yaml_mapping(task_yaml)
 
 
-def load_config(config_path: str) -> dict:
+def load_config(config_path: str | None) -> dict:
     """Load judge/model config from yaml file."""
     if not config_path or not os.path.exists(config_path):
         return {}
-    with open(config_path) as f:
-        return yaml.safe_load(f) or {}
+    return _load_yaml_mapping(config_path, allow_empty=True)
 
 
 def require_valid_config(config_path: str | None,

@@ -71,6 +71,9 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 以下所有命令均假设使用 `uv run`（项目 venv 自动解析）。
 
+任务定义及非空 config YAML 的根节点必须是映射。列表或标量会被拒绝，并
+报告对应文件名。空的可选配置仍可使用环境变量设置；空任务定义则无效。
+
 > **除非已 export model/judge 环境变量，否则必须传 `--config`。** `run`/`batch` **不会**自动加载 `claw-eval/config.yaml`；请传 `--config claw-eval/config.yaml`（由 `scripts/configure_model.py` 写入），或 export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` 与 `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`。
 
 ```bash
