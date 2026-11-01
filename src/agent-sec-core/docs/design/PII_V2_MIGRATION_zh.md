@@ -56,7 +56,7 @@ JWT 扩展与反例。差分只排除耗时、V2 新增元数据及明确升级�
 内置 word 和 decimal 字符表固定为 Python 3.11 / Unicode 14；全量 Unicode scalar
 分类检查和大小写匹配用例保护 V1 的字符边界语义。
 
-检测语义版本为 `summary.scanner_version=2.1.1`，纳入 `ruleset_id`，并在成功/失败扫描及
+检测语义版本为 `summary.scanner_version=2.2.0`，纳入 `ruleset_id`，并在成功/失败扫描及
 审计结果中记录。内置 engine 为 `regex_v2`，自定义 engine 为 `fancy_regex`。该版本独立于包版本。
 2.0.0 修复空 claims JWT 漏报，保留大整数/深层 JSON 的非递归结构检查；身份证日期和校验位
 统一转换数字并支持全角 X；银行卡排除全零占位符。234 个 V1 用例继续验证不变行为，
@@ -74,6 +74,46 @@ JWT 扩展与反例。差分只排除耗时、V2 新增元数据及明确升级�
 子串标记、正向上下文归一化、评分权重、过滤阈值及邮箱/私钥例外不变。
 `tests/compatibility.rs` 显式分类 `sk-test987…` 和 `LTAI5tQnKxExampleToken12` 上下文的
 置信度差异，不改写冻结的 V1 语料，也不忽略其他预期字段。
+
+2.2.0 改为按官方环境变量名识别阿里云凭据，不再依赖 `LTAI` 值前缀。归属需要符合
+`NAME=value` / `export NAME=value` 形状，且变量名必须与
+`crates/asc-capability-pii-scan/src/aliyun.rs` 中的名称精确、区分大小写地匹配；该表是名称与
+角色的唯一来源，`ALIASES` 有查重单元测试。值可为裸值或一对成对引号包裹，但证据与脱敏
+范围只覆盖值本身，因此 `redacted_text` 仍保留可识别该凭据的变量名。
+
+该表为 issue #2146 批准的 21 个名称。`ACCESS_KEY_ID`、`ACCESS_KEY_SECRET`、
+`SECURITY_TOKEN` 不在表内：CLI 将其作为回退项接受，但通用拼写无法证明归属阿里云。
+Role ARN、OIDC token 路径、profile、region、endpoint 及 header 名称选择器属于配置而非
+密钥，不在范围内。当前工具链并不读取的 `ALIBABA_CLOUD_ACCESS_KEY` 与
+`ALICLOUD_ACCESS_KEY_PAIR` 同样不在表内；前者仅在 Terraform 概览中被提及且未定义角色。
+
+| 类型 | 级别 | `metadata.credential_kind` | 脱敏 |
+|------|------|---------------------------|------|
+| `aliyun_access_key_id` | `warn` | `access_key_id` | 超过八个字符的字母数字 ID 保留前后各四个字符，中间使用 `...[REDACTED]...`；其他值完全遮蔽 |
+| `aliyun_access_key_secret` | `deny` | `access_key_secret` | `[REDACTED_SECRET]` |
+| `generic_secret_field` | `deny` | `security_token` | `[REDACTED_TOKEN]` |
+| `bearer_token` | `deny` | `bearer_token` | `[REDACTED_TOKEN]` |
+| `api_key` | `deny` | `model_studio_api_key` | `[REDACTED_API_KEY]` |
+
+AccessKey ID 单独不可用于认证，因此为 `warn`；可单独完成认证的凭据一律 `deny`。STS token
+保留 `generic_secret_field` 类型，bearer 与模型密钥保留原有前缀类型，按既有类型名分支的
+调用方仍会看到拒绝。归属信息另以 `metadata.provider=alibaba_cloud` 与
+`metadata.credential_kind` 记录；审计仅为通过 `type + provider + kind` 三元组校验的组合
+保留这两个字段。
+
+2.2.0 取代三项冻结的 V1 预期，并移除 `LTAI` 值前缀规则 `_ALIYUN_ACCESS_KEY_ID_RE`。
+`tests/compatibility.rs` 在替换前先重新断言每个历史取值：
+
+- 无厂商上下文的 `accessKeySecret` 不再报告 `aliyun_access_key_secret`，而是保留
+  `generic_secret_field` 与拒绝级别，并改用全值脱敏 `[REDACTED_SECRET]`，不再保留首尾各
+  四个字符。
+- 裸 `id=LTAI5tQnKxExampleToken12` 不再归属阿里云，fixture 用例 3 由 5 条 finding 变为
+  4 条，仍为拒绝。
+- fixture 用例 198、199 将 `LTAIabcdefghijklmnop` 与冻结 Unicode 14 word 字符表中未分配
+  的 U+1E4D0 相邻。二者此前为阳性仅因已退役的前缀规则忽略词边界，现均为通过。
+
+Unicode、误报与资源边界检查保留；234 条冻结语料的来源不变，且未重新生成。
+
 
 V1 顶层字段仍为 `ok`、`verdict`、`summary`、`findings`、`elapsed_ms` 和可选
 `redacted_text`。`summary` 将执行状态与覆盖状态分开：
@@ -169,7 +209,7 @@ opaque 兼容 trace 标签，并为遥测提供白名单 Agent product。PII Han
 | 身份 | UID/GID/PID 来自 UDS peer；trace 和 `agent_name` 不授予权限 |
 | Trace | CLI 顶层 `--trace-context`；V1 别名、去空白和 256 字符限制；复用公共 Context/顶层 carrier，opaque 标签不是 OTel ID |
 | 规则 | 从 V1 用户级、下次扫描加载，显式迁移为中央配置、启动加载 |
-| 检测版本 | `scanner_version=2.1.1`；内置质量改进与原生自定义方言有独立用例 |
+| 检测版本 | `scanner_version=2.2.0`；内置质量改进与原生自定义方言有独立用例 |
 | 正则 | 原生 fancy-regex；实际无效语法、YAML 别名/多文档拒绝，以及执行预算/引擎限制 |
 | Runtime | 检测器、client、daemon 均为 Rust；保留 V1 作为独立回滚及 oracle |
 

@@ -38,6 +38,11 @@ impl AuditProjector for PiiAuditProjector {
             .findings
             .iter()
             .map(|finding| {
+                let mut metadata = safe_metadata(&finding.metadata);
+                if let Some((provider, kind)) = credential_fields(finding) {
+                    metadata.insert("provider".to_owned(), json!(provider));
+                    metadata.insert("credential_kind".to_owned(), json!(kind));
+                }
                 json!({
                     "type": finding.pii_type,
                     "category": finding.category,
@@ -45,7 +50,7 @@ impl AuditProjector for PiiAuditProjector {
                     "confidence": finding.confidence,
                     "evidence_redacted": finding.evidence_redacted,
                     "span": finding.span,
-                    "metadata": safe_metadata(&finding.metadata),
+                    "metadata": metadata,
                 })
             })
             .collect();
@@ -88,6 +93,22 @@ fn request_fields(request: &PiiScanRequest) -> Map<String, Value> {
     fields
 }
 
+/// Provider facts are retained only for an approved `type + provider + kind`
+/// triple. Validating the fields separately would let a mismatched or
+/// input-derived combination pass, and a durable audit record must not carry
+/// attribution that no detector contract justifies.
+const APPROVED_TRIPLES: &[(&str, &str, &str)] = &[
+    ("aliyun_access_key_id", "alibaba_cloud", "access_key_id"),
+    (
+        "aliyun_access_key_secret",
+        "alibaba_cloud",
+        "access_key_secret",
+    ),
+    ("generic_secret_field", "alibaba_cloud", "security_token"),
+    ("bearer_token", "alibaba_cloud", "bearer_token"),
+    ("api_key", "alibaba_cloud", "model_studio_api_key"),
+];
+
 fn safe_metadata(metadata: &std::collections::BTreeMap<String, Value>) -> Map<String, Value> {
     let mut safe = Map::new();
     for (key, allowed) in [
@@ -122,6 +143,22 @@ fn safe_metadata(metadata: &std::collections::BTreeMap<String, Value>) -> Map<St
     // The original spelling of a matched secret field is input-derived. It is
     // useful in the client result, but unnecessary for durable audit decisions.
     safe
+}
+
+fn credential_fields(finding: &crate::PiiFinding) -> Option<(String, String)> {
+    let provider = finding.metadata.get("provider").and_then(Value::as_str)?;
+    let kind = finding
+        .metadata
+        .get("credential_kind")
+        .and_then(Value::as_str)?;
+    APPROVED_TRIPLES
+        .iter()
+        .any(|(pii_type, approved_provider, approved_kind)| {
+            *pii_type == finding.pii_type
+                && *approved_provider == provider
+                && *approved_kind == kind
+        })
+        .then(|| (provider.to_owned(), kind.to_owned()))
 }
 
 fn safe_error_code(code: &str) -> &str {

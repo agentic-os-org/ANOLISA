@@ -99,6 +99,7 @@ fn run<'a>(
                     ("detector".into(), json!("custom_rule")),
                     ("engine".into(), json!("fancy_regex")),
                 ]),
+                mask: None,
             });
         }
     }

@@ -5,7 +5,13 @@ use crate::report::{OMITTED_TEXT, REPORT_BYTES};
 use crate::validators::decimal;
 use std::ops::Range;
 
-pub(crate) fn value(value: &str, kind: &str, category: &str) -> String {
+pub(crate) fn value(value: &str, kind: &str, category: &str, mask: Option<&str>) -> String {
+    // A detector that knows the value is a whole credential overrides the
+    // partial mask: for a short secret the retained prefix and suffix narrow
+    // the guess far more than they help a reader.
+    if let Some(mask) = mask {
+        return mask.to_owned();
+    }
     if category == "custom" {
         return format!("[{}_REDACTED]", kind.to_ascii_uppercase());
     }
@@ -102,6 +108,7 @@ struct Group<'a> {
     first: Range<usize>,
     end: usize,
     mixed: bool,
+    whole_mask: bool,
     priority: (bool, bool, &'a str),
     replacement: String,
 }
@@ -125,6 +132,9 @@ impl<'a> Text<'a> {
             candidate.severity != Severity::Deny,
             candidate.kind,
         );
+        let whole_mask = candidate.mask.is_some()
+            || candidate.category == "custom"
+            || candidate.kind == "private_key";
         if let Some(group) = self
             .group
             .as_mut()
@@ -132,9 +142,17 @@ impl<'a> Text<'a> {
         {
             group.end = group.end.max(candidate.bytes.end);
             group.mixed |= group.first != candidate.bytes;
-            if priority < group.priority {
+            if (!group.mixed && whole_mask && !group.whole_mask)
+                || (priority < group.priority && (group.mixed || whole_mask || !group.whole_mask))
+            {
                 group.priority = priority;
-                group.replacement = value(candidate.value, candidate.kind, candidate.category);
+                group.whole_mask = whole_mask;
+                group.replacement = value(
+                    candidate.value,
+                    candidate.kind,
+                    candidate.category,
+                    candidate.mask,
+                );
             }
             return;
         }
@@ -144,8 +162,14 @@ impl<'a> Text<'a> {
                 first: candidate.bytes.clone(),
                 end: candidate.bytes.end,
                 mixed: false,
+                whole_mask,
                 priority,
-                replacement: value(candidate.value, candidate.kind, candidate.category),
+                replacement: value(
+                    candidate.value,
+                    candidate.kind,
+                    candidate.category,
+                    candidate.mask,
+                ),
             });
         }
     }

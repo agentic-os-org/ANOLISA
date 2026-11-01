@@ -155,14 +155,13 @@ fn negative_context_scoring_preserves_type_validation_and_exemptions() {
             &PiiScanOptions::default(),
         )
         .unwrap();
-    assert_eq!(report.findings.len(), 2);
-    for (finding, (kind, confidence)) in report.findings.iter().zip([
-        ("aliyun_access_key_secret", 0.94),
-        ("aliyun_access_key_id", 1.0),
-    ]) {
-        assert_eq!(finding.pii_type, kind);
-        assert!((finding.confidence - confidence).abs() < 1e-9);
-    }
+    // A contextless `accessKeySecret` keeps the generic type and the denial, and
+    // the retired value-prefix rule no longer reports the bare `id=LTAI…`.
+    assert_eq!(report.findings.len(), 1);
+    let finding = &report.findings[0];
+    assert_eq!(finding.pii_type, "generic_secret_field");
+    assert!((finding.confidence - 0.94).abs() < 1e-9);
+    assert_eq!(finding.evidence_redacted, "[REDACTED_SECRET]");
     assert_eq!(report.verdict, Verdict::Deny);
 }
 
@@ -429,11 +428,19 @@ fn all_eleven_types_have_positive_and_negative_examples() {
             "Bearer abcdefghijklmnopqrstuvwxyz",
             "Bearer short",
         ),
-        ("aliyun_access_key_id", "LTAIAbCdEfGhIjKlMnOp", "LTAIshort"),
+        // Provider attribution requires a documented Alibaba Cloud name; a bare
+        // `LTAI…` value is no longer sufficient since the prefix rule retired.
+        // The negative side is a pure shell reference, which the approved
+        // contract filters instead of guessing at undocumented value lengths.
+        (
+            "aliyun_access_key_id",
+            "ALIBABA_CLOUD_ACCESS_KEY_ID=LTAIAbCdEfGhIjKlMnOp",
+            "ALIBABA_CLOUD_ACCESS_KEY_ID=${ALIYUN_KEY}",
+        ),
         (
             "aliyun_access_key_secret",
-            "access_key_secret=AbCdEfGhIjKlMnOp",
-            "access_key_secret=short",
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET=AbCdEfGhIjKlMnOp",
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET=<your-secret>",
         ),
         (
             "generic_secret_field",
@@ -776,4 +783,371 @@ fn compound_prefix_scanning_is_bounded_on_segmented_hyphen_runs() {
             .any(|f| f.pii_type == "generic_secret_field"),
         "segmented names inside the bound stay detected"
     );
+}
+
+// Documented Alibaba Cloud environment-variable credentials.
+//
+// These cases pin the three acceptance boundaries agreed on issue #2146:
+// overlap with the token-prefix rule, an STS value that is also a valid JWT,
+// and the handoff from placeholders to the generic same-assignment path.
+
+/// The 21 approved names with their documented role and a synthetic value.
+const ALIBABA_CLOUD_ALIASES: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "ALIBABA_CLOUD_ACCESS_KEY_ID",
+        "aliyun_access_key_id",
+        "warn",
+        "access_key_id",
+        "LTAI5tQnKxSampleToken12",
+    ),
+    (
+        "ALIBABACLOUD_ACCESS_KEY_ID",
+        "aliyun_access_key_id",
+        "warn",
+        "access_key_id",
+        "LTAI5tQnKxSampleToken12",
+    ),
+    (
+        "ALICLOUD_ACCESS_KEY_ID",
+        "aliyun_access_key_id",
+        "warn",
+        "access_key_id",
+        "LTAI5tQnKxSampleToken12",
+    ),
+    (
+        "ALICLOUD_ACCESS_KEY",
+        "aliyun_access_key_id",
+        "warn",
+        "access_key_id",
+        "LTAI5tQnKxSampleToken12",
+    ),
+    (
+        "OSS_ACCESS_KEY_ID",
+        "aliyun_access_key_id",
+        "warn",
+        "access_key_id",
+        "LTAI5tQnKxSampleToken12",
+    ),
+    (
+        "ALIYUN_ACCESS_KEY_ID",
+        "aliyun_access_key_id",
+        "warn",
+        "access_key_id",
+        "LTAI5tQnKxSampleToken12",
+    ),
+    (
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+        "aliyun_access_key_secret",
+        "deny",
+        "access_key_secret",
+        "wJalrXUtnFEMI7SampleSecret2",
+    ),
+    (
+        "ALIBABACLOUD_ACCESS_KEY_SECRET",
+        "aliyun_access_key_secret",
+        "deny",
+        "access_key_secret",
+        "wJalrXUtnFEMI7SampleSecret2",
+    ),
+    (
+        "ALICLOUD_ACCESS_KEY_SECRET",
+        "aliyun_access_key_secret",
+        "deny",
+        "access_key_secret",
+        "wJalrXUtnFEMI7SampleSecret2",
+    ),
+    (
+        "ALICLOUD_SECRET_KEY",
+        "aliyun_access_key_secret",
+        "deny",
+        "access_key_secret",
+        "wJalrXUtnFEMI7SampleSecret2",
+    ),
+    (
+        "OSS_ACCESS_KEY_SECRET",
+        "aliyun_access_key_secret",
+        "deny",
+        "access_key_secret",
+        "wJalrXUtnFEMI7SampleSecret2",
+    ),
+    (
+        "ALIYUN_ACCESS_KEY_SECRET",
+        "aliyun_access_key_secret",
+        "deny",
+        "access_key_secret",
+        "wJalrXUtnFEMI7SampleSecret2",
+    ),
+    (
+        "ALIBABA_CLOUD_SECURITY_TOKEN",
+        "generic_secret_field",
+        "deny",
+        "security_token",
+        "CAIS9wFq6vAVStsTokenSample9",
+    ),
+    (
+        "ALIBABACLOUD_SECURITY_TOKEN",
+        "generic_secret_field",
+        "deny",
+        "security_token",
+        "CAIS9wFq6vAVStsTokenSample9",
+    ),
+    (
+        "ALICLOUD_SECURITY_TOKEN",
+        "generic_secret_field",
+        "deny",
+        "security_token",
+        "CAIS9wFq6vAVStsTokenSample9",
+    ),
+    (
+        "ALICLOUD_ACCESS_KEY_STS_TOKEN",
+        "generic_secret_field",
+        "deny",
+        "security_token",
+        "CAIS9wFq6vAVStsTokenSample9",
+    ),
+    (
+        "OSS_SESSION_TOKEN",
+        "generic_secret_field",
+        "deny",
+        "security_token",
+        "CAIS9wFq6vAVStsTokenSample9",
+    ),
+    (
+        "OSS_SECURITY_TOKEN",
+        "generic_secret_field",
+        "deny",
+        "security_token",
+        "CAIS9wFq6vAVStsTokenSample9",
+    ),
+    (
+        "ALIYUN_SECURITY_TOKEN",
+        "generic_secret_field",
+        "deny",
+        "security_token",
+        "CAIS9wFq6vAVStsTokenSample9",
+    ),
+    (
+        "ALIBABA_CLOUD_BEARER_TOKEN",
+        "bearer_token",
+        "deny",
+        "bearer_token",
+        "eyJhbGciOiJIUzI1NiJ9SampleBearer1",
+    ),
+    (
+        "DASHSCOPE_API_KEY",
+        "api_key",
+        "deny",
+        "model_studio_api_key",
+        "sk-dashscopeSampleValue1234",
+    ),
+];
+
+/// Every approved role reports one finding with the fixed provider triple.
+#[test]
+fn alibaba_cloud_aliases_report_their_documented_role() {
+    let scanner = PiiScanner::new().unwrap();
+    for &(name, kind, severity, credential_kind, value) in ALIBABA_CLOUD_ALIASES {
+        for text in [
+            format!("{name}={value}"),
+            format!("export {name}=\"{value}\""),
+            format!("export {name}='{value}'"),
+        ] {
+            let report = scanner.scan(&text, &PiiScanOptions::default()).unwrap();
+            assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+            let own: Vec<_> = report
+                .findings
+                .iter()
+                .filter(|f| is_provider_finding(f))
+                .collect();
+            assert_eq!(own.len(), 1, "{text}: exactly one provider finding");
+            let finding = own[0];
+            assert_eq!(finding.pii_type, kind, "{text}");
+            assert_eq!(severity_of(finding.severity), severity, "{text}");
+            assert_eq!(
+                finding.metadata["credential_kind"], credential_kind,
+                "{text}"
+            );
+            assert!((finding.confidence - 1.0).abs() < 1e-9, "{text}");
+            // The span is the value only; the variable name stays readable.
+            let span = finding.span;
+            assert_eq!(
+                text.chars()
+                    .skip(span.start)
+                    .take(span.end - span.start)
+                    .collect::<String>(),
+                value,
+                "{text}: the value alone is the evidence span"
+            );
+        }
+    }
+}
+
+/// Boundary 1: a `DashScope` key that also matches the token-prefix rule.
+#[test]
+fn dashscope_key_keeps_provider_attribution_and_one_finding() {
+    let scanner = PiiScanner::new().unwrap();
+    let text = "DASHSCOPE_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456";
+    let report = scanner.scan(text, &PiiScanOptions::default()).unwrap();
+    assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+    assert_eq!(report.summary.total, 1, "one credential is counted once");
+    let finding = &report.findings[0];
+    assert_eq!(finding.pii_type, "api_key");
+    assert_eq!(severity_of(finding.severity), "deny");
+    assert_eq!(finding.metadata["provider"], "alibaba_cloud");
+    assert_eq!(finding.metadata["credential_kind"], "model_studio_api_key");
+    // The whole value is masked, not the generic four-plus-four partial mask.
+    assert_eq!(finding.evidence_redacted, "[REDACTED_API_KEY]");
+    assert_eq!(report.verdict, Verdict::Deny);
+}
+
+/// Boundary 2: an STS value that is also a structurally valid JWT.
+#[test]
+fn sts_token_that_is_a_jwt_keeps_both_classifications() {
+    let scanner = PiiScanner::new().unwrap();
+    let text = format!("ALIBABA_CLOUD_SECURITY_TOKEN={EMPTY_CLAIMS_JWT}");
+    let report = scanner
+        .scan(
+            &text,
+            &PiiScanOptions {
+                redact_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+    // The provider finding and the independent JWT finding both survive: the
+    // STS token really is a JWT, and collapsing them would lose one contract.
+    let provider = report
+        .findings
+        .iter()
+        .find(|f| is_provider_finding(f))
+        .expect("provider finding");
+    assert_eq!(provider.pii_type, "generic_secret_field");
+    assert_eq!(provider.metadata["credential_kind"], "security_token");
+    assert_eq!(provider.evidence_redacted, "[REDACTED_TOKEN]");
+    let jwt = report
+        .findings
+        .iter()
+        .find(|f| f.pii_type == "jwt")
+        .expect("independent JWT finding");
+    // The independent classification is retained without exposing token fragments.
+    assert_eq!(jwt.evidence_redacted, "[REDACTED]");
+    assert_eq!(report.verdict, Verdict::Deny);
+
+    // `redacted_text` never falls back to the weaker JWT partial mask for the
+    // same credential: the whole-value provider mask wins the overlap.
+    let redacted = report.redacted_text.as_deref().unwrap();
+    assert!(
+        redacted.contains("ALIBABA_CLOUD_SECURITY_TOKEN="),
+        "{redacted}"
+    );
+    assert!(redacted.contains("[REDACTED_TOKEN]"), "{redacted}");
+    assert!(!redacted.contains("eyJh"), "{redacted}");
+    assert!(!redacted.contains(EMPTY_CLAIMS_JWT), "{redacted}");
+}
+
+/// Boundary 3: placeholders are filtered before the generic same-assignment path.
+#[test]
+fn placeholder_and_reference_assignments_report_nothing() {
+    let scanner = PiiScanner::new().unwrap();
+    for (name, value) in [
+        ("ALIBABA_CLOUD_ACCESS_KEY_ID", "${ALIYUN_ACCESS_KEY_ID}"),
+        ("ALIBABA_CLOUD_ACCESS_KEY_ID", "$ALIYUN_KEY"),
+        (
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+            "$(cat /run/secrets/alibaba)",
+        ),
+        (
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+            "%ALIBABA_CLOUD_ACCESS_KEY_SECRET%",
+        ),
+        (
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+            "<your-access-key-secret>",
+        ),
+        ("DASHSCOPE_API_KEY", "your_api_key_here"),
+        ("ALICLOUD_SECRET_KEY", "xxxxxxxxxxxxxxxx"),
+        ("ALIBABA_CLOUD_SECURITY_TOKEN", "changeme"),
+    ] {
+        let report = scanner
+            .scan(&format!("{name}={value}"), &PiiScanOptions::default())
+            .unwrap();
+        assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+        assert_eq!(
+            report.summary.total, 0,
+            "{name}={value}: filtered on the provider path and not re-reported generically"
+        );
+        assert_eq!(report.verdict, Verdict::Pass, "{name}={value}");
+    }
+}
+
+/// Real values that merely contain `test`/`example` stay reported, and the
+/// generic `accessKeySecret` fallback keeps its own denial.
+#[test]
+fn real_values_and_generic_fallback_keep_their_contracts() {
+    let scanner = PiiScanner::new().unwrap();
+    for text in [
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRET=testValue1234567890",
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRET=sampleValue1234567890",
+    ] {
+        let report = scanner.scan(text, &PiiScanOptions::default()).unwrap();
+        assert_eq!(report.summary.total, 1, "{text}");
+        assert_eq!(report.findings[0].metadata["provider"], "alibaba_cloud");
+        assert_eq!(report.verdict, Verdict::Deny);
+    }
+    // No documented provider name: generic type, generic denial, whole mask.
+    let report = scanner
+        .scan(
+            "accessKeySecret=abcdefghijklmnopqrstuvwxyz",
+            &PiiScanOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].pii_type, "generic_secret_field");
+    assert_eq!(severity_of(report.findings[0].severity), "deny");
+    assert_eq!(report.findings[0].evidence_redacted, "[REDACTED_SECRET]");
+    // The retained generic field label still identifies what matched.
+    assert_eq!(report.findings[0].metadata["field"], "accessKeySecret");
+}
+
+/// Names are matched exactly and only inside an assignment shape.
+#[test]
+fn alias_names_require_exact_assignment_context() {
+    let scanner = PiiScanner::new().unwrap();
+    for text in [
+        // Not an assignment.
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+        "the ALIBABA_CLOUD_ACCESS_KEY_SECRET is rotated weekly",
+        // Not an approved name.
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRETS=wJalrXUtnFEMI7SampleSecret2",
+        "MY_ALIBABA_CLOUD_ACCESS_KEY_SECRET=wJalrXUtnFEMI7SampleSecret2",
+        // Generic CLI fallbacks carry no provider context.
+        "ACCESS_KEY_SECRET=wJalrXUtnFEMI7SampleSecret2",
+        "SECURITY_TOKEN=CAIS9wFq6vAVStsTokenSample9",
+        // Lowercase spellings are not the documented variables.
+        "alibaba_cloud_access_key_secret=wJalrXUtnFEMI7SampleSecret2",
+    ] {
+        let report = scanner.scan(text, &PiiScanOptions::default()).unwrap();
+        assert!(
+            !report.findings.iter().any(is_provider_finding),
+            "{text}: no provider attribution"
+        );
+    }
+}
+
+/// Lowercase severity label used by the serialized report.
+fn severity_of(severity: asc_capability_pii_scan::Severity) -> &'static str {
+    match severity {
+        asc_capability_pii_scan::Severity::Warn => "warn",
+        asc_capability_pii_scan::Severity::Deny => "deny",
+    }
+}
+
+/// `true` for a finding whose provider attribution is Alibaba Cloud.
+fn is_provider_finding(finding: &asc_capability_pii_scan::PiiFinding) -> bool {
+    finding
+        .metadata
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        == Some("alibaba_cloud")
 }

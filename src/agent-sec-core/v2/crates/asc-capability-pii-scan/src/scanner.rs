@@ -2,13 +2,14 @@
 
 use crate::custom;
 use crate::models::{
-    Coverage, CoverageStatus, PiiScanOptions, PiiScanReport, PiiSummary, ScanError, ScanStatus,
-    check_deadline,
+    Candidate, Coverage, CoverageStatus, PiiFinding, PiiScanOptions, PiiScanReport, PiiSummary,
+    ScanError, ScanStatus, check_deadline,
 };
 use crate::redact;
 use crate::report::{Findings, bound_report};
 use crate::rules::PiiRuleSet;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -63,6 +64,7 @@ impl PiiScanner {
         let mut findings = Findings::default();
         let mut redactor = options.redact_output.then(|| redact::Text::new(text));
         let mut previous = None;
+        let mut evidence = ProtectedEvidence::default();
         loop {
             check_deadline(deadline)?;
             let take_builtin = match (builtin.peek(), candidates.peek()) {
@@ -87,10 +89,13 @@ impl PiiScanner {
             if !options.include_low_confidence && candidate.confidence < 0.5 {
                 continue;
             }
+            // A provider-owned finding already excludes the generic finding for
+            // the same assignment inside the detector, so overlaps with
+            // independently meaningful detections such as a JWT are preserved.
             if let Some(redactor) = &mut redactor {
                 redactor.push(&candidate);
             }
-            findings.push(candidate, options.raw_evidence);
+            evidence.push(candidate, &mut findings, options.raw_evidence);
         }
         let mut reasons = Vec::new();
         if truncated {
@@ -145,6 +150,66 @@ impl PiiScanner {
         check_deadline(deadline)?;
         Ok(report)
     }
+}
+
+/// Tracks retained findings that can overlap a later protected value.
+#[derive(Default)]
+struct ProtectedEvidence {
+    protected_end: usize,
+    active: BTreeMap<usize, Vec<usize>>,
+}
+
+impl ProtectedEvidence {
+    fn push(&mut self, mut candidate: Candidate<'_>, findings: &mut Findings, raw: bool) {
+        let start = candidate.span.start;
+        while self
+            .active
+            .first_key_value()
+            .is_some_and(|(end, _)| *end <= start)
+        {
+            self.active.pop_first();
+        }
+        let provider_mask = candidate.mask.filter(|_| {
+            candidate.metadata.get("provider").and_then(|v| v.as_str()) == Some("alibaba_cloud")
+        });
+        if provider_mask.is_some() {
+            // Earlier findings can enclose a provider value. Every active
+            // finding overlaps it because candidates arrive in start order.
+            for indices in std::mem::take(&mut self.active).into_values() {
+                for index in indices {
+                    "[REDACTED]".clone_into(&mut findings.items[index].evidence_redacted);
+                }
+            }
+            self.protected_end = self.protected_end.max(candidate.span.end);
+        } else if start < self.protected_end {
+            candidate.mask = Some("[REDACTED]");
+        }
+
+        let compact_before = findings.is_compact();
+        let count_before = findings.items.len();
+        findings.push(candidate, raw);
+        if !compact_before && findings.is_compact() {
+            // Compaction can reindex retained findings; it happens at most once.
+            self.active.clear();
+            for (index, finding) in findings.items.iter().enumerate() {
+                if finding.span.end > start && !whole_masked(finding) {
+                    self.active.entry(finding.span.end).or_default().push(index);
+                }
+            }
+        } else if findings.items.len() > count_before {
+            let index = findings.items.len() - 1;
+            let finding = &findings.items[index];
+            if !whole_masked(finding) {
+                self.active.entry(finding.span.end).or_default().push(index);
+            }
+        }
+    }
+}
+
+fn whole_masked(finding: &PiiFinding) -> bool {
+    finding.evidence_redacted == "[REDACTED]"
+        || (finding.metadata.get("provider").and_then(|v| v.as_str()) == Some("alibaba_cloud")
+            && finding.evidence_redacted.starts_with('['))
 }
 
 pub(crate) fn digest(bytes: impl AsRef<[u8]>) -> String {

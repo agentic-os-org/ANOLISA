@@ -198,7 +198,8 @@ adjustment.
 |----------|-------|------------------|
 | Personal data | `email`, `phone_cn`, `credit_card`, `cn_id` | `warn` |
 | Credentials | `private_key`, `bearer_token`, `api_key`, `jwt` | `deny` |
-| Alibaba Cloud credentials | `aliyun_access_key_id`, `aliyun_access_key_secret` | `deny` |
+| Alibaba Cloud access key secret | `aliyun_access_key_secret` | `deny` |
+| Alibaba Cloud access key id | `aliyun_access_key_id` | `warn` |
 | Secret fields | `generic_secret_field` | `deny` |
 
 Credit card, Chinese ID, and JWT candidates are validated before becoming findings. Surrounding
@@ -209,6 +210,33 @@ its phone finding, while `test-only 13812345678` remains a low-confidence fixtur
 The `.invalid` marker retains substring matching; email and private-key findings retain their
 existing exemptions from this context penalty. Findings below the default `0.5` threshold are
 omitted unless `--include-low-confidence` is set.
+
+### Alibaba Cloud credentials
+
+Alibaba Cloud credentials are reported from documented environment-variable assignments rather
+than from a value prefix. A finding requires the `NAME=value` or `export NAME=value` shape with an
+exact, case-sensitive name; the value may be bare or wrapped in one pair of quotes. The evidence
+span covers the value only, so a redacted copy still shows which variable held the credential.
+
+`ALIBABA_CLOUD_BEARER_TOKEN` reports `bearer_token`, `DASHSCOPE_API_KEY` reports `api_key`, and an
+STS token reports `generic_secret_field`; all three keep `deny`. An access key id only warns
+because it cannot authenticate on its own. Each finding also carries
+`metadata.provider=alibaba_cloud` and `metadata.credential_kind`. Secrets and tokens are masked
+in full. An alphanumeric access key ID longer than eight characters retains its first and last
+four characters, separated by `...[REDACTED]...`; shorter or compound values are fully masked.
+
+Complete placeholders and unresolved references are not reported: `$NAME`, `${NAME}`, `%NAME%`,
+`$(cat /run/secret)`, `<your-key>`, `changeme`, and runs of `x` or `*`. A `$` reference
+inside single quotes is treated as a literal value and reported. Other command
+substitutions, such as `$(printf secret123)`, are reported. A real value that merely contains
+`test` or `example`, such as `testValue1234567890`, is still reported. `accessKeySecret` without a
+documented provider name keeps `generic_secret_field` and `deny`. Generic fallbacks such as
+`ACCESS_KEY_ID` carry no provider context, and a bare `LTAI...` value is no longer attributed to
+Alibaba Cloud on its own.
+
+Deeply nested assignments are subject to a bounded rescan budget. If the
+budget is exhausted, the scan reports `matching_failed` with unavailable
+coverage instead of a complete result.
 
 Email detection accepts sentence-ending ASCII periods, including an ellipsis, when the period run
 is followed by end of input, whitespace, or a supported sentence/closing delimiter. For example,
