@@ -71,6 +71,12 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 All commands below assume `uv run` (project venv is auto-resolved).
 
+Preview batch selection before evaluation with `ce-runner batch --dry-run
+--prefix T --range 1-10 --trials 3`. It prints the selected task directory names
+and requested run count, using the same selectors as a normal batch. This mode
+needs no model/judge credentials or running gateway and creates no trace outputs.
+Selection errors still fail; runtime preflight and fixture checks run during evaluation.
+
 > **`--config` is required unless the model/judge env vars are exported.** `run`/`batch` do **not** auto-load `claw-eval/config.yaml`; pass `--config claw-eval/config.yaml` (written by `scripts/configure_model.py`), or export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` and `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`.
 
 ```bash
@@ -112,6 +118,7 @@ ce-runner supports three task prefixes with different execution modes:
 | `--chunk-size` | 4 | Tasks per chunk (controls peak memory; auto-raised to --parallel) |
 | `--trace-prefix` | `openclaw` | Prefix for trace directory name |
 | `--skip-preflight` | false | Skip openclaw plugins + docker pre-flight checks |
+| `--dry-run` | false | Preview selected batch tasks and requested trial count |
 
 ## Output
 

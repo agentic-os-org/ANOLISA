@@ -420,6 +420,8 @@ Task filtering examples:
                          help="Prefix for trace directory name (default: openclaw)")
     p_batch.add_argument("--skip-preflight", action="store_true", default=False,
                          help="Skip openclaw plugins + docker pre-flight checks")
+    p_batch.add_argument("--dry-run", action="store_true", default=False,
+                         help="Preview selected tasks and trial count without evaluation setup")
 
     args = parser.parse_args()
 
