@@ -409,6 +409,12 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+`trace_model_summary.csv` groups executions by the reported model and includes distinct
+case counts, execution counts, total input/output tokens, and mean tokens/steps per execution.
+Counts show each model's case coverage; means weight executions equally. A session using
+multiple models stays in its reported model-combination group and is counted once. Traces
+without a recorded model use a blank model group.
+
 Analyze existing traces:
 
 ```bash
@@ -477,7 +483,8 @@ output/
     │   └── <instance_id>.csv
     ├── trace_metrics/
     │   └── trace_metrics.csv
-    └── trace_summary.csv
+    ├── trace_summary.csv
+    └── trace_model_summary.csv
 ```
 
 Important files:
@@ -494,6 +501,7 @@ Important files:
 | `evaluate/*.json` | SWE-bench evaluation summary report |
 | `analyze-traces/trace_details/*.csv` | Per-trace basic metrics |
 | `analyze-traces/trace_summary.csv` | Per-instance summary metrics |
+| `analyze-traces/trace_model_summary.csv` | Token budgets and case coverage grouped by model |
 | `analyze-traces/trace_metrics/trace_metrics.csv` | Detailed trace, tool-call, and token metrics |
 
 ## Project Structure

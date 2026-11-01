@@ -399,6 +399,11 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+`trace_model_summary.csv` 按记录的模型汇总执行，包含不同用例数、执行次数、输入与输出
+Token 总数，以及每次执行的平均 Token 数和步骤数。用例数显示各模型的覆盖范围，
+平均值对每次执行赋予相同权重。使用多个模型的 session 保留在记录的模型组合组中，
+只计数一次。未记录模型的 trace 归入模型字段为空的组。
+
 分析已有 trace：
 
 ```bash
@@ -467,7 +472,8 @@ output/
     │   └── <instance_id>.csv
     ├── trace_metrics/
     │   └── trace_metrics.csv
-    └── trace_summary.csv
+    ├── trace_summary.csv
+    └── trace_model_summary.csv
 ```
 
 重要文件：
@@ -484,6 +490,7 @@ output/
 | `evaluate/*.json` | SWE-bench evaluation 汇总报告 |
 | `analyze-traces/trace_details/*.csv` | 每条 trace 的基础指标 |
 | `analyze-traces/trace_summary.csv` | 每个实例的汇总指标 |
+| `analyze-traces/trace_model_summary.csv` | 按模型汇总的 Token 预算与用例覆盖范围 |
 | `analyze-traces/trace_metrics/trace_metrics.csv` | 更细的 trace、工具调用和 token 指标 |
 
 ## 项目结构

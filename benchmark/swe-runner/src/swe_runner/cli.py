@@ -222,6 +222,7 @@ def analyze_traces(
     console.print(f"[green]Per-trace CSV dir:[/green] {result.detail_dir}")
     console.print(f"[green]Per-case summary CSV:[/green] {result.summary_csv}")
     console.print(f"[green]Trace metrics CSV:[/green] {result.trace_metrics_csv}")
+    console.print(f"[green]Per-model summary CSV:[/green] {result.model_summary_csv}")
 
 
 if __name__ == "__main__":
