@@ -150,6 +150,10 @@ delete 不再接受前缀。缺失的 pinned 快照和 guarded evidence 保留 u
 - `-g` / `--global` 查看或修改全局配置文件
 - `-w <workspace>` / `--workspace <workspace>` 查看或修改单个工作区的 `policy.toml`
 
+`backend.btrfs-loop.img_size` / `config -g --img-size` 接受至少 **5 GiB** 的整数
+（默认 30 GiB），修改后需要重启 daemon。配置非法时 daemon 停止启动，不会用默认值
+替换其他设置。CLI 在保存前校验更新后的配置，也允许修复旧配置中的数值越界问题。
+
 ```bash
 # 查看系统状态
 ws-ckpt status --workspace ~/my-workspace

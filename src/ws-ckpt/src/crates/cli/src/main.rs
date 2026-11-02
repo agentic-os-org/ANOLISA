@@ -9,11 +9,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
-    decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
-    ChangeType, CleanupRetention, DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp,
-    RecoveryPreview, Request, Response, SnapshotListItem, WorkspacePolicyJson,
-    ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
-    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
+    decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file,
+    load_config_file_unvalidated, save_config_file, ChangeType, CleanupRetention, DaemonConfig,
+    ErrorCode, GlobalConfigJson, PolicyFieldOp, RecoveryPreview, Request, Response,
+    SnapshotListItem, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH,
+    DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
     GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE, MAX_LIST_PAGE_ITEMS, OVERVIEW_JSON_SCHEMA,
 };
@@ -84,8 +84,8 @@ struct ConfigArgs {
     #[arg(long)]
     health_check_interval: Option<u64>,
 
-    /// Set target image size in GB (image will be grown/shrunk at next daemon restart).
-    /// Global-only.
+    /// Set target image size in GiB, minimum 5 (image will be grown/shrunk at
+    /// next daemon restart). Global-only.
     #[arg(long)]
     img_size: Option<u64>,
 
@@ -378,15 +378,10 @@ async fn run(cli: Cli) -> Result<()> {
             socket,
             log_level,
         } => {
-            // Load auto-cleanup settings from config file
+            // Refuse to start on an invalid config: falling back to defaults
+            // would silently drop the operator's other valid settings.
             let file_config = load_config_file(std::path::Path::new(CONFIG_FILE_PATH))
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "Warning: failed to load {}: {}, using defaults",
-                        CONFIG_FILE_PATH, e
-                    );
-                    Default::default()
-                });
+                .with_context(|| format!("failed to load {}", CONFIG_FILE_PATH))?;
             let config = DaemonConfig {
                 mount_path,
                 socket_path: socket,
@@ -1968,9 +1963,10 @@ async fn handle_global_config_update(
 ) -> Result<()> {
     let path = std::path::Path::new(CONFIG_FILE_PATH);
 
-    // Load existing config
-    let mut fc =
-        load_config_file(path).map_err(|e| anyhow::anyhow!("Failed to read config: {}", e))?;
+    // Parse without range validation so this update can repair an
+    // out-of-range value; save_config_file validates the result.
+    let mut fc = load_config_file_unvalidated(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read config: {}", e))?;
 
     // Apply updates
     if let Some(interval) = health_check_interval {
