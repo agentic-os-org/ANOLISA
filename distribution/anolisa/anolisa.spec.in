@@ -149,7 +149,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Oct 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Mon Nov 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Ship distribution-owned component contracts and recognize standalone RPM cores.
+- Render MCP command paths and preserve discovery files during raw lifecycle operations.
+- Activate managed cosh extensions and refresh component catalog versions.
+
+* Thu Oct 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.20-1
 - Allow raw installs to skip runtime dependency handling with --no-deps.
 - Explain adapter path boundary recovery and refresh component catalog versions.
 
