@@ -89,6 +89,25 @@ Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清�
 **兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
 assignment。请更新脚本，使用 `--pid`、`--process-name` 或 `--executable` 选择目标进程。
 
+V2 **Secret Gateway 预览能力**让真实 GitHub 凭据不进入 Agent 进程。
+V2 `agent-sec-core` RPM 自动启动基础 daemon，但网关默认关闭；root 显式安装 mitmproxy。
+raw 包包含相同网关资产，但不启动两个服务；网关启停仅由 daemon 管理，卸载时撤流失败则拒绝删除。
+`gateway key add github --secret-file /root/github.token` 只导入，不授权；相同 secret 幂等成功，
+不同值报错且不覆盖。更换必须先 remove 再 add、创建新 Scope 并更新 Agent 配置，旧 fake
+永久退役，不自动轮换。既有原生 Policy JSON 通过 `network/use_credential` 授权 HTTPS 请求；Scope 固定 Policy revision
+快照，并指定非 root owner 和进程 selector。先准备 Scope、启用网关，再以 owner 查询
+`gateway credentials --scope <scopeId>`，将 fake 与 CA 配入 Agent 后启动。
+discovery 自动接管匹配实例，不保证 first packet 保护。实例重启保持 Scope fake；删除 Scope
+只撤销其 fake，`gateway key remove github` 则全局退役凭据。只读 status 与凭据查询按 UID
+隔离：status 返回 `{enabled, ready, scopes}`，Scope 项为 `{scopeId, bindings}`，credentials
+返回 `{scopeId, environment}`。`ready` 要求已启用、cgroup v2 只读检查通过、代理 unit active、
+已加载 generation 匹配且 CA 可用。enable 在改变 enabled 前检查 cgroup v2；发布（含已启用
+状态恢复）、已启用时的 status 查询与凭据查询重新检查。默认关闭恢复跳过此预检；不降级为
+cgroup v1、不改挂载。nftables `socket cgroupv2` 仅在实际规则应用时检验，不做独立预检；
+实例 Binding `READY` 仍需另行等待。key list 只列 active IDs（`{"credentials":["github"]}`），add/remove 返回
+`{"credential":"github"}`，enable/disable 成功返回 `{}`。
+参阅 [Secret Gateway 设计](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md)。
+
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅

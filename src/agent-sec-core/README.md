@@ -103,6 +103,30 @@ the daemon with `--policy-admin-uid <UID>`; default authorization remains root-o
 assignments were not supported. Update scripts to select the intended processes
 with `--pid`, `--process-name`, or `--executable`.
 
+The V2 **Secret Gateway preview** keeps real GitHub credentials out of Agent processes.
+The V2 `agent-sec-core` RPM starts the base daemon automatically but leaves the gateway off; root installs
+mitmproxy explicitly. Raw packages include the same gateway assets but start neither service; the daemon
+alone controls the gateway lifecycle, and uninstall refuses to proceed if routing withdrawal fails.
+`gateway key add github --secret-file /root/github.token` imports without granting access: the same
+secret is idempotent, and a different value is rejected without overwrite.
+Replacement requires remove then add, a new Scope and updated Agent configuration; old fakes are
+permanently retired, with no automatic rotation. Existing native Policy JSON authorizes `network/use_credential` HTTPS
+requests, and a Scope pins that Policy revision with a non-root owner and process selector.
+Prepare the Scope, enable the gateway, query `gateway credentials --scope <scopeId>` as its owner,
+and configure the Agent's fake and CA before starting it. Discovery automatically attaches matching
+instances; it does not guarantee first-packet protection. Instance restarts retain the Scope fake;
+Scope deletion revokes only its fakes, while `gateway key remove github` retires the credential globally.
+Read-only status and credential queries are UID-scoped: status returns `{enabled, ready, scopes}`
+with `{scopeId, bindings}` entries, and credentials returns `{scopeId, environment}`. `ready` requires
+an enabled gateway, a passing read-only cgroup v2 check, active proxy unit, matching loaded generation
+and available CA. Enable checks cgroup v2 before changing enabled state; publication (including enabled
+recovery), enabled status queries and credential queries recheck it. Default-off recovery skips this
+preflight. No cgroup v1 fallback or mount changes occur; nftables `socket cgroupv2` is checked only by
+actual rule application, not an independent preflight. Wait separately for instance Binding `READY`.
+Key list returns active IDs only (`{"credentials":["github"]}`); add/remove return `{"credential":"github"}` and
+successful enable/disable return `{}`. See the
+[Secret Gateway design (Chinese)](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md).
+
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an
 upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables

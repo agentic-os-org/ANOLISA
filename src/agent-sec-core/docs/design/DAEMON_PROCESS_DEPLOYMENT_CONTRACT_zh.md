@@ -809,7 +809,7 @@ mitmproxy standalone 构建，不继承 daemon 权限。daemon 仅经 drop-in
 `inet agent_sec_gateway`；Binding 实例 cgroup 通过 systemd D-Bus 创建。网关账户主组必须
 同名且无其他成员，Scope owner 和进程不得具备读取网关秘密的 UID/组权限，准备、接管与
 下发均须核验。cgroup 是分类边界，同 UID 多 Scope 不能防止该用户读取彼此 fake。
-V2 `agent-sec-cli` RPM 包含 addon、policy 模块、网关 unit、daemon drop-in、installer 和
+V2 `agent-sec-core` RPM 包含 addon、policy 模块、网关 unit、daemon drop-in、installer 和
 provenance，构建只 staging 到 `DESTDIR`。安装自动启动基础 daemon，但网关默认关闭：
 不启动代理、不创建网关账户、不携带或下载 mitmproxy、不添加引流。未配置凭据 Scope、
 没有保存网关状态的初始安装，daemon 启动和重启也不创建网关 runtime、凭据目录或 nft 表；
@@ -817,6 +817,10 @@ provenance，构建只 staging 到 `DESTDIR`。安装自动启动基础 daemon�
 再配置 Policy/Scope 并 enable。源码 staging 不是最终 RPM 已构建/验收的证明。
 最终卸载在存在运行 manifest 或代理 active 时，先经 daemon 执行 disable，再停止两个服务；
 disable 失败则拒绝卸载。升级不执行该清理，手动安装的 mitmproxy 和持久凭据不由 RPM 删除。
+raw 包包含相同网关静态资产，由组件 manifest 渲染 unit 和卸载脚本路径；基础 daemon
+声明 `enable=false/start=false`，gateway unit 仅作为文件交付，其启停仍由 daemon 独占，
+不进入 ANOLISA 通用组件重启操作。安装不执行网关初始化。raw 卸载通过严格 `pre_uninstall`
+钩子完成上述撤流，失败不停止服务、不删除文件；raw 升级不因新增网关资产而启用或重启代理。
 
 持久状态位于 `/var/lib/agent-sec/gateway/state.json`（0600，目录 0700）和
 `/var/lib/agent-sec/credentials`，不进入 `/var/log/agent-sec`；`AGENT_SEC_DATA_DIR` 覆盖
@@ -842,10 +846,12 @@ GitHub 鉴权；已有代理连接不保证无缝恢复，须重连。
 TLS 透传或不受影响，generation 未就绪仍拒绝。撤销失败的停止代理与删除整个运行目录
 （`remove_all`）行为保持不变，不适用主动 disable 的 CA 保留规则，不能概括为所有故障都 fail-open。
 
-当前 daemon 在开放 UDS 请求前依次同步执行 `GatewayService.recover()` 与
-`PapService.recover_scopes()`，不是后台恢复，也没有独立 gateway 恢复 Job。网关构造或恢复
-失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，不阻塞原有
-file-policy daemon readiness。file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
+当前 daemon 在启动 Binding worker 前恢复 file Scope 删除屏障并同步执行
+`GatewayService.recover()`，开放 UDS 请求前再执行 `PapService.recover_scopes()`；不设置
+独立 gateway 恢复 Job。Apply claim 的 SQLite 事务核对 canonical Scope 仍为 `Active`，
+防止删除中的 assignment 重新部署策略。网关构造或恢复失败单独记录错误；Active 凭据 Scope
+恢复失败保留 `Active`，不转入删除，不阻塞原有 file-policy daemon readiness。
+file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
 管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
 generation 在每次尝试前持久化且不复用；网关恢复、撤销或首次 enable 失败时停止 unit、
 撤流并删除运行目录，保留 canonical intent。systemd `active` 不代表网关已加载，发布流程等待
@@ -854,8 +860,10 @@ unit 在启动前和停止后都删除 `status/health.json`，避免上一个进
 恢复重新读取 canonical Scope/Binding 与固定 Policy 快照，并核验 boot ID、PID namespace、
 PID/start time 和执行 cgroup；不能仅凭保存的 PID 接管新进程。多实例共享 Scope fake；实例
 退出只清理自身 Binding，不撤销共享 grant。Scope 删除关闭 admission、撤销其 fake，保留
-清理责任直到完成。现有 reconciliation timer 调用 `sweep_deleting_scopes()`，在 Binding
-清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；空 Scope 也释放端口，
+清理责任直到完成。Policy Runtime 拥有单一 Scope 清理 worker，调用 `sweep_deleting_scopes()`，
+在 Binding 清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；shutdown
+等待其实际调用结束。网关等待不占用 Binding timer；file-only Scope 和 credential Scope
+使用独立变更锁，混合 Scope 归 credential 域。空 Scope 也释放端口，
 不删除 real、不停止 Agent。全局 key retirement 撤销所有 Scope 对该凭据的 fake。
 await 后须重新验证 canonical 授权，过时操作不得恢复引流。
 

@@ -4,7 +4,7 @@
 | --- | --- |
 | 状态 | [TARGET V2] |
 | 范围 | GitHub 凭据；复用原生 Policy/Scope/Binding 与 process discovery |
-| 相关文档 | [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2-secret-gateway-进程权限与数据目录dproc-gw)、[daemon 协议 §18](DAEMON_PROTOCOL_V1_zh.md#18-target-v2-secret-gateway-管理)、[用户指南](../../../../docs/user-guide/zh/agent-sec-core/secret-gateway.md) |
+| 相关文档 | [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2-secret-gateway-进程权限与数据目录dproc-gw)、[daemon 协议 §18](DAEMON_PROTOCOL_V1_zh.md#18-target-v2-secret-gateway-管理) |
 
 ## 1. 目标与授权对象
 
@@ -64,7 +64,7 @@ Policy 使用既有 `specVersion: "0.1"`、`rules` JSON，不增加独立授权�
 - methods 是 1–6 个不重复的大写 `GET/HEAD/POST/PUT/PATCH/DELETE`。
 - `responseRewrite` 为 `buffered` 或 `none`。可选 `because` 最长 256 字节且不含控制字符。
 
-标准 GitHub Policy 随交付提供完整可复制 JSON，内容见用户指南；不依赖未确定的 package 路径：
+标准 GitHub Policy 的完整 JSON 位于 `v2/crates/asc-gateway-plan/policies/github.json`；RPM 将其安装为 `/usr/share/anolisa/sec-core/gateway/github-policy.json`：
 
 | host | path | method | 响应改写 |
 | --- | --- | --- | --- |
@@ -214,13 +214,17 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 `credential_not_allowed`。不携带托管凭据仍需通过有关校验，不是 TLS 透传。
 
 拒绝响应为 `{"error":"<code>","source":"agent-sec-gateway"}`，通常 403；SNI/Host 不符为 421，
-内部异常 `gateway_error` 为 500。日志只记录有界归属与请求信息、不含 Token；真实值泄露时
-也不记录 path。
+内部异常 `gateway_error` 为 500。输出日志只允许 addon 的固定安全诊断，不输出请求字段、
+依赖解析消息或异常堆栈；客户端错误码和内部 readiness 报告保留，底层故障日志细节减少。
 
 命中 allow 后只替换 Authorization token/Basic 密码，保留 Basic 用户名。仅注入后的响应需
-反向改写：header/trailer 中真实值始终改回 fake；`buffered` body 限 8 MiB，只接受 identity/gzip，
-解码/大小/编码不合格返回 502 或断开。改写后移除 ETag 和 Content-MD5。`none` 保持 body 流式。
-响应钩子异常断开，不向 Agent 交付未检查响应。
+反向改写：header/trailer 中实际注入的 Authorization（含 Basic 编码）和裸真实值均改回 fake；
+`buffered` body 限 8 MiB，只接受 identity/gzip，并使用相同替换表。解码/大小/编码不合格
+返回 502 或断开。改写后移除 ETag 和 Content-MD5。`none` 保持 body 流式。
+响应钩子异常或已注入请求的上游协议错误（含响应头解析与字段校验失败）均直接关闭客户端
+连接，不交付包含原始上游字节的代理错误页。字段校验失败不受 flow kill 约束，addon 在
+error hook 返回前同步关闭底层 writer，覆盖 HTTP/1 与 HTTP/2；同一 HTTP/2 连接的其它流也
+会断开。该行为依赖固定 mitmproxy 版本的连接实现，升级时须重跑对应黑盒用例。
 
 ## 5. 执行投影、发布与清理
 
@@ -229,10 +233,12 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 canonical Scope、固定的 Policy revision 和 Binding，核对 lifecycle 与实例身份；不从 PID
 单独恢复、不读取 latest Policy 替代快照。
 
-当前 daemon 在开放 UDS 请求前依次同步执行 `GatewayService.recover()` 与
-`PapService.recover_scopes()`，不是后台恢复，也没有独立 gateway 恢复 Job。网关构造或恢复
-失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，不阻塞原有
-file-policy daemon readiness。file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
+当前 daemon 在启动 Binding worker 前恢复 file Scope 的删除屏障，并同步执行
+`GatewayService.recover()`；开放 UDS 请求前再执行 `PapService.recover_scopes()`，不设置独立
+网关恢复 Job。SQLite 在 claim Apply 的同一事务中核对 canonical Scope 仍为 `Active`，
+防止删除中的 Scope 在 discovery 清理前重新部署策略。网关构造或恢复失败单独记录错误；
+Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，不阻塞原有 file-policy daemon readiness。
+file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
 管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
 
 每次下发先持久化新的 generation，编号不复用；校验 canonical Scope 与账户隔离，写快照和
@@ -251,8 +257,10 @@ IPv4 TCP 80/443 引流，IPv6、UDP/443 与其他端口放行但不保护、不�
 连接不受追溯保护。所有被引流 HTTPS 均 MITM，即使不含 fake 也要求信任 CA。
 
 Scope 删除先永久关闭 admission 并撤销 fake，再清理 Binding 和执行投影；清理失败保留责任
-以便重试。现有 reconciliation timer 调用 `sweep_deleting_scopes()`，在 Binding 清理完成后
-执行 Deleting Scope 的 final release，包括零实例 Scope；不另设 gateway 恢复任务。
+以便重试。Policy Runtime 拥有单一 Scope 清理 worker，调用 `sweep_deleting_scopes()`，
+在 Binding 清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；shutdown
+等待其实际调用结束。网关发布等待不占用 Binding timer，file-only Scope 和 credential Scope
+使用独立变更锁，混合 Scope 归 credential 域；不另设 gateway 恢复任务。
 实例退出不退役共享 fake。全局 key retirement 对所有 Scope 生效。撤销不能确认
 时停止代理、撤流并删除整个 runtime（包含 CA），不能保留可用旧 generation。
 
@@ -271,6 +279,14 @@ mitmproxy、不添加引流。未配置凭据 Scope、没有保存网关状态�
 状态的同步恢复。管理员显式安装 standalone、导入 key、准备 Policy/Scope 后 enable。
 最终卸载活动网关须先通过 daemon disable，失败拒绝卸载；升级不执行 erase 清理。手动安装
 的 mitmproxy 与持久凭据保留。本设计不把源码 staging 当作最终 RPM 已构建或验收的证据。
+
+raw 包交付相同网关静态资产。`anolisa --install-mode system install sec-core --backend raw` 按组件 manifest
+安装 gateway unit、daemon drop-in 与 addon，unit 和卸载脚本中的路径随安装布局渲染。
+基础 daemon 声明 `enable=false/start=false`，gateway unit 仅作为普通文件交付，不登记为
+ANOLISA 托管服务，由 daemon 独占启停。安装不下载 standalone、不创建网关账户或引流。
+raw 升级只更新文件，不因新增网关资产而启用或重启代理；运行中的代理须由管理员显式重启
+以加载新 addon。raw 卸载在停止服务和删除文件前执行严格撤流钩子；活动 unit 或运行 manifest
+存在时，disable 失败拒绝卸载，手动安装的 standalone 与持久凭据仍保留。
 
 | 层级 | 验证入口 |
 | --- | --- |
