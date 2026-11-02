@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.3
+
+### Fixes
+- Preserve final token usage in cost analysis and scope final answers to the latest turn.
+- Preserve ATIF developer instructions and recorded tool completion times.
+- Decode stacked HTTP content codings and keep missing throughput measurements unknown.
+- Preserve Hermes fallback call identity and clear empty Hermes histories.
+- Cover legacy guards in write-access preflight and close file-guard content-loss entries.
+- Validate resource capture quality before accepting benchmark results.
+
+### Changed
+- Keep ANOLISA discovery contract ownership in the distribution.
+
 ## 0.15.2
 
 ### Features
