@@ -240,6 +240,7 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             unmatched_results = []
             for result in tool_results:
                 call_id = result.get("source_call_id")
+                owner_id = call_id
                 owner = tool_call_steps.get(call_id) if isinstance(call_id, str) else None
                 if owner is None and isinstance(call_id, str):
                     case_key, (kind, normalized) = _call_id_keys(call_id)
@@ -249,9 +250,14 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
                     )
                     # An exact ID wins; an ambiguous echo must not steal a sibling's result.
                     if len(matches) == 1:
-                        owner = tool_call_steps[next(iter(matches))]
+                        owner_id = next(iter(matches))
+                        owner = tool_call_steps[owner_id]
                 if owner is not None:
                     owner.setdefault("observation", {"results": []})["results"].append(result)
+                    if isinstance(timestamp, str) and timestamp:
+                        for call in owner.get("tool_calls", []):
+                            if call.get("tool_call_id") == owner_id:
+                                call.setdefault("extra", {})["result_timestamp"] = timestamp
                 else:
                     unmatched_results.append(result)
 
