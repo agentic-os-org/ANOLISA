@@ -416,10 +416,12 @@ plugin configuration when it sets `autoCheckpoint: true`. The binding and its
 configuration file must predate the start of the trajectory. A recorded
 workspace operation takes precedence over this fallback.
 
-All snapshot routes require Dashboard credentials, including loopback. Restore
-also requires `restore_enabled: true`; it remains off by default. See
+Snapshot data and restore operations require Dashboard credentials, including on
+loopback. The Dashboard can check whether a registered workspace is available
+before prompting for a token. Restore also requires `restore_enabled: true` and
+is off by default. See
 [snapshot APIs](data-and-storage.md#workspace-snapshot-api) for the confirmation
-protocol. This backend change does not add Dashboard controls by itself.
+protocol and [Dashboard snapshot controls](dashboard.md#workspace-snapshots-in-execution-steps).
 
 ## Tokenless statistics API
 

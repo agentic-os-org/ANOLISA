@@ -26,6 +26,7 @@ function viewer(browser) {
   };
   runInNewContext(readFileSync(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, 'utf8'), {
     exports,
+    AbortController,
     setTimeout: browser.setTimeout,
     Blob,
     URL: browser.URL,
@@ -45,6 +46,7 @@ function viewer(browser) {
         fetchAtifBySession: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
         fetchSessionSavings: async () => ({ items: [], total_compounded_saved: 0 }),
       };
+      if (name === '../utils/wsCkpt') return { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false };
       if (name === '../utils/trajectoryTree') return { buildTrajectoryTree: () => null };
       if (name === '../utils/trajectoryTextFilter') return require(process.env.AGENTSIGHT_TRAJECTORY_FILTER_BUILD);
       if (name === '../utils/text') return require(join(dirname(process.env.AGENTSIGHT_ATIF_PAGE_BUILD), '../utils/text.js'));

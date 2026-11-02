@@ -55,7 +55,7 @@ try {
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/settings-save-readiness.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/llm-locale-regression.test.cjs', 'tests/strategy-presentation-regression.test.cjs', 'tests/clipboard-regression.test.cjs', 'tests/savings-sort-regression.test.cjs', 'tests/download-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/settings-save-readiness.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/llm-locale-regression.test.cjs', 'tests/strategy-presentation-regression.test.cjs', 'tests/clipboard-regression.test.cjs', 'tests/savings-sort-regression.test.cjs', 'tests/download-regression.test.cjs', 'tests/ws-ckpt-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),

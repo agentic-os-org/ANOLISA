@@ -381,9 +381,10 @@ journalctl -u agentsight.service -n 30 --no-pager
 Sight 会检查该实例是否配置了 `autoCheckpoint: true`，以及绑定和插件配置文件是否
 早于轨迹开始。轨迹中可确认的工作区操作优先。
 
-所有快照接口均要求 Dashboard 凭据，包括回环地址。恢复还需显式配置
-`restore_enabled: true`，默认关闭。确认协议见[快照 API](data-and-storage.md#工作区快照-api)。
-本次后端接入本身不增加页面控件。
+读取快照数据和执行恢复均要求 Dashboard 凭据，包括回环地址。Dashboard 可先检查轨迹
+能否定位到注册工作区，再决定是否提示登录。恢复还需显式配置
+`restore_enabled: true`，默认关闭。确认协议见[快照 API](data-and-storage.md#工作区快照-api)，
+页面操作见 [Step 快照交互](dashboard.md#在执行-step-中查看工作区快照)。
 
 ## Tokenless 统计 API
 

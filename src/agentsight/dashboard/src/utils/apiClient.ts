@@ -11,7 +11,7 @@ import type {
   OptimizeLlmConfig,
 } from '../types/optimization';
 
-const API_BASE: string = (() => {
+export const API_BASE: string = (() => {
   // Explicit override via env var (set at build time for non-embedded deployments)
   if (typeof process !== 'undefined' && (process.env as any).REACT_APP_API_BASE) {
     return (process.env as any).REACT_APP_API_BASE as string;
@@ -114,9 +114,9 @@ export class ApiRequestError extends Error {
   }
 }
 
-async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(url: string, init: RequestInit = {}, redirectOnUnauthorized = true): Promise<T> {
   const res = await fetch(url, { ...init, credentials: 'same-origin' });
-  if (res.status === 401) {
+  if (res.status === 401 && redirectOnUnauthorized) {
     // Session expired or invalid — redirect to login
     window.location.hash = '#/login';
     throw new Error('Authentication required');

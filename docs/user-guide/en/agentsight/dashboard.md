@@ -146,6 +146,38 @@ and includes its collected subagent trajectories in the ATIF viewer. A captured 
 can resolve children under one matching collected rollout parent; ambiguous rollout parents
 are not combined. If collected children are unavailable, the captured session remains readable.
 
+### Workspace snapshots in execution Steps
+
+When a recorded ws-ckpt operation identifies a registered workspace, the ATIF viewer shows its
+path beside **Interaction trajectory** and attaches workspace snapshots to Agent Steps by
+timestamp. This includes snapshots created by other sessions or CLI users; a Step association
+does not identify the snapshot's creator. The server provides the association, and the viewer
+checks that it describes the displayed trajectory. Local JSON imports and embedded child
+trajectories do not inherit the root's snapshot buttons. Unresolved workspaces or unavailable
+snapshot queries leave the existing trajectory view unchanged.
+If a registered workspace is available and the snapshot API requires a token, the viewer
+opens the Dashboard login form and returns to the same trajectory after sign-in.
+
+Select **View snapshot / Roll back** to open the file change list, comparing the target snapshot
+with the current workspace. Lists longer than 20 files show the total and page controls
+in the dialog footer, alongside the rollback confirmation. M/A/D/R mark modified,
+added, deleted and renamed files; rollback
+reverses these changes. No line-by-line file contents are shown. **Confirm rollback** is enabled
+only when the server allows restoration and you confirm that no other process will write
+to the workspace during rollback. Restore resets the entire managed workspace to the target
+snapshot, overwriting changes from other sessions. If the file list changes before confirmation,
+refresh it and confirm again. When a rollback is rejected before execution, **View failed rollback**
+reopens the original snapshot. **Cancel rollback** clears the failure. To retry that snapshot,
+confirm that there are no other writes and select **Confirm rollback**. The server rechecks the
+preview before executing.
+If the result is uncertain, the dialog automatically checks the submitted operation.
+**View pending rollback** in the page banner reopens the original snapshot and resumes checking.
+**Close** retains it
+on the page. **Cancel rollback** and **Confirm rollback** are unavailable while the
+submitted operation's outcome is unknown. You can still view other snapshots and their
+file changes. Reloading or leaving the viewer clears the pending operation
+from the page. Setup and platform requirements: [ws-ckpt integration](integrations.md#ws-ckpt-workspace-snapshots-linux).
+
 ## Reuse Labels
 
 Reviews collected trajectories for later Agent reuse. Run deterministic triage first, then confirm or override `good`, `bad`, `useless`, or `unknown` labels individually or in batch. The rules never assign `bad`; that verdict requires a human decision or an LLM judgement with a cited trajectory step.

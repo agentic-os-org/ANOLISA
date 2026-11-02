@@ -94,7 +94,7 @@ const AuthGate: React.FC<{ children: (status: AuthStatusResponse | null) => Reac
 
   const handleAuthenticated = () => {
     setAuthState('authenticated');
-    navigate(defaultPath(capabilitiesFromStatus(status)));
+    if (location.pathname !== '/atif') navigate(defaultPath(capabilitiesFromStatus(status)));
   };
 
   if (authState === 'loading') {
@@ -121,11 +121,13 @@ const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) =
     return <Navigate to={fallbackPath} replace />;
   }
 
+  // The trajectory viewer pins its pending rollback to the page scroll.
+  const trajectoryViewer = location.pathname === '/atif';
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <NavBar capabilities={capabilities} />
-      <div className="flex flex-1 overflow-hidden">
-        <main className="flex-1 overflow-auto">
+      <div className={`flex flex-1 ${trajectoryViewer ? 'overflow-clip' : 'overflow-hidden'}`}>
+        <main className={`flex-1 ${trajectoryViewer ? 'min-w-0 overflow-clip' : 'overflow-auto'}`}>
           <Routes>
             {/* The bare root renders no page: a fresh visit lands on the
                 Agent dashboard (#2723). `/observability` keeps serving the
@@ -153,11 +155,25 @@ const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) =
   );
 };
 
+const LoginRoute: React.FC = () => {
+  const { search } = useLocation();
+  const navigate = useNavigate();
+  const atif = new URLSearchParams(search).get('atif');
+  return <LoginPage onAuthenticated={() => {
+    if (atif) {
+      navigate({ pathname: '/atif', search: `?${atif}` }, { replace: true });
+    } else {
+      window.location.hash = '#/';
+      window.location.reload();
+    }
+  }} />;
+};
+
 const App: React.FC = () => {
   return (
     <HashRouter>
       <Routes>
-        <Route path="/login" element={<LoginPage onAuthenticated={() => { window.location.hash = '#/'; window.location.reload(); }} />} />
+        <Route path="/login" element={<LoginRoute />} />
         <Route path="/*" element={
           <AuthGate>
             {(status) => <AppShell status={status} />}
