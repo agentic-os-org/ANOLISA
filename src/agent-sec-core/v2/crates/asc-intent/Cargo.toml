@@ -1,0 +1,20 @@
+[package]
+name = "asc-intent"
+description = "Direct task-to-Cedar candidate generation with schema, path and Strict validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-model-client = { workspace = true }
+cedar-policy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

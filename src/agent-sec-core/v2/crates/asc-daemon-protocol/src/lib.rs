@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
+pub mod intent;
 mod observability;
 pub use observability::ObservabilityRecordParams;
 mod common;

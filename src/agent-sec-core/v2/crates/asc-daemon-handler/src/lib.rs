@@ -11,6 +11,7 @@
 mod action;
 mod dispatcher;
 mod gateway;
+mod intent;
 mod observability;
 mod pap;
 mod pii;

@@ -241,6 +241,7 @@ dependencies = [
  "asc-daemon-protocol",
  "asc-daemon-service",
  "asc-foundation-types",
+ "asc-intent",
  "asc-model-client",
  "asc-observability",
  "asc-os-permission-types",
@@ -259,7 +260,9 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "signal-hook",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -355,6 +358,8 @@ dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-foundation-types",
+ "asc-intent",
+ "asc-model-client",
  "asc-observability",
  "asc-pap",
  "asc-policy-types",
@@ -363,6 +368,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -378,6 +384,7 @@ dependencies = [
  "asc-daemon-core",
  "asc-daemon-protocol",
  "asc-daemon-service",
+ "asc-intent",
  "asc-model-client",
  "asc-observability",
  "asc-pap",
@@ -483,6 +490,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-intent"
+version = "1.1.2"
+dependencies = [
+ "asc-model-client",
+ "cedar-policy",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
 ]
 

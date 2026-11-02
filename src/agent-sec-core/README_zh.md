@@ -4,7 +4,8 @@
 
 **面向 AI Agent 的 OS 级安全内核。** 为 Agent 负载提供纵深防御：提示词注入检测、
 代码扫描、PII 检测、Skill 完整性追踪、沙箱隔离，以及本地安全事件
-存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
+存储。安全扫描本地运行，无 Token 消耗；可选的 Intent 提案使用云模型，可能产生费用。
+适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
@@ -112,6 +113,16 @@ V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
 [上下文示例与日志限制](v2/README.md#native-opentelemetry-tracing)。
+
+`agent-sec-cli intent propose` 将可组合的读取、具体写操作、程序执行和全网络规则
+生成未批准的 Cedar 候选。命令只接收 `--task` 与 `--ttl`：不采集工作目录或附件路径，
+程序也不追加任何允许或禁止，模型写出的策略就是全部授权。在 daemon 环境启用
+`ASC_INTENT_ENABLED=true` 并配置 `DASHSCOPE_API_KEY`；任务正文发送给云模型，
+不读取也不发送文件正文。模型从 draft v1 直接写出原生 Cedar（不含逐字段 evidence），
+Rust 解析并校验，不改写其语义。纯禁止不补允许，无法表达的限制明确拒绝。
+CLI 与 daemon 须同步升级为 request v1/candidate v1，其它版本不兼容。
+候选不会批准、安装或执行策略。详见
+[Intent 命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#intent从任务生成待审候选)。
 
 ## 安全防护架构
 

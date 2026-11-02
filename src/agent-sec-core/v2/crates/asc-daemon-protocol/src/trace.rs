@@ -101,7 +101,14 @@ fn present_string<'de, D: Deserializer<'de>>(de: D) -> Result<Option<String>, D:
 /// Returns malformed JSON errors. Callers must also decode `DaemonRequest` to
 /// reject duplicate members and enforce the schema before dispatching.
 pub fn request_fits_budget(bytes: &[u8]) -> Result<bool, serde_json::Error> {
-    let _: BTreeMap<String, &serde_json::value::RawValue> = serde_json::from_slice(bytes)?;
+    let fields: BTreeMap<String, &serde_json::value::RawValue> = serde_json::from_slice(bytes)?;
+    let length = bytes.len() + usize::from(bytes.last() != Some(&b'\n'));
+    if let Some(method) = fields.get("method")
+        && serde_json::from_str::<String>(method.get())? == crate::method::INTENT_PROPOSE
+        && length > crate::intent::INTENT_REQUEST_BYTES
+    {
+        return Ok(false);
+    }
     let mut depth = 0_usize;
     let mut quoted = false;
     let mut escaped = false;
@@ -149,7 +156,6 @@ pub fn request_fits_budget(bytes: &[u8]) -> Result<bool, serde_json::Error> {
     }
     context += context_members.min(members.saturating_sub(1));
     // Service dispatch strips LF. Reserve it even for EOF-terminated requests.
-    let length = bytes.len() + usize::from(bytes.last() != Some(&b'\n'));
     Ok(context <= CONTEXT_FRAME_BYTES
         && length.saturating_sub(context) <= BUSINESS_FRAME_BYTES
         && length <= MAX_REQUEST_FRAME_BYTES)

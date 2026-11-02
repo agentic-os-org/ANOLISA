@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 mod actions;
+mod intent;
+pub use intent::intent_from_environment;
 mod scope_discovery;
 pub use scope_discovery::{ScopeDiscoveryJob, ScopeDiscoveryRegistry};
 mod bootstrap;

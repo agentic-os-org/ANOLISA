@@ -1,0 +1,4 @@
+{
+  "source_id": "task-input-1",
+  "text": "允许删除当前目录及子目录中的文件，但禁止删除精确文件 config/important.txt。不要运行任何程序，不要联网。"
+}

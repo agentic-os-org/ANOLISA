@@ -1127,3 +1127,82 @@ cgroup v2 检查要求 Linux `/sys/fs/cgroup` 的 `statfs` 类型为 `CGROUP2_SU
 
 gateway dispatch 预算为 45 秒，CLI 默认 60 秒，generation 加载最长 20 秒。错误可以含路径、
 Scope ID 或 UID，不含真实值/fake。源码接口核对不替代安装态与协议运行验收。
+
+## 19. [TARGET V2，已实现] Intent 任务策略候选
+
+新增 `intent.propose`，使用 V2 `{method,params}` / `{requestId,result|error}` 信封。
+方法按 `LocalUser` 授权，UID 来自内核 peer credentials，不接受调用者声明身份。
+这是初次任务提案接口，不改变 CURRENT V1 清单，也不调用 PAP、批准或下发接口。
+
+| `params` 必填字段 | 契约 |
+|---|---|
+| `format_version` | 精确字符串 `asc.intent.request.v1` |
+| `task` | 非空 UTF-8 正文，最多 64 KiB |
+| `ttl` | 整数 1–1800 秒，从 daemon 接受生成请求时起算 |
+
+拒绝未知字段及版本，包括路径类字段、自报身份、
+模型配置、摘要和批准状态。完整请求含 OTel 信封、空白、转义与 LF 最多 256 KiB。
+daemon 不打开调用方路径，不采集文件正文、目录列表或 Git 变更。配置的 HTTPS 模型只接收任务
+正文和服务端生成的来源标识，并在 system 中接收统一 schema；任务中的敏感文本会发送，
+可能产生调用费用。
+
+`result.outcome` 有且只有以下两种状态：
+
+- `candidate`：完整 `asc.intent.candidate.v1`，保留 `asc.intent.draft.v1` 原始草稿、
+  `artifact`、TTL、`notes` 及内容哈希；恒为
+  `CANDIDATE` / `authorization_required=true`。`artifact` 带 language/text/schema_sha256。
+  合法策略即使包含非空 `unresolved` 也返回候选；CLI 展示后退出 2，不开放批准菜单。
+  模型 policy 为空时 text 为空；不包含 rules/mapping/back_translation、绑定或保护列表。
+- `needs_clarification`：原始草稿及 `reasons`，用于非规范路径或不受支持的模板、身份、注解，
+  没有可批准候选。Cedar 语法或 Strict 失败返回错误，不返回部分策略。
+
+`intent_extraction.rs` 的 `generate_policy_draft` 只将 task 文本和统一 schema 交给模型，
+模型仅返回 `{"policy":"...","unresolved":[]}`。草稿保存原始响应及任务来源。
+提示词从 `policy-generation.md` 编译嵌入，标记为 `cedar-policy@1`。实体、动作及字段语义
+直接复用内嵌 schema 和注释，提示词仅保留生成约束。
+`policy_validation.rs` 解析原生 Cedar、检查路径表达式并进行 Strict 校验，不追加任何规则；
+`policy_generator.rs` 封装 TTL 和完整候选哈希。
+
+链路为 task + schema → 模型 policy/unresolved → 官方 parser 与路径表达式检查 →
+官方 Strict → 未批准候选。前端不通过字符串替换重写模型语义；路径仅接受
+规范绝对字符串的 ==/!= 或目录末尾 /* 的 like，拒绝动态路径、自报 Subject/File UID、
+未绑定模板及可选 @id 之外的注解。统一 schema 来源仍是
+`asc-policy-cedar/schema/seccore.cedarschema`，本接口不生成或扩展 schema。
+CLI 复核版本、任务来源、TTL 和完整哈希，并使用内嵌 schema 从 draft.policy 重建
+预期 artifact；替换模型输出后重算哈希仍会被发现。CLI 与 daemon 必须同步升级，旧版本不适配。
+历史候选保持原版本；不能重新标记为新候选，须重新生成。
+
+提示词要求必要身份、条件、审批或义务无法表达时放入 unresolved，不得删掉后生成无条件
+permit；工具调用不能替换为程序执行。但 unresolved 是模型自报，不是完整性或冲突证明。
+程序不求解策略冲突。普通 permit 不排斥其它策略的允许；排他要求须在原生
+Cedar 中明确补集 forbid，write 补集须限定同一 operation。禁删不等于不可变；task 要求
+“不删除 a.txt”时由模型自行写出对应 forbid，程序不再替用户补充保护规则。
+Strict、空 unresolved 和哈希均不证明任务理解正确、全部要求已落实、可信批准或真实对象绑定。
+
+模型 JSON 最多 16 KiB；unresolved 最多 128 个非空项，每项最多 4096 字节且不含控制字符。
+最终 Cedar 最多 1024 条策略、256 KiB，超限不进入 Strict。
+预算超限返回 `resource_exhausted`，无候选，不截断策略。
+
+完整结果最多 512 KiB。CLI 默认等待 45 秒，真实 UDS 为该方法配置 35 秒派发预算，模型
+预算最多 30 秒且受请求期限和 TTL 进一步收紧。每 UID（含 root）最多一个实际生成，全局
+最多四个，无排队；连接取消或超时后，仍在阻塞的生成占用名额直到实际返回。失败无自动重试，
+到期结果丢弃，不刷新有效期。
+
+错误使用封闭类别：参数/版本错误 `invalid_argument`；超量/并发占满 `resource_exhausted`；
+未启用、配置或模型响应无效 `unavailable`；取消/超时/到期 `deadline_exceeded`；内部编码或
+Cedar 校验失败 `internal`。诊断不包含任务正文、原始模型响应或密钥。
+
+配置于 daemon 启动时读取：`ASC_INTENT_ENABLED=true`、`DASHSCOPE_API_KEY`，可选
+`ASC_INTENT_MODEL`、`ASC_INTENT_BASE_URL`、`ASC_INTENT_THINKING=disabled|provider`。
+保留默认 `deepseek-v4.1-flash`，推荐作为速度优先的选择，不要求显式配置模型。可切换其它
+可用模型和 OpenAI-compatible HTTPS 服务，响应协议及 Cedar 校验不绑定模型名称；切换服务时
+API key 使用所选服务的凭据。不支持 DashScope 思考扩展的服务须设置 thinking=provider。
+自动选择模型和本地回退尚未实现。
+禁用并重启即可关闭模型入口；候选及批准请求不持久化，没有 Intent 状态迁移或部署回滚。
+CLI 只渲染候选，不交互、不产生请求，也不产生授权；任务无法表达时照常输出 `reasons` 并以退出码 `0` 结束。
+
+可执行契约位于 `v2/crates/asc-intent/tests/{policy_prompt,policy}.rs`、
+`v2/apps/asc-cli/tests/intent.rs`，以及协议、handler、core 的 Intent 单元测试。
+覆盖参数/版本拒绝、原始响应和任务哈希绑定、原生 Cedar 组合裁决、模型输出重建与篡改检查，
+以及失败隔离、并发名额、过期及输出检查。
+实际进程、路径别名、rename 两端与参数索引等事实仍由未来执行端保证；这些测试不是执行拦截证据。

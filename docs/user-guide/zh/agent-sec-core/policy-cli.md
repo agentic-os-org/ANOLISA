@@ -67,6 +67,122 @@ RUST_LOG=info agent-sec-cli --trace-context '{"session_id":"session-123","agent_
 改变固定的本地采样策略。`--otel-context` 是入站上下文，不是导出目标。
 CLI 要求支持 carrier 的新 daemon，应先升级 daemon。
 
+## Intent：从任务生成待审候选
+
+`agent-sec-cli intent propose` 将任务转换为可组合的待审 Cedar policy，供人工
+核对精确路径、目录子树、动作和条件。目前仅输出候选策略，不写入策略管理记录、不绑定执行
+进程，也不下发执行。下文的 Policy 管理命令使用现有 JSON 模板，不能直接导入此
+Cedar 候选。
+
+LLM 只接收任务文本和统一 `seccore.cedarschema`，直接返回
+`{"policy":"...","unresolved":[]}`。Rust 解析原始 Cedar、检查绝对路径表达式
+并执行官方 Strict 校验，不追加任何规则。
+`asc.intent.draft.v1` 草稿保存原始响应及任务来源。校验通过或 `unresolved` 为空均不证明
+理解正确或完整；未解决要求由模型自报。CLI 使用内嵌 schema 从草稿重建预期产物，
+同时复核版本、来源、TTL 和哈希。CLI 与 daemon 须同步升级。
+生成规范位于
+[`policy-generation.md`](../../../../src/agent-sec-core/v2/crates/asc-intent/prompts/policy-generation.md)，
+随二进制编译嵌入，标记为 `cedar-policy@1`；候选仍须人工核对。
+
+管理员须在 daemon 启动环境中设置 `ASC_INTENT_ENABLED=true` 与 `DASHSCOPE_API_KEY`，
+配置变更重启后生效。保留 `deepseek-v4.1-flash` 为默认模型，它响应较快，无需显式设置
+`ASC_INTENT_MODEL`；实际延迟随机型、任务和服务而变化。Intent 不绑定 DeepSeek，
+可通过 `ASC_INTENT_MODEL` 选择其它可用模型，例如 `qwen-plus`，不必修改响应协议或
+Cedar 检查。默认 API base 为 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
+`ASC_INTENT_BASE_URL` 可切换其它 OpenAI-compatible HTTPS 服务；虽然变量沿用历史名称，
+`DASHSCOPE_API_KEY` 此时应配置为所选服务的 API key。服务须接受 JSON chat-completions
+请求参数，并在输出预算和期限内返回完整 policy/unresolved 响应。
+
+`ASC_INTENT_THINKING` 接受 `disabled`（默认，发送 DashScope 扩展
+`enable_thinking: false`）或 `provider`（省略该扩展）。服务不支持此扩展时应使用
+`provider`。例如，在 daemon 启动环境中选择其它模型：
+
+```bash
+export ASC_INTENT_MODEL=qwen-plus
+export ASC_INTENT_THINKING=provider
+```
+
+配置无效或模型响应不合法时返回不可用，不影响其它 daemon 功能。
+自动选择模型和本地模型回退尚未实现；后续计划评估本地小模型以降低云端调用费用。
+
+此功能只把任务正文发送给云模型，可能产生费用。
+不采集文件正文、目录列表或 Git 变更，daemon 不打开调用方路径。
+任务中的绝对路径和敏感文本会发送，请先检查任务内容。
+
+```bash
+agent-sec-cli intent propose \
+  --task "Allow reading and writing the src directory tree; keep config/important.txt unchanged. Do not execute programs or use the network."
+```
+
+只需要 `--task`：连接默认 daemon 端点并输出 text。
+模型须把任务目标表达为规范绝对路径，可引用尚未创建的文件；相对路径或无法确定的
+目标写入 `unresolved`，不接受用户另外补充路径或保护规则。
+`--socket` 或 `AGENT_SEC_DAEMON_SOCKET` 可覆盖端点，连接失败不回退本地模型。
+
+### Policy 和安全边界
+
+- 只使用统一 schema：`file.read`、`file.write`、`file.exec`、`network.use`。
+  修改请求通过 `WriteOperation` 区分 `write/create/delete/rename/setattr`；禁删不等于不可变。
+  `file.read` 表示内容读取，不等于仅列目录名或读取元数据。
+- 模型输出就是全部授权：程序不追加 permit/forbid，也不覆盖模型写出的规则。
+  task 要求“不删除 a.txt”时由模型自行写出对应 forbid，而不是让用户提供保护列表。
+- 路径使用 `resource.path`、`context.input.program/cwd`，不使用 File UID。
+  前端接受规范绝对字符串的 `==`/`!=`，或仅在目录末尾含 `/*` 通配符的 `like`。
+  动态或非规范路径、未绑定模板、模型自报 Subject/File 身份及可选 `@id` 之外的注解均被拒绝。
+- 提示词要求将无法表达的必要身份、条件、审批或义务保留于 `unresolved`，不能改成
+  无条件 permit。工具调用不能替换为程序启动，裸程序名不能通过 PATH 猜测。
+  这是模型指令，不是确定性的完整性或冲突检查。
+- 条件可直接使用 schema 的 `program`、`cwd`、带索引的 `args` 与 `arg_count`，以及可选
+  `mode/ownerUid/ownerGid`；可选字段须先用 `has` 判断。参数 index 0 对应 `argv[1]`，不含 `argv[0]`。
+- Cedar 无匹配 permit 默认 Deny，forbid 优先。普通 permit 不限制其它策略的允许。
+  排他要求须用原生补集 forbid 表达并包含条件；write 补集须限定所请求的 operation。
+- 纯禁止不应补 permit；程序不自动添加敏感路径黑名单、程序或网络禁令。
+  请结合任务核对实际 Cedar；Strict 和模型自报 `unresolved` 均不证明每项要求已经落实。
+
+### 查看结果
+
+`--format text` 为默认值，输出原任务、模型 Cedar 草稿、`unresolved`、已校验 Cedar、
+安全提示及有效期。`--format cedar` 输出待审 Cedar，注释中附未解决要求；
+`--format json` 输出完整结果。
+模型 policy 为空时，`artifact.text` 为空。任何模式都不会读取键盘输入，也不发起审批。
+默认通信预算为 45 秒；模型调用最多 30 秒，调大 `--timeout-ms` 不会延长模型预算。
+`--ttl` 为 `1..=1800` 秒，默认 `1800`，从 daemon 收到请求时计时，不自动续期。
+
+模型 JSON 响应最多 16 KiB；`unresolved` 最多 128 项，每项非空且最多
+4096 字节。最终 Cedar 最多 1024 条策略、256 KiB；完整结果
+最多 512 KiB。任一预算超限均整项失败，不截断输出。
+
+`unresolved` 非空时随候选一并展示，没有可继续确认的动作。
+任务被模型或 schema 判定无法表达属于正常结果，不是失败：CLI 打印模型草稿和每一条
+`reasons`，不输出 Cedar，退出码为 `0`。Ctrl-C 退出 `130`。任何一次运行都不会安装、
+记录或请求审批。
+
+请求使用 `asc.intent.request.v1`，候选使用 `asc.intent.candidate.v1`，恒为
+`status: "CANDIDATE"` / `authorization_required: true`。候选保留 `draft`（原始 `policy`、
+`unresolved` 和任务来源）、TTL、哈希和 `notes`。
+`artifact` 包含 `language`、`text` 和必填 `schema_sha256`。版本不匹配直接失败；已有候选须用
+匹配版本的 CLI 和 daemon 重新生成。
+
+`candidate_hash` 覆盖除自身外的完整候选，但不是签名或审批凭据。CLI 还从草稿重建最终产物，
+即使重算哈希也能发现模型输出被替换。官方 Strict 仅证明 schema 一致性，
+不证明任务完整性、可信身份或真实文件操作已被拦截。
+
+| Intent 结果 | 退出码 |
+|-------------|--------|
+| `candidate`（`unresolved` 不论是否为空） | `0` |
+| `needs_clarification`（草稿和原因，无候选） | `0` |
+| 输入、传输、配置、模型或 Cedar 校验错误 | `1` |
+| 收到时候选已过期 | `2` |
+| 被中断（Ctrl-C） | `130` |
+
+退出码只说明命令是否跑完，不说明任务能否表达；后一点看 `outcome` 和 `reasons`。
+
+此 Cedar schema 只有 `file.read`、`file.write`、`file.exec`、`network.use`，没有 TTL
+或进程身份。可信审批、具体进程绑定与到期撤销仍须由后段实现。执行端还须规范化路径、
+处理符号链接/硬链接和命名空间，分别裁决 rename 的源与目标，并保证参数索引和
+`arg_count` 一致、属性值有效。本命令不证明这些条件
+已经实现，因此不能声称 `rm` 已被拦截。
+
 ## 管理 Policy
 
 准备 JSON 模板文件，例如 `policy.json`：
