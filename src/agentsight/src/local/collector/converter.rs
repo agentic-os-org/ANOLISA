@@ -234,7 +234,8 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                     .map(String::from)
                     .or_else(|| model_name.clone());
 
-                let content_arr = event.pointer("/message/content").and_then(|c| c.as_array());
+                let content = event.pointer("/message/content");
+                let content_arr = content.and_then(Value::as_array);
 
                 let mut message_text = String::new();
                 let mut reasoning = String::new();
@@ -285,6 +286,8 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                             _ => {}
                         }
                     }
+                } else if let Some(text) = content.and_then(Value::as_str) {
+                    message_text.push_str(text);
                 }
 
                 step_id += 1;
@@ -756,12 +759,12 @@ mod tests {
     }
 
     #[test]
-    fn test_assistant_no_content_blocks() {
+    fn test_assistant_string_content() {
         let content =
             r#"{"type":"assistant","message":{"model":"m","content":"plain text reply"}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
         assert_eq!(traj.steps.len(), 1);
-        assert_eq!(traj.steps[0].message, "");
+        assert_eq!(traj.steps[0].message, "plain text reply");
         assert!(traj.steps[0].tool_calls.is_none());
         assert!(traj.steps[0].reasoning_content.is_none());
     }
