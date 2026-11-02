@@ -945,10 +945,7 @@ impl Renderer<'_> {
                 let code = self.text(id, in_sectioning, "");
                 let code = code.strip_prefix('\n').unwrap_or(&code);
                 let code = code.trim_end_matches('\n');
-                let mut fence = "```".to_owned();
-                while code.contains(&fence) {
-                    fence.push('`');
-                }
+                let fence = "`".repeat((longest_backtick_run(code) + 1).max(3));
                 format!("{fence}{language}\n{code}\n{fence}")
             }
             "ul" | "ol" | "menu" => self.list(id, in_sectioning),
@@ -1440,8 +1437,8 @@ fn destination(url: &str) -> Option<String> {
 }
 
 /// Length of the longest consecutive backtick run, in one pass over the
-/// text. Fence selection for code spans needs exactly this: the smallest
-/// fence a run cannot close is one tick longer than the longest run.
+/// text. Code fences must outgrow that run; block fences also require at
+/// least three backticks.
 fn longest_backtick_run(text: &str) -> usize {
     let bytes = text.as_bytes();
     let mut longest = 0usize;
