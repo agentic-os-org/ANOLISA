@@ -46,6 +46,10 @@ Releases from 0.7.2 onward follow
 
 ## [0.9.2] - 2026-11-05
 
+### Added
+
+- Optional mixed-content compression for tool outputs that are neither a whole structured document nor handled by any existing domain. When enabled with `TOKENLESS_MIXED_CONTENT_ENABLED`, the PostTool pipeline recognizes explicitly bounded typed regions — fenced code blocks labeled `json`, `csv`, or `tsv`, and bracket-balanced bare JSON documents — compresses each region with the same compressor and policy the standalone route uses, and keeps all surrounding text byte-for-byte. Fenced JSON regions that select TOON have their fence label updated; regions the compressor rejects stay verbatim ([#9326](https://github.com/agentic-os-org/ANOLISA/issues/9326)).
+
 ### Changed
 
 - Choose the CLI and framework integrations separately using the core and plugins RPMs.
