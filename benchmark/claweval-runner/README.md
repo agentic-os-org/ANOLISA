@@ -198,6 +198,13 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+The interactive `debug_task.py` and `prompt_task.py` scripts accept an existing
+task file (`.yaml` or `.yml`) or a directory containing `task.yaml`. Existing local
+paths take precedence over names beneath `claw-eval/tasks`; missing task files
+fail before infrastructure setup. Resolution follows actual files/directories,
+including directories whose names end in `.yaml`. The runner retains its
+explicit file/directory path interface.
+
 ## Troubleshooting
 
 | Issue | Fix |

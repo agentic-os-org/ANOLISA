@@ -198,6 +198,11 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+交互脚本 `debug_task.py` 和 `prompt_task.py` 接受已有任务文件（`.yaml` 或 `.yml`）
+或包含 `task.yaml` 的目录。已有本地路径优先于 `claw-eval/tasks` 下的名称；
+任务文件缺失时，会在初始化基础设施前报错。解析按实际文件/目录类型进行，
+包括名称以 `.yaml` 结尾的目录。运行器仍使用显式文件/目录路径接口。
+
 ## 故障排查
 
 | 问题 | 修复 |
