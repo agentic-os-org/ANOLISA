@@ -49,6 +49,8 @@ SYSTEMD_SERVICE_DATADIR ?= /usr/share/anolisa
 SYSTEMD_SYSTEM_UNIT_DIR ?= /usr/lib/systemd/system
 SYSTEMD_SYSTEM_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core-v2.service.in
 SOURCE_SYSTEMD_SYSTEM_UNIT_DIR ?= /etc/systemd/system
+GATEWAY_DATADIR ?= $(SYSTEMD_SERVICE_DATADIR)/sec-core/gateway
+GATEWAY_SOURCE_DIR ?= $(BUILD_DIR)/gateway
 SYSTEM_SEC_CORE_CONFIG_DIR ?= /etc/agent-sec
 SYSTEMD_SKILLSEC_CONFIG ?=
 SYSTEMD_SKILLSEC_CONFIG_ARGS = $(if $(SYSTEMD_SKILLSEC_CONFIG), --skillsec-config "$(SYSTEMD_SKILLSEC_CONFIG)")
@@ -255,7 +257,7 @@ install-all-for-rpmbuild-v2: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild-v2: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild-v2: install-cli-v2 $(filter-out install-component-manifest,$(RPM_INSTALL_COMMON_TARGETS)) install-systemd-system ## Install all (V2 RPM build)
+install-all-for-rpmbuild-v2: install-cli-v2 $(filter-out install-component-manifest,$(RPM_INSTALL_COMMON_TARGETS)) install-systemd-system install-gateway ## Install all (V2 RPM build)
 
 .PHONY: install-systemd-system
 install-systemd-system: ## Stage V2 system unit and preserve existing settings
@@ -277,6 +279,26 @@ install-systemd-system-source: ## Install V2 system unit for source builds
 	sed -e 's|{bindir}|$(BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
 		> $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 	chmod 0644 $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+
+.PHONY: install-gateway
+install-gateway: ## Install prebuilt gateway assets without activation or mitmproxy provisioning
+	install -d -m 0755 "$(DESTDIR)$(GATEWAY_DATADIR)"
+	install -m 0644 "$(GATEWAY_SOURCE_DIR)/asc_gateway_addon.py" \
+		"$(GATEWAY_SOURCE_DIR)/asc_gateway_policy.py" "$(GATEWAY_SOURCE_DIR)/mitmproxy.provenance" \
+		"$(GATEWAY_SOURCE_DIR)/github-policy.json" "$(DESTDIR)$(GATEWAY_DATADIR)/"
+	install -m 0755 "$(GATEWAY_SOURCE_DIR)/install-mitmproxy.sh" "$(DESTDIR)$(GATEWAY_DATADIR)/"
+	install -d -m 0755 "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d"
+	sed -e 's|{datadir}|$(GATEWAY_DATADIR)|g' "$(GATEWAY_SOURCE_DIR)/agent-sec-gateway.service.in" \
+		> "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-gateway.service"
+	chmod 0644 "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-gateway.service"
+	install -m 0644 "$(GATEWAY_SOURCE_DIR)/gateway.conf" \
+		"$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d/gateway.conf"
+
+.PHONY: uninstall-gateway
+uninstall-gateway: ## Remove gateway files while retaining the standalone installation and credentials
+	rm -f "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-gateway.service"
+	rm -f "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d/gateway.conf"
+	rm -rf "$(DESTDIR)$(GATEWAY_DATADIR)"
 
 # =============================================================================
 # UNINSTALL

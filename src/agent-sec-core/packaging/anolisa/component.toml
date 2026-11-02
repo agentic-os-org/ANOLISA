@@ -119,6 +119,28 @@ mode = "0644"
 render = "anolisa-paths-v1"
 
 [[component.layout.files]]
+source = "share/anolisa/sec-core/gateway/"
+target = "{datadir}/sec-core/gateway/"
+
+[[component.layout.files]]
+source = "share/anolisa/sec-core/agent-sec-gateway.service.in"
+target = "{unitdir}/agent-sec-gateway.service"
+mode = "0644"
+render = "anolisa-paths-v1"
+
+[[component.layout.files]]
+source = "share/anolisa/sec-core/gateway.conf"
+target = "{unitdir}/agent-sec-core.service.d/gateway.conf"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/anolisa/sec-core/pre-uninstall-gateway.sh.in"
+target = "{datadir}/sec-core/pre-uninstall-gateway.sh"
+mode = "0755"
+type = "executable"
+render = "anolisa-paths-v1"
+
+[[component.layout.files]]
 source = "share/doc/sec-core/LICENSE"
 target = "{datadir}/doc/sec-core/LICENSE"
 mode = "0644"
@@ -128,6 +150,12 @@ unit = "agent-sec-core.service"
 scope = "system"
 enable = false
 start = false
+
+[[component.hooks]]
+phase = "pre_uninstall"
+script = "{datadir}/sec-core/pre-uninstall-gateway.sh"
+strict = true
+timeout_secs = 60
 
 [component.health_check]
 type = "binary_version"

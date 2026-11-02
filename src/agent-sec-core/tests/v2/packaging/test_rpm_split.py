@@ -84,7 +84,8 @@ class RpmSplitTests(unittest.TestCase):
             ]
             offline = subprocess.check_output(command + [str(spec)], text=True)
             online = subprocess.check_output(
-                command + ["--define", "_with_nightly_online 1", str(spec)], text=True
+                command + ["--define", "_with_nightly_online 1", str(spec)],
+                text=True,
             )
         self.assertRegex(
             offline, r"(?m)^Source1:\s+agent-sec-core-1\.1\.2-vendor\.tar\.gz$"
@@ -137,6 +138,11 @@ class RpmSplitTests(unittest.TestCase):
             "/usr/bin/linux-sandbox": "agent-sec-core",
             "/etc/agent-sec/skillsec.json": "agent-sec-core",
             "/usr/lib/systemd/system/agent-sec-core.service": "agent-sec-core",
+            "/usr/lib/systemd/system/agent-sec-gateway.service": "agent-sec-core",
+            "/usr/lib/systemd/system/agent-sec-core.service.d/gateway.conf": "agent-sec-core",
+            "/usr/share/anolisa/sec-core/gateway/asc_gateway_addon.py": "agent-sec-core",
+            "/usr/share/anolisa/sec-core/gateway/github-policy.json": "agent-sec-core",
+            "/usr/share/anolisa/sec-core/gateway/install-mitmproxy.sh": "agent-sec-core",
             "/usr/share/anolisa/extensions/agent-sec-core/hooks/code_scanner_hook.py": "agent-sec-plugins",
             "/opt/agent-sec/openclaw-plugin/dist/index.js": "agent-sec-plugins",
             "/opt/agent-sec/hermes-plugin/src/plugin.yaml": "agent-sec-plugins",
@@ -177,7 +183,8 @@ class RpmSplitTests(unittest.TestCase):
         )
         self.assertIn("make build-all-v2-offline", parsed["build", "agent-sec-core"])
         self.assertIn(
-            "make install-all-for-rpmbuild-v2", parsed["install", "agent-sec-core"]
+            "make install-all-for-rpmbuild-v2",
+            parsed["install", "agent-sec-core"],
         )
 
     def test_adapter_managed_packages_cover_materialized_rpm_resources(self):
@@ -234,12 +241,21 @@ class RpmSplitTests(unittest.TestCase):
                 "qwen-code-extension/hooks/observability_hook.py",
                 "qwen-code-extension/hooks/skill_ledger_hook.py",
                 "qwen-code-extension/hooks/pii_checker_hook.py",
+                "gateway/asc_gateway_addon.py",
+                "gateway/asc_gateway_policy.py",
+                "gateway/mitmproxy.provenance",
+                "gateway/github-policy.json",
+                "gateway/install-mitmproxy.sh",
             )
             for name in artifacts:
                 path = build / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("fixture\n")
                 path.chmod(0o755)
+            for name in ("agent-sec-gateway.service.in", "gateway.conf"):
+                shutil.copy2(
+                    ROOT / "packaging/gateway" / name, build / "gateway" / name
+                )
             for adapter in contract["adapters"]:
                 for skill in adapter.get(adapter["framework"], {}).get("skills", []):
                     skill_name = Path(skill["source"]).name
@@ -343,7 +359,8 @@ class RpmSplitTests(unittest.TestCase):
                         actual = installed_owners(installed_path)
                         self.assertEqual(len(actual), 1, installed_path)
                         self.assertTrue(
-                            actual.issubset(rpm["managed_packages"]), installed_path
+                            actual.issubset(rpm["managed_packages"]),
+                            installed_path,
                         )
                         owners.update(actual)
                     self.assertEqual(owners, set(rpm["managed_packages"]))
@@ -362,7 +379,10 @@ class RpmSplitTests(unittest.TestCase):
             ):
                 command.extend(["--define", macro])
             result = subprocess.run(
-                command + [str(spec)], capture_output=True, text=True, check=True
+                command + [str(spec)],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             self.assertEqual(
                 set(result.stdout.splitlines()),

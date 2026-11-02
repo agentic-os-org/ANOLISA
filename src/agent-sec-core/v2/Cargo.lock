@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "asc-credential-store"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "ring",
  "rustix",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "asc-gateway-plan"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "asc-credential-store",
  "asc-policy-types",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "asc-gateway-runtime"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "asc-credential-store",
  "asc-gateway-plan",

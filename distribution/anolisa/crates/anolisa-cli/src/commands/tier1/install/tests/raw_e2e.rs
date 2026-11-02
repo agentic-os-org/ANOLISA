@@ -1456,6 +1456,241 @@ fn install_raw_end_to_end_records_declared_service() {
 
 #[test]
 #[cfg(unix)]
+fn install_raw_sec_core_gateway_defaults_off_and_strict_uninstall_preserves_installation() {
+    use crate::commands::tier1::uninstall::{UninstallArgs, handle_with_deps};
+    use anolisa_core::owned_executor::{PHASE_HOOK, PHASE_SERVICES};
+    use anolisa_core::transaction::{JOURNAL_FILE_SUFFIX, TransactionStepStatus};
+
+    let source_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../src/agent-sec-core");
+    let manifest_text =
+        std::fs::read_to_string(source_root.join("packaging/anolisa/component.toml"))
+            .expect("current sec-core raw contract");
+    let manifest = ComponentManifest::from_toml_str(&manifest_text).expect("sec-core manifest");
+    let tmp = tempdir().expect("tmpdir");
+    let repo = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_component(&repo, "sec-core", &manifest.component.version, &["system"]);
+
+    let mut entries = vec![(
+        ".anolisa/component.toml".to_string(),
+        manifest_text.into_bytes(),
+    )];
+    for file in &manifest.install.files {
+        let source = file.source.as_deref().expect("raw file source");
+        let (path, bytes) = match source {
+            "share/anolisa/sec-core/agent-sec-core.service.in" => (
+                source.to_string(),
+                std::fs::read(source_root.join("packaging/systemd/agent-sec-core-v2.service.in"))
+                    .expect("daemon unit template"),
+            ),
+            "share/anolisa/sec-core/agent-sec-gateway.service.in" => {
+                let template = std::fs::read_to_string(
+                    source_root.join("packaging/gateway/agent-sec-gateway.service.in"),
+                )
+                .expect("gateway unit template");
+                // Mirror raw staging's namespace adjustment, not the final layout rendering.
+                (
+                    source.to_string(),
+                    template
+                        .replace(
+                            "{datadir}/asc_gateway_addon.py",
+                            "\"{datadir}/sec-core/gateway/asc_gateway_addon.py\"",
+                        )
+                        .into_bytes(),
+                )
+            }
+            "share/anolisa/sec-core/gateway.conf" => (
+                source.to_string(),
+                std::fs::read(source_root.join("packaging/gateway/gateway.conf"))
+                    .expect("daemon gateway drop-in"),
+            ),
+            "share/anolisa/sec-core/pre-uninstall-gateway.sh.in" => (
+                source.to_string(),
+                std::fs::read(source_root.join("packaging/raw/assets/pre-uninstall-gateway.sh.in"))
+                    .expect("raw withdrawal hook template"),
+            ),
+            "share/anolisa/sec-core/gateway/" => (
+                format!("{source}asc_gateway_addon.py"),
+                b"# synthetic gateway addon; never executed\n".to_vec(),
+            ),
+            source if source.ends_with('/') => (
+                format!("{source}fixture.txt"),
+                b"synthetic directory asset\n".to_vec(),
+            ),
+            _ => (source.to_string(), b"#!/bin/sh\nexit 0\n".to_vec()),
+        };
+        entries.push((path, bytes));
+    }
+    for adapter in &manifest.adapters {
+        let source = adapter.source.as_deref().expect("raw adapter source");
+        entries.push((
+            format!("{}/fixture.txt", source.trim_end_matches('/')),
+            b"synthetic adapter asset\n".to_vec(),
+        ));
+    }
+    let entries: Vec<_> = entries
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        .collect();
+    replace_repo_artifact(&repo, "sec-core", &build_tar_gz(&entries));
+
+    let prefix = tmp.path().join("sys");
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let mut request = args("sec-core");
+    request.backend = Some("raw".to_string());
+    request.repo = Some(repo_url);
+    request.no_deps = true;
+    let effects = crate::test_support::RawEffectRecorder::default();
+    effects
+        .with(|factories| handle_with_effects(request, &ctx, factories))
+        .expect("install current sec-core raw contract with synthetic payload");
+    assert!(
+        effects
+            .calls()
+            .iter()
+            .all(|call| !call.starts_with("Enable ")
+                && !call.starts_with("Start ")
+                && !call.starts_with("Restart ")),
+        "delivering gateway units must not activate either service"
+    );
+
+    let addon = layout.datadir.join("sec-core/gateway/asc_gateway_addon.py");
+    assert!(
+        addon.is_file(),
+        "gateway directory payload must be installed"
+    );
+    let unit = std::fs::read_to_string(layout.systemd_unit_dir.join("agent-sec-gateway.service"))
+        .expect("rendered gateway unit");
+    assert!(
+        unit.lines()
+            .any(|line| line.trim() == format!("-s \"{}\"", addon.display()))
+    );
+    assert!(
+        !unit.contains("{datadir}"),
+        "gateway unit must be fully rendered"
+    );
+    let dropin = layout
+        .systemd_unit_dir
+        .join("agent-sec-core.service.d/gateway.conf");
+    assert!(
+        std::fs::read_to_string(&dropin)
+            .expect("installed gateway drop-in")
+            .lines()
+            .any(|line| line == "CapabilityBoundingSet=CAP_NET_ADMIN")
+    );
+    let hook = layout.datadir.join("sec-core/pre-uninstall-gateway.sh");
+    let hook_text = std::fs::read_to_string(&hook).expect("rendered withdrawal hook");
+    assert!(hook_text.contains(&format!(
+        "\"{}\" gateway disable",
+        layout.bin_dir.join("agent-sec-cli").display()
+    )));
+    assert!(!hook_text.contains("{bindir}"));
+
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "sec-core")
+        .expect("raw installation");
+    let artifact = owned_artifact(installation);
+    let services: Vec<_> = artifact
+        .services
+        .iter()
+        .map(|service| (service.name.as_str(), service.enabled))
+        .collect();
+    assert_eq!(
+        services,
+        [("agent-sec-core.service", false)],
+        "gateway lifecycle must not participate in generic component restarts"
+    );
+    let snapshot = common::installed_component_manifest_path(&layout, "sec-core", COMMAND)
+        .expect("installed contract path");
+    // Never execute the real withdrawal hook: it inspects host routing/systemd state.
+    std::fs::write(&hook, b"#!/bin/sh\nexit 7\n").expect("synthetic withdrawal failure");
+    let owned_bytes: Vec<_> = artifact
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                std::fs::read(&file.path).expect("owned file before uninstall"),
+            )
+        })
+        .collect();
+    let err = handle_with_deps(
+        UninstallArgs {
+            component: "sec-core".to_string(),
+            purge: false,
+            remove_system_package: false,
+            force: false,
+        },
+        &ctx,
+        &FakeQuery::default(),
+        &NoTxn,
+        false,
+    )
+    .expect_err("strict withdrawal failure must abort real uninstall");
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(err.reason().contains("pre-uninstall"), "{err}");
+    assert!(
+        err.reason().contains('7'),
+        "hook exit status must be surfaced: {err}"
+    );
+    for (path, bytes) in owned_bytes {
+        assert_eq!(
+            std::fs::read(&path).expect("owned file retained"),
+            bytes,
+            "{}",
+            path.display()
+        );
+    }
+    let after = load_v5_store(&layout);
+    assert_eq!(
+        after.find(ObjectKind::Component, "sec-core"),
+        Some(installation)
+    );
+    assert!(
+        snapshot.is_file(),
+        "failed withdrawal must preserve the installed contract"
+    );
+
+    // The existing uninstall entrypoint injects fake effects, but has no recorder port.
+    // Its durable execution journal proves service teardown was never reached.
+    let journals: Vec<_> =
+        std::fs::read_dir(crate::commands::tier1::rpm_install::journal_dir(&layout))
+            .expect("transaction journals")
+            .map(|entry| entry.expect("journal entry").path())
+            .filter(|path| path.to_string_lossy().ends_with(JOURNAL_FILE_SUFFIX))
+            .map(|path| Transaction::load_journal(&path).expect("load execution journal"))
+            .filter(|journal| journal.operation == "uninstall")
+            .collect();
+    assert_eq!(journals.len(), 1);
+    let journal = &journals[0];
+    assert!(
+        journal
+            .steps
+            .iter()
+            .any(|step| step.phase == PHASE_HOOK && step.status == TransactionStepStatus::Failed)
+    );
+    let service_steps: Vec<_> = journal
+        .steps
+        .iter()
+        .filter(|step| step.phase == PHASE_SERVICES)
+        .collect();
+    assert!(
+        !service_steps.is_empty(),
+        "uninstall must plan service teardown"
+    );
+    assert!(
+        service_steps
+            .iter()
+            .all(|step| step.status == TransactionStepStatus::Planned),
+        "strict hook failure must precede Stop/Disable"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn install_raw_records_post_hook_bytes_and_detects_later_drift() {
     use anolisa_core::integrity::{IntegrityStatus, check_owned_file};
 
