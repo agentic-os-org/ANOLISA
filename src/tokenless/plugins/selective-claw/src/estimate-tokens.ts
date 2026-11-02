@@ -21,20 +21,28 @@ function estimateCodePointTokens(cp: number): number {
   return 0.25;
 }
 
-export function estimateTokens(text: string): number {
+export function estimateTokenWeight(text: string): number {
   let tokens = 0;
   for (const char of text) {
     tokens += estimateCodePointTokens(char.codePointAt(0) ?? 0);
   }
-  return Math.ceil(tokens);
+  return tokens;
 }
 
-export function truncateTextToEstimatedTokens(text: string, maxTokens: number): string {
+export function estimateTokens(text: string): number {
+  return Math.ceil(estimateTokenWeight(text));
+}
+
+export function truncateTextToEstimatedTokens(
+  text: string,
+  maxTokens: number,
+): string {
   if (maxTokens <= 0 || !text) return "";
   let tokens = 0;
   let end = 0;
   for (const char of text) {
-    const nextTokens = tokens + estimateCodePointTokens(char.codePointAt(0) ?? 0);
+    const nextTokens =
+      tokens + estimateCodePointTokens(char.codePointAt(0) ?? 0);
     if (Math.ceil(nextTokens) > maxTokens) break;
     tokens = nextTokens;
     end += char.length;

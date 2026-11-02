@@ -97,7 +97,7 @@ describe("Assembler", () => {
     const result = assembler.assemble({
       messages: msgs,
       summaries: new Map([[1, "Detailed summary ".repeat(200)]]),
-      tokenBudget: 500,
+      tokenBudget: 10000,
       freshTailTurns: 3,
     });
 

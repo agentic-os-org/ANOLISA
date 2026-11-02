@@ -1,3 +1,5 @@
+export { TokenBudgetExceededError } from "./budget-error.js";
+
 export type AgentMessage = {
   role: string;
   content?: any;
@@ -49,6 +51,7 @@ export type ContextEngine = {
     sessionKey?: string;
     message: AgentMessage;
   }): Promise<IngestResult>;
+  /** @throws {TokenBudgetExceededError} When the protected recent tail exceeds the budget. */
   assemble(params: {
     sessionId: string;
     sessionKey?: string;
@@ -74,6 +77,9 @@ export type OpenClawPluginApi = {
   pluginConfig?: Partial<import("./types.js").SelectiveClawConfig>;
   runtime?: any;
   logger?: any;
-  registerContextEngine: (id: string, factory: () => ContextEngine | Promise<ContextEngine>) => void;
+  registerContextEngine: (
+    id: string,
+    factory: () => ContextEngine | Promise<ContextEngine>,
+  ) => void;
   [key: string]: any;
 };
