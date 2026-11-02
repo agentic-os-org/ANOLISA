@@ -9,11 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.21] - Unreleased
+## [0.3.21] - 2026-11-02
+
+### Added
+
+- Activate managed cosh extensions through cosh's native registry when running
+  `anolisa adapter enable <component> cosh`. Status verifies the selected user
+  source and enabled state; disable releases only the matching source selection
+  and preserves system extensions and user-edited files. Use a cosh-ng build
+  supporting conditional source cleanup and restart existing cosh sessions after
+  enable or disable; resident-session loading remains `unknown`
+  ([#9352](https://github.com/agentic-os-org/ANOLISA/pull/9352)).
 
 ### Changed
 
-- Render Agent Memory MCP command paths for the selected installation layout.
+- Ship component discovery and integration contracts with ANOLISA in RPM,
+  prebuilt archives, npm platform packages, and installer data bundles. RPM
+  install and adopt retain these contracts for adapter management and recognize
+  standalone core packages. Keep the CLI's `bin/` and `share/` directories
+  together when moving an installation. For RPM upgrades, upgrade ANOLISA and
+  all installed older component packages that own the registry files together
+  in a single DNF/Yum transaction. The enabled repositories must provide the
+  compatible CLI, component packages, and required subpackages at the same time.
+  Rollback requires matching component packages and registry data
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222)).
+- Render Agent Memory MCP command paths for the selected installation layout,
+  including paths containing quotes or backslashes, while preserving other JSON
+  fields. Agent Memory `0.2.13` raw packages require ANOLISA `0.3.21` or later
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222)).
+- Update the component catalog to Agent Memory `0.2.13`, AgentSight `0.15.1`,
+  cosh-ng `0.28.1`, OS Skills `0.6.4`, agent-sec-core `1.1.2`, SkillFS `0.5.5`,
+  Tokenless `0.9.2`, and ws-ckpt `0.6.1`.
+
+### Fixed
+
+- Preserve ANOLISA's component discovery files during raw installation,
+  update, rollback, repair, and uninstall. Existing archives can install beside
+  the registry, and obsolete ownership records no longer treat registry changes
+  as component damage or delete the registry during cleanup. This also applies
+  when recovering quarantined records. New raw packages that omit registry
+  installation require ANOLISA `0.3.21` or later
+  ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)).
 
 ## [0.3.20] - 2026-10-29
 
