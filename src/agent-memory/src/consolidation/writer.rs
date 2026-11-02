@@ -80,7 +80,7 @@ impl FactWriter {
     /// Retiring them *later* opens the opposite hazard — the scan no longer
     /// holds the store lock across the writes, so a candidate path can come to
     /// name a different record — which is why the supersede re-checks each
-    /// candidate's identity; see [`Self::supersede_conflicts`].
+    /// candidate's identity; see `supersede_conflicts` below.
     pub fn write(&self, fact: &ConsolidatedFact) -> Result<()> {
         std::fs::create_dir_all(&self.facts_dir)?;
 
@@ -413,56 +413,86 @@ mod tests {
         );
     }
 
-    /// The hazard the deferred supersede introduces (#8717 review): the scan no
-    /// longer holds the store lock across the filesystem writes, so while
-    /// `write()` is busy the index worker can drop the scanned row — the old
-    /// file was unlinked — and index *unrelated* content that reappeared at the
-    /// same path. Retiring by `path` alone then hides that unrelated record
-    /// from every search and stamps a bogus `superseded_by` into its
-    /// frontmatter.
+    /// What the index ends up holding at the conflict path while `write()` is
+    /// parked: always a different body, and either a different row shape
+    /// (`mtime_ms` / `size`) or the very same one.
     ///
-    /// The interleaving is forced rather than raced: `facts/facts.jsonl` is a
+    /// [`Self::SameShape`] is the #8717 review's follow-up probe — a
+    /// timestamp-preserving copy or restore, which replaces a file's content
+    /// while leaving its byte length and mtime alone, so the row written
+    /// afterwards is indistinguishable from the scanned one by metadata alone.
+    #[derive(Clone, Copy)]
+    enum MidWriteReplacement {
+        /// New content at a new byte length, with a fresh mtime. The control
+        /// case: metadata alone already tells the two records apart.
+        Reshaped,
+        /// New content padded to the scanned file's byte length, with that
+        /// file's mtime restored.
+        SameShape,
+    }
+
+    /// Run the deferred-supersede probe and report its outcome: the paths that
+    /// answer a search for the *replacement* content once `write()` has
+    /// finished, and whether the replaced file gained a `superseded_by`.
+    ///
+    /// The interleaving is forced rather than raced. `facts/facts.jsonl` is a
     /// FIFO, so the append blocks with the new markdown already on disk and the
     /// store lock already released — exactly the window the replacement needs.
-    /// Sandboxed (`root_fd`) write path, the one production uses.
-    #[test]
-    fn conflict_candidate_reindexed_mid_write_is_not_superseded() {
+    /// The scanned row is then dropped, as the worker drops it when the old file
+    /// is unlinked, and unrelated content is indexed at the same path before the
+    /// append is released.
+    ///
+    /// Seeding and replacement both go through the same `safe_fs` stat,
+    /// `mtime_ms_of` and `extract_text` that the worker's flush uses, so the
+    /// identity under test is the one production compares and no field of it is
+    /// substituted by hand; the probe asserts the two rows' metadata really is
+    /// identical before it asks anything of the supersede. Sandboxed (`root_fd`)
+    /// write path, the one production uses, with the store on disk under `root`
+    /// so `mount_root` is `root` and a supersede reaches the file's frontmatter
+    /// as well as the index row.
+    fn parked_write_probe(replacement: MidWriteReplacement) -> (Vec<String>, bool) {
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        // Store on disk under `root`, so `mount_root` is `root` and a supersede
-        // reaches the file's frontmatter as well as the index row.
         let index_dir = root.join(".anolisa").join("index");
         std::fs::create_dir_all(&index_dir).unwrap();
         let store = Arc::new(Mutex::new(
             BM25Store::open_for_test(&index_dir.join("bm25.db")).unwrap(),
         ));
+        let root_fd = Arc::new(crate::safe_fs::open_root(&root).unwrap());
 
-        // The record the scan is about to find: on disk, and in the index with
-        // the mtime/size the worker would have recorded for it.
+        // Index `rel` the way the worker's flush does: stat it through safe_fs,
+        // extract its body, upsert what the two reported.
+        let index_like_the_worker = |rel: &str| {
+            let rel_path = Path::new(rel);
+            let meta = crate::safe_fs::metadata(root_fd.as_fd(), rel_path).unwrap();
+            let body = crate::index::extractor::extract_text(root_fd.as_fd(), rel_path)
+                .expect("probe content is UTF-8");
+            store
+                .lock()
+                .unwrap()
+                .upsert(
+                    rel,
+                    crate::index::store::mtime_ms_of(&meta),
+                    meta.len(),
+                    &body,
+                    None,
+                )
+                .unwrap();
+        };
+        let stat_of = |rel: &str| store.lock().unwrap().index_stat_for(rel).unwrap();
+
+        // The record the scan is about to find: on disk, and in the index.
         let old_rel = "notes/old-lesson.md";
         let old_abs = root.join(old_rel);
         std::fs::create_dir_all(old_abs.parent().unwrap()).unwrap();
-        std::fs::write(
-            &old_abs,
-            "---\ntitle: old\n---\n\nborrow checker rejects nested closure capture\n",
-        )
-        .unwrap();
-        store
-            .lock()
-            .unwrap()
-            .upsert(
-                old_rel,
-                1_000,
-                10,
-                "borrow checker rejects nested closure capture",
-                None,
-            )
-            .unwrap();
+        let old_content = "---\ntitle: old\n---\n\nborrow checker rejects nested closure capture\n";
+        std::fs::write(&old_abs, old_content).unwrap();
+        index_like_the_worker(old_rel);
+        let scanned_shape = stat_of(old_rel);
 
-        let root_fd = Arc::new(crate::safe_fs::open_root(&root).unwrap());
         let writer = Arc::new(
             FactWriter::new(&root)
                 .with_root_fd(Arc::clone(&root_fd))
@@ -503,21 +533,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // Index worker, mid-write: the old file went away so its row went away,
-        // then unrelated content appeared at the same path and got indexed
-        // there — a different row identity under an identical `path`.
+        // Mid-write replacement: the scanned row goes away with the file it
+        // described, then unrelated content appears at the same path and is
+        // indexed there — a different record under an identical `path`.
         let unrelated_body = "kubernetes pod affinity needs a topology key";
+        let mut on_disk = format!("---\ntitle: k8s\n---\n\n{unrelated_body}\n");
+        // A same-shape replacement is padded out to the scanned file's byte
+        // length and gets that file's mtime put back, which is what a
+        // timestamp-preserving copy or restore leaves behind.
+        let preserved = match replacement {
+            MidWriteReplacement::Reshaped => None,
+            MidWriteReplacement::SameShape => Some(std::fs::metadata(&old_abs).unwrap()),
+        };
+        if preserved.is_some() {
+            assert!(
+                on_disk.len() <= old_content.len(),
+                "the replacement has to fit the scanned file's byte length"
+            );
+            on_disk.push_str(&" ".repeat(old_content.len() - on_disk.len()));
+        }
+
         store.lock().unwrap().remove(old_rel).unwrap();
-        std::fs::write(
-            &old_abs,
-            format!("---\ntitle: k8s\n---\n\n{unrelated_body}\n"),
-        )
-        .unwrap();
-        store
-            .lock()
-            .unwrap()
-            .upsert(old_rel, 2_000, 42, unrelated_body, None)
-            .unwrap();
+        std::fs::write(&old_abs, &on_disk).unwrap();
+        if let Some(before) = preserved.as_ref() {
+            std::fs::File::open(&old_abs)
+                .unwrap()
+                .set_modified(before.modified().unwrap())
+                .unwrap();
+        }
+        index_like_the_worker(old_rel);
+
+        // The premise of the probe, checked rather than assumed: the replacement
+        // row's metadata identity is the scanned one, so nothing but the body
+        // fingerprint can tell the two records apart.
+        let replaced_shape = stat_of(old_rel);
+        match replacement {
+            MidWriteReplacement::SameShape => assert_eq!(
+                (replaced_shape.mtime_ms, replaced_shape.size),
+                (scanned_shape.mtime_ms, scanned_shape.size),
+                "the probe has to reproduce the review's identical-metadata case"
+            ),
+            MidWriteReplacement::Reshaped => assert_ne!(
+                (replaced_shape.mtime_ms, replaced_shape.size),
+                (scanned_shape.mtime_ms, scanned_shape.size),
+                "the control case is supposed to differ in shape"
+            ),
+        }
+
         let searchable = |q: &str| {
             store
                 .lock()
@@ -540,16 +602,53 @@ mod tests {
         drop(reader);
         res.expect("write() must succeed once the FIFO has a reader");
 
+        let stamped = std::fs::read_to_string(&old_abs)
+            .unwrap()
+            .contains("superseded_by");
+        (searchable("kubernetes"), stamped)
+    }
+
+    /// The hazard the deferred supersede introduces (#8717 review): the scan no
+    /// longer holds the store lock across the filesystem writes, so while
+    /// `write()` is busy the index worker can drop the scanned row — the old
+    /// file was unlinked — and index *unrelated* content that reappeared at the
+    /// same path. Retiring by `path` alone then hides that unrelated record
+    /// from every search and stamps a bogus `superseded_by` into its
+    /// frontmatter.
+    #[test]
+    fn conflict_candidate_reindexed_mid_write_is_not_superseded() {
+        let (searchable, stamped) = parked_write_probe(MidWriteReplacement::Reshaped);
+
         assert_eq!(
-            searchable("kubernetes"),
-            vec![old_rel],
+            searchable,
+            vec!["notes/old-lesson.md"],
             "unrelated content at a re-created conflict path was hidden from search"
         );
         assert!(
-            !std::fs::read_to_string(&old_abs)
-                .unwrap()
-                .contains("superseded_by"),
+            !stamped,
             "unrelated content was stamped with a superseded_by it did not earn"
+        );
+    }
+
+    /// The same window with the metadata held still (#8717 review, second
+    /// round): the replacement is padded to the scanned file's byte length and
+    /// its mtime is restored, so the row the worker writes afterwards carries
+    /// exactly the `mtime_ms` and `size` the scan recorded. Only the body
+    /// fingerprint separates the two records; without it the unrelated content
+    /// is superseded — hidden from search and stamped with a `superseded_by`
+    /// pointing at a fact it never conflicted with.
+    #[test]
+    fn conflict_candidate_replaced_by_same_shape_content_is_not_superseded() {
+        let (searchable, stamped) = parked_write_probe(MidWriteReplacement::SameShape);
+
+        assert_eq!(
+            searchable,
+            vec!["notes/old-lesson.md"],
+            "a same-size, same-mtime replacement was hidden from search"
+        );
+        assert!(
+            !stamped,
+            "a same-size, same-mtime replacement was stamped with superseded_by"
         );
     }
 }
