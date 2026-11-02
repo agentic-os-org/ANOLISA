@@ -54,8 +54,21 @@ class DeliveryTests(unittest.TestCase):
             "qwen-code-extension/hooks/observability_hook.py",
             "qwen-code-extension/hooks/skill_ledger_hook.py",
             "skills/demo/SKILL.md",
+            "gateway/asc_gateway_addon.py",
+            "gateway/asc_gateway_policy.py",
+            "gateway/mitmproxy.provenance",
+            "gateway/github-policy.json",
         ):
             self.artifact(name, "fixture\n")
+        self.artifact(
+            "gateway/install-mitmproxy.sh",
+            "#!/bin/sh\nexit 91\n",
+            executable=True,
+        )
+        for name in ("agent-sec-gateway.service.in", "gateway.conf"):
+            shutil.copy2(
+                ROOT / "packaging/gateway" / name, self.build / "gateway" / name
+            )
 
     def artifact(self, name, contents, executable=False):
         destination = self.build / name
@@ -94,7 +107,13 @@ class DeliveryTests(unittest.TestCase):
         # Installation fixtures explicitly exercise system-package /usr paths.
         if (
             any(
-                arg in {"install", "install-core", "install-plugins", "install-skills"}
+                arg
+                in {
+                    "install",
+                    "install-core",
+                    "install-plugins",
+                    "install-skills",
+                }
                 for arg in arguments
             )
             and not any(arg.startswith("PREFIX=") for arg in arguments)
@@ -102,14 +121,22 @@ class DeliveryTests(unittest.TestCase):
         ):
             arguments = (*arguments, "PREFIX=/usr")
         return subprocess.run(
-            ["make", "--no-print-directory", "-C", str(self.source), *arguments],
+            [
+                "make",
+                "--no-print-directory",
+                "-C",
+                str(self.source),
+                *arguments,
+            ],
             check=False,
             capture_output=True,
             text=True,
             env=environment,
         )
 
-    def test_root_layout_ignores_legacy_file_defaults_but_honors_explicit_inputs(self):
+    def test_root_layout_ignores_legacy_file_defaults_but_honors_explicit_inputs(
+        self,
+    ):
         result = self.make("layout")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PREFIX=/usr/local\n", result.stdout)
@@ -134,7 +161,8 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SKILLDIR=/usr/share/anolisa/skills\n", result.stdout)
         self.assertIn(
-            "EXTENSIONDIR=/usr/share/anolisa/extensions/agent-sec-core\n", result.stdout
+            "EXTENSIONDIR=/usr/share/anolisa/extensions/agent-sec-core\n",
+            result.stdout,
         )
         result = self.make("layout", "AWPRJ=anolisa", "DATADIR=/srv/data")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -245,6 +273,17 @@ class DeliveryTests(unittest.TestCase):
             (stage / "srv/units/agent-sec-core.service").read_text(),
         )
         self.assertTrue((stage / "srv/config/skillsec.json").is_file())
+        gateway = stage / "opt/vendor/share/work/agent-sec-core/gateway"
+        self.assertTrue((gateway / "github-policy.json").is_file())
+        gateway_unit = (stage / "srv/units/agent-sec-gateway.service").read_text()
+        self.assertIn(
+            "-s /opt/vendor/share/work/agent-sec-core/gateway/asc_gateway_addon.py",
+            gateway_unit,
+        )
+        self.assertNotIn(str(stage), gateway_unit)
+        self.assertTrue(
+            (stage / "srv/units/agent-sec-core.service.d/gateway.conf").is_file()
+        )
         self.assertIn(
             '--skillsec-config "/srv/config/skillsec.json"',
             (stage / "srv/units/agent-sec-core.service").read_text(),
@@ -253,7 +292,9 @@ class DeliveryTests(unittest.TestCase):
             str(stage), (stage / "srv/units/agent-sec-core.service").read_text()
         )
 
-    def test_native_system_unit_preserves_default_configuration_resolution(self):
+    def test_native_system_unit_preserves_default_configuration_resolution(
+        self,
+    ):
         stage = self.base / "native-system"
         result = self.make("install-systemd-system", f"DESTDIR={stage}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -278,7 +319,11 @@ class DeliveryTests(unittest.TestCase):
         for directory in (stage / "usr/bin", stage / "srv/source-bin"):
             self.assertEqual(
                 {path.name for path in directory.iterdir()},
-                {"agent-sec-cli", "agent-sec-daemon", "agent-sec-daemon-health"},
+                {
+                    "agent-sec-cli",
+                    "agent-sec-daemon",
+                    "agent-sec-daemon-health",
+                },
             )
             self.assertTrue(
                 all(path.stat().st_mode & 0o111 for path in directory.iterdir())
@@ -385,7 +430,9 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((stage / "another-component").is_symlink())
 
-    def test_core_install_does_not_require_or_copy_plugin_and_skill_inputs(self):
+    def test_core_install_does_not_require_or_copy_plugin_and_skill_inputs(
+        self,
+    ):
         for name in (
             "cosh-extension",
             "codex-plugin",
@@ -406,6 +453,16 @@ class DeliveryTests(unittest.TestCase):
         )
         self.assertTrue((stage / "etc/agent-sec/skillsec.json").is_file())
         self.assertTrue((stage / "usr/share/suite/agent-sec-core/LICENSE").is_file())
+        self.assertTrue(
+            (
+                stage / "usr/share/suite/agent-sec-core/gateway/github-policy.json"
+            ).is_file()
+        )
+        self.assertTrue(
+            (stage / "usr/lib/systemd/system/agent-sec-gateway.service").is_file()
+        )
+        self.assertFalse((stage / "opt/agent-sec-gateway").exists())
+        self.assertFalse((stage / "run/agent-sec-gateway").exists())
         self.assertFalse((stage / "usr/share/suite/agent-sec-core/adapters").exists())
         self.assertFalse((stage / "usr/share/suite/agent-sec-core/skills").exists())
         self.assertNotIn("overriding recipe", result.stderr)
@@ -478,7 +535,11 @@ class DeliveryTests(unittest.TestCase):
             ("anolisa", "usr/local/share/anolisa/skills"),
         ):
             stage = self.base / (namespace or "standalone")
-            args = (f"DESTDIR={stage}", "PREFIX=/usr/local", f"AWPRJ={namespace}")
+            args = (
+                f"DESTDIR={stage}",
+                "PREFIX=/usr/local",
+                f"AWPRJ={namespace}",
+            )
             installed = self.make("install-skills", *args)
             self.assertEqual(installed.returncode, 0, installed.stderr)
             skill = stage / relative / "demo/SKILL.md"
@@ -494,6 +555,7 @@ class DeliveryTests(unittest.TestCase):
     def test_each_group_preflights_its_inputs_before_any_write(self):
         for group, name in (
             ("core", "v2/bin/agent-sec-daemon"),
+            ("core", "gateway/github-policy.json"),
             ("plugins", "openclaw-plugin/dist/index.js"),
             ("skills", "skills/demo/SKILL.md"),
         ):
@@ -534,7 +596,9 @@ class DeliveryTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("No rule to make target", result.stderr)
 
-    def test_direct_install_checks_written_paths_without_scanning_shared_parents(self):
+    def test_direct_install_checks_written_paths_without_scanning_shared_parents(
+        self,
+    ):
         prefix = self.base / "direct-links"
         bindir = prefix / "bin"
         bindir.mkdir(parents=True)
@@ -550,7 +614,9 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("symlink", result.stderr)
         self.assertEqual(outside.read_text(), "leave unchanged\n")
 
-    def test_shared_skill_root_only_checks_and_chmods_this_components_files(self):
+    def test_shared_skill_root_only_checks_and_chmods_this_components_files(
+        self,
+    ):
         prefix = self.base / "shared-prefix"
         skills = prefix / "shared-skills"
         other = skills / "other"

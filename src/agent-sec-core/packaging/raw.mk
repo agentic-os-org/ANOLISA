@@ -15,7 +15,7 @@ prepare-raw-python: build-all-v2 ## Stage the adapter-only bundled Python runtim
 		"$(abspath $(RAW_PYTHON_RUNTIME))" "$(abspath $(RAW_PYTHON_ARCHIVE))"
 
 .PHONY: stage-raw
-stage-raw: ## Stage the V2 raw payload under DESTDIR
+stage-raw: stage-gateway ## Stage the V2 raw payload under DESTDIR
 	@BUILD_DIR="$(abspath $(BUILD_DIR))" \
 		DESTDIR="$(DESTDIR)" \
 		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \

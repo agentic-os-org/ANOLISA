@@ -143,13 +143,24 @@ build-all: build-all-v2 ## Build all components with the V2 Rust CLI/daemon
 build-all-v1: $(call component_build_targets,build-cli) ## Build all components with the V1 Python CLI
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
+.PHONY: stage-gateway
+stage-gateway: ## Stage static secret gateway assets without installing mitmproxy
+	install -d -m 0755 "$(BUILD_DIR)/gateway"
+	install -m 0644 v2/gateway/addon/asc_gateway_addon.py \
+		v2/gateway/addon/asc_gateway_policy.py v2/gateway/mitmproxy.provenance \
+		packaging/gateway/agent-sec-gateway.service.in packaging/gateway/gateway.conf \
+		"$(BUILD_DIR)/gateway/"
+	install -m 0644 v2/crates/asc-gateway-plan/policies/github.json \
+		"$(BUILD_DIR)/gateway/github-policy.json"
+	install -m 0755 packaging/gateway/install-mitmproxy.sh "$(BUILD_DIR)/gateway/"
+
 .PHONY: build-all-v2
-build-all-v2: $(call component_build_targets,build-cli-v2) ## Build all components with the V2 Rust CLI/daemon
+build-all-v2: $(call component_build_targets,build-cli-v2) stage-gateway ## Build all components with the V2 Rust CLI/daemon
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: build-all-v2-offline
 build-all-v2-offline: OFFLINE_BUILD := 1
-build-all-v2-offline: $(call component_build_targets,build-cli-v2) ## Build V2 components from vendored dependencies only
+build-all-v2-offline: $(call component_build_targets,build-cli-v2) stage-gateway ## Build V2 components from vendored dependencies only
 	@echo "📦 Offline V2 artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: build-all-source-v2

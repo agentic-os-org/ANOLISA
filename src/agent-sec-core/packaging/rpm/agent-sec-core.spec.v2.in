@@ -52,6 +52,8 @@ Obsoletes:      agent-sec-cli < 1.1.2
 
 %description
 Native V2 CLI, daemon, health helper, sandbox, configuration and system service.
+Includes opt-in secret gateway assets and a pinned mitmproxy installer;
+administrators provision mitmproxy separately and explicitly enable the gateway.
 Framework integrations and skills are supplied separately by agent-sec-plugins
 and agent-sec-skills. ANOLISA discovery metadata belongs to the distribution.
 
@@ -268,7 +270,17 @@ capture=1
 %{asc_capture_service}
 
 %preun
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ] && {
+    [ -e /run/agent-sec-gateway/active.json ] ||
+    /usr/bin/systemctl is-active --quiet agent-sec-gateway.service
+}; then
+    /usr/bin/agent-sec-cli gateway disable || {
+        echo "Cannot withdraw gateway routing; start agent-sec-core.service, run gateway disable and retry removal." >&2
+        exit 1
+    }
+fi
 %systemd_preun agent-sec-core.service
+%systemd_preun agent-sec-gateway.service
 
 %postun
 %systemd_postun_with_restart agent-sec-core.service
@@ -289,6 +301,17 @@ fi
 %attr(0755,root,root) /usr/bin/agent-sec-daemon-health
 %attr(0755,root,root) /usr/bin/linux-sandbox
 %{_unitdir}/agent-sec-core.service
+%{_unitdir}/agent-sec-gateway.service
+%dir %{_unitdir}/agent-sec-core.service.d
+%{_unitdir}/agent-sec-core.service.d/gateway.conf
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/sec-core
+%dir %{_datadir}/anolisa/sec-core/gateway
+%{_datadir}/anolisa/sec-core/gateway/asc_gateway_addon.py
+%{_datadir}/anolisa/sec-core/gateway/asc_gateway_policy.py
+%{_datadir}/anolisa/sec-core/gateway/github-policy.json
+%{_datadir}/anolisa/sec-core/gateway/mitmproxy.provenance
+%attr(0755,root,root) %{_datadir}/anolisa/sec-core/gateway/install-mitmproxy.sh
 %dir %{_sysconfdir}/agent-sec
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/agent-sec/skillsec.json
 %license LICENSE

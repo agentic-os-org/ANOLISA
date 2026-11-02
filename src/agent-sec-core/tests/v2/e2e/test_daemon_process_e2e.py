@@ -13,6 +13,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import warnings
 from pathlib import Path
 
 import pytest
@@ -75,7 +76,12 @@ with socket.socket(socket.AF_UNIX) as listener:
             os.chown(endpoint, 0, 0)
             if client == "cli":
                 result = cli(
-                    "--socket", str(endpoint), "policy", "list", "--timeout-ms", "1000"
+                    "--socket",
+                    str(endpoint),
+                    "policy",
+                    "list",
+                    "--timeout-ms",
+                    "1000",
                 )
             else:
                 environment = os.environ.copy()
@@ -136,7 +142,11 @@ def test_dproc_uds_002_authenticates_uid_with_zero_peer_pid(
         "--kill-child",
     ]
     available = subprocess.run(
-        namespace + ["true"], capture_output=True, text=True, timeout=5, check=False
+        namespace + ["true"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
     )
     if available.returncode:
         pytest.skip(f"user/PID namespaces unavailable: {available.stderr.strip()}")
@@ -206,6 +216,62 @@ os.execv(sys.argv[3], sys.argv[3:])
             if process.poll() is None:
                 process.kill()
                 process.communicate(timeout=5)
+
+
+def test_default_start_and_restart_do_not_activate_gateway(
+    start_daemon, tmp_path, monkeypatch, record_property
+):
+    data = tmp_path / "data"
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(data))
+    runtime = Path("/run/agent-sec-gateway")
+    assert not runtime.exists(), "requires an environment without an active gateway"
+    nft = shutil.which("nft")
+    nft_unavailable = None
+
+    for phase in ("before_start", "after_start", "after_restart"):
+        if phase != "before_start":
+            daemon = start_daemon()
+            status = daemon.request("gateway", "status")
+            assert status == {"enabled": False, "ready": False, "scopes": []}
+        if nft is None:
+            nft_unavailable = "nft is not installed"
+        else:
+            tables = subprocess.run(
+                [nft, "--json", "list", "tables"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if tables.returncode != 0 and any(
+                reason in tables.stderr.lower()
+                for reason in ("operation not permitted", "permission denied")
+            ):
+                nft_unavailable = "nft read permission denied"
+            else:
+                assert tables.returncode == 0, tables.stderr
+                assert not any(
+                    entry.get("table", {}).get("name") == "agent_sec_gateway"
+                    for entry in json.loads(tables.stdout)["nftables"]
+                ), f"gateway nftables table exists during {phase}"
+        assert not runtime.exists()
+        assert not (data / "gateway").exists()
+        assert not (data / "credentials").exists()
+        if phase != "before_start":
+            daemon.process.send_signal(signal.SIGTERM)
+            daemon.process.communicate(timeout=5)
+            assert daemon.process.returncode == 0
+            assert not daemon.socket_path.exists()
+    record_property(
+        "gateway_nft_coverage",
+        f"unavailable: {nft_unavailable}" if nft_unavailable else "verified",
+    )
+    if nft_unavailable:
+        warnings.warn(
+            f"Gateway nftables absence was not verified: {nft_unavailable}",
+            pytest.PytestWarning,
+            stacklevel=1,
+        )
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="cross-UID UDS test requires root")
@@ -384,7 +450,9 @@ def test_dproc_014_second_socket_in_same_runtime_is_rejected(daemon, daemon_bin)
     assert daemon.request("policy", "list")["total"] == 0
 
 
-def test_dproc_003_sigkill_restart_reuses_lock_and_reclaims_socket(start_daemon):
+def test_dproc_003_sigkill_restart_reuses_lock_and_reclaims_socket(
+    start_daemon,
+):
     first = start_daemon()
     lock = first.socket_path.parent / "daemon.lock"
     inode = lock.stat().st_ino
@@ -468,7 +536,8 @@ def test_dproc_012_directory_special_bits_allow_safe_access(
 
 
 @pytest.mark.parametrize(
-    "kind", ["symlink", "writable", "world_writable", "setgid_writable", "ancestor"]
+    "kind",
+    ["symlink", "writable", "world_writable", "setgid_writable", "ancestor"],
 )
 def test_dproc_012_unsafe_directory_is_rejected(daemon_bin, tmp_path, kind):
     runtime = tmp_path / "runtime"

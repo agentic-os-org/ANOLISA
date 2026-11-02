@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+if [ -e /run/agent-sec-gateway/active.json ] ||
+    systemctl is-active --quiet agent-sec-gateway.service 2>/dev/null; then
+    if ! "{bindir}/agent-sec-cli" gateway disable; then
+        echo "Cannot withdraw gateway routing; start agent-sec-core.service, run gateway disable and retry removal." >&2
+        exit 1
+    fi
+fi

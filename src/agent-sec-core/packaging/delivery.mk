@@ -34,13 +34,17 @@ DELIVERY_INSTALL_ARGS = INSTALL_PROFILE=system V2_BIN_BUILD_DIR="$(DELIVERY_BUIL
 	QODER_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/qoder" \
 	QWEN_CODE_EXTENSION_DIR="$(DELIVERY_ADAPTERDIR)/qwencode" \
 	SYSTEMD_SYSTEM_UNIT_DIR="$(DELIVERY_UNITDIR)" SYSTEMD_SERVICE_BINDIR="$(DELIVERY_BINDIR)" \
-	SYSTEM_SEC_CORE_CONFIG_DIR="$(DELIVERY_CONFIGDIR)" SYSTEMD_SKILLSEC_CONFIG="$(DELIVERY_CONFIGDIR)/skillsec.json"
+	SYSTEM_SEC_CORE_CONFIG_DIR="$(DELIVERY_CONFIGDIR)" SYSTEMD_SKILLSEC_CONFIG="$(DELIVERY_CONFIGDIR)/skillsec.json" \
+	GATEWAY_DATADIR="$(DELIVERY_DATADIR)/gateway" GATEWAY_SOURCE_DIR="$(DELIVERY_BUILD_OUTPUT)/gateway"
 
 .PHONY: delivery-validate-layout delivery-validate-install layout install test-packaging
 
 # The public uninstall must remove the skills selected by the public installer.
 uninstall: SKILLDIR := $(DELIVERY_SKILLDIR)
 uninstall: EXTENSIONDIR := $(DELIVERY_EXTENSIONDIR)
+uninstall: GATEWAY_DATADIR := $(DELIVERY_DATADIR)/gateway
+uninstall: SYSTEMD_SYSTEM_UNIT_DIR := $(DELIVERY_UNITDIR)
+uninstall: uninstall-gateway
 
 delivery-validate-layout:
 	@test "$(DELIVERY_INSTALL_PROFILE)" = system || { echo 'Public install supports INSTALL_PROFILE=system only; use an explicit legacy installer for other profiles' >&2; exit 1; }
@@ -66,7 +70,13 @@ DELIVERY_CORE_INPUTS = \
 	--target-file "$(DELIVERY_BINDIR)/linux-sandbox" \
 	--target-file "$(DELIVERY_UNITDIR)/agent-sec-core.service" \
 	--target-file "$(DELIVERY_CONFIGDIR)/skillsec.json" \
-	--target-file "$(DELIVERY_DATADIR)/LICENSE"
+	--target-file "$(DELIVERY_DATADIR)/LICENSE" \
+	$(foreach file,asc_gateway_addon.py asc_gateway_policy.py mitmproxy.provenance github-policy.json install-mitmproxy.sh,--file "$(DELIVERY_BUILD_OUTPUT)/gateway/$(file)" --target-file "$(DELIVERY_DATADIR)/gateway/$(file)") \
+	--executable "$(DELIVERY_BUILD_OUTPUT)/gateway/install-mitmproxy.sh" \
+	--file "$(DELIVERY_BUILD_OUTPUT)/gateway/agent-sec-gateway.service.in" \
+	--file "$(DELIVERY_BUILD_OUTPUT)/gateway/gateway.conf" \
+	--target-file "$(DELIVERY_UNITDIR)/agent-sec-gateway.service" \
+	--target-file "$(DELIVERY_UNITDIR)/agent-sec-core.service.d/gateway.conf"
 DELIVERY_PLUGIN_INPUTS = \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/cosh-extension" \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/codex-plugin" \
@@ -114,7 +124,7 @@ delivery-validate-skills: delivery-validate-layout
 delivery-validate-install: delivery-validate-core delivery-validate-plugins delivery-validate-skills
 
 delivery-install-core-files:
-	$(MAKE) -C "$(DELIVERY_ROOT)" install-cli-v2-source install-sandbox install-systemd-system $(DELIVERY_INSTALL_ARGS)
+	$(MAKE) -C "$(DELIVERY_ROOT)" install-cli-v2-source install-sandbox install-systemd-system install-gateway $(DELIVERY_INSTALL_ARGS)
 	install -d -m 0755 "$(DELIVERY_DESTDIR)$(DELIVERY_DATADIR)"
 	install -p -m 0644 "$(DELIVERY_ROOT)/LICENSE" "$(DELIVERY_DESTDIR)$(DELIVERY_DATADIR)/LICENSE"
 
