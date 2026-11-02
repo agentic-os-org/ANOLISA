@@ -18,6 +18,7 @@ pub(crate) mod storage_status;
 mod system_audit;
 mod token_savings;
 mod tokenless;
+mod ws_ckpt;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -263,6 +264,12 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)
+                .service(ws_ckpt::get_snapshots)
+                .service(ws_ckpt::snapshot_availability)
+                .service(ws_ckpt::diff)
+                .service(ws_ckpt::prepare)
+                .service(ws_ckpt::execute)
+                .service(ws_ckpt::restore_result)
                 .service(handlers::get_agent_health)
                 .service(handlers::get_agent_process_health)
                 .service(
@@ -365,6 +372,36 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// Keep in sync with `configure_routes` above — the doc test in this module
 /// spot-checks a few entries but cannot detect every drift.
 const API_ROUTES: &[(&str, &str, &str)] = &[
+    (
+        "GET",
+        "/api/ws-ckpt/{kind}/{id}/snapshots",
+        "ATIF steps and workspace snapshots",
+    ),
+    (
+        "HEAD",
+        "/api/ws-ckpt/{kind}/{id}/snapshots",
+        "Whether a registered workspace is available for the trajectory",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/diff",
+        "File changes against the current workspace",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/restore/prepare",
+        "Verify file changes and prepare rollback confirmation",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/restore/execute",
+        "Confirm an exact guarded restore",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/restore/result",
+        "Query durable restore evidence",
+    ),
     ("GET", "/health", "Liveness probe (localhost only)"),
     ("GET", "/metrics", "Prometheus metrics (localhost only)"),
     (
@@ -1816,7 +1853,7 @@ mod tests {
         assert!(tail.status().is_success() || tail.status() == StatusCode::NOT_FOUND);
     }
 
-    fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
+    pub(super) fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
         let auth_config = ServerAuthConfig { enabled: false };
         let auth = Arc::new(DashboardAuth::init(
             &auth_config,

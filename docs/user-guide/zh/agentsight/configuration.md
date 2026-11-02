@@ -356,6 +356,33 @@ python3 -m json.tool /etc/agentsight/config.json > /dev/null && echo "JSON ok"
 journalctl -u agentsight.service -n 30 --no-pager
 ```
 
+## 工作区快照后端（Linux）
+
+可选的 `ws_ckpt` 配置连接本机 ws-ckpt 实例：
+
+```json
+{"ws_ckpt":{"binary":"/usr/local/bin/ws-ckpt","socket":"/run/ws-ckpt/ws-ckpt.sock","restore_enabled":false,"plugins":{"example-agent":{"runtime":"openclaw","config_path":"/home/example/.openclaw/ws-ckpt.json"}}}}
+```
+
+`binary` 默认从 PATH 查找 `ws-ckpt`。`socket` 默认读取 `WS_CKPT_SOCKET`，再回退到
+`/run/ws-ckpt/ws-ckpt.sock`；JSON CLI 查询与 guarded 操作使用同一 socket。配置逐请求
+读取，不配置时保留原有部署方式。工具显式传入 workspace 时可省略 `plugins`，不从
+进程 cwd 推测工作区。
+
+`plugins` 的键必须匹配轨迹中的 ATIF agent 名称，并对应实际宿主实例。`runtime`
+支持 `openclaw`（持久化 JSON）或 `hermes`（YAML 中的 `plugins.ws-ckpt`）。可选
+`workspace_override` 表示该实例已知的环境覆盖值或宿主默认值；不能拿 Sight 的 HOME
+或环境代替。配置文件若在调用之后修改，不用当前值倒填历史工作区；实例不明确时保持
+未解析状态。
+
+纯自动快照也可使用绑定的插件配置。轨迹没有记录可用的 ws-ckpt 工作区操作时，
+Sight 会检查该实例是否配置了 `autoCheckpoint: true`，以及绑定和插件配置文件是否
+早于轨迹开始。轨迹中可确认的工作区操作优先。
+
+所有快照接口均要求 Dashboard 凭据，包括回环地址。恢复还需显式配置
+`restore_enabled: true`，默认关闭。确认协议见[快照 API](data-and-storage.md#工作区快照-api)。
+本次后端接入本身不增加页面控件。
+
 ## Tokenless 统计 API
 
 连接远程 Tokenless 时，在传给 `agentsight serve --config /etc/agentsight/config.json`

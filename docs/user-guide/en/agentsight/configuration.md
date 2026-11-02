@@ -387,6 +387,37 @@ python3 -m json.tool /etc/agentsight/config.json > /dev/null && echo "JSON ok"
 journalctl -u agentsight.service -n 30 --no-pager
 ```
 
+## Workspace snapshot backend (Linux)
+
+The optional `ws_ckpt` section connects the server to a local ws-ckpt instance:
+
+```json
+{"ws_ckpt":{"binary":"/usr/local/bin/ws-ckpt","socket":"/run/ws-ckpt/ws-ckpt.sock","restore_enabled":false,"plugins":{"example-agent":{"runtime":"openclaw","config_path":"/home/example/.openclaw/ws-ckpt.json"}}}}
+```
+
+`binary` defaults to `ws-ckpt` on PATH. `socket` defaults to `WS_CKPT_SOCKET`,
+then `/run/ws-ckpt/ws-ckpt.sock`. CLI queries and guarded operations use the same
+socket. Settings are read per request; the optional section does not change
+existing deployments. Omit `plugins` when tool calls carry explicit workspace
+arguments. No workspace is inferred from process cwd.
+
+Each `plugins` key must match the recorded ATIF agent name and identify its actual
+host instance. `runtime` is `openclaw` (persisted JSON) or `hermes` (YAML section
+`plugins.ws-ckpt`). An optional `workspace_override` records that instance's known
+environment override or host default. Do not substitute the server's HOME or
+environment. A config modified after the recorded call is not used to infer that
+call's historical workspace; unknown bindings remain unresolved.
+
+For automatic snapshots without a recorded ws-ckpt call, Sight can use the bound
+plugin configuration when it sets `autoCheckpoint: true`. The binding and its
+configuration file must predate the start of the trajectory. A recorded
+workspace operation takes precedence over this fallback.
+
+All snapshot routes require Dashboard credentials, including loopback. Restore
+also requires `restore_enabled: true`; it remains off by default. See
+[snapshot APIs](data-and-storage.md#workspace-snapshot-api) for the confirmation
+protocol. This backend change does not add Dashboard controls by itself.
+
 ## Tokenless statistics API
 
 For a remote Tokenless instance, add this optional top-level setting to the configuration

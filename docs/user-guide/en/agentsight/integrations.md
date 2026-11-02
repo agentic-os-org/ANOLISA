@@ -315,3 +315,16 @@ lists also require the existing AgentSight credential, including on loopback.
 
 The API-backed savings path requires the batch POST endpoint; upgrade AgentSight and the
 Tokenless query service together. Existing single-filter GET queries remain available.
+
+## ws-ckpt workspace snapshots (Linux)
+
+The [snapshot backend](data-and-storage.md#workspace-snapshot-api) combines existing
+ATIF steps with a local ws-ckpt workspace. Explicit successful tool/Bash operations
+identify the workspace; omitted arguments require an explicitly configured host
+plugin binding. Snapshots of every origin are grouped by creation time, without
+native session-ID matching or a new collection pipeline. File changes use
+`ws-ckpt diff --format json`; guarded restore reuses the existing checkpoint
+client. Restore is separately enabled and requires confirmed stopped writers,
+a pinned protection snapshot and same-dialog confirmation. See
+[configuration](configuration.md#workspace-snapshot-backend-linux). The backend
+interfaces alone do not add Dashboard controls.

@@ -403,6 +403,17 @@ fn normalize_path(mut path: String) -> String {
 /// (labels, triage, evaluations) stay on the loopback path: they change what
 /// the dashboard shows, not what the host does.
 fn is_credential_required_path(method: &actix_web::http::Method, path: &str) -> bool {
+    if let Some(rest) = path.strip_prefix("/api/ws-ckpt/") {
+        // The HEAD probe exposes workspace availability only. The usual
+        // authentication rules for reading a trajectory still apply to it.
+        let mut parts = rest.split('/');
+        return !(*method == actix_web::http::Method::HEAD
+            && matches!(
+                (parts.next(), parts.next(), parts.next(), parts.next()),
+                (Some("session" | "conversation" | "{kind}"), Some(id), Some("snapshots"), None)
+                    if !id.is_empty()
+            ));
+    }
     match *method {
         actix_web::http::Method::POST => {
             matches!(
