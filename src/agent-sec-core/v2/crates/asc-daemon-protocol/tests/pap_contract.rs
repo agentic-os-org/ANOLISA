@@ -76,6 +76,7 @@ fn method_results_reuse_complete_domain_contracts() {
         scope_id: binding.scope.scope_id.clone(),
         selector: binding.scope.selector.clone(),
         policy_snapshots: vec![policy.clone()],
+        owner_uid: None,
         status: asc_policy_types::scope::ScopeStatus::Active,
     };
     let binding = BindingView {
@@ -98,6 +99,25 @@ fn method_results_reuse_complete_domain_contracts() {
         items: vec![binding],
         total: 1,
     });
+}
+
+#[test]
+fn scope_owner_is_optional_at_the_wire_boundary_and_round_trips_without_authority_fields() {
+    let file = json!({"selector":{"kind":"pid","pid":4242}});
+    let decoded: CreateScopeParams = serde_json::from_value(file.clone()).unwrap();
+    assert_eq!(decoded.owner_uid, None);
+    assert_eq!(serde_json::to_value(decoded).unwrap(), file);
+    let credentials = json!({"selector":{"kind":"process","match":{"processName":"agent"}},
+        "ownerUid":1000,"policyTemplates":[{"policyId":"credential-policy","policyRevision":1}]});
+    assert_eq!(
+        round_trip::<CreateScopeParams>(credentials.clone()),
+        credentials
+    );
+    for owner in [json!(-1), json!(4_294_967_296_u64), json!("1000")] {
+        let mut invalid = credentials.clone();
+        invalid["ownerUid"] = owner;
+        assert!(serde_json::from_value::<CreateScopeParams>(invalid).is_err());
+    }
 }
 
 #[test]
@@ -124,6 +144,7 @@ fn authored_params_reject_server_owned_or_legacy_fields() {
 
     let invalid_outbound = CreateScopeParams {
         selector: ScopeSelector::Pid { pid: 0 },
+        owner_uid: None,
         policy_templates: vec![],
     };
     assert!(serde_json::to_value(invalid_outbound).is_err());
@@ -510,4 +531,46 @@ fn observability_query_method_inventory_matches_dispatch() {
             AccessPolicy::LocalUser
         );
     }
+}
+
+/// Gateway administration retains administrator metadata; queries accept local peers.
+#[test]
+fn gateway_method_inventory_matches_dispatch_and_access() {
+    use asc_daemon_protocol::method::{AccessPolicy, GatewayMethod, MethodId};
+    let expected = [
+        (GatewayMethod::Enable, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Disable, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Status, AccessPolicy::LocalUser),
+        (GatewayMethod::KeyAdd, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::KeyRemove, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::KeyList, AccessPolicy::PolicyAdministrator),
+        (GatewayMethod::Credentials, AccessPolicy::LocalUser),
+    ];
+    assert_eq!(method::GATEWAY_METHODS.len(), expected.len());
+    for (wire, (gateway, access)) in method::GATEWAY_METHODS.into_iter().zip(expected) {
+        assert_eq!(method::resolve(wire), Some(MethodId::Gateway(gateway)));
+        assert_eq!(method::metadata(wire).unwrap().access, access);
+    }
+    assert_eq!(
+        round_trip::<asc_daemon_protocol::GatewayKeyAddParams>(
+            json!({"credential": "github", "secretFile": "/root/token"})
+        ),
+        json!({"credential": "github", "secretFile": "/root/token"})
+    );
+    assert!(
+        serde_json::from_value::<asc_daemon_protocol::GatewayKeyAddParams>(
+            json!({"credential": "github", "secret": "dummy"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        round_trip::<asc_daemon_protocol::GatewayScopeParams>(json!({"scopeId": "scope-1"})),
+        json!({"scopeId": "scope-1"})
+    );
+    assert!(
+        serde_json::from_value::<asc_daemon_protocol::GatewayScopeParams>(
+            json!({"scopeId": "scope-1", "uid": 0})
+        )
+        .is_err()
+    );
 }

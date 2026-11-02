@@ -18,7 +18,7 @@ use asc_daemon_core::{PrincipalPolicy, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder, QueryHandler};
 use asc_daemon_service::ShutdownToken;
 use asc_event_sink::ConfiguredSecurityEventSinks;
-use asc_pap::{PapRepository, PapService, ScopeDiscovery};
+use asc_pap::{PapRepository, PapService};
 use asc_policy_repository_sqlite::{SqlitePolicyRepository, select_policy_database_path};
 use asc_policy_runtime::reconciliation::ReconciliationRuntime;
 use asc_policy_types::scope::ScopeStatus;
@@ -218,8 +218,7 @@ async fn run(
         );
     }
     report_startup("deleting_scope_recovery", startup_started);
-    // Exclusive DB ownership proves no pre-crash discovery worker can still write.
-    if let Err(error) = recover_deleting_scopes(repository.as_ref()) {
+    if let Err(error) = recover_deleting_file_scopes(repository.as_ref()) {
         report_error(telemetry, &error);
         let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
         return (
@@ -227,8 +226,31 @@ async fn run(
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
+    report_startup("gateway", startup_started);
+    let gateway = match asc_daemon::gateway::GatewayAdapter::system(
+        &gateway_data_dir(),
+        repository.clone(),
+    ) {
+        Ok(gateway) => Some(Arc::new(gateway)),
+        Err(problem) => {
+            report_error(telemetry, &problem);
+            None
+        }
+    };
+    let gateway_service = gateway.as_ref().map(|gateway| gateway.service());
+    let scope_execution = gateway_service
+        .as_ref()
+        .map(|service| service.clone() as Arc<dyn asc_pap::ScopeExecution>);
+    if let Some(service) = &gateway_service
+        && let Err(error) = service.recover()
+    {
+        report_error(telemetry, &error);
+    }
     report_startup("policy_runtime", startup_started);
-    let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
+    let mut policy_runtime = match asc_daemon::start_policy_reconciliation_with_gateway(
+        repository.clone(),
+        gateway_service.clone(),
+    ) {
         Ok(runtime) => runtime,
         Err(error) => {
             report_error(telemetry, &error);
@@ -239,14 +261,18 @@ async fn run(
             );
         }
     };
-    report_startup("active_scope_recovery", startup_started);
-    let pap =
+    report_startup("scope_recovery", startup_started);
+    let mut pap =
         PapService::new(repository.clone()).with_reconcile_enqueuer(policy_runtime.enqueuer());
+    if let Some(execution) = scope_execution.clone() {
+        pap = pap.with_scope_execution(execution);
+    }
     // The sink clone has no registry, avoiding a worker/service ownership cycle.
     let discovery_registry = Arc::new(asc_daemon::ScopeDiscoveryRegistry::new(Arc::new(
         pap.clone(),
     )));
-    if let Err(error) = recover_active_scopes(repository.as_ref(), discovery_registry.as_ref()) {
+    let pap = pap.with_scope_discovery(discovery_registry.clone());
+    if let Err(error) = pap.recover_scopes() {
         report_error(telemetry, &error);
         let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
         drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop).await;
@@ -255,16 +281,33 @@ async fn run(
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
-    let pap = pap.with_scope_discovery(discovery_registry.clone());
+    let cleanup = pap.clone();
+    if let Err(error) = policy_runtime.set_scope_cleanup(move || {
+        if let Err(error) = cleanup.sweep_deleting_scopes() {
+            tracing::warn!(target: "asc_process_diagnostic", %error,
+                "Scope cleanup remains pending; compensation will retry");
+        }
+    }) {
+        report_error(telemetry, &error);
+        let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
+        drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop).await;
+        return (
+            ExitCode::FAILURE,
+            Some(sinks::ShutdownPlan::full(durable_sinks)),
+        );
+    }
     let principal_policy = Arc::new(RootManagedPrincipalPolicy::with_admin_uids(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let dispatcher = DaemonDispatcher::new(pap, policy_for_handler, actions)
+    let mut dispatcher = DaemonDispatcher::new(pap, policy_for_handler, actions)
         .with_observability(asc_daemon_core::ObservabilityService::new(Arc::new(
             sinks::ObservabilitySinkAdapter(Arc::clone(&durable_sinks.observability)),
         )))
         .with_queries(queries);
+    if let Some(gateway) = gateway {
+        dispatcher = dispatcher.with_gateway(gateway);
+    }
     let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
         dispatcher,
         skillfs.clone(),
@@ -407,12 +450,7 @@ async fn start_retention(
         .await
 }
 
-#[tracing::instrument(
-    skip_all,
-    target = "asc_daemon",
-    name = "policy.recovery.deleting_scopes"
-)]
-fn recover_deleting_scopes(repository: &dyn PapRepository) -> Result<(), asc_pap::PapError> {
+fn recover_deleting_file_scopes(repository: &dyn PapRepository) -> Result<(), asc_pap::PapError> {
     let mut cursor = None;
     loop {
         let scopes = repository.scan_scopes(cursor.as_ref(), 128)?;
@@ -421,40 +459,9 @@ fn recover_deleting_scopes(repository: &dyn PapRepository) -> Result<(), asc_pap
         }
         for scope in scopes {
             cursor = Some(scope.scope_id.clone());
-            if scope.status == ScopeStatus::Deleting {
+            if scope.status == ScopeStatus::Deleting && !scope.uses_credentials() {
+                // No pre-crash discovery survives exclusive database ownership.
                 repository.finish_scope_discovery(&scope.scope_id)?;
-                tracing::debug!(
-                    target: "asc_observability::diagnostic", component = "policy_recovery",
-                    scope_id = %scope.scope_id, "deleting scope recovery barrier committed"
-                );
-            }
-        }
-    }
-}
-
-#[tracing::instrument(
-    skip_all,
-    target = "asc_daemon",
-    name = "policy.recovery.active_scopes"
-)]
-fn recover_active_scopes(
-    repository: &dyn PapRepository,
-    discovery: &dyn ScopeDiscovery,
-) -> Result<(), asc_pap::PapError> {
-    let mut cursor = None;
-    loop {
-        let scopes = repository.scan_scopes(cursor.as_ref(), 128)?;
-        if scopes.is_empty() {
-            return Ok(());
-        }
-        for scope in scopes {
-            cursor = Some(scope.scope_id.clone());
-            if scope.status == ScopeStatus::Active {
-                discovery.start(&repository.scope_discovery_seed(&scope.scope_id)?)?;
-                tracing::debug!(
-                    target: "asc_observability::diagnostic", component = "policy_recovery",
-                    scope_id = %scope.scope_id, "active scope discovery restored"
-                );
             }
         }
     }
@@ -618,6 +625,14 @@ fn install_panic_hook() {
     }));
 }
 
+/// Gateway state and the credential store live under `/var/lib`, never the
+/// daemon's `/var/log` data directory, which log collection may harvest.
+fn gateway_data_dir() -> std::path::PathBuf {
+    asc_security_events::config::DaemonDataDirEnv::from_process()
+        .override_dir
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/agent-sec"))
+}
+
 fn report_error(telemetry: &asc_observability::TelemetryRuntime, problem: &dyn std::error::Error) {
     telemetry.report(&format!("asc-daemon: {problem}"));
     let mut source = problem.source();
@@ -652,6 +667,60 @@ fn watch_policy_health(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_scope_restart_retires_pending_apply_before_workers_start() {
+        use asc_pap::PapRepository;
+        use asc_policy_repository::BindingStateRepository;
+        use asc_policy_types::{
+            binding::{BindingStatus, PreparedBinding},
+            scope::{PreparedScope, ScopeStatus},
+        };
+
+        let repository = asc_policy_repository_sqlite::SqlitePolicyRepository::temporary().unwrap();
+        let binding: PreparedBinding = serde_json::from_str(include_str!(
+            "../../../crates/asc-policy-types/tests/fixtures/prepared-binding.json"
+        ))
+        .unwrap();
+        repository.put_policy(&binding.policy).unwrap();
+        repository
+            .put_scope(&PreparedScope {
+                scope_id: binding.scope.scope_id.clone(),
+                selector: binding.scope.selector.clone(),
+                policy_snapshots: vec![binding.policy],
+                owner_uid: None,
+                status: ScopeStatus::Active,
+            })
+            .unwrap();
+        let receipt = repository
+            .sync_scope_instances(&binding.scope.scope_id, &[binding.scope.process])
+            .unwrap()
+            .remove(0);
+        repository
+            .begin_scope_delete(&binding.scope.scope_id)
+            .unwrap();
+        assert_eq!(
+            repository
+                .get_binding_state(&receipt.spec.binding_id)
+                .unwrap()
+                .unwrap()
+                .binding
+                .status
+                .phase,
+            BindingStatus::PendingApply
+        );
+        super::recover_deleting_file_scopes(&repository).unwrap();
+        assert_eq!(
+            repository
+                .get_binding_state(&receipt.spec.binding_id)
+                .unwrap()
+                .unwrap()
+                .binding
+                .status
+                .phase,
+            BindingStatus::PendingDelete
+        );
+    }
+
     #[test]
     fn panic_hook_reports_location_without_payload() {
         const CHILD_ENV: &str = "ASC_PANIC_HOOK_TEST_CHILD";

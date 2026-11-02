@@ -114,6 +114,7 @@ fn dispatch_scope(
                 principal,
                 &input.selector,
                 &input.policy_templates,
+                input.owner_uid,
             )?)
         }
         ScopeMethod::Retry => {

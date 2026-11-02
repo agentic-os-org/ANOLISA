@@ -1054,3 +1054,76 @@ obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本�
 历史未知归属使用 `unknown_SessionId`；未重名的 ID 保持原样。组合名称仍有歧义时拒绝；原始存储 ID 和安全关联不变，详见查询设计 §4.1。
 内部 `DaemonDispatcher::handle` 使用命名的 5 秒 convenience budget；真实 UDS dispatch
 使用 transport 配置生成的 `DispatchControl`，不受该默认值替代。
+
+## 18. [TARGET V2] Secret Gateway 管理
+
+`gateway.*` 是 V2 method family。设计见 [V2 Secret Gateway 设计](V2_SECRET_GATEWAY_DESIGN_zh.md)，
+进程与权限见 [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2-secret-gateway-进程权限与数据目录dproc-gw)。
+七个方法的清单、分发与访问级别由 `asc-daemon-protocol` 和 `pap_contract.rs` 对照。
+
+| method | 访问级别 | params | result |
+| --- | --- | --- | --- |
+| `gateway.enable` | UID 0 | 无 | `{}` |
+| `gateway.disable` | UID 0 | 无 | `{}` |
+| `gateway.status` | LocalUser，owner UID 隔离 | 无 | `GatewayStatus` |
+| `gateway.key.add` | UID 0 | `{credential, secretFile}` | `KeyOutcome` |
+| `gateway.key.remove` | UID 0 | `{credential}` | `KeyOutcome` |
+| `gateway.key.list` | UID 0 | 无 | `KeyList` |
+| `gateway.credentials` | LocalUser，owner UID 隔离 | `{scopeId}` | `CredentialGrant` |
+
+- 无参数方法只接受省略、`null` 或 `{}`；有参数方法拒绝未知字段。
+- 管理方法要求内核认证的 UDS peer UID 0，非 root PolicyAdministrator 不获得管理权。
+  `scopeId` 只选择既有 Scope，不能选择调用者 UID；ownerUid 是 assignment 的目标身份约束，
+  不替代 peer 身份。
+- `credential` 当前支持 `github`。`key.add` 只导入，不创建 Scope 或授权；相同 secret 幂等
+  成功，不同值报错且不覆盖。更换 key 必须先 `key.remove` 再 `key.add`，不自动轮换。
+  `key.remove` 全局退役该真实凭据和全部 Scope fake，不影响其他凭据；旧 fake 永久退役，
+  重新导入后需新 Scope 和新的 Agent 配置。真实值只在 root 拥有、单硬链接、普通且
+  group/other 无权限的 `secretFile` 中，由 daemon 读取，不进入 params/result。
+- 权限复用既有 `policy.templates.*`、`policy.scopes.*` 与 Binding lifecycle。原生
+  `specVersion=0.1` 的凭据规则是 `allow/network/use_credential`，target `http_request` 包含
+  `credentialId/scheme/host/path/methods/responseRewrite`。凭据 Policy 不混合 file、不支持
+  where/previous。凭据 Scope 要求非 root ownerUid 与持续 process selector，固定 Policy
+  revision 快照；只对凭据 Policy/Scope 增加 root 限制，不改变普通 file 用法、权限或快照。
+- `policy.scopes.create` 可在无匹配进程时准备 fake/port/plan。先 enable、owner 查询、配置
+  Agent 后再自主启动，由 discovery 自动建立实例 Binding。查询不迁移进程或修改环境，
+  必须满足下述 gateway readiness 条件后返回，否则明确失败。
+- 同 Scope 多实例与重启共享稳定 fake；实例退出仅清理自身 Binding。Scope 删除先关闭
+  admission 并撤销该 Scope fake，包括空 Scope，保留清理责任到完成，不删除 real、不停止
+  Agent。恢复重新核对 canonical Scope/Binding 和完整实例身份，不单凭 PID 授权。
+
+批准的 result 契约使用 camelCase：
+
+- `gateway.enable`、`gateway.disable` 成功返回 `{}`；失败仍明确返回错误。
+- `GatewayStatus`：`{enabled: bool, ready: bool, scopes: ScopeStatusView[]}`。`ready` 必须同时满足
+  enabled、cgroup v2 检查通过、代理 unit active、loaded generation 与内部当前 generation
+  匹配、CA 可用。已启用时每次查询重新只读检查 cgroup，失败返回 `ready=false`，不改变状态。
+  网关 ready 不替代实例 Binding `READY` 与引流完成的等待。
+- `ScopeStatusView`：`{scopeId, bindings}`。bindings 为绑定责任 ID 数组；空数组不代表 Scope
+  无授权，其 fake/plan 可先于进程准备。
+- `KeyOutcome`：`{credential}`，例如 `{"credential":"github"}`，用于 add/remove 成功结果。
+- `KeyList`：`{credentials: string[]}`，只列 active 凭据 ID，例如 `{"credentials":["github"]}`。
+- `CredentialGrant`：`{scopeId, environment}`。包含 Scope fake 与 ready CA bundle 路径，供 Agent
+  自身配置加载；查询重新检查 cgroup v2，无 active fake 或 readiness 未达成时不返回部分 grant。
+
+cgroup v2 检查要求 Linux `/sys/fs/cgroup` 的 `statfs` 类型为 `CGROUP2_SUPER_MAGIC`，
+且 daemon 自身 `/proc/self/cgroup` 视图有 `0::` 条目；证据不可读或非 v2 时失败。
+`gateway.enable` 在改变 enabled 前检查，apply 在每次发布前检查（含已启用状态恢复）。
+默认关闭恢复不运行此预检，不会仅因 cgroup v2 不可用而失败；不自动降级为 v1、不改挂载。
+这不是完整内核/nft 能力预检：不独立探测 nft `socket cgroupv2`，实际规则应用仍可能失败。
+
+内部保留 generation、撤销 fence 和永久 tombstone，用于发布、恢复与拒绝旧 fake；这些状态
+不构成管理查询的展示字段。
+
+| code | 场景 |
+| --- | --- |
+| `invalid_argument` | 参数、credential ID、Scope ID 或 secret 文件不合格 |
+| `not_found` | canonical Scope 或 credential 不存在 |
+| `conflict` | 已有 credential 的 secret 不同，禁止覆盖；canonical Scope 已关闭或快照/执行身份不一致；真实值与其他真实值/fake 冲突 |
+| `permission_denied` | 非 root 管理或越过 owner UID 查询 |
+| `resource_exhausted` | 监听端口或 fake 等有界容量耗尽 |
+| `unavailable` | gateway 未配置/禁用、Scope 未准备、无活跃 fake、账户缺失、cgroup 挂载不可检查或非 v2、CA 或 generation 未 ready |
+| `internal` | 数据面 generation 拒绝、存储损坏或宿主操作失败 |
+
+gateway dispatch 预算为 45 秒，CLI 默认 60 秒，generation 加载最长 20 秒。错误可以含路径、
+Scope ID 或 UID，不含真实值/fake。源码接口核对不替代安装态与协议运行验收。

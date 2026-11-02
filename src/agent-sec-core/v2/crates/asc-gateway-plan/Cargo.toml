@@ -1,0 +1,19 @@
+[package]
+name = "asc-gateway-plan"
+description = "Scope policy compiler and secret gateway plan format for AgentSecCore V2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-credential-store = { workspace = true }
+asc-policy-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

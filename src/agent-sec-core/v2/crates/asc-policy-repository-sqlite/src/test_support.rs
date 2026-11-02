@@ -49,6 +49,7 @@ impl SqlitePolicyRepository {
                                 scope_id: owner.scope_id.clone(),
                                 selector: owner.selector.clone(),
                                 policy_snapshots: Vec::new(),
+                                owner_uid: None,
                                 status: ScopeStatus::Active,
                             });
                     if scope.selector != owner.selector {

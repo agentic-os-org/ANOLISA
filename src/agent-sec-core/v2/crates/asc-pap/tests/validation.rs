@@ -78,6 +78,7 @@ fn validated_construction_still_produces_valid_policy_and_scope_snapshots() {
         scope_id: binding().scope.scope_id,
         selector: ScopeSelector::Pid { pid: 1 },
         policy_snapshots: vec![binding().policy],
+        owner_uid: None,
         status: asc_policy_types::scope::ScopeStatus::Active,
     };
     scope.validate().unwrap();
@@ -88,7 +89,7 @@ fn validated_construction_still_produces_valid_policy_and_scope_snapshots() {
         (ScopeSelector::CgroupId { cgroup_id: 0 }, "cgroupId"),
     ] {
         assert_eq!(
-            pap.create_scope_assignment(&selector, &[]),
+            pap.create_scope_assignment(&selector, &[], None),
             Err(PapError::InvalidScope(ValidationError::new(
                 path,
                 "must be positive"
@@ -115,7 +116,7 @@ fn invalid_template_rejects_create_and_update_without_writing() {
             "template.rules[0].target.path",
         ),
         (bad_version, "template.specVersion"),
-        (bad_category, "template.rules[0].target"),
+        (bad_category, "template.rules[0]"),
     ] {
         for result in [
             pap.create_policy("invalid", &template),

@@ -1,7 +1,7 @@
 //! Atomic reconcile writes and bounded catalog reads.
 use crate::{
     RepositoryError, SqlitePolicyRepository,
-    records::{decode, encode, finalize_scope, id, read_binding, save_binding},
+    records::{decode, encode, finalize_scope, id, read_binding, read_scope, save_binding},
 };
 use asc_foundation_types::ResourceId;
 use asc_policy_repository::{
@@ -59,6 +59,22 @@ impl BindingStateRepository for SqlitePolicyRepository {
                         WriteResult::Conflict
                     });
                 };
+                // Parent deletion fences new Apply claims before discovery finishes retiring children.
+                if current.binding.status.phase
+                    == asc_policy_types::binding::BindingStatus::PendingApply
+                    && write
+                        .next
+                        .as_ref()
+                        .and_then(|patch| patch.status.as_ref())
+                        .is_some_and(|status| {
+                            status.phase == asc_policy_types::binding::BindingStatus::Applying
+                        })
+                    && read_scope(tx, &current.binding.spec.scope.scope_id)?.is_none_or(|scope| {
+                        scope.scope.status != asc_policy_types::scope::ScopeStatus::Active
+                    })
+                {
+                    return Ok(WriteResult::Conflict);
+                }
                 let (next, result) = apply_binding_write(&current, expected, write)?;
                 let WriteResult::Applied(receipt) = result else {
                     return Ok(result);

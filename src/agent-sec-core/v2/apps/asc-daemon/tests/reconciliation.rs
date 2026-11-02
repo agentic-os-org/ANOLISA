@@ -22,6 +22,20 @@ use std::time::{Duration, Instant};
 #[path = "reconciliation/storage_faults.rs"]
 mod storage_faults;
 
+struct UnavailableReconciliation;
+
+impl asc_pap::BindingReconcileEnqueuer for UnavailableReconciliation {
+    fn check_ready(&self) -> Result<(), asc_pap::PapError> {
+        Err(asc_pap::PapError::Unavailable)
+    }
+    fn enqueue(
+        &self,
+        _: &asc_policy_types::identifiers::ResourceId,
+    ) -> Result<(), asc_pap::EnqueueError> {
+        Err(asc_pap::EnqueueError::Stopped)
+    }
+}
+
 #[derive(Default)]
 struct Client {
     plans: Mutex<Vec<TargetBindingPlan>>,
@@ -96,6 +110,7 @@ fn configured_composition_delivers_pap_intent_and_joins_its_workers() {
                 policy_id: spec.policy.policy_id.clone(),
                 policy_revision: spec.policy.revision,
             }],
+            None,
         )
         .unwrap();
     asc_pap::ScopeBindingSink::sync_instances(
@@ -145,7 +160,7 @@ fn configured_composition_delivers_pap_intent_and_joins_its_workers() {
 fn unavailable_reconciliation_rejects_new_assignments_but_keeps_policy_crud() {
     let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let pap = PapService::new(repository)
-        .with_reconcile_enqueuer(Arc::new(asc_daemon::UnavailableReconciliation))
+        .with_reconcile_enqueuer(Arc::new(UnavailableReconciliation))
         .with_scope_discovery(Arc::new(Discovery));
     let policy = pap
         .create_policy("test", &file_policy(vec!["/a".into()]))
@@ -157,7 +172,8 @@ fn unavailable_reconciliation_rejects_new_assignments_but_keeps_policy_crud() {
     assert_eq!(
         pap.create_scope_assignment(
             &asc_policy_types::scope::ScopeSelector::Pid { pid: 42 },
-            &refs
+            &refs,
+            None,
         ),
         Err(asc_pap::PapError::Unavailable)
     );
@@ -243,6 +259,7 @@ where
                 policy_id: policy.policy_id.clone(),
                 policy_revision: policy.revision,
             }],
+            None,
         )
         .unwrap();
     let ready = |count| {

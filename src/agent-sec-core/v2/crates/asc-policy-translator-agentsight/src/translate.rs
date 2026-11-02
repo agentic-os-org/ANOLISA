@@ -123,7 +123,9 @@ fn compile_native(
         {
             return Err(reject("UNSUPPORTED_CONDITION"));
         }
-        let Resource::File { path: pattern } = &rule.target;
+        let Resource::File { path: pattern } = &rule.target else {
+            return Err(rejection(&format!("RULE_{index}_UNSUPPORTED_TARGET")));
+        };
         if !actplane_can_represent_glob(pattern) {
             return Err(reject("UNSUPPORTED_ACTPLANE_GLOB"));
         }
@@ -140,7 +142,9 @@ fn compile_native(
     }
     let mut dsl = String::from("source AGENT = exec \"**\"\n");
     for (index, rule) in rules.iter().enumerate() {
-        let Resource::File { path: pattern } = &rule.target;
+        let Resource::File { path: pattern } = &rule.target else {
+            return Err(rejection(&format!("RULE_{index}_UNSUPPORTED_TARGET")));
+        };
         let reason = rule.because.as_deref().unwrap_or(DSL_REASON);
         // ActPlane still maps unlink and write to OP_WRITE; translation alone
         // does not establish delete-only kernel enforcement.
