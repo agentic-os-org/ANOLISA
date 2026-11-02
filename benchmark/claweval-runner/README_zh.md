@@ -159,7 +159,7 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | 策略 | 作用 |
 |--------|------|
 | `tools.allow` | 显式白名单:`exec`(启用工具执行)+ `serverKey__toolName` 格式(双下划线)的任务 MCP 工具。只有列出的工具对模型可用。 |
-| `tools.deny` | 屏蔽所有内置 gateway 工具(宿主 exec/read/write/browser 等)、agent-memory 插件的持久记忆工具以及其他 MCP 服务器的工具。防止访问宿主文件系统、跨任务记忆召回和跨任务泄漏。 |
+| `tools.deny` | 屏蔽所有内置 gateway 工具(宿主 exec/read/write/browser 等)、agent-memory 插件的持久记忆工具以及其他 MCP 服务器的工具。防止访问宿主文件系统,并阻止**模型**调用任何宿主记忆工具。它管不到插件自己的宿主侧 hook —— 见[宿主记忆隔离](#宿主记忆隔离)。 |
 | `tools.exec` | 设置 MCP 工具执行的安全策略(工具调用成功所必需)。 |
 
 ### 每个任务两个 MCP 服务器
@@ -186,6 +186,17 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `memory_get`、`memory_search` | agent-memory ≤ 0.2.7 以及 OpenClaw 自带的 `memory-core` |
 
 最后一行也是两种拼写都要保留的原因:`memory_get` / `memory_search` 在 0.2.8 之前就是插件自己的读/检索工具名,同时也是宿主 `memory-core` 的内置工具名,屏蔽它们即可同时覆盖旧版插件和宿主后端。
+
+#### 屏蔽列表覆盖不到的部分
+
+`tools.deny` 约束的是**模型**被允许调用的工具。插件还注册了两个宿主侧 hook,它们不经过这道门禁 —— 而是直接通过 stdio 与 agent-memory 的 MCP 子进程通信:
+
+| Hook | 在评测任务中做的事 |
+|------|--------------------|
+| `before_prompt_build`(自动召回) | 用任务 prompt 检索记忆库,并把命中结果作为 `prependContext` 返回,于是 agent 不调用任何工具就读到了之前任务写入的内容 |
+| `agent_end`(自动捕获) | 当最后一条 assistant 消息命中触发词时,通过 `memory_observe` 写入记忆库,于是 agent 不调用任何工具就给下一个任务留下了状态 |
+
+这两个 hook 都没有配置开关:`openclaw.plugin.json` 的 `configSchema` 只暴露 `binaryPath`、`userId`、`profile`、`maxReadBytes`、`maxWriteBytes`、`sessionId` 和 `sessionDir`,因此本 runner 无法按任务关闭它们。**所以屏蔽列表保证的是模型无法调用宿主的记忆工具,它本身并不保证记忆隔离。** 分数不得依赖宿主记忆的评测,必须跑在没有加载 agent-memory 插件的宿主机上。这是宿主属性而非任务属性 —— 可以在 gateway 日志里确认:插件加载时会写一次 `agent-memory: plugin registered (...)`,每轮注入时会写 `agent-memory: auto-recall injected N memory result(s) for prompt`。runner 的预检会执行 `openclaw plugins doctor`,但它报告的是插件**加载失败**,并不是本插件的存在性检查。
 
 ### 实现
 

@@ -159,7 +159,7 @@ Each task agent is configured with three tool policies working together:
 | Policy | Role |
 |--------|------|
 | `tools.allow` | Explicit allowlist: `exec` (enables tool execution) + task MCP tools in `serverKey__toolName` format (double underscore). Only listed tools are available to the model. |
-| `tools.deny` | Blocks all built-in gateway tools (host exec/read/write/browser/etc.), the agent-memory plugin's persistent-memory tools, and other MCP servers' tools. Prevents host filesystem access, cross-task memory recall, and cross-task leakage. |
+| `tools.deny` | Blocks all built-in gateway tools (host exec/read/write/browser/etc.), the agent-memory plugin's persistent-memory tools, and other MCP servers' tools. Prevents host filesystem access and stops the *model* from invoking any host memory tool. It does not reach the plugin's own host-side hooks — see [Host Memory Isolation](#host-memory-isolation). |
 | `tools.exec` | Sets MCP tool execution security policy (required for tool calls to succeed). |
 
 ### Two MCP Servers Per Task
@@ -186,6 +186,17 @@ Where the agent-memory OpenClaw plugin is installed and enabled, it registers it
 | `memory_get`, `memory_search` | agent-memory ≤ 0.2.7 and OpenClaw's own `memory-core` |
 
 The last row is why both spellings stay in the list: `memory_get` / `memory_search` were the plugin's own read/search names before 0.2.8 and are also the host `memory-core` built-ins, so denying them covers the old plugin and the host backend at once.
+
+#### What the deny list does not cover
+
+`tools.deny` gates the tools the *model* is allowed to call. The plugin also installs two host-side hooks that never pass through that gate — they talk to the agent-memory MCP child directly over stdio:
+
+| Hook | What it does during a benchmark task |
+|------|--------------------------------------|
+| `before_prompt_build` (auto-recall) | Searches the store for the task prompt and returns the hits as `prependContext`, so the agent reads what earlier tasks recorded without calling a tool |
+| `agent_end` (auto-capture) | Writes the last assistant message to the store through `memory_observe` when it matches a trigger phrase, so the agent leaves state behind for the next task without calling a tool |
+
+Neither hook has a configuration knob: `openclaw.plugin.json`'s `configSchema` exposes only `binaryPath`, `userId`, `profile`, `maxReadBytes`, `maxWriteBytes`, `sessionId` and `sessionDir`, so this runner cannot switch them off per task. **The deny list therefore guarantees that the model cannot invoke the host's memory tools; on its own it does not guarantee memory isolation.** A benchmark whose scores must not depend on host memory has to run on a host where the agent-memory plugin is not loaded. That is a host property, not a task property — confirm it in the gateway log, where the plugin writes `agent-memory: plugin registered (...)` once when it loads and `agent-memory: auto-recall injected N memory result(s) for prompt` on every turn it injects. The runner's pre-flight runs `openclaw plugins doctor`, but that reports plugin *load failures*; it is not a presence check for this plugin.
 
 ### Implementation
 
