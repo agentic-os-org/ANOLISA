@@ -324,7 +324,7 @@ identify the workspace; omitted arguments require an explicitly configured host
 plugin binding. Snapshots of every origin are grouped by creation time, without
 native session-ID matching or a new collection pipeline. File changes use
 `ws-ckpt diff --format json`; guarded restore reuses the existing checkpoint
-client. Restore is separately enabled and requires confirmed stopped writers,
-a pinned protection snapshot and same-dialog confirmation. See
-[configuration](configuration.md#workspace-snapshot-backend-linux). The backend
-interfaces alone do not add Dashboard controls.
+client. Restore is separately enabled and requires the operator to confirm in
+the dialog that the workspace will have no concurrent writes. See
+[configuration](configuration.md#workspace-snapshot-backend-linux) and
+[Step snapshot controls](dashboard.md#workspace-snapshots-in-execution-steps).

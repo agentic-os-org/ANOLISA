@@ -1329,8 +1329,10 @@ function renderAtifPage() {
       new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
       return mod.exports;
     })(),
+    '../utils/wsCkpt': { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false },
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': panelStub,
+    '../components/WorkspaceSnapshotDialog': componentStub('WorkspaceSnapshotDialog'),
     '../utils/trajectoryTree': {
       buildTrajectoryTree: () => null,
       findNodeByPath: () => null,

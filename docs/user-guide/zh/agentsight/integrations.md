@@ -275,5 +275,6 @@ tool-call ID 刷新元数据，再计算结果，无需为这些视图额外调�
 ws-ckpt 工作区。由成功的工具/Bash 操作确定工作区；省略参数时需显式绑定宿主插件
 配置。各来源快照统一按创建时间关联，不匹配原生 session ID，也不新增采集链路。
 文件变化使用 `ws-ckpt diff --format json`；恢复复用已有 guarded 客户端，另需启用
-开关、确认停写、保存 pinned 保护快照并在同窗确认。详见
-[配置](configuration.md#工作区快照后端linux)。本次后端接口本身不增加页面控件。
+开关，并在同窗确认回滚期间工作区没有其他写入。详见
+[配置](configuration.md#工作区快照后端linux)和
+[Step 快照交互](dashboard.md#在执行-step-中查看工作区快照)。
