@@ -99,6 +99,7 @@ are outside the final-input guarantee. See [native configuration](../../../devel
 ## Boundaries
 
 - Ordinary Qoder SDK and QwenPaw accept Post failure action `withhold_result`, withholding delivery and stopping subsequent dispatch. Existing tool side effects remain.
+- AgentScope 2.0.6+ accepts Post failure action `withhold_result` for tool.after: a failed strict check replaces the unchecked native result with an error-state placeholder at the end of the middleware chain, so other after hooks still observe the original result. Admitted only when the bridge supports result replacement.
 - Pi and Claude SDK resident callback failures stop the task. Post checks cannot undo an executed tool.
 - Public Provider Hooks currently cover the two events above. The other 14 event names, common approval, input replacement, guard, Schema/BeforeModel and Retrieve integration are not available.
 - AW enforces policy through native Hooks. Deploy OS sandbox isolation separately.
