@@ -75,7 +75,7 @@ fn managed_mcp_freezes_registered_tools_and_checked_results() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Ran 7 tests"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Ran 9 tests"));
 }
 
 #[test]

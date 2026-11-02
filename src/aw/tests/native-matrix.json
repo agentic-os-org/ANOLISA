@@ -639,11 +639,22 @@
             {
               "file": "fixtures/managed-mcp-failure/result.json",
               "values": {
-                "tasks": 1,
+                "tasks": 2,
                 "passed": true,
                 "status/bindings": 0,
                 "status/events": 0,
                 "scenario": "mcp-failure"
+              },
+              "cases": {
+                "at": "cases",
+                "key": "mode",
+                "names": [
+                  "compress-error",
+                  "compress-recovery"
+                ],
+                "values": {
+                  "passed": true
+                }
               }
             }
           ]

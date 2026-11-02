@@ -61,9 +61,10 @@ serveRequests 为业务服务，在工厂返回前配置业务回调。任务完
 并发 prompt 会被拒绝；其他路径也必须经过公共工厂。
 
 示例组合自定义 Hook、sec-core Bash 扫描及 Tokenless PreTool/PostTool。需要单独启动
-sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要明确的安全语义。常驻模式
-在回调错误时停止任务，包括 on_error: report；正常策略拒绝沿用原生语义。Claude 中断无法
-确认时会终止 AW 的自有前台进程组，部署需配置监督器重启。发送退出信号前先排空请求，
+sec-core daemon，并提供真实自定义 Hook。不透明 MCP 工具还需要明确的安全语义。常驻模式在回调错误时停止任务，包括
+`on_error: report`；例外是 Claude SDK 受管 MCP 的 tool.after 步骤，其
+`report` 故障保留已检查的原始结果并继续当前任务。正常策略拒绝沿用原生语义。
+Claude 中断无法确认时会终止 AW 的自有前台进程组，部署需配置监督器重启。发送退出信号前先排空请求，
 并设置目标的 `shutdown_grace_ms` 为应用剩余清理留出时间。外层 launcher 从首次转发
 退出信号到开始强制清理，默认给予两秒宽限期。
 作用范围和限制见[退出宽限期](lifecycle.md)。
