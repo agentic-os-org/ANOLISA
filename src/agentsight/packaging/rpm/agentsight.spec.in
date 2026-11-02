@@ -116,6 +116,15 @@ fi
 %{_datadir}/agentsight/adapters/dsh/
 
 %changelog
+* Mon Nov 02 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.15.3-1
+- Preserve final token usage in cost analysis and scope final answers to the latest turn
+- Preserve ATIF developer instructions and recorded tool completion times
+- Decode stacked HTTP content codings and keep missing throughput measurements unknown
+- Preserve Hermes fallback call identity and clear empty Hermes histories
+- Cover legacy guards in write-access preflight and close file-guard content-loss entries
+- Validate resource capture quality before accepting benchmark results
+- Keep ANOLISA discovery contract ownership in the distribution
+
 * Tue Jul 28 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.9.0-1
 - Release AgentSight 0.9.0
 - Add optimization dashboard, trajectory collection, and ATIF v1.7 support
