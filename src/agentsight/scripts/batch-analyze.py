@@ -186,6 +186,7 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
     partial_usage = ".qoder" in filepath.parts or ".qoderwork" in filepath.parts
 
     steps = []
+    unmatched_tool_results = []
     tool_call_steps = {}
     tool_call_aliases = {}
     usage_records = []
@@ -254,8 +255,7 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
                 else:
                     unmatched_results.append(result)
 
-            # A mixed reply still contains a genuine user turn. Pure orphan
-            # results have no issuing step and must not become human input.
+            # Preserve the existing user step for a mixed reply.
             text = extract_text(content, include_tool_results=False)
             if text.strip():
                 step_id += 1
@@ -268,6 +268,12 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
                 if unmatched_results:
                     step["observation"] = {"results": unmatched_results}
                 steps.append(step)
+            elif unmatched_results:
+                # Without a real turn to attach to, retain evidence in metadata.
+                # A synthetic step would change replay costs and timing windows.
+                unmatched_tool_results.append(
+                    {"timestamp": timestamp, "results": unmatched_results}
+                )
 
         elif role == "assistant" or entry_type == "assistant":
             text = extract_text(content)
@@ -326,7 +332,7 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             continue
         step["metrics"] = metrics
 
-    if not steps:
+    if not steps and not unmatched_tool_results:
         return None
 
     # Explicit runtime metadata retains precedence even when it arrives late.
@@ -343,7 +349,7 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
         elif ".qoder" in path_str:
             agent_name = "qoder"
 
-    return {
+    trajectory = {
         "schema_version": "ATIF-v1.7",
         "session_id": session_id or filepath.stem,
         "agent": {
@@ -353,6 +359,9 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
         },
         "steps": steps,
     }
+    if unmatched_tool_results:
+        trajectory["extra"] = {"unmatched_tool_results": unmatched_tool_results}
+    return trajectory
 
 
 # ─── File discovery ───────────────────────────────────────────────────────────
