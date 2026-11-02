@@ -198,6 +198,9 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+交互式调试会话会在退出、初始化失败或中断时释放已取得的沙箱、MCP 注册和模拟服务。
+某个清理操作失败时，仍会继续尝试其余清理；警告会指出可能需要手动清理的资源。
+
 ## 故障排查
 
 | 问题 | 修复 |
