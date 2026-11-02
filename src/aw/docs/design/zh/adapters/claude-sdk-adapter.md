@@ -51,9 +51,12 @@ bash/file_read/file_write；其他工具使用精确原生名称。身份、cwd�
 参数形状无效时按配置的错误策略处理。
 
 两类原生 post 事件均映射 `tool.after`。失败结果包含 native error 和 interrupt flag，
-不会替换结果。CLI 2.1.161 对 SDK MCP `isError: true` 响应仍发送 `PostToolUse`，
-callback payload 不包含该 flag。因此 post 事件不证明业务成功；MCP 错误分类需要
-执行器/业务层的观察合同。被拒绝的工具不补造 after。取消会回收 owned Hook 进程组，
+不会替换结果。SDK 0.2.88 + CLI 2.1.161 实测，两条 MCP 路径的失败行为一致：
+报告错误的工具结果（SDK handler 合同的 `is_error`，映射为线上 `isError`）以
+`PostToolUseFailure` 到达钩子，不含 `tool_response`（仅有 `error` 与
+`is_interrupt`），模型收到原始错误结果。MCP 投影因此只覆盖成功结果，失败结果
+保持原样；业务级成功仍以执行器/业务层的观察合同为准。
+被拒绝的工具不补造 after。取消会回收 owned Hook 进程组，
 不承诺远端工具副作用被取消。
 
 ## Bash 优化
@@ -69,10 +72,14 @@ PreTool 重试建议通过原生 deny 的有界原因完整返回，不返回 `u
 后续步骤。独立 native matchers 保留原生调度并取得输入副本；配置 AW replacement
 时拒绝其改写输出的响应。
 
-只为原生 `Bash` 的 `PostToolUse`、非图片且未中断的 stdout 提供替换投影。最终返回
-原生 `updatedToolOutput`，保留 stderr 与其余 envelope 字段。失败工具、MCP tools、
-媒体及未知形状没有投影，保持原样。CLI 不提供 MCP `isError`，其结果压缩需要可信
-业务状态合同。RTK 重试命令的归属识别复用现有 Provider，避免重复压缩。
+原生 `Bash` 的 `PostToolUse`（非图片且未中断的 stdout）保持对象投影：最终返回
+原生 `updatedToolOutput`，保留 stderr 与其余 envelope 字段。原生 HTTP MCP 工具
+（`mcp__*`）投影模型可见字符串：存在 structuredContent 时为其序列化串，纯文本
+结果时为单一文本内容块。替换以该字符串作为 `updatedToolOutput` 返回，bundled CLI
+在下一模型请求采纳，保持 structuredContent 优先的原生语义。MCP 失败结果
+不进入该路径：CLI 将错误结果以无 `tool_response` 的
+`PostToolUseFailure` 送达，保持原始错误形态。媒体、多块及未知形状没有投影，
+保持原样。RTK 重试命令的归属识别复用现有 Provider，避免重复压缩。
 
 ## 验证范围
 
@@ -82,7 +89,8 @@ PreTool 重试建议通过原生 deny 的有界原因完整返回，不返回 `u
 原生 Bash 失败、并行工具、两轮会话、连续 34 次策略拒绝/exit 9/SIGTERM fail-closed 后允许执行及
 持久化 AW journal，不调用真实模型或云业务服务。运行文件/transcripts 存在 output
 目录。可选 `--tokenless` 使用已构建的 Protocol v2 CLI 与 PATH 中的 RTK，验证
-Bash 模型可见替换、原始观察值、失败/report 行为、重试拒绝及跳过 MCP 错误压缩。
+Bash 模型可见替换、原始观察值、失败/report 行为、重试拒绝、受管 MCP 错误跳过压缩
+及 HTTP MCP 错误结果保持原样（`PostToolUseFailure`，不压缩）。
 私有 UDS 目录也在 output 下，并在 service 停止后删除。socket 路径过长时
 明确要求选择更短的 output 路径。该验证不认证业务部署或其他 SDK
 版本。可选测试固定 MCP 1.26.0：SDK 0.2.88 依赖范围可能选择 MCP 2.x，但后者缺少

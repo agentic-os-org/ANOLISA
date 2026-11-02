@@ -94,7 +94,7 @@ class NativePathTests(GateFixture):
                         sys, "stdout", new=io.StringIO()
                     ):
                         claude.main()
-                self.assertEqual(sum(len(call.args) == 6 for call in cases.call_args_list), 8)
+                self.assertEqual(sum(len(call.args) == 6 for call in cases.call_args_list), 11)
 
     def test_agentscope_uses_explicit_providers_with_clean_and_stale_layouts(self) -> None:
         paths = self.executables()

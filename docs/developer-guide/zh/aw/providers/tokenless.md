@@ -142,7 +142,7 @@ Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若
 停止 AW 后用新配置重新启动。已有会话不会
 热重载。外部 Tokenless state 目录按数据保留需求保留或删除。
 
-Claude SDK 使用 [AW 指南](../agents/claude-sdk.md) 中的显式 worker 工厂。单个 AW callback 已按顺序等待步骤。仅原生 Bash stdout 可替换，通过 `PostToolUse` 的 `hookSpecificOutput.updatedToolOutput` 返回原生 envelope；MCP 状态不可靠，结果保持原样。配置 AW replacement 时拒绝既有原生 callback 的输出改写。
+Claude SDK 使用 [AW 指南](../agents/claude-sdk.md) 中的显式 worker 工厂。单个 AW callback 已按顺序等待步骤。原生 Bash stdout 与原生 HTTP MCP 的模型可见字符串（structuredContent 序列化或单一文本块）可替换；受管 SDK MCP 沿用自身单文本替换。原生回调不提供可靠的 MCP 业务错误状态。配置 AW replacement 时拒绝既有原生 callback 的输出改写。
 
 ## Panel 只读查询
 

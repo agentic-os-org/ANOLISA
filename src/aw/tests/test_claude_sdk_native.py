@@ -116,7 +116,12 @@ def document(
                     "--cli",
                     str(
                         tokenless
-                        if mode not in {"bash-compress-failure", "bash-compress-tool-failure"}
+                        if mode
+                        not in {
+                            "bash-compress-failure",
+                            "bash-compress-tool-failure",
+                            "http-mcp-compress-failure",
+                        }
                         else Path("/bin/false")
                     ),
                     "--data-dir",
@@ -280,6 +285,9 @@ def run_case(
             "settings-disabled-hooks",
             "plugins",
             "http-mcp",
+            "http-mcp-compress",
+            "http-mcp-compress-failure",
+            "http-mcp-error-compress",
             "many-denials",
             "bash-compress",
             "bash-compress-observer-failure",
@@ -338,6 +346,11 @@ def run_case(
             assert not after, report
         if mode in {"bash-failure", "bash-compress-tool-failure"}:
             assert after[0]["hook_event_name"] == "PostToolUseFailure", report
+        if mode == "http-mcp-error-compress":
+            # The bundled CLI reports HTTP MCP isError results through
+            # PostToolUseFailure, not PostToolUse; failure results carry no
+            # projection and reach the model unchanged.
+            assert after[0]["hook_event_name"] == "PostToolUseFailure", report
         if mode == "permission-rewrite":
             assert (case / "permission-called").exists(), report
         journals = []
@@ -386,6 +399,7 @@ def run_case(
             "after-report-failure",
             "bash-compress-observer-failure",
             "bash-compress-failure",
+            "http-mcp-compress-failure",
         }:
             assert "aw hook failed:" in stderr, stderr
             assert any(
@@ -412,7 +426,42 @@ def run_case(
                 json.loads(line) for line in (case / "policy-events.jsonl").read_text().splitlines()
             ]
             assert all("result_projection" not in event["tool"] for event in policies)
-            if mode.startswith("bash-compress") and mode != "bash-compress-tool-failure":
+            if mode.startswith("http-mcp-compress"):
+                original = report["original"]
+                # The policy observer sees the native projection: the
+                # plain-text content blocks of the HTTP MCP result.
+                observed = [
+                    event["tool"]["result"]
+                    for event in policies
+                    if event["name"] == "tool.after"
+                ]
+                assert observed == [[{"type": "text", "text": original}]], observed
+                result = report["tool_results"][-1]["content"]
+                if mode == "http-mcp-compress-failure":
+                    assert result == [{"type": "text", "text": original}], report
+                    assert any(
+                        record.get("status") == "error" and record.get("failure_action") == "report"
+                        for record in completed
+                    ), completed
+                else:
+                    assert isinstance(result, str) and len(result) < len(original), result
+                    assert json.loads(result) == json.loads(original), result
+            elif mode == "http-mcp-error-compress":
+                original = report["original"]
+                # The failure event exposes only the native error envelope;
+                # no text projection reaches the observer or the compressor.
+                observed = [
+                    event["tool"]["result"]
+                    for event in policies
+                    if event["name"] == "tool.after"
+                ]
+                assert observed == [
+                    {"is_error": True, "error": original, "is_interrupt": False}
+                ], observed
+                result = report["tool_results"][-1]
+                assert result["is_error"] is True, report
+                assert result["content"] == original, report
+            elif mode.startswith("bash-compress") and mode != "bash-compress-tool-failure":
                 original = report["original"]
                 observed = [
                     event["tool"]["result"]["stdout"]
@@ -559,6 +608,9 @@ def main() -> None:
             "bash-pretool",
             "bash-pretool-deny",
             "mcp-error-compress",
+            "http-mcp-compress",
+            "http-mcp-compress-failure",
+            "http-mcp-error-compress",
         ):
             results.append(
                 run_case(

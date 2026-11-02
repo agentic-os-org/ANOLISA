@@ -15,6 +15,18 @@ fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
         {
             &native["tool_response"]
         }
+        // Native HTTP MCP tools expose the model-visible projection only:
+        // the serialized structuredContent string when it is present, or the
+        // content blocks when the tool returned plain text.
+        "claude-sdk"
+            if native["hook_event_name"] == "PostToolUse"
+                && native["tool_name"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("mcp__"))
+                && matches!(native["tool_response"], Value::String(_) | Value::Array(_)) =>
+        {
+            &native["tool_response"]
+        }
         "openclaw" => &native["event"]["result"],
         "hermes" => &native["extra"]["result"],
         _ => &Value::Null,
@@ -29,6 +41,21 @@ fn text_slot<'a>(
     result: &'a Value,
 ) -> Option<(&'static str, &'a str)> {
     if adapter == "claude-sdk" {
+        // The bundled CLI adopts a string updatedToolOutput for native MCP
+        // tools, replacing the model-visible projection as a whole.
+        if native["tool_name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("mcp__"))
+        {
+            if let Some(text) = result.as_str() {
+                return Some(("", text));
+            }
+            return result
+                .as_array()
+                .filter(|blocks| blocks.len() == 1 && blocks[0]["type"] == "text")
+                .and_then(|blocks| blocks[0]["text"].as_str())
+                .map(|text| ("", text));
+        }
         return result["stdout"].as_str().map(|text| ("/stdout", text));
     }
     if let Some(text) = result.as_str() {
@@ -321,11 +348,7 @@ mod tests {
         );
         for (key, value) in [
             ("hook_event_name", json!("PostToolUseFailure")),
-            ("tool_name", json!("mcp__local__Bash")),
-            (
-                "tool_response",
-                json!([{"type":"text","text":"MCP status unknown"}]),
-            ),
+            ("tool_name", json!("WebSearch")),
             (
                 "tool_response",
                 json!({"stdout":"image", "isImage":true, "interrupted":false}),
@@ -340,6 +363,75 @@ mod tests {
             assert!(project("claude-sdk", &unsupported).is_none());
             assert!(reply("claude-sdk", &unsupported, "compact").is_err());
         }
+    }
+
+    #[test]
+    fn claude_mcp_projection_replaces_the_model_visible_string() {
+        // structuredContent present: the hook sees the serialized string.
+        let structured = json!({
+            "hook_event_name":"PostToolUse",
+            "tool_name":"mcp__inspection__inspect_runtime",
+            "tool_input":{"query":"tenant"},
+            "tool_response":"{\"tenant\":\"fixture-tenant\",\"rows\":[]}"
+        });
+        let projection = project("claude-sdk", &structured).unwrap();
+        assert_eq!(
+            projection["text"],
+            "{\"tenant\":\"fixture-tenant\",\"rows\":[]}"
+        );
+        assert_eq!(projection["status"], "success");
+        assert_eq!(projection["content_origin"], "api_response");
+        let response: Value =
+            serde_json::from_slice(&reply("claude-sdk", &structured, "compact").unwrap().stdout)
+                .unwrap();
+        assert_eq!(
+            response,
+            json!({"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":"compact"}})
+        );
+
+        // plain text only: the hook sees the content blocks.
+        let plain = json!({
+            "hook_event_name":"PostToolUse",
+            "tool_name":"mcp__local__touch",
+            "tool_input":{"value":"tool_native_1"},
+            "tool_response":[{"type":"text","text":"original long output"}]
+        });
+        let projection = project("claude-sdk", &plain).unwrap();
+        assert_eq!(projection["text"], "original long output");
+        let response: Value =
+            serde_json::from_slice(&reply("claude-sdk", &plain, "compact").unwrap().stdout)
+                .unwrap();
+        assert_eq!(
+            response,
+            json!({"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":"compact"}})
+        );
+
+        // multi-block, non-text, object and missing projections stay untouched.
+        for tool_response in [
+            json!([{"type":"text","text":"a"},{"type":"text","text":"b"}]),
+            json!([{"type":"image","data":"..."}]),
+            json!({"stdout":"object shape"}),
+            Value::Null,
+        ] {
+            let mut unsupported = plain.clone();
+            unsupported["tool_response"] = tool_response;
+            assert!(project("claude-sdk", &unsupported).is_none());
+            assert!(reply("claude-sdk", &unsupported, "compact").is_err());
+        }
+
+        // Measured CLI 2.1.161 shape for HTTP MCP isError results: the
+        // failure event carries no tool_response, only error and is_interrupt,
+        // so failed results have no replaceable slot at all.
+        let failure = json!({
+            "hook_event_name":"PostToolUseFailure",
+            "tool_name":"mcp__local__touch",
+            "tool_input":{"value":"tool_native_1"},
+            "tool_use_id":"tool_native_1",
+            "error":"fixture tool failure",
+            "is_interrupt":false
+        });
+        assert!(project("claude-sdk", &failure).is_none());
+        assert!(reply("claude-sdk", &failure, "compact").is_err());
     }
 
     #[test]

@@ -57,8 +57,13 @@ class Handler(BaseHTTPRequestHandler):
                 value = body["params"]["arguments"]["value"]
                 assert (ROOT / f"policy-{value}").exists()
                 (ROOT / "effect").write_text(value)
-                result = {"content": [{"type": "text", "text": "native HTTP MCP result"}],
-                          "structuredContent": {"tenant": "fixture-tenant"}, "isError": False}
+                if MODE.startswith("http-mcp-compress"):
+                    result = {"content": [{"type": "text", "text": ORIGINAL}], "isError": False}
+                elif MODE.startswith("http-mcp-error-compress"):
+                    result = {"content": [{"type": "text", "text": ORIGINAL}], "isError": True}
+                else:
+                    result = {"content": [{"type": "text", "text": "native HTTP MCP result"}],
+                              "structuredContent": {"tenant": "fixture-tenant"}, "isError": False}
             self.reply(json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result}).encode(),
                        "application/json")
             return
@@ -187,7 +192,10 @@ async def touch(args: dict[str, Any]) -> dict[str, Any]:
     assert (ROOT / f"policy-{args['value']}").exists(), "tool executed before policy completion"
     (ROOT / "effect").write_text(args["value"])
     if MODE in {"failure", "mcp-error-compress"}:
-        return {"content": [{"type": "text", "text": "fixture tool failure"}], "isError": True}
+        # The SDK handler contract uses is_error; create_sdk_mcp_server maps
+        # it to the wire-level isError flag. An isError key here is ignored
+        # and the result would be treated as a success.
+        return {"content": [{"type": "text", "text": "fixture tool failure"}], "is_error": True}
     return {"content": [{"type": "text", "text": "ok"}]}
 
 
@@ -291,7 +299,7 @@ async def run(server: ThreadingHTTPServer) -> None:
         from native_configuration import configure
 
         opts = configure(opts, ROOT, MODE)
-    if MODE == "http-mcp":
+    if MODE.startswith("http-mcp"):
         opts = replace(opts, mcp_servers={"local": {
             "type": "http", "url": f"http://127.0.0.1:{server.server_port}/mcp",
             "headers": {"X-Inspection-Ctx-Token": "fixture-tenant"}}})

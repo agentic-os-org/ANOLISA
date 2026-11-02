@@ -180,7 +180,7 @@ PreTool step still references it. Then stop
 and restart AW using the updated configuration. Existing sessions are not reloaded.
 Keep or remove the external Tokenless state directory according to your data needs.
 
-Claude SDK uses the explicit worker factory described in the [AW guide](../agents/claude-sdk.md). Its single AW callback already awaits steps in order. Only native Bash stdout is replaceable; MCP status is not reliably exposed and its results remain unchanged. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
+Claude SDK uses the explicit worker factory described in the [AW guide](../agents/claude-sdk.md). Its single AW callback already awaits steps in order. Native Bash stdout and native HTTP MCP model-visible strings (structuredContent serialization or a single text block) are replaceable; managed SDK MCP keeps its own single-text replacement. The native callback does not expose reliable MCP business-error status. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
 
 ## Read-only Panel queries
 

@@ -119,18 +119,29 @@ class Bridge:
             raise CallbackFailure("invalid_native_response")
         updated = specific.get("updatedToolOutput")
         original = payload.get("tool_response")
+        # Native MCP tools adopt a string replacement of the whole
+        # model-visible projection; the CLI keeps its own error state.
         if (
             not hook["replace_result"]
             or payload.get("hook_event_name") != "PostToolUse"
-            or payload.get("tool_name") != "Bash"
-            or not isinstance(original, dict)
-            or not isinstance(updated, dict)
-            or not isinstance(updated.get("stdout"), str)
-            or {**updated, "stdout": original.get("stdout")} != original
             or result
             != {
                 "hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}
             }
+        ):
+            raise CallbackFailure("invalid_native_response")
+        if str(payload.get("tool_name", "")).startswith("mcp__") and isinstance(
+            original, (str, list)
+        ):
+            if not isinstance(updated, str):
+                raise CallbackFailure("invalid_native_response")
+            return result
+        if (
+            payload.get("tool_name") != "Bash"
+            or not isinstance(original, dict)
+            or not isinstance(updated, dict)
+            or not isinstance(updated.get("stdout"), str)
+            or {**updated, "stdout": original.get("stdout")} != original
         ):
             raise CallbackFailure("invalid_native_response")
         return result
