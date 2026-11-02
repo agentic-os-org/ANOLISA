@@ -1,5 +1,7 @@
 //! Phase 6.3: snapshot create / list / restore round-trip.
 
+use std::os::unix::fs::PermissionsExt;
+
 use tempfile::tempdir;
 
 use agent_memory::config::AppConfig;
@@ -441,4 +443,59 @@ fn skipped_archive_directory_rejects_restore_without_replacing_live_content() {
     let error = svc.mem_snapshot_restore(&snapshot.id).unwrap_err();
     assert!(error.to_string().contains("skipped"), "{error}");
     assert_eq!(svc.read("doc.md").unwrap(), "live");
+}
+
+#[test]
+fn snapshot_archive_and_meta_dirs_are_owner_only() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/a.md", "secret-alpha", false).unwrap();
+
+    let info = svc.mem_snapshot(Some("baseline")).unwrap();
+    let snap_dir = svc.mount.meta_dir.join("snapshots");
+    assert_eq!(
+        std::fs::metadata(snap_dir.join(format!("{}.tar.gz", info.id)))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "a snapshot packs the whole memory tree and must not be group/other-readable"
+    );
+    // The directory level is the primary guarantee for everything under
+    // .anolisa — including the sqlite -wal/-shm siblings of the index,
+    // which are created at sqlite's own default mode and can only be
+    // fenced off by an owner-only directory.
+    assert_eq!(
+        std::fs::metadata(&snap_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&svc.mount.meta_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+}
+
+#[test]
+fn snapshot_archive_replaces_a_pre_existing_0644_file() {
+    // An archive left world-readable by an older build must not survive a
+    // re-snapshot under the same id.
+    let (_tmp, svc) = setup();
+    svc.write("notes/a.md", "alpha", false).unwrap();
+    let snap_dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    let archive = snap_dir.join("fixed.tar.gz");
+    std::fs::write(&archive, b"stale").unwrap();
+    std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    agent_memory::snapshot::tar::create_tarball(&svc.mount, "fixed", "again").unwrap();
+
+    assert_eq!(
+        std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "re-snapshotting must not resurrect a world-readable archive"
+    );
 }
