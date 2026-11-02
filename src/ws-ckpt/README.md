@@ -163,6 +163,12 @@ Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wid
 - `-g` / `--global`: view or modify the global config file
 - `-w <workspace>` / `--workspace <workspace>`: view or modify a workspace's `policy.toml`
 
+`backend.btrfs-loop.img_size` / `config -g --img-size` accepts integers of at
+least **5 GiB** (default: 30 GiB); changes require a daemon restart. Invalid
+configurations stop daemon startup rather than replacing other settings with
+defaults. CLI updates validate before saving and can repair an existing
+out-of-range value.
+
 ```bash
 # View system status
 ws-ckpt status --workspace ~/my-workspace

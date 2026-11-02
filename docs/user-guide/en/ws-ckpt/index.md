@@ -298,6 +298,26 @@ Inspect the cause with `sudo journalctl -u ws-ckpt -n 100 --no-pager`. After fix
 
 The daemon configuration file is located at `/etc/ws-ckpt/config.toml`. This is a system-level configuration for the ws-ckpt daemon process.
 
+`backend.btrfs-loop.img_size` is an integer measured in GiB (1 GiB = 1024³
+bytes), with a minimum of **5** and a default of **30** when omitted. This is a
+configuration policy, not a universal btrfs safety guarantee. Initial creation
+is still subject to the percentage cap and available host space. Image-size
+changes take effect at the next daemon restart, not on reload.
+
+An invalid file stops daemon startup; unrelated settings are not replaced with
+defaults. CLI updates validate the complete updated configuration before
+saving, so an invalid update leaves the file unchanged. To repair a legacy
+out-of-range value without discarding other settings, for example:
+
+```bash
+ws-ckpt config -g --img-size 30
+```
+
+TOML syntax or field-type errors still require manual correction. If the daemon
+is offline, a valid correction is saved but the CLI may exit non-zero because
+it cannot verify the daemon's configuration. Fix all invalid fields before
+restarting; choose an image size that fits the workspace and retained history.
+
 There is no user-side global config file. Auto-checkpoint and cleanup behavior are controlled per-plugin:
 
 ### OpenClaw Plugin Configuration

@@ -23,6 +23,9 @@ pub const BTRFS_IMG_DIR: &str = "/var/lib/ws-ckpt";
 pub const LEGACY_BTRFS_IMG_PATH: &str = "/data/ws-ckpt/btrfs-data.img";
 pub const CONFIG_FILE_PATH: &str = "/etc/ws-ckpt/config.toml";
 pub const DEFAULT_IMG_SIZE_GB: u64 = 30;
+/// Minimum `backend.btrfs-loop.img_size` in GiB. A configuration policy, not a
+/// universal btrfs safety minimum.
+pub const MIN_BTRFS_LOOP_IMG_SIZE_GB: u64 = 5;
 pub const DEFAULT_IMG_MAX_PERCENT: f64 = 0.4; // 40% as fraction for calculation
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/ws-ckpt"; // systemd StateDirectory
 pub const STATE_FILE: &str = "state.json"; // daemon state file
@@ -1408,13 +1411,18 @@ pub struct FileConfig {
 /// Load config from a TOML file. Returns `FileConfig::default()` when the file
 /// does not exist.
 pub fn load_config_file(path: &Path) -> Result<FileConfig, WsCkptError> {
+    let fc = load_config_file_unvalidated(path)?;
+    validate_file_config(&fc, path)?;
+    Ok(fc)
+}
+
+/// Parses the config without range validation so an update can overwrite an
+/// out-of-range value; [`save_config_file`] validates before writing. TOML
+/// syntax and field-type errors are still returned.
+pub fn load_config_file_unvalidated(path: &Path) -> Result<FileConfig, WsCkptError> {
     match std::fs::read_to_string(path) {
-        Ok(content) => {
-            let fc: FileConfig = toml::from_str(&content)
-                .map_err(|e| WsCkptError::Config(format!("parse {}: {}", path.display(), e)))?;
-            validate_file_config(&fc, path)?;
-            Ok(fc)
-        }
+        Ok(content) => toml::from_str(&content)
+            .map_err(|e| WsCkptError::Config(format!("parse {}: {}", path.display(), e))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
         Err(e) => Err(WsCkptError::Io(e)),
     }
@@ -1434,12 +1442,22 @@ fn validate_file_config(fc: &FileConfig, path: &Path) -> Result<(), WsCkptError>
                 )));
             }
         }
+        if let Some(size) = loop_cfg.img_size {
+            if size < MIN_BTRFS_LOOP_IMG_SIZE_GB {
+                return Err(WsCkptError::Config(format!(
+                    "backend.btrfs-loop.img_size in {}: expected a value of at least {} GiB (got {})",
+                    path.display(), MIN_BTRFS_LOOP_IMG_SIZE_GB, size
+                )));
+            }
+        }
     }
     Ok(())
 }
 
-/// Save config to a TOML file, creating parent directories as needed.
+/// Validates and saves config to a TOML file, creating parent directories as
+/// needed. Nothing is created or written when validation fails.
 pub fn save_config_file(path: &Path, config: &FileConfig) -> Result<(), WsCkptError> {
+    validate_file_config(config, path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3129,6 +3147,85 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn load_config_file_rejects_btrfs_loop_img_size_below_minimum() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0", "1", "4"] {
+            let path = dir.path().join(format!("bad_{}.toml", bad));
+            let toml = format!("[backend.btrfs-loop]\nimg_size = {}\n", bad);
+            std::fs::write(&path, toml).unwrap();
+            let result = load_config_file(&path);
+            let err = result.expect_err("img_size below the minimum should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("img_size"),
+                "error should name img_size, got: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn load_config_file_accepts_btrfs_loop_img_size_at_or_above_minimum() {
+        let dir = tempfile::tempdir().unwrap();
+        for good in ["5", "6", "30"] {
+            let path = dir.path().join(format!("good_{}.toml", good));
+            let toml = format!("[backend.btrfs-loop]\nimg_size = {}\n", good);
+            std::fs::write(&path, toml).unwrap();
+            let result = load_config_file(&path);
+            assert!(
+                result.is_ok(),
+                "img_size = {} should be accepted, got {:?}",
+                good,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn save_config_file_rejects_invalid_img_size_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "auto_cleanup = true\n").unwrap();
+        let mut fc = load_config_file(&path).unwrap();
+        for size in [0, 1, 4] {
+            fc.backend.btrfs_loop = Some(BtrfsLoopConfig {
+                img_size: Some(size),
+                img_max_percent: None,
+            });
+            let err = save_config_file(&path, &fc).unwrap_err().to_string();
+            assert!(err.contains("backend.btrfs-loop.img_size"));
+            assert!(err.contains(&path.display().to_string()));
+            assert!(err.contains(&format!("got {}", size)));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "auto_cleanup = true\n"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_img_size_on_disk_can_be_repaired_via_unvalidated_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "auto_cleanup = true\n[backend]\ntype = \"btrfs-loop\"\n[backend.btrfs-loop]\nimg_size = 0\nimg_max_percent = 40.0\n",
+        )
+        .unwrap();
+        assert!(load_config_file(&path).is_err());
+        let mut fc = load_config_file_unvalidated(&path).unwrap();
+        fc.backend.btrfs_loop.as_mut().unwrap().img_size = Some(5);
+        save_config_file(&path, &fc).unwrap();
+        let repaired = load_config_file(&path).unwrap();
+        assert_eq!(repaired, fc);
+        assert_eq!(repaired.auto_cleanup, Some(true));
+        assert_eq!(repaired.backend.r#type, "btrfs-loop");
+        let loop_config = repaired.backend.btrfs_loop.unwrap();
+        assert_eq!(loop_config.img_size, Some(5));
+        assert_eq!(loop_config.img_max_percent, Some(40.0));
     }
 
     // ── Recover round-trip tests ──
