@@ -228,9 +228,15 @@ pub fn convert_qoder_events(
                 }
 
                 // Process content blocks
-                let content_blocks = match msg.get("content").and_then(|v| v.as_array()) {
-                    Some(arr) => arr,
-                    None => continue,
+                let content_blocks = match msg.get("content") {
+                    Some(serde_json::Value::Array(arr)) => arr,
+                    Some(serde_json::Value::String(text)) => {
+                        if !text.is_empty() {
+                            message_parts.push(text.clone());
+                        }
+                        continue;
+                    }
+                    _ => continue,
                 };
                 for block in content_blocks {
                     let bt = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
