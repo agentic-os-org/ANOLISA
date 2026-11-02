@@ -146,7 +146,7 @@ pub fn convert_codex_events(
     // Latest turn_context values, applied to the next agent turn.
     let mut current_model: Option<String> = None;
     let mut current_effort: Option<serde_json::Value> = None;
-    // Cumulative usage from the last token_count event (authoritative totals).
+    // Latest cumulative usage, extended by any subsequent last-call-only events.
     let mut last_total_usage: Option<(u64, u64, u64)> = None;
     let mut previous_total_usage: Option<(u64, u64, u64)> = None;
 
@@ -213,6 +213,12 @@ pub fn convert_codex_events(
                         previous_total_usage = total;
                         if let Some(total) = total {
                             last_total_usage = Some(total);
+                        } else if let (Some(known), Some(delta)) =
+                            (&mut last_total_usage, incremental)
+                        {
+                            known.0 = known.0.saturating_add(delta.0);
+                            known.1 = known.1.saturating_add(delta.1);
+                            known.2 = known.2.saturating_add(delta.2);
                         }
                         if let Some((pt, ct, cache)) = incremental {
                             let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
@@ -306,8 +312,8 @@ pub fn convert_codex_events(
     }
     flush(&mut turn, &mut steps, &mut step_id);
 
-    // Prefer the cumulative totals reported by the last token_count event;
-    // fall back to summing per-step metrics.
+    // Prefer the latest cumulative total plus its last-call-only tail;
+    // without a cumulative snapshot, fall back to summing per-step metrics.
     let final_metrics =
         last_total_usage
             .or_else(|| sum_step_usage(&steps))
