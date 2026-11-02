@@ -240,6 +240,10 @@ enum Commands {
         /// Target snapshot (ID or name); omit to diff against current workspace
         #[arg(long, short = 't', value_parser = snapshot_id_value_parser())]
         to: Option<String>,
+
+        /// Output format: text or json (default: text)
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
     },
 
     /// Show daemon and workspace status
@@ -570,6 +574,7 @@ async fn run(cli: Cli) -> Result<()> {
             workspace,
             from,
             to,
+            format,
         } => {
             let request = Request::Diff {
                 workspace: resolve_workspace_arg(&workspace),
@@ -578,7 +583,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
 
             let response = send_request_to_daemon(&request).await?;
-            handle_diff_response(response)?;
+            handle_diff_response(response, &format)?;
         }
         Commands::Status { workspace, format } => {
             let request = Request::Status {
@@ -1398,18 +1403,20 @@ fn handle_list_page_response(response: Response, format: &str, explicit_page: bo
 }
 
 /// Handle DiffOk response, formatting diff entries.
-fn handle_diff_response(response: Response) -> Result<()> {
+fn handle_diff_response(response: Response, format: &str) -> Result<()> {
     match response {
         Response::DiffOk { changes } => {
-            print_diff_entries(&changes);
+            if format == "json" {
+                emit_json(serde_json::json!({ "changes": changes }));
+            } else {
+                print_diff_entries(&changes);
+            }
         }
         Response::Error { code, message } => {
             eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
             process::exit(1);
         }
-        _ => {
-            eprintln!("\x1b[33mUnexpected response type\x1b[0m");
-        }
+        _ => anyhow::bail!("unexpected response type while reading diff"),
     }
     Ok(())
 }
@@ -4013,13 +4020,48 @@ mod tests {
                 workspace,
                 from,
                 to,
+                format,
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(from, "msg1-step0");
                 assert_eq!(to, Some("msg2-step0".to_string()));
+                assert_eq!(format, "text");
             }
             _ => panic!("expected Diff"),
         }
+    }
+
+    #[test]
+    fn parse_diff_json_against_live() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "-w",
+            "/tmp/test",
+            "--from",
+            "snapshot-1",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Diff { to: None, format, .. } if format == "json"));
+    }
+
+    #[test]
+    fn parse_diff_rejects_invalid_format() {
+        let error = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "-w",
+            "/tmp/test",
+            "--from",
+            "snapshot-1",
+            "--format",
+            "jso",
+        ])
+        .err()
+        .expect("invalid diff format must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]
