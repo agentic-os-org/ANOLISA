@@ -348,6 +348,11 @@ class TestHostToolDenyBaseline:
     spellings stay denied: ``anolisa_memory_*`` (agent-memory >= 0.2.8) and
     ``memory_get`` / ``memory_search`` (agent-memory <= 0.2.7, which are also
     the host ``memory-core`` built-in names).
+
+    These tests pin the deny *list*. They assert nothing about the plugin's
+    ``before_prompt_build`` / ``agent_end`` hooks, which reach the same store
+    without a model tool call and are therefore out of ``tools.deny``'s reach
+    — see "Host Memory Isolation" in README.md.
     """
 
     MEMORY_PLUGIN_TOOLS = [
