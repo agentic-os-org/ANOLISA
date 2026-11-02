@@ -72,8 +72,10 @@ fn structured_protected_entries(
 ) -> Result<Vec<preexisting_maps::ProtectedEntry>, BackendError> {
     let mut entries = Vec::new();
     for target in &policy.targets {
-        // Delete-only targets promise no content coverage, so pre-existing
-        // write access in the binding tree must not reject them.
+        // Structured delete-only targets leave writes genuinely unmediated,
+        // so pre-existing write access in the binding tree must not reject
+        // them. Legacy guards need no such filter: their unlink clauses
+        // lower to write-op rules and mediate writes anyway.
         if !target.ordinary_write {
             continue;
         }

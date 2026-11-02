@@ -70,9 +70,12 @@ backend mediates the content-loss entries that the validated kernel permits:
   and `/proc/<pid>/fd` over the whole target process tree and rejects the
   binding with `preexisting_writable_map` or `preexisting_writable_fd` when
   write access to a content-protected path is present, instead of claiming
-  coverage it cannot enforce. The scan covers only targets that request
-  ordinary-write protection: delete-only targets promise no content coverage,
-  so pre-existing write access in their tree does not reject the binding.
+  coverage it cannot enforce. For structured policies the scan covers only
+  targets that request ordinary-write protection, because structured delete
+  protection leaves writes genuinely unmediated. Legacy guards are always
+  covered: their `block unlink` clauses lower to write-op rules, so even a
+  delete-only legacy binding mediates writes and implicitly promises content
+  coverage.
 - Path stability: the inode entry also guards every ancestor directory of a
   guarded file against rename and removal inside the bound domain, so path
   relation changes cannot detach a protected entry from its authored path.

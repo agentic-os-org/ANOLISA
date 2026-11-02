@@ -20,10 +20,6 @@ struct InodeFile {
     dev: u32,
     path: String,
     rule_id: Option<u32>,
-    /// Whether a `block write` clause (not only `block unlink`) guards this
-    /// file: only write-guarded files promise content coverage, so only they
-    /// feed the pre-existing write-access preflight.
-    write_clause: bool,
     _file: Arc<File>,
 }
 
@@ -57,22 +53,17 @@ impl InodePolicy {
             .iter()
             .filter(|source| source.kind == Kind::File)
         {
-            prepared.add_file(&source.pattern, None, false)?;
+            prepared.add_file(&source.pattern, None)?;
         }
-        for (path, rule_id, write_clause) in guards {
-            prepared.add_file(&path, Some(rule_id), write_clause)?;
+        for (path, rule_id) in guards {
+            prepared.add_file(&path, Some(rule_id))?;
         }
         prepared.add_ancestors()?;
         Ok(prepared)
     }
 
-    fn add_file(
-        &mut self,
-        path: &str,
-        rule_id: Option<u32>,
-        write_clause: bool,
-    ) -> Result<(), BackendError> {
-        let file = pin_file(path, rule_id, write_clause)?;
+    fn add_file(&mut self, path: &str, rule_id: Option<u32>) -> Result<(), BackendError> {
+        let file = pin_file(path, rule_id)?;
         if let Some(existing) = self
             .files
             .iter_mut()
@@ -90,7 +81,6 @@ impl InodePolicy {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
-            existing.write_clause |= write_clause;
         } else {
             self.files.push(file);
         }
@@ -138,14 +128,18 @@ impl InodePolicy {
             .find(|entry| entry.ino == ino && entry.dev == dev)
     }
 
-    /// Device/inode identities of write-guarded files for the pre-attach
-    /// write-access scan. Delete-only guards promise no content coverage, so
-    /// pre-existing writable mappings or descriptors of theirs must not
-    /// reject the binding.
+    /// Device/inode identities of guarded files for the pre-attach
+    /// write-access scan. Every legacy guard entry mediates writes as well as
+    /// deletes: `block unlink` clauses lower to write-op rules that the
+    /// mediation hooks evaluate for write access, so a binding carrying them
+    /// implicitly promises content coverage and pre-existing writable
+    /// mappings or descriptors must reject the apply. Structured delete-only
+    /// targets are filtered out by the caller instead, because structured
+    /// delete protection genuinely leaves writes unmediated.
     pub(super) fn protected_identities(&self) -> Vec<super::preexisting_maps::ProtectedEntry> {
         self.files
             .iter()
-            .filter(|file| file.rule_id.is_some() && file.write_clause)
+            .filter(|file| file.rule_id.is_some())
             .map(|file| super::preexisting_maps::ProtectedEntry {
                 path: file.path.clone(),
                 scope: super::preexisting_maps::ProtectedScope::Exact {
@@ -220,7 +214,7 @@ pub(super) fn clear(engine: &PinnedEngine) -> Vec<String> {
 fn extract_guarded_paths(
     policy: &Policy,
     compiled: &Compiled,
-) -> Result<Vec<(String, u32, bool)>, BackendError> {
+) -> Result<Vec<(String, u32)>, BackendError> {
     let seed = if compiled.labels.contains_key("COMMAND") {
         "COMMAND"
     } else {
@@ -281,11 +275,7 @@ fn extract_guarded_paths(
             }
             let rule_id = u32::try_from(rule_id)
                 .map_err(|_| invalid("lowered rule index exceeds the inode guard ABI"))?;
-            paths.push((
-                clause.target.pattern.clone(),
-                rule_id,
-                matches!(clause.op, Op::Write),
-            ));
+            paths.push((clause.target.pattern.clone(), rule_id));
         }
     }
     Ok(paths)
@@ -305,11 +295,7 @@ fn matches_clause(meta: &RuleMeta, rule: &Rule, clause: &Clause) -> bool {
         && meta.target_arg == clause.target.arg
 }
 
-fn pin_file(
-    path: &str,
-    rule_id: Option<u32>,
-    write_clause: bool,
-) -> Result<InodeFile, BackendError> {
+fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError> {
     if !Path::new(path).is_absolute() || path.contains(['*', '?', '[', ']', '{', '}', '\\']) {
         return Err(invalid(format!(
             "'{path}': inode-only paths must be exact absolute literals, not globs; use full-path mode for patterns"
@@ -348,7 +334,6 @@ fn pin_file(
         dev: userspace_dev_to_kernel(metadata.dev()),
         path: path.into(),
         rule_id,
-        write_clause,
         _file: Arc::new(file),
     })
 }
@@ -377,7 +362,6 @@ fn pin_dir(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError> 
         dev: userspace_dev_to_kernel(metadata.dev()),
         path: path.into(),
         rule_id,
-        write_clause: false,
         _file: Arc::new(file),
     })
 }
@@ -453,14 +437,13 @@ mod tests {
     }
 
     #[test]
-    fn preflight_identities_cover_only_write_guarded_files() {
+    fn preflight_identities_cover_every_guarded_legacy_file() {
         let fixture = Fixture::new();
         let path = fixture.file("p");
+        // Unlink-only clauses lower to write-op rules, so even a delete-only
+        // legacy binding mediates writes and must feed the preflight.
         let unlink_only = prepare(&guard_dsl(&path, "if AGENT")).unwrap();
-        assert!(
-            unlink_only.protected_identities().is_empty(),
-            "delete-only guards promise no content coverage"
-        );
+        assert_eq!(unlink_only.protected_identities().len(), 1);
         let dsl = format!(
             "source AGENT = exec \"**\"\nrule protect:\n block write file \"{path}\" if AGENT\n because \"keep file\"\n"
         );
@@ -661,7 +644,7 @@ mod tests {
                 format!("source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{bad}\"\n");
             assert!(prepare(&source).is_err(), "source: {bad}");
         }
-        let error = pin_file(&format!("/{}", "a".repeat(126)), None, false).unwrap_err();
+        let error = pin_file(&format!("/{}", "a".repeat(126)), None).unwrap_err();
         assert!(error.to_string().contains("126-byte"));
     }
 
