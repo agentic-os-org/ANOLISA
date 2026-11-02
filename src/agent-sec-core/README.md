@@ -5,7 +5,8 @@
 **OS-level security kernel for AI Agents.** Provides defense in depth for Agent
 workloads: prompt injection detection, code scanning, PII detection, skill
 integrity tracking, sandbox isolation, and a local security event store.
-Everything runs locally with no Token cost. Applicable to
+Security scanning runs locally with no Token cost; optional Intent proposals
+use a cloud model and may incur charges. Applicable to
 Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
 listed below.
 
@@ -131,6 +132,20 @@ V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an
 upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables
 bounded correlation records on stderr. See [context examples and logging limits](v2/README.md#native-opentelemetry-tracing).
+
+`agent-sec-cli intent propose` generates an unapproved Cedar candidate from
+composable read, write-operation, execution and whole-network rules.
+The command takes only `--task` and `--ttl`: no path metadata is collected,
+and the program adds no permits or forbids of its own, so the model's
+policy is the whole authorization.
+Enable `ASC_INTENT_ENABLED=true` and configure `DASHSCOPE_API_KEY` in the daemon
+environment. Task text goes to the cloud; file contents are not read or sent.
+The model writes native Cedar from draft v1 without per-field evidence; Rust
+parses and validates it without rewriting its meaning. Pure prohibitions add no
+permissions; unsupported constraints are rejected.
+Upgrade CLI and daemon together for request v1/candidate v1; other versions are
+incompatible. Candidates do not approve, install or enforce policies. See the
+[Intent reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-propose-a-candidate-from-a-task).
 
 ## Security Architecture
 

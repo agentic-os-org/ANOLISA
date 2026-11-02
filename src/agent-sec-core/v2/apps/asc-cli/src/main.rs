@@ -106,6 +106,10 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+        Err(RunError::Intent(error)) => {
+            eprintln!("agent-sec-cli: {error}");
+            ExitCode::from(error.exit_code())
+        }
         Err(error) => {
             eprintln!("agent-sec-cli: {error}");
             ExitCode::FAILURE
@@ -134,7 +138,7 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
         Plan::Daemon { socket } => socket,
     };
     if let Some(result) = run_owned_transport(cli, socket) {
-        return result.map_err(RunError::Output);
+        return result;
     }
     // Scan-prompt resolves its own request batch (one per input line or
     // conversation payload) and prints diagnostics around them, so it owns
@@ -225,9 +229,14 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
 }
 
 /// Commands that page, review or exec around their own daemon calls.
-fn run_owned_transport(cli: &Cli, socket: &std::path::Path) -> Option<io::Result<u8>> {
-    cli.run_observability_query(socket)
-        .or_else(|| cli.run_gateway(socket, &mut io::stdout().lock(), &mut io::stderr()))
+fn run_owned_transport(cli: &Cli, socket: &std::path::Path) -> Option<Result<u8, RunError>> {
+    if let Some(result) = cli.run_intent(socket) {
+        return Some(result.map_err(RunError::Intent));
+    }
+    let result = cli
+        .run_observability_query(socket)
+        .or_else(|| cli.run_gateway(socket, &mut io::stdout().lock(), &mut io::stderr()))?;
+    Some(result.map_err(RunError::Output))
 }
 
 /// Prints the default policy embedded in this binary, which needs neither a
@@ -254,6 +263,8 @@ fn render_observability_schema() -> Result<u8, RunError> {
 enum RunError {
     #[error(transparent)]
     Sandbox(#[from] asc_cli::sandbox::SandboxError),
+    #[error(transparent)]
+    Intent(#[from] asc_cli::IntentFailure),
     #[error(transparent)]
     Input(#[from] InputError),
     #[error(transparent)]

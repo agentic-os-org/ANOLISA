@@ -31,6 +31,7 @@ pub struct DaemonDispatcher {
     gateway: GatewayHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
     observability: Option<asc_daemon_core::ObservabilityService>,
+    intent: Option<Arc<asc_daemon_core::intent::IntentService>>,
 }
 
 impl DaemonDispatcher {
@@ -57,6 +58,7 @@ impl DaemonDispatcher {
             gateway: GatewayHandler::default(),
             principal_policy,
             observability: None,
+            intent: None,
         }
     }
 
@@ -81,6 +83,13 @@ impl DaemonDispatcher {
         gateway: Arc<dyn asc_daemon_core::GatewayAdministration>,
     ) -> Self {
         self.gateway = GatewayHandler::new(gateway);
+        self
+    }
+
+    /// Installs the shared initial proposal use case; model calls are unavailable by default.
+    #[must_use]
+    pub fn with_intent(mut self, service: Arc<asc_daemon_core::intent::IntentService>) -> Self {
+        self.intent = Some(service);
         self
     }
 
@@ -144,6 +153,9 @@ impl DaemonDispatcher {
             );
         }
         match method_id {
+            MethodId::IntentPropose => {
+                crate::intent::handle(request_id, peer, control, self.intent.as_deref(), request)
+            }
             MethodId::Health => DaemonResponse::success(
                 request_id,
                 serde_json::json!({
@@ -230,6 +242,9 @@ impl RequestDispatcher for DaemonDispatcher {
                 .map(std::time::Duration::from_millis);
         }
         let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
+        if request.method == method::INTENT_PROPOSE {
+            return Some(std::time::Duration::from_secs(35));
+        }
         if method::GATEWAY_METHODS.contains(&request.method.as_str()) {
             return Some(GATEWAY_DISPATCH_BUDGET);
         }
@@ -301,6 +316,18 @@ impl RequestDispatcher for DaemonDispatcher {
                 )
             });
         };
+        if decoded.method == method::INTENT_PROPOSE
+            && request.payload.len() >= asc_daemon_protocol::intent::INTENT_REQUEST_BYTES
+        {
+            return write_response(
+                response,
+                &DaemonResponse::<serde_json::Value>::error(
+                    request_id,
+                    error_code::RESOURCE_EXHAUSTED,
+                    "intent request exceeds byte limit",
+                ),
+            );
+        }
         let parent = request_parent(&decoded);
         let method = decoded.method.clone();
         request_scope(parent, &method, || {

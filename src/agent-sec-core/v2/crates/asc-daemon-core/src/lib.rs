@@ -8,6 +8,7 @@ mod action;
 mod gateway;
 pub use gateway::{GatewayAdministration, GatewayFailure, GatewayFailureKind, GatewayKeyRequest};
 mod identity;
+pub mod intent;
 pub use action::ActionService;
 mod pap;
 pub mod scope_discovery;

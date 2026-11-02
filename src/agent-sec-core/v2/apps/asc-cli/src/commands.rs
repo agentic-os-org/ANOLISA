@@ -6,6 +6,7 @@ mod common;
 mod events;
 mod events_summary;
 mod gateway;
+mod intent;
 mod observability;
 mod policy;
 mod scan_code;
@@ -21,6 +22,7 @@ use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
 pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
 pub(crate) use self::gateway::GatewayCommand;
+pub use self::intent::IntentFailure;
 pub use self::policy::DefaultPolicy;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
@@ -36,6 +38,9 @@ pub(crate) enum Command {
     /// Run a command locally with explicitly supplied sandbox permissions.
     #[command(subcommand)]
     Sandbox(crate::sandbox::SandboxCommand),
+    /// Propose unapproved Cedar candidates through the daemon.
+    #[command(subcommand)]
+    Intent(intent::IntentCommand),
     /// Collect observability records through the daemon.
     #[command(subcommand)]
     Observability(observability::ObservabilityCommand),
@@ -74,6 +79,21 @@ impl Command {
         }
     }
 
+    pub(crate) fn run_intent(
+        &self,
+        socket: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Option<Result<u8, IntentFailure>> {
+        match self {
+            Self::Intent(command) => Some(command.run(socket, timeout)),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn is_intent(&self) -> bool {
+        matches!(self, Self::Intent(_))
+    }
+
     pub(crate) fn run_observability_query(
         &self,
         socket: &std::path::Path,
@@ -97,6 +117,7 @@ impl Command {
             // values are satisfied through bounded page requests), so the
             // single-request path refuses it.
             Self::Events(_) => Err(InputError::EventsBatch),
+            Self::Intent(_) => Err(InputError::IntentProposal),
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),

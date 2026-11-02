@@ -28,6 +28,7 @@ members = [
     "crates/asc-persistence-sqlite",
     "crates/asc-sqlite-kernel",
     "crates/asc-foundation-types",
+    "crates/asc-intent",
     "crates/asc-model-client",
     "crates/asc-agentsight-client",
     "crates/asc-agentsight-protocol",
@@ -83,6 +84,7 @@ asc-daemon-service = { path = "crates/asc-daemon-service" }
 asc-event-log = { path = "crates/asc-event-log" }
 asc-event-sink = { path = "crates/asc-event-sink" }
 asc-foundation-types = { path = "crates/asc-foundation-types" }
+asc-intent = { path = "crates/asc-intent" }
 asc-model-client = { path = "crates/asc-model-client" }
 asc-observability = { path = "crates/asc-observability" }
 asc-pap = { path = "crates/asc-pap" }

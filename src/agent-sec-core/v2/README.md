@@ -133,8 +133,11 @@ The current crates are:
   [`V2_CAPABILITY_VIEW_MIGRATION_zh.md`](../docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md).
 - `asc-daemon`: foreground process and composition root that configures and
   injects concrete adapters into the daemon service.
-- `asc-model-client`: shared, loopback-only HTTP client for local model
-  inference backends (Ollama); injected by scanner crates.
+- `asc-model-client`: shared loopback client for local inference (Ollama),
+  plus an explicitly configured HTTPS OpenAI-compatible provider for Intent.
+- `asc-intent`: task-to-Cedar generation against the unified schema with official
+  parsing, canonical absolute-path checks and Strict validation. It does not
+  approve, persist, deploy or enforce candidates.
 - `asc-capability-prompt-scan`: prompt injection/jailbreak scanner combining
   a rule engine, model-backed classification and multi-turn intent detection;
   served by the daemon through `action.prompt_scan`. It supports `fast`,
@@ -153,6 +156,89 @@ locations, dependency order, interface boundaries, and acceptance requirements.
 The workspace now exposes `action.code_scan`, `action.pii_scan` and `action.prompt_scan`
 through the common Action Runtime. PII migration and its future policy boundary are described in the
 [two-stage PII design](../docs/design/PII_V2_MIGRATION.md).
+
+## Intent candidates
+
+`agent-sec-cli intent propose` sends only the task text to the configured model,
+which directly returns Cedar against the unified schema. The response
+is exactly `{"policy":"...","unresolved":[]}`. The unconfirmed draft preserves
+that response and task provenance; it does not grant authorization.
+
+There are no path inputs: the request carries only the task text and a TTL.
+No file contents, directory listings or Git changes are read, and the daemon does
+not open caller paths. The model resolves absolute paths from the task itself; a
+relative or ambiguous target goes into `unresolved`. Nothing is appended to the
+model output, so a permit written by the model is the whole grant.
+
+Enable `ASC_INTENT_ENABLED=true` and supply `DASHSCOPE_API_KEY` in the daemon startup
+environment. Cloud calls may incur charges. `deepseek-v4.1-flash` remains the default;
+`ASC_INTENT_MODEL` and `ASC_INTENT_BASE_URL` can select another model and
+OpenAI-compatible HTTPS service. Use `ASC_INTENT_THINKING=provider` if that service
+does not support the DashScope thinking extension. There is no automatic model
+selection or local fallback.
+
+Rust parses the original Cedar with the official parser, checks inspectable absolute
+path expressions, rejects unbound templates, model-supplied Subject/File identities
+and unsupported annotations, then runs official Strict validation against
+`asc-policy-cedar/schema/seccore.cedarschema`. It does not rewrite
+model semantics or prove task completeness. The prompt requires unresolved identities,
+necessary conditions, approvals and obligations to be reported rather than silently
+removed. `unresolved` is model-reported, not a complete gap or conflict detector.
+
+Requests use `asc.intent.request.v1`, drafts `asc.intent.draft.v1` with
+`cedar-policy@1`, and candidates `asc.intent.candidate.v1`. Candidates contain the
+original `draft`, final `artifact`, TTL, hashes and `notes`.
+CLI rechecks provenance, versions, TTL and hashes, and rebuilds the expected artifact
+from `draft.policy` with its embedded schema. Upgrade CLI and daemon together;
+version mismatches fail instead of adapting.
+
+`--format` accepts text, JSON or Cedar. Every outcome is single-shot: a candidate,
+including one with nonempty `unresolved`, is displayed and exits 0, and no format
+prompts for input or requests approval. Only an unexpressible task, a transport
+failure or a validation error changes the exit status. Empty `unresolved`, Strict
+validation and hashes do not establish correct understanding, process binding or
+enforcement. TTL, trusted approval, Scope/Binding selection and execution remain
+downstream; this path does not connect to PAP.
+See [the Intent reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-propose-a-candidate-from-a-task)
+for configuration, constraints and output semantics.
+
+### Intent source layout
+
+`asc-intent/src/` contains four Rust files:
+
+- `lib.rs`: public entry points and module declarations.
+- `intent_extraction.rs`: task-only model input, response parsing and traceable Cedar draft.
+- `policy_validation.rs`: native Cedar/path checks, escaping and Strict validation.
+- `policy_generator.rs`: orchestration, candidate TTL, complete hashes and safety notes.
+
+The generation instructions in `asc-intent/prompts/policy-generation.md` are
+embedded at build time. Entity, action and field semantics come from the embedded
+schema and its comments; the prompt keeps generation constraints instead of
+duplicating those definitions.
+
+### Extending schema support
+
+Intent embeds `asc-policy-cedar/schema/seccore.cedarschema` into both model input
+and Strict validation; it does not generate or expand the schema. Compatible type
+or field additions that leave identity, path and protection contracts unchanged
+normally need only a schema update and rebuild in Intent, plus targeted tests.
+Identity or path changes still need aligned frontend checks; new modification
+actions need explicit hard-protection semantics. Request producers and enforcement
+must implement new capabilities separately; schema typing does not provide them.
+Incompatible protocol semantics need explicit version changes, and CLI/daemon
+must use matching schemas.
+
+Tests in `asc-intent/tests/policy.rs` use official Cedar authorization to check
+paths, program/argument/attribute conditions, operation-specific complements,
+composition and immutable protection. Strict typing is not a substitute for
+producer invariants such as complete argument indices, normalized paths or rename
+endpoints. No task-to-policy semantic equivalence checker is implemented.
+
+Current-version candidates can be checked offline through the ignored
+`real_model_candidate_case` using `ASC_INTENT_CANDIDATE`, `ASC_INTENT_WORKSPACE`
+and optional `ASC_INTENT_CASE` (`deny-etc`, `unsupported-network`). Without a case,
+this validates structure and Strict, not task semantics. Historical real-model
+archives keep their original versions and cannot be relabeled as new verification.
 
 ## PII scanning
 

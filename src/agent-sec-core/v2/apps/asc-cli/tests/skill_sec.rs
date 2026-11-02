@@ -296,6 +296,7 @@ async fn assert_root_identity_contract(socket: &Path, path: &str, directory: &Pa
     }
     assert_eq!(invoke(socket, &["activate", path]).await.0, 0);
     if rustix::process::geteuid().as_raw() == 0 {
+        let binary = common::executable(directory);
         let export_parent = directory.join("user-output");
         fs::create_dir(&export_parent).unwrap();
         rustix::fs::chown(
@@ -310,7 +311,7 @@ async fn assert_root_identity_contract(socket: &Path, path: &str, directory: &Pa
             vec!["export", path, "--output", export_parent.to_str().unwrap()],
         ] {
             let expected = i32::from(arguments[0] != "export");
-            let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"))
+            let output = std::process::Command::new(&binary)
                 .arg("--socket")
                 .arg(socket)
                 .arg("--timeout-ms")
@@ -342,7 +343,7 @@ async fn assert_root_identity_contract(socket: &Path, path: &str, directory: &Pa
                 assert!(String::from_utf8_lossy(&output.stderr).contains("not supported"));
             }
         }
-        assert_user_can_edit_after_rollback(socket, directory).await;
+        assert_user_can_edit_after_rollback(socket, directory, &binary).await;
         assert_eq!(
             fs::metadata(export_parent.join("snapshot/SKILL.md"))
                 .unwrap()
@@ -352,7 +353,7 @@ async fn assert_root_identity_contract(socket: &Path, path: &str, directory: &Pa
     }
 }
 
-async fn assert_user_can_edit_after_rollback(socket: &Path, directory: &Path) {
+async fn assert_user_can_edit_after_rollback(socket: &Path, directory: &Path, binary: &Path) {
     let skill = directory.join("user-owned-skill");
     let nested = skill.join("nested");
     fs::create_dir_all(&nested).unwrap();
@@ -375,7 +376,7 @@ async fn assert_user_can_edit_after_rollback(socket: &Path, directory: &Path) {
         0
     );
     fs::write(nested.join("note.txt"), "changed\n").unwrap();
-    let rollback = std::process::Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"))
+    let rollback = std::process::Command::new(binary)
         .arg("--socket")
         .arg(socket)
         .args([
@@ -461,7 +462,8 @@ fn certify_cleanup_is_projected_before_output_and_never_changes_certification_st
         let server_findings = findings.clone();
         let server =
             std::thread::spawn(move || reply_to_certify(&listener, &server_findings, case));
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"));
+        let binary = common::executable(&directory.0);
+        let mut command = std::process::Command::new(&binary);
         command
             .current_dir(&directory.0)
             .env("HOME", &directory.0)
