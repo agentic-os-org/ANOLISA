@@ -123,18 +123,29 @@ class BatchExecutionTests(unittest.TestCase):
         )
         analyzer.chmod(0o700)
         result = self.run_cli(str(analyzer))
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(json.loads(result.stdout)["_session_id"], "second")
         self.assertIn("Done: 1 analyzed, 0 skipped, 1 failed", result.stderr)
         self.assertFalse(list(self.root.glob("atif-*.json")))
 
     def test_real_cli_missing_binary_counts_each_file_without_traceback(self) -> None:
         result = self.run_cli(str(self.root / "missing-analyzer"))
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertIn("Done: 0 analyzed, 0 skipped, 2 failed", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(list(self.root.glob("atif-*.json")))
+
+    def test_real_cli_all_successes_exit_zero(self) -> None:
+        analyzer = self.root / "analyzer.py"
+        analyzer.write_text(
+            f"#!{sys.executable}\nimport json,sys\nprint('{{\"accepted\":true}}')\n",
+            encoding="utf-8",
+        )
+        analyzer.chmod(0o700)
+        result = self.run_cli(str(analyzer))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Done: 2 analyzed, 0 skipped, 0 failed", result.stderr)
 
     def run_cli(self, binary: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
