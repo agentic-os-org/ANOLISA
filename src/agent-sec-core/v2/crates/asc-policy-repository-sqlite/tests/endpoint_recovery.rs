@@ -54,6 +54,7 @@ fn persist(repo: &SqlitePolicyRepository, target: TargetRef) -> BindingStateSnap
         scope_id: fixture.scope.scope_id.clone(),
         selector: fixture.scope.selector,
         policy_snapshots: vec![fixture.policy],
+        owner_uid: None,
         status: ScopeStatus::Active,
     })
     .unwrap();

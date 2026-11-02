@@ -123,8 +123,20 @@ pub struct PreparedScope {
     pub selector: ScopeSelector,
     /// Server-resolved authored Policy revisions.
     pub policy_snapshots: Vec<crate::policy::PreparedPolicy>,
+    /// Kernel UID required for credential-bearing process assignments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_uid: Option<u32>,
     /// Mutable lifecycle, independent of policy revisions.
     pub status: ScopeStatus,
+}
+
+impl PreparedScope {
+    /// Whether pinned policies require credential execution and durable release.
+    pub fn uses_credentials(&self) -> bool {
+        self.policy_snapshots
+            .iter()
+            .any(|policy| policy.template.uses_credentials())
+    }
 }
 
 impl Validate for PreparedScope {
@@ -143,6 +155,15 @@ impl Validate for PreparedScope {
             {
                 return Err(ValidationError::new("policyTemplates", "duplicate policy"));
             }
+        }
+        if self.uses_credentials()
+            && (self.owner_uid.is_none_or(|uid| uid == 0)
+                || !matches!(self.selector, ScopeSelector::Process { .. }))
+        {
+            return Err(ValidationError::new(
+                "ownerUid",
+                "credential scopes require a non-root UID and continuous process selector",
+            ));
         }
         self.selector.validate()
     }

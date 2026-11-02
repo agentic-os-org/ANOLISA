@@ -296,6 +296,7 @@ dependencies = [
  "asc-daemon-service",
  "asc-event-sink",
  "asc-foundation-types",
+ "asc-gateway-runtime",
  "asc-model-client",
  "asc-observability",
  "asc-pap",
@@ -451,6 +452,36 @@ version = "1.1.2"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-gateway-plan"
+version = "1.1.1"
+dependencies = [
+ "asc-credential-store",
+ "asc-policy-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-gateway-runtime"
+version = "1.1.1"
+dependencies = [
+ "asc-credential-store",
+ "asc-gateway-plan",
+ "asc-pap",
+ "asc-policy-repository",
+ "asc-policy-repository-sqlite",
+ "asc-policy-target-contracts",
+ "asc-policy-types",
+ "nix",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

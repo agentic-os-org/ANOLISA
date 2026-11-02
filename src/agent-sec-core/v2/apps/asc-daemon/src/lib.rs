@@ -12,6 +12,8 @@ pub use scope_discovery::{ScopeDiscoveryJob, ScopeDiscoveryRegistry};
 mod bootstrap;
 pub use actions::{scan_application, skill_application, skill_task_scope};
 mod cli;
+/// Secret-gateway composition.
+pub mod gateway;
 mod reconciliation;
 /// The security-event `SQLite` retention background service.
 pub mod retention;
@@ -21,7 +23,7 @@ mod signals;
 pub use bootstrap::{BootstrapConfig, BootstrapError, default_service_config, serve};
 pub use cli::{Cli, CliError, ParseOutcome};
 pub use reconciliation::{
-    UnavailableReconciliation, start_policy_reconciliation, start_policy_reconciliation_with_client,
+    start_policy_reconciliation_with_client, start_policy_reconciliation_with_gateway,
 };
 pub use retention::{
     RETENTION_JOIN_TIMEOUT, RetentionPass, RetentionReport, RetentionSchedule, RetentionTask,

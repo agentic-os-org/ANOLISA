@@ -1,4 +1,4 @@
-//! Target-specific composition only; queue and lifecycle implementation live in Policy Runtime.
+//! Target-specific composition; queue and lifecycle remain in Policy Runtime.
 use asc_agentsight_client::AgentSightClientFactory;
 use asc_pcp::{
     BindingReconciler, RetryPolicy, StoreError, TargetDeploymentClient,
@@ -7,73 +7,96 @@ use asc_pcp::{
 use asc_policy_repository::{BindingReconcileCatalog, BindingStateRepository};
 use asc_policy_runtime::reconciliation::{MonotonicClock, ReconciliationRuntime, RuntimeConfig};
 use asc_policy_translator_agentsight::AgentSightTranslator;
+use asc_policy_types::Validate;
 use asc_policy_types::binding::PreparedBinding;
+use asc_policy_types::target::{
+    AdapterFault, Failure, FailureKind, TargetBindingPlan, TranslationOutcome,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Initializes the service's PEP dependencies and starts policy reconciliation.
-/// Target selection and construction belong here, not in the process entrypoint.
+/// Composes file and credential execution routes without coupling their readiness.
 /// # Errors
-/// Returns a Repository readiness or worker startup error.
-pub fn start_policy_reconciliation<
+/// Returns repository readiness or worker startup failures.
+pub fn start_policy_reconciliation_with_gateway<
     R: BindingStateRepository + BindingReconcileCatalog + 'static,
 >(
     repository: Arc<R>,
+    gateway: Option<Arc<asc_gateway_runtime::GatewayService>>,
 ) -> Result<ReconciliationRuntime, StoreError> {
-    start_policy_reconciliation_with_factory(
+    let factory: Arc<dyn TargetDeploymentClientFactory> = Arc::new(move || {
+        let service = gateway
+            .as_ref()
+            .ok_or_else(|| Failure::new(FailureKind::Retryable, "GATEWAY_UNAVAILABLE"))?;
+        Ok(Arc::new(asc_gateway_runtime::GatewayBindingClient::new(
+            service.clone(),
+        )) as Arc<dyn TargetDeploymentClient>)
+    });
+    start_with_factories(
         repository,
         Arc::new(AgentSightClientFactory::default()),
+        Some(factory),
     )
 }
 
-/// Starts the `AgentSight` composition with an injected deployment Client.
-/// This permits component validation without host credentials or target I/O.
+/// Uses an injected file target Client for component validation.
 /// # Errors
-/// Returns a core configuration, Repository readiness or worker startup error.
+/// Returns repository readiness or worker startup failures.
 pub fn start_policy_reconciliation_with_client<
     R: BindingStateRepository + BindingReconcileCatalog + 'static,
 >(
     repository: Arc<R>,
     client: Arc<dyn TargetDeploymentClient>,
 ) -> Result<ReconciliationRuntime, StoreError> {
-    start_policy_reconciliation_with_factory(repository, Arc::new(move || Ok(client.clone())))
+    start_with_factories(repository, Arc::new(move || Ok(client.clone())), None)
 }
 
-fn start_policy_reconciliation_with_factory<
-    R: BindingStateRepository + BindingReconcileCatalog + 'static,
->(
+fn start_with_factories<R: BindingStateRepository + BindingReconcileCatalog + 'static>(
     repository: Arc<R>,
-    factory: Arc<dyn TargetDeploymentClientFactory>,
+    file_factory: Arc<dyn TargetDeploymentClientFactory>,
+    gateway_factory: Option<Arc<dyn TargetDeploymentClientFactory>>,
 ) -> Result<ReconciliationRuntime, StoreError> {
     let clock = Arc::new(MonotonicClock::default());
-    let translator = |binding: &PreparedBinding| AgentSightTranslator.translate(binding);
-    let core = Arc::new(BindingReconciler::new(
-        repository.clone(),
-        Arc::new(translator),
-        BTreeMap::from([("agentsight".into(), factory)]),
-        "agentsight".into(),
-        clock,
-        RetryPolicy {
-            max_attempts: 5,
-            base_delay_ms: 1000,
-            max_delay_ms: 30_000,
-        },
-    )?);
+    let mut factories = BTreeMap::from([("agentsight".into(), file_factory)]);
+    if let Some(factory) = gateway_factory {
+        factories.insert("gateway".into(), factory);
+    }
+    let adapter = |binding: &PreparedBinding| {
+        if binding.policy.template.uses_credentials() {
+            binding.validate().map_err(|_| AdapterFault {
+                code: "GATEWAY_INVALID_BINDING".into(),
+            })?;
+            let content = serde_json::to_vec(binding).map_err(|_| AdapterFault {
+                code: "GATEWAY_ENCODING_FAILED".into(),
+            })?;
+            Ok(TranslationOutcome::Translated(TargetBindingPlan {
+                format: "agent-sec-gateway-binding/v1".into(),
+                content,
+            }))
+        } else {
+            AgentSightTranslator.translate(binding)
+        }
+    };
+    let core = Arc::new(
+        BindingReconciler::new(
+            repository.clone(),
+            Arc::new(adapter),
+            factories,
+            "agentsight".into(),
+            clock,
+            RetryPolicy {
+                max_attempts: 5,
+                base_delay_ms: 1000,
+                max_delay_ms: 30_000,
+            },
+        )?
+        .with_route_selector(|binding| {
+            if binding.policy.template.uses_credentials() {
+                "gateway".into()
+            } else {
+                "agentsight".into()
+            }
+        }),
+    );
     ReconciliationRuntime::start(repository, core, RuntimeConfig::default())
-}
-
-/// Failed service admission remains explicit while unrelated daemon services run.
-pub struct UnavailableReconciliation;
-
-impl asc_pap::BindingReconcileEnqueuer for UnavailableReconciliation {
-    fn check_ready(&self) -> Result<(), asc_pap::PapError> {
-        Err(asc_pap::PapError::Unavailable)
-    }
-
-    fn enqueue(
-        &self,
-        _: &asc_policy_types::identifiers::ResourceId,
-    ) -> Result<(), asc_pap::EnqueueError> {
-        Err(asc_pap::EnqueueError::Stopped)
-    }
 }

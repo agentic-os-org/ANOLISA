@@ -112,6 +112,16 @@ pub trait PapRepository: Send + Sync {
         id: &ResourceId,
     ) -> Result<Vec<asc_policy_repository::BindingIntentReceipt>, PapError>;
 
+    /// Reports whether discovery has stopped and no Binding responsibility remains.
+    /// # Errors
+    /// Returns storage failures; never assumes completion from an empty in-memory set.
+    fn scope_execution_ready_to_release(&self, id: &ResourceId) -> Result<bool, PapError>;
+
+    /// Confirms successful execution release and finalizes an otherwise empty deletion.
+    /// # Errors
+    /// Rejects unfinished discovery/Binding cleanup or storage failures.
+    fn finish_scope_execution(&self, id: &ResourceId) -> Result<(), PapError>;
+
     /// Admits missing instances and retires absent ones atomically with Scope lifecycle.
     /// Returns only changed Binding intents; terminal failures are not implicitly retried.
     /// # Errors

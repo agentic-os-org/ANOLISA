@@ -280,15 +280,31 @@ fn complete_serialized_core_cases() {
             id: case.id.clone(),
         });
         let client: Arc<dyn TargetDeploymentClient> = harness.clone();
+        let selected_route = case.variant == "create";
+        let mut factories = BTreeMap::from([(
+            "test".into(),
+            Arc::new(move || Ok(client.clone())) as Arc<dyn crate::TargetDeploymentClientFactory>,
+        )]);
+        if selected_route {
+            factories.insert(
+                "unselected".into(),
+                Arc::new(|| {
+                    Err(Failure::new(
+                        FailureKind::Rejected,
+                        "UNSELECTED_ROUTE_OPENED",
+                    ))
+                }),
+            );
+        }
         let reconciler = BindingReconciler::new(
             harness.clone(),
             harness.clone(),
-            BTreeMap::from([(
-                "test".into(),
-                Arc::new(move || Ok(client.clone()))
-                    as Arc<dyn crate::TargetDeploymentClientFactory>,
-            )]),
-            "test".into(),
+            factories,
+            if selected_route {
+                "unselected".into()
+            } else {
+                "test".into()
+            },
             harness.clone(),
             RetryPolicy {
                 max_attempts: 3,
@@ -297,6 +313,11 @@ fn complete_serialized_core_cases() {
             },
         )
         .unwrap();
+        let reconciler = if selected_route {
+            reconciler.with_route_selector(|_| "test".into())
+        } else {
+            reconciler
+        };
         for (index, step) in case.steps.into_iter().enumerate() {
             harness.now.store(step.now, Ordering::SeqCst);
             *harness.script.lock().unwrap() = Script {

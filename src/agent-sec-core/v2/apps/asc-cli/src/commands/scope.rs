@@ -35,6 +35,9 @@ pub(crate) struct CreateScope {
     policy_id: ResourceId,
     #[arg(long, value_parser = revision, requires = "policy_id")]
     policy_revision: Revision,
+    /// Non-root process owner UID (required by credential policies).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "pid")]
+    owner_uid: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -64,6 +67,7 @@ impl ScopeCommand {
                 POLICY_SCOPES_CREATE,
                 &CreateScopeParams {
                     selector: input.selector.value(),
+                    owner_uid: input.owner_uid,
                     policy_templates: vec![PolicyReference {
                         policy_id: input.policy_id.clone(),
                         policy_revision: input.policy_revision,

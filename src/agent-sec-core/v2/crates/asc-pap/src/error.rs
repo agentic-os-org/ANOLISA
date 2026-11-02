@@ -54,6 +54,9 @@ pub enum PapError {
     /// Pagination parameters are outside the bounded PAP query contract.
     #[error("invalid pagination: limit must be between 1 and 1000")]
     InvalidPagination,
+    /// File-only authority cannot mutate a credential-bearing Policy revision.
+    #[error("credential policy requires root authority")]
+    CredentialAuthorityRequired,
     /// An immutable identity or concurrent revision precondition conflicted.
     #[error("immutable revision conflict")]
     Conflict,

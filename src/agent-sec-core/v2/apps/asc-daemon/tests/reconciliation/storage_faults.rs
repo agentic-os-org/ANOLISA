@@ -230,6 +230,7 @@ fn scenario(
                     policy_id: fixture.policy.policy_id.clone(),
                     policy_revision: fixture.policy.revision,
                 }],
+                None,
             )
             .unwrap();
         let accepted = repo

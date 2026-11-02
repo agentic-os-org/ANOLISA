@@ -90,6 +90,7 @@ fn sigkill_before_discovery_commit_rolls_back_pin_and_all_bindings() {
                 }
             },
             policy_snapshots: vec![binding.policy],
+            owner_uid: None,
             status: ScopeStatus::Active,
         };
         repo.put_scope(&scope).unwrap();
@@ -328,6 +329,7 @@ fn oversized_policy_and_assignment_are_rejected_before_commit() {
         scope_id: ResourceId::new("oversized").unwrap(),
         selector: ScopeSelector::Pid { pid: 42 },
         policy_snapshots: vec![a, b],
+        owner_uid: None,
         status: ScopeStatus::Active,
     };
     assert!(matches!(
@@ -353,6 +355,7 @@ fn repository_runs_the_current_pap_request_slice_without_a_reconciler() {
         scope_id: ResourceId::new("scope").unwrap(),
         selector: ScopeSelector::Pid { pid: 4242 },
         policy_snapshots: vec![policy],
+        owner_uid: None,
         status: ScopeStatus::Active,
     };
     repository.put_scope(&scope).unwrap();

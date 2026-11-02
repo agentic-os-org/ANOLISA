@@ -264,6 +264,22 @@ impl PapRepository for SqlitePolicyRepository {
         })
         .map_err(RepositoryError::pap)
     }
+    fn scope_execution_ready_to_release(&self, key: &ResourceId) -> Result<bool, PapError> {
+        self.access(false, |tx| {
+            let Some(scope) = read_scope(tx, key)? else {
+                return Ok(false);
+            };
+            Ok(scope.execution_pending
+                && scope.scope.status == ScopeStatus::Deleting
+                && scope.discovery_stopped
+                && binding_ids(tx, key)?.is_empty())
+        })
+        .map_err(RepositoryError::pap)
+    }
+    fn finish_scope_execution(&self, key: &ResourceId) -> Result<(), PapError> {
+        self.access(true, |tx| crate::records::confirm_scope_execution(tx, key))
+            .map_err(RepositoryError::pap)
+    }
     fn sync_scope_instances(
         &self,
         key: &ResourceId,

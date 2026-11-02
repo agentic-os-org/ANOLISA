@@ -42,6 +42,28 @@ pub trait BindingReconcileEnqueuer: Send + Sync {
     fn enqueue(&self, id: &asc_foundation_types::ResourceId) -> Result<(), EnqueueError>;
 }
 
+/// Credential execution owned by an immutable Scope, never by a file-only assignment.
+/// Operations must be idempotent across retries and restart. Release is called only
+/// after discovery termination and all Binding cleanup have been durably confirmed.
+pub trait ScopeExecution: Send + Sync {
+    /// Checks execution availability without creating resources.
+    /// # Errors
+    /// Rejects unsupported or unavailable credential execution.
+    fn validate(&self, scope: &asc_policy_types::scope::PreparedScope) -> Result<(), PapError>;
+    /// Prepares resources after the Scope and its cleanup responsibility are committed.
+    /// # Errors
+    /// Leaves any partially prepared resources available to revoke and release.
+    fn prepare(&self, scope: &asc_policy_types::scope::PreparedScope) -> Result<(), PapError>;
+    /// Closes credential injection before discovery and Binding cleanup.
+    /// # Errors
+    /// Retains durable cleanup responsibility when revocation cannot be confirmed.
+    fn revoke(&self, scope: &asc_policy_types::scope::PreparedScope) -> Result<(), PapError>;
+    /// Releases remaining Scope resources after Binding cleanup.
+    /// # Errors
+    /// Retains durable cleanup responsibility until release succeeds.
+    fn release(&self, id: &asc_foundation_types::ResourceId) -> Result<(), PapError>;
+}
+
 /// Lifecycle of Scope-owned instance discovery.
 pub trait ScopeDiscovery: Send + Sync {
     /// Starts one worker from the stored assignment. On error no worker may remain.

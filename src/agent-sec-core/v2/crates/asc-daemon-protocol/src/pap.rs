@@ -41,6 +41,9 @@ pub struct CreateScopeParams {
     /// Exact policies assigned to every Scope; admission requires 1–32 distinct IDs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policy_templates: Vec<PolicyReference>,
+    /// Process owner attribution, not caller authority; required for credential scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_uid: Option<u32>,
 }
 
 fn deserialize_authored_selector<'de, D>(deserializer: D) -> Result<ScopeSelector, D::Error>

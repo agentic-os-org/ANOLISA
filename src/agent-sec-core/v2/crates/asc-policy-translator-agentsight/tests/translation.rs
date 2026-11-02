@@ -293,7 +293,10 @@ fn rule_order_is_preserved_and_changed_rules_change_the_plan() {
         panic!("expected plan");
     };
     let decoded: AgentSightBindingPlan = serde_json::from_slice(&plan.content).unwrap();
-    let Resource::File { path } = &native_template(&mut reversed.policy.template).rules[0].target;
+    let Resource::File { path } = &native_template(&mut reversed.policy.template).rules[0].target
+    else {
+        panic!("expected file target");
+    };
     assert!(decoded.policy.content.starts_with(&format!(
         "source AGENT = exec \"**\"\nrule agentseccore-unlink-0000:\n  block unlink file \"{path}\""
     )));

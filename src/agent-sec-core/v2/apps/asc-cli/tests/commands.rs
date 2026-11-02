@@ -655,6 +655,33 @@ fn scope_create_excludes_unsupported_cgroup_selector() {
 }
 
 #[test]
+fn scope_owner_uid_maps_to_rpc_and_rejects_root_or_pid_credential_selection() {
+    let base = [
+        "agent-sec-cli",
+        "scope",
+        "create",
+        "--policy-id",
+        "credential-policy",
+        "--policy-revision",
+        "1",
+    ];
+    for (flag, value) in [("--process-name", "agent"), ("--executable", "/bin/agent")] {
+        let args = base.into_iter().chain([flag, value, "--owner-uid", "1000"]);
+        let request = Cli::parse_from(args).unwrap().request().unwrap();
+        assert_eq!(request.params["ownerUid"], 1000);
+        assert_eq!(request.method, "policy.scopes.create");
+    }
+    for extra in [
+        vec!["--process-name", "agent", "--owner-uid", "0"],
+        vec!["--process-name", "agent", "--owner-uid", "-1"],
+        vec!["--process-name", "agent", "--owner-uid", "4294967296"],
+        vec!["--pid", "42", "--owner-uid", "1000"],
+    ] {
+        assert!(Cli::parse_from(base.into_iter().chain(extra)).is_err());
+    }
+}
+
+#[test]
 fn scope_create_encodes_name_and_path_assignments() {
     for (flag, matcher) in [
         ("--process-name", json!({"processName":"scope-agent"})),
@@ -697,4 +724,109 @@ fn scope_create_encodes_name_and_path_assignments() {
         ])
         .is_err()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_cli_preserves_minimal_results_and_conflicts() {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    // The real client authenticates the server UID; do not add a test bypass.
+    if rustix::process::geteuid().as_raw() != 0 {
+        return;
+    }
+    let directory = common::Directory::new();
+    let socket = directory.0.join("gateway.sock");
+    let cases: &[(&[&str], &str, Value, Value)] = &[
+        (&["enable"], "gateway.enable", json!({}), json!({})),
+        (&["disable"], "gateway.disable", json!({}), json!({})),
+        (
+            &["status"],
+            "gateway.status",
+            json!({}),
+            json!({"enabled":true,"ready":true,"scopes":[{"scopeId":"scope-1","bindings":["binding-1"]}]}),
+        ),
+        (
+            &["key", "list"],
+            "gateway.key.list",
+            json!({}),
+            json!({"credentials":["github"]}),
+        ),
+        (
+            &["key", "add", "github", "--secret-file", "/root/a b"],
+            "gateway.key.add",
+            json!({"credential":"github","secretFile":"/root/a b"}),
+            json!({"credential":"github"}),
+        ),
+        (
+            &["key", "remove", "github"],
+            "gateway.key.remove",
+            json!({"credential":"github"}),
+            json!({"credential":"github"}),
+        ),
+        (
+            &["credentials", "--scope", "scope-1"],
+            "gateway.credentials",
+            json!({"scopeId":"scope-1"}),
+            json!({"scopeId":"scope-1","environment":{"GITHUB_TOKEN":"fake","GIT_SSL_CAINFO":"/run/agent-sec-gateway/ca-bundle.pem"}}),
+        ),
+        (
+            &["key", "add", "github", "--secret-file", "/root/new"],
+            "gateway.key.add",
+            json!({"credential":"github","secretFile":"/root/new"}),
+            Value::Null,
+        ),
+    ];
+    for (arguments, method, params, result) in cases {
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let mut args: Vec<OsString> = vec![
+            "--socket".into(),
+            socket.as_os_str().into(),
+            "gateway".into(),
+        ];
+        args.extend(arguments.iter().map(OsString::from));
+        let cli = tokio::task::spawn_blocking(move || common::run(&args));
+        let response = if result.is_null() {
+            DaemonResponse::error(
+                RequestId::new("gateway-test").unwrap(),
+                "conflict",
+                "credential already holds a different value",
+            )
+        } else {
+            DaemonResponse::success(RequestId::new("gateway-test").unwrap(), result.clone())
+        };
+        let response = serde_json::to_value(response).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = tokio::io::BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], *method);
+            assert_eq!(request["params"], *params);
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            stream.get_mut().write_all(&bytes).await.unwrap();
+        })
+        .await
+        .unwrap();
+        let output = cli.await.unwrap();
+        if result.is_null() {
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+                response
+            );
+        } else {
+            assert_eq!(output.status.code(), Some(0));
+            assert!(output.stderr.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                *result
+            );
+        }
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+    }
 }
