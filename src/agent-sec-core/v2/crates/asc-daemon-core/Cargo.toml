@@ -12,6 +12,7 @@ publish.workspace = true
 asc-intent.workspace = true
 asc-model-client.workspace = true
 tracing.workspace = true
+asc-daemon-protocol = { workspace = true }
 serde = { workspace = true }
 asc-security-events = { workspace = true }
 sha2 = { workspace = true }

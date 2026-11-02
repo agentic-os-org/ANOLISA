@@ -1,6 +1,7 @@
-// Scope/Binding selects the process instance; policies leave principal unconstrained.
+// Runtime authorization supports logical subjects independently of process binding.
 namespace SecCore {
-    entity Subject;
+    entity Subject { agent_type?: String };
+    entity Process { program: String, resolved_program: String };
 
     // Resource attributes describe concrete request targets, not policy patterns.
     entity File { path: String };
@@ -52,6 +53,11 @@ namespace SecCore {
     action "file.exec" appliesTo {
         principal: Subject,
         resource: File,
+        context: FileExecContext
+    };
+    action "process.spawn" appliesTo {
+        principal: Subject,
+        resource: Process,
         context: FileExecContext
     };
     action "network.use" appliesTo {

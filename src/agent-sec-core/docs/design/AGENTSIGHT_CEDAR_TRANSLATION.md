@@ -89,9 +89,9 @@ actions; unrestricted file.write; create/rename/setattr; `context.input.program`
 `mode`, `ownerUid`, `ownerGid`, `cwd`, `arg_count` and `args` conditions;
 resource identity/hierarchy conditions; arbitrary
 `like` patterns; unbounded complements; unsupported functions and expressions.
-Even an unsupported condition in a constant-false branch is rejected. The common
-frontend separately rejects unknown schema revisions, principal constraints and
-references, templates, and annotations including `@id` and `@advice`.
+Even an unsupported condition in a constant-false branch is rejected. AgentSight rejects
+principal constraints and references, and annotated policies. The shared frontend
+checks the schema revision, rejects templates and validates supported annotations.
 
 Only these fixed target semantics are accepted:
 

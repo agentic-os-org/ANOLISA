@@ -1206,3 +1206,47 @@ CLI 只渲染候选，不交互、不产生请求，也不产生授权；任务�
 覆盖参数/版本拒绝、原始响应和任务哈希绑定、原生 Cedar 组合裁决、模型输出重建与篡改检查，
 以及失败隔离、并发名额、过期及输出检查。
 实际进程、路径别名、rename 两端与参数索引等事实仍由未来执行端保证；这些测试不是执行拦截证据。
+
+## V2 sandbox 授权扩展
+
+`authorization.evaluate`、`authorization.claim` 与 `authorization.report` 使用现有 UDS、JSON 信封和 peer UID，
+不修改 V1 oracle。这些方法面向已准入的运行时调用者，不接受调用方上传 Cedar 策略。
+授权 `request_id`、`execution_id` 位于 params 内，与传输层生成的 request ID 分开。
+
+| method | params / data | 处理 |
+|---|---|---|
+| `authorization.evaluate` | `AuthorizationRequest` → `Decision` | 读取一个有效策略版本、求值；不启动进程、不等待 ask。 |
+| `authorization.claim` | `DecisionClaim` → `ClaimResponse` | accept 在期限内接收；execute 向同 UID 一次性转交原请求、决定与已固定的执行状态；abandon 关闭未执行交接。不重新授权。 |
+| `authorization.report` | `ExecutionReceipt` → `ReceiptAck` | 校验当前 peer 对决策的归属和执行引用，确认日志持久化；不重新授权或执行。 |
+
+类型定义见 [`authorization.rs`](../../v2/crates/asc-daemon-protocol/src/authorization.rs)。
+request 包含 type=os、request_id、execution_id、principal、launch、requested_permissions。launch 仅含 program、resolved_program、args、cwd。PEP 在本地固定环境与路径身份，跨进程交接时在 claim 的 accept 阶段一次性提交 execution。execute 和 abandon 只传标识与阶段。
+Decision 返回最终命令、有效权限、策略版本、接收期限和 warnings。仅当路径条件要求区分文件与目录时，require_files 列出须由执行侧核实为文件的路径。
+`approval_requirements` 是 V2 sandbox 决定附带的展示来源，缺省为空，空列表不序列化。
+每项包含 `target` 与可选的策略 `message`：target.kind 为 execution、filesystem 或 network。
+execution 的 `original_request` 区分最终执行要求与改写前保留的审批要求；filesystem 包含规范路径
+`path`、`right`（read/write）和 `excluded_paths`，表示不含更具体子区域的最终权限区域；network
+表示完整宿主网络。PDP 将代表性子路径探测映射回真实区域，保留对应审批文案，不输出内部探测路径。
+只记录 escalate 触发的事项；它们不新增授权、不代替 effective_permissions，也不是独立审批开关。
+改写前的事项转为 original_request=true 的执行要求；最终资源项仅来自对最终命令的重新求值。
+PEP 从已固定的路径事实及只用于标签的本地查询区分文件与目录，不根据命令或原因文字猜测权限。
+新客户端可读取缺少该字段的旧决定并回退为整体原因。旧版严格解码器不接受非空新字段，因此本次
+未发布的 V2 扩展应连同 daemon 与 CLI 一起更新；不改变 V1 oracle。对应 fixture 为
+`asc-daemon-protocol/tests/authorization_display.rs` 和 `asc-pdp-runtime/tests/authorization.rs`。
+所有类型拒绝未知字段。daemon 从 PAP 同一事务读取配置所选策略的当前版本；策略更新成功后供下一次授权使用，删除或不可用时拒绝授权，不回退缓存旧版本。
+
+MODIFY 携带 PDP 已完整授权的最终命令与权限，绑定原请求摘要；PEP 本地核验后直接执行。
+DEFER 没有执行权，PEP 停止并回执。STEP_UP 的本地确认通过后
+直接执行绑定动作，不再 evaluate。PEP 须在 expires_at 前一次性接收决定；接收后的审批等待和执行不再检查该期限。report 只接受同一 peer UID 的决策，包含 approval、
+installed/started、exit_code/signal/cancel_signal、错误和记录时间。
+已成功报告的决策拒绝重复回执，包括 DEFER。未通过 claim 接收的决策保留到 expires_at 后 24 小时；已接收交接保留到回执或 daemon 重启，仍受全局和每 UID 容量限制；它不限制已接收决定的执行。回执事件中的 warnings 来自 daemon 保存的 Decision。
+
+领域 DENY 是成功 RPC 中的决策。错误使用既有目录：无配置返回 `unavailable`，
+非法载荷 `invalid_argument`，跨 UID `permission_denied`，过期/引用冲突 `conflict`，
+容量不足 `resource_exhausted`，存储或内部失败 `internal`。只有所有配置的 SQLite/JSONL
+记录成功后才 Ack；部分写入失败返回错误，不承诺跨存储事务或自动重试。
+身份字段描述逻辑 Agent，由接入方提供；peer UID 约束决策与回执归属，不认证自报 agent_type。
+
+fixture：`asc-daemon-handler/src/authorization.rs`、`asc-daemon-core/src/authorization.rs`、
+`tests/e2e/linux-sandbox/authorized_cli.py`。部署和后端边界见
+[Sandbox 主设计](LINUX_SANDBOX_PEP_DESIGN_zh.md)。

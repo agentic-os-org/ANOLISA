@@ -2,8 +2,8 @@
 
 use crate::PepError;
 use asc_sandbox_types::{
-    ExecutionResult, ExecutionSpec, LaunchSpec, OsPermissionSet, PathFact, Validate,
-    ValidationError,
+    BackendCapabilities, ExecutionResult, ExecutionSpec, LaunchSpec, OsPermissionSet, PathFact,
+    Validate, ValidationError,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -34,6 +34,24 @@ impl SandboxBackend {
         Ok(Self::new(parent.join("linux-sandbox")))
     }
 
+    /// Probes the helper without passing target environment or executing a target.
+    ///
+    /// # Errors
+    /// Rejects unavailable helpers and malformed capability replies.
+    pub fn capabilities(&self) -> Result<BackendCapabilities, PepError> {
+        let output = std::process::Command::new(&self.helper)
+            .arg("--capabilities")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()?;
+        if !output.status.success() {
+            return Err(PepError::Unsupported(
+                "strict backend capability probe failed".into(),
+            ));
+        }
+        Ok(serde_json::from_slice(&output.stdout)?)
+    }
+
     /// Installs exactly the supplied permissions and waits for the target tree.
     ///
     /// # Errors
@@ -50,6 +68,7 @@ impl SandboxBackend {
             launch,
             permissions,
             path_facts: facts,
+            mount_aliases: Vec::new(),
         })
     }
 

@@ -574,3 +574,107 @@ fn gateway_method_inventory_matches_dispatch_and_access() {
         .is_err()
     );
 }
+
+#[test]
+fn cedar_policy_sources_round_trip_and_reject_mixed_or_duplicate_fields() {
+    let input = json!({"policyName":"sandbox", "template":{
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system", "revision":1},
+            "text":"permit(principal, action, resource);"
+        }
+    }});
+    assert_eq!(round_trip::<CreatePolicyParams>(input.clone()), input);
+    let mut mixed = input.clone();
+    mixed["template"]["specVersion"] = json!("0.1");
+    assert!(serde_json::from_value::<CreatePolicyParams>(mixed).is_err());
+    let mut injected = input;
+    injected["template"]["content"]["ast"] = json!({});
+    assert!(serde_json::from_value::<CreatePolicyParams>(injected).is_err());
+    for raw in [
+        r#"{"policyName":"p","template":{"specVersion":"0.1","specVersion":"0.1","rules":[]}}"#,
+        r#"{"policyName":"p","template":{"language":"cedar","language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"permit(principal,action,resource);"}}}"#,
+    ] {
+        assert!(serde_json::from_str::<CreatePolicyParams>(raw).is_err());
+    }
+}
+
+#[test]
+fn native_template_error_diagnostics_remain_specific() {
+    let native = json!({"specVersion":"0.1", "rules":[{
+        "effect":"block", "category":"file", "action":"read",
+        "target":{"type":"file", "path":"/work"}
+    }]});
+    let mut missing_version = native.clone();
+    missing_version
+        .as_object_mut()
+        .unwrap()
+        .remove("specVersion");
+    let mut wrong_action = native.clone();
+    wrong_action["rules"][0]["action"] = json!("missing");
+    let mut wrong_path = native.clone();
+    wrong_path["rules"][0]["target"]["path"] = json!(17);
+    let mut unknown_field = native.clone();
+    unknown_field["extra"] = json!(true);
+    for template in [
+        Value::Null,
+        missing_version,
+        wrong_action,
+        wrong_path,
+        unknown_field,
+    ] {
+        let expected =
+            serde_json::from_value::<asc_policy_types::authoring::PolicyTemplate>(template.clone())
+                .unwrap_err()
+                .to_string();
+        let actual = serde_json::from_value::<CreatePolicyParams>(json!({
+            "policyName":"baseline", "template":template
+        }))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(actual, expected);
+    }
+    let duplicate = r#"{"policyName":"baseline","template":{"specVersion":"0.1","rules":[{"effect":"block","effect":"allow","category":"file","action":"read","target":{"type":"file","path":"/work"}}]}}"#;
+    assert!(serde_json::from_str::<CreatePolicyParams>(duplicate).is_err());
+}
+
+#[test]
+fn native_and_cedar_policies_round_trip_inside_typed_daemon_responses() {
+    let binding: PreparedBinding = serde_json::from_str(include_str!(
+        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
+    ))
+    .unwrap();
+    let mut policy = binding.policy;
+    let cedar = serde_json::from_value(json!({
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system", "revision":1},
+            "text":"permit(principal, action, resource);"
+        }
+    }))
+    .unwrap();
+    for source in [policy.template.clone(), cedar] {
+        policy.template = source;
+        let response =
+            DaemonResponse::success(RequestId::new("policy-response").unwrap(), policy.clone());
+        round_trip_value(&response);
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DaemonResponse<PreparedPolicy>>(&encoded).unwrap(),
+            response
+        );
+        let duplicated = if encoded.contains("\"language\":\"cedar\"") {
+            encoded.replacen(
+                "\"language\":\"cedar\"",
+                "\"language\":\"cedar\",\"language\":\"cedar\"",
+                1,
+            )
+        } else {
+            encoded.replacen(
+                "\"specVersion\":\"0.1\"",
+                "\"specVersion\":\"0.1\",\"specVersion\":\"0.1\"",
+                1,
+            )
+        };
+        assert_ne!(duplicated, encoded);
+        assert!(serde_json::from_str::<DaemonResponse<PreparedPolicy>>(&duplicated).is_err());
+    }
+}

@@ -136,6 +136,27 @@ fn unsupported_conditions_reject_the_whole_policy_including_later_statements() {
 }
 
 #[test]
+fn runtime_only_rules_reject_the_whole_agentsight_binding() {
+    let base = rule(
+        r#"context.input.operation == SecCore::WriteOperation::"write" && resource.path == "/config""#,
+    );
+    for runtime_rule in [
+        base.replace("forbid(principal,", r#"forbid(principal == SecCore::Subject::"worker","#),
+        base.replace("when {", r#"when { principal == SecCore::Subject::"worker" &&"#),
+        format!(r#"@id("protected") {base}"#),
+        r#"@advice("{\"verdict\":\"escalate\"}") permit(principal, action == SecCore::Action::"process.spawn", resource);"#.into(),
+    ] {
+        let combined = format!("{base}\n{runtime_rule}");
+        let input = binding(&combined);
+        let asc_policy_types::authoring::PolicySource::Cedar(source) = &input.policy.template else {
+            unreachable!()
+        };
+        asc_policy_cedar::validate(source).unwrap();
+        assert!(matches!(AgentSightTranslator.translate(&input).unwrap(), TranslationOutcome::Rejected(_)), "{runtime_rule}");
+    }
+}
+
+#[test]
 fn conflicts_limits_empty_output_and_unknown_schema_fail_without_a_plan() {
     let base = r#"context.input.operation == SecCore::WriteOperation::"write" && (resource.path == "/a" || resource.path like "/a/*")"#;
     for text in [

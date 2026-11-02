@@ -32,6 +32,7 @@ pub struct DaemonDispatcher {
     principal_policy: Arc<dyn PrincipalPolicy>,
     observability: Option<asc_daemon_core::ObservabilityService>,
     intent: Option<Arc<asc_daemon_core::intent::IntentService>>,
+    authorization: Option<asc_daemon_core::AuthorizationService>,
 }
 
 impl DaemonDispatcher {
@@ -59,7 +60,15 @@ impl DaemonDispatcher {
             principal_policy,
             observability: None,
             intent: None,
+            authorization: None,
         }
+    }
+
+    /// Installs the trusted policy evaluator and checked receipt sink.
+    #[must_use]
+    pub fn with_authorization(mut self, service: asc_daemon_core::AuthorizationService) -> Self {
+        self.authorization = Some(service);
+        self
     }
 
     /// Installs the explicitly configured observability ingestion application.
@@ -156,6 +165,14 @@ impl DaemonDispatcher {
             MethodId::IntentPropose => {
                 crate::intent::handle(request_id, peer, control, self.intent.as_deref(), request)
             }
+            MethodId::Authorization(method) => crate::authorization::handle(
+                request_id,
+                peer,
+                control,
+                self.authorization.as_ref(),
+                method,
+                request.params,
+            ),
             MethodId::Health => DaemonResponse::success(
                 request_id,
                 serde_json::json!({

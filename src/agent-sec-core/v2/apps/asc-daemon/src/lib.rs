@@ -9,6 +9,8 @@
 mod actions;
 mod intent;
 pub use intent::intent_from_environment;
+/// Trusted runtime authorization policy loading.
+pub mod authorization;
 mod scope_discovery;
 pub use scope_discovery::{ScopeDiscoveryJob, ScopeDiscoveryRegistry};
 mod bootstrap;

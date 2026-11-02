@@ -6,9 +6,9 @@
 第 5–7 节保留早期 Cedar/Dogwood 导入评估，第 8 节记录当前选定的架构、数据结构、
 版本与持久化约定。选定方案采用双前端，不实施 Cedar 与原有 JSON 策略之间的转换器。
 
-设计更新日期：2026-11-03。Cedar 准入与 PAP/RPC 源码持久化已接入；
+Cedar 准入与 PAP/RPC 源码持久化已接入；
 测试通过已有 `pst` 接口重新解析保存的源码。
-Cedar 删除/普通写保护已接入现有 PEP Adapter 的翻译与部署；运行时授权服务仍待实现。
+Cedar 删除/普通写保护已接入现有 PEP Adapter 的翻译与部署；sandbox 运行时授权使用 PAP 当前策略及 schema revision 1。
 具体能力边界及流程见 [专属 Adapter 契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)。
 
 原有 JSON 链路与早期导入评估的核查基线：
@@ -323,8 +323,7 @@ PEP 实施结果。普通工具或内容请求通常不需要逐次生成持久�
 授权结果到约束、Binding 的映射，以及“先安装再启动”所需的主体标识与时序，仍需设计。
 现有 Binding 绑定已识别的进程实例，不能直接视为已经支持启动前授权。
 
-后续支持 MODIFY、STEP_UP、DEFER 和 `@advice` 时，SecCore 需要定义相应的处理协议。
-当前前端拒绝策略注解。PIP/Agent Hook 的具体检测事实本次不展开。
+OS 授权 PDP 处理 permit 上通过校验的告警、审批及命令改写 advice。PIP/Agent Hook 的具体检测事实本次不展开。
 
 ### 8.2 翻译、部署接入与协调
 
@@ -364,9 +363,7 @@ Translator 表示纯翻译组件；Adapter 包括 Translator 和 Deployment Clie
 | D3：基础与运行时策略叠加 | PAP 组织策略、PDP 加载与决策 | 权限上限、组合方式、冲突、有效期、撤销后的恢复仍需单独设计；动态策略不能默认扩权 |
 | D4：AST 与检查位置 | 前端准入、加载、Translator | 原生 `PolicyTemplate` 与 Cedar PST；PAP 校验并保存源码，`pst` 重新解析保存的 Cedar 源码；Cedar 文件翻译已接入现有 PEP Adapter |
 
-作用对象继续由 Scope/Binding 管理。Cedar 语法仍有 principal 位置，但用户策略不填写
-具体主体条件；当前前端拒绝 principal 约束与引用。直接求值时，由接入层提供符合 schema
-的 `SecCore::Subject` 引用，并保证请求对应已选定的作用对象。
+Scope/Binding 选择 AgentSight 保护的进程。OS 授权 PDP 使用每次请求提供的逻辑 Subject 求值主体条件。
 
 部署流程图展开策略部署链路。
 
@@ -489,21 +486,18 @@ Dogwood 事件派生，`events.dwschema` 属于该时序扩展。SecCore 需要�
 非阻断的 SDK warnings 在 `validate` 成功时返回。错误枚举区分失败类别，SDK 诊断保留
 可获得的策略 ID 和源码位置。失败时不返回部分 PST。Translator 检查语义支持范围，Client 检查运行时能力。
 
-principal 条件检查借用 SDK 已解析的 AST。该私有函数使用 SDK 隐藏的
-`AsRef<ast::Policy>` 接口和 `subexpressions()` 遍历器。`cedar-policy-core` 与
-`cedar-policy` 均固定为 4.14.0；升级 SDK 时需要核对这处内部访问及 principal 引用测试。
-仅 `pst` 将校验后的策略集转换为 PST。工作区最低 Rust 版本为 1.89，构建环境可继续使用 1.93.1。
+仅 `pst` 将校验后的策略集转换为 SDK 的公共语法树，供后端使用。
 
 | 文件 | 职责 |
 |---|---|
-| `schema/seccore.cedarschema` | 实体、动作及各动作 input 字段定义 |
+| `schema/seccore.cedarschema` | revision 1 实体、动作及各动作 input 字段定义 |
 | `src/schema.rs` | 精确解析内置 schema 标识及版本 |
 | `src/validation.rs` | 共用的解析、schema 校验及公共子集检查 |
 | `src/lib.rs` | `validate`、`pst` 公开函数、PST 转换与类型化诊断 |
 
-schema 覆盖文件访问、程序调用和整体网络权限，保留 `SecCore::File` 与
+revision 1 schema 覆盖文件访问、程序调用和整体网络权限，保留 `SecCore::File` 与
 `file.read/write/exec` 命名。`file.exec` 继续表示程序调用，不是 Linux 文件系统 X 权限检查。
-`SecCore::Subject` 是由集成层提供的无属性请求主体类型，具体进程身份仍由 Scope/Binding
+`SecCore::Subject` 是由集成层提供的请求主体类型，带可选的 `agent_type` 属性，具体进程身份仍由 Scope/Binding
 管理。`SecCore::File.path` 表示具体文件或程序路径，不保存策略中的路径模式；
 路径条件直接写在策略中。`SecCore::Network::"all"` 表示整体网络使用权限，
 尚未定义主机、IP、端口或协议过滤。
@@ -513,6 +507,7 @@ schema 覆盖文件访问、程序调用和整体网络权限，保留 `SecCore:
 | `file.read` | `File` | `input.program: String` | 发起请求的可执行程序路径 |
 | `file.write` | `File` | `input` 下的 `program: String`、`operation: WriteOperation`，可选的 `mode`、`ownerUid`、`ownerGid: Long` | 写操作子类型及请求设置的 setattr 值 |
 | `file.exec` | `File` | `input.cwd: String`、`input.arg_count: Long`、`input.args: Set<ProcessArgument>` | 程序调用，`resource.path` 为程序路径 |
+| `process.spawn` | `Process` | 与 `file.exec` 相同 | 程序资源携带命令名和解析后的可执行文件路径 |
 | `network.use` | `Network::"all"` | `{}` | 整体网络使用权限 |
 
 `WriteOperation` 是枚举实体，取值为 `write`、`create`、`delete`、`rename`、`setattr`，
@@ -555,28 +550,24 @@ when {
 若要求完整参数列表相等，还需限制 `context.input.arg_count`。
 旧 `where.file` 可用 `resource.path` 表达，`cwd` 保留在 `context.input`。
 
-前端接受非空静态策略集中的 `permit`/`forbid` 及符合 schema 的条件。未知 schema 版本、
-principal 约束或条件中的 principal 引用、模板 slot、全部策略注解（包括 `advice`）均被拒绝。
-Agent Hook、历史条件（`previous`）和确认流程尚无 schema 契约。
-本库不转换原有 JSON 策略，原有 JSON 入口保持现状。
+前端接受非空静态策略集、主体条件、非空 `@id` 和 permit 上经过校验的 `@advice`。
+未知 schema 版本、模板 slot 和不支持的注解会被拒绝。各后端分别检查可执行的规则。
 
 系统操作分别使用 `FileReadContext`、`FileWriteContext`、`FileExecContext`。
 后续 Agent Hook 可以新增独立资源、action 和 context，必要时使用单独 namespace，
 复用 `SecCore::Subject`。本次没有添加占位 Hook 实体、扫描 verdict、通用 JSON 字段或
-schema 插件加载器。Hook 扩展仅在测试中定义，当前内置 schema 仍拒绝这些动作。
-初始 schema 尚未发布，因此仍保留 revision 1；发布后扩展需要更新固定版本契约并重新
-校验策略，尤其注意未限制 action 或 resource 的策略可能覆盖新领域。
+schema 插件加载器。Hook 扩展仅在测试中定义，内嵌 schema 拒绝这些动作。
 
 这是 V2 前端与策略管理契约。PAP/RPC 与源码快照已接入，测试将恢复的源码传给 `pst`；
 现有 PEP Adapter 已翻译受支持的 Cedar forbid 删除/普通写条件，Client 下发目标防护策略。
-完整边界见[目标契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)；运行时请求映射尚未接入。
+完整边界见[目标契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)；sandbox 运行时请求使用 schema revision 1。
 校验成功只证明前端接受该策略。SDK 的深层嵌套输入栈溢出限制仍未解决，
 当前应使用管理员审阅的策略，接入不可信生成输入前需补齐防护。
 
 验收由 [`tests/validation.rs`](../../v2/crates/asc-policy-cedar/tests/validation.rs)执行：
 `validate`/`pst` 准入一致性、warnings 返回、官方 PST 往返、文件与网络字段、
 参数前缀决策、请求必填结构、测试用 Hook 扩展、
-整组拒绝、schema 版本限定、principal 限制、
+整组拒绝、schema 版本限定、principal 条件、
 模板/注解拒绝及 schema 诊断。既有 policy-types fixtures 继续检查原生 wire format。
 在 `src/agent-sec-core/v2` 下运行：
 
@@ -589,6 +580,12 @@ cargo doc -p asc-policy-cedar -p asc-policy-types --no-deps --locked
 PAP 是创建/更新的直接消费者，CLI 进程测试覆盖 RPC 往返及拒绝行为。
 SQLite contracts 覆盖三处快照、更新/删除后的修订固定及关闭重开后的 PST 加载。
 撤销 Cedar 支持前需处理已有 Cedar 源码快照；本次未增加 SQL 迁移。
+
+Sandbox PDP 对 `Subject.agent_type`、主体条件、`process.spawn` 和 permit 上通过校验的
+`warn`/`escalate`/`transform` advice 求值。它通过 `pst` 加载 PAP 所选策略的当前源码，
+重建 SDK `PolicySet` 后在进程内求值。基线和可选任务策略一起读取；更新影响后续请求，
+Scope/Binding 快照仍保留原 revision。配置选择 Policy ID，不接收策略快照文件。
+决策与回执见 [Sandbox 授权设计](LINUX_SANDBOX_PEP_DESIGN_zh.md)。
 
 ### 8.7 Schema 版本与策略加载
 
@@ -622,14 +619,13 @@ Schema 元数据与策略注解分别约定处理规则。
 进入前端的 Cedar 文本必须携带 `CedarSchemaReference`。创建界面可以预选当前版本，但
 在提交、校验和存储前须形成明确引用；更新未改变 schema 引用的策略继续使用原版本。
 Cedar parser 根据语言语法解析文本，应用 schema 用于后续类型校验，二者不应混称为
-“按 schema 解析语言”。当前 `load_schema` 只将引用与 `SCHEMA_ID`、`SCHEMA_REVISION`
-常量比较，再解析内嵌 schema。以下是持久化及文件元数据接入后的加载流程：
+“按 schema 解析语言”。`load_schema` 以 `SCHEMA_ID` 和 `SCHEMA_REVISION` 校验引用，再加载内嵌 schema。以下是持久化及文件元数据接入后的加载流程：
 
 1. 读取已保存源码中的精确 `{schemaId, revision}`，查找受支持的 schema；不存在则拒绝加载。
 2. 校验 schema 文件元数据与引用一致。SDK 解析文本并按 schema 校验类型；SecCore 检查
    公共支持子集。
-3. 翻译路径将 PST 与 schema 引用交给 Translator。后续 Cedar PDP 使用 SDK 可求值的
-   `PolicySet`，并按同一 schema 构造请求；PDP 加载接口仍待定义。
+3. 翻译路径将 PST 与 schema 引用交给 Translator。Sandbox PDP 已从校验后的 PST
+   重建 SDK 可求值的 `PolicySet`，按 revision 1 构造请求；schema 文件元数据仍待接入。
 
 保持旧 schema 引用时不应原地改写已发布定义；修改引用则产生新的 Policy revision。
 仅更新 Policy 当前记录不会更新已有 Scope/Binding 快照，升级须另行更新分配并完成部署。
@@ -665,11 +661,11 @@ Binding，必须保留其版本支持，或先完成显式迁移和目标重新�
 | 类型与 Cedar 前端 | 源码联合类型；内置 revision 1；`validate` 返回非阻断 warnings，`pst` 校验并返回 SDK PST | schema 文件元数据及读取；保持公共子集诊断 |
 | Policy/PAP/RPC/SQLite | `template: PolicySource`；Cedar 准入和源码持久化；旧请求与三处快照兼容 | 保持版本与快照契约 |
 | 策略加载与目标翻译 | 保存的 Cedar 源码经 `pst` 加载；删除/普通写翻译和 Client 部署已接入现有 PEP Adapter | 按声明边界验证真实后端防护；逐目标扩展支持范围 |
-| PDP 与部署衔接 | 现有链路负责异步部署，无通用 Cedar 请求授权入口 | 独立定义请求/决策契约、策略组合、约束到 Binding 的接口及启动时序 |
+| Sandbox 运行时授权 | PAP 当前版本读取、OS 授权 PDP、五态、本地 PEP 审批/执行与检查写入的回执 | 按最终修订确认 Linux 和 CI 结果；保留独立的 Binding 部署语义 |
 | Agent Hook/PIP | 内置 schema 尚未支持 | 另定资源、动作、请求字段与检测契约，再发布对应 schema 版本 |
 
-Cedar 源码保存、加载与面向现有 PEP 的文件策略翻译已接入既有策略生命周期。后续依据具体运行时场景
-实现 PDP/PEP 请求路径。版本支持检查贯穿接入、加载与翻译；不先引入外部 schema 注册服务、
+Sandbox PDP 读取 PAP 当前策略，AgentSight 适配器部署其支持的文件保护规则。
+版本检查贯穿准入、加载与翻译。不先引入外部 schema 注册服务、
 持久化 AST 缓存或通用旧模型转换器。
 
 实现时的关键验证包括：旧 SQLite 快照仍可读取和恢复；Cedar 创建拒绝未知 schema 与不支持

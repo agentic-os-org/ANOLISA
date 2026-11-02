@@ -34,6 +34,7 @@ members = [
     "crates/asc-agentsight-protocol",
     "crates/asc-policy-translator-agentsight",
     "crates/asc-pep-runtime",
+    "crates/asc-pdp-runtime",
     "crates/asc-policy-cedar",
     "crates/asc-pap",
     "crates/asc-pcp",
@@ -92,6 +93,7 @@ asc-pcp = { path = "crates/asc-pcp" }
 asc-persistence-sqlite = { path = "crates/asc-persistence-sqlite" }
 asc-policy-translator-agentsight = { path = "crates/asc-policy-translator-agentsight" }
 asc-pep-runtime = { path = "crates/asc-pep-runtime" }
+asc-pdp-runtime = { path = "crates/asc-pdp-runtime" }
 linux-sandbox = { path = "../linux-sandbox" }
 asc-policy-cedar = { path = "crates/asc-policy-cedar" }
 asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }

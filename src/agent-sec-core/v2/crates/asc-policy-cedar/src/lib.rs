@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod advice;
 pub mod default_policy;
 pub mod schema;
 mod validation;
@@ -14,9 +15,8 @@ use cedar_policy::ValidationWarning;
 
 /// Validates source for policy creation and returns non-blocking SDK warnings.
 ///
-/// Scope/Binding owns subject selection, so principal constraints and references
-/// in conditions are rejected. Templates and annotations require contracts not
-/// supplied by this frontend. Target-specific support is checked by Translators.
+/// Accepts schema-valid subjects and supported permit advice. Each translator
+/// checks which rules its target can enforce.
 /// Validation inspects the parsed AST without generating a PST.
 ///
 /// # Errors

@@ -271,6 +271,12 @@ Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保�
 旧二进制不能读取新增 Cedar 记录，需要回滚时应保留升级前的数据库备份。
 深层嵌套源码导致 SDK 栈溢出的已知限制仍未解决，应使用管理员审阅的策略，避免不可信生成输入。
 
+Sandbox 运行时授权复用同一组 Policy 对象，使用
+`schema: {schemaId: "seccore.system", revision: 1}`。OS 授权 PDP 支持 Agent 主体、`process.spawn` 及 permit 上约定的 advice。
+按 [Sandbox 指南](sandbox.md#接入策略授权)在 daemon 授权配置中选择基线和可选任务 Policy ID。
+每次求值一起读取所选策略的当前版本；更新成功后影响后续请求，策略缺失或删除时停止新授权。
+已有 Scope/Binding 快照和已经接收的决定继续保留各自绑定的版本。
+
 ## 管理 Scope
 
 创建时提供 Policy ID、精确 revision 和一个 selector：`--process-name` 精确匹配 Linux

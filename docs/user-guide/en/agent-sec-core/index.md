@@ -11,7 +11,8 @@ guide for the backend command and service contracts.
 
 Use `agent-sec-cli sandbox run` to run a command with explicit filesystem and
 network permissions. The [sandbox guide](sandbox.md) covers this local command
-and its runtime requirements.
+and its runtime requirements, plus application integration with policy authorization,
+local approval and execution receipts.
 
 ## Overview
 

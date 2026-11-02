@@ -180,9 +180,9 @@ fn cedar_admission_rejects_invalid_creates_and_updates_without_allocating_revisi
             "action",
         ),
         (
-            "@id(\"unsupported\") forbid(principal, action == SecCore::Action::\"file.write\", resource);",
+            "@unknown(\"unsupported\") forbid(principal, action == SecCore::Action::\"file.write\", resource);",
             1,
-            "annotations",
+            "unsupported annotation",
         ),
         (
             "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { context.input.operation == \"delete\" };",
@@ -226,5 +226,81 @@ fn cedar_admission_rejects_invalid_creates_and_updates_without_allocating_revisi
             .revision
             .get(),
         2
+    );
+}
+
+fn runtime_cedar(text: &str) -> asc_policy_types::authoring::PolicySource {
+    serde_json::from_value(serde_json::json!({
+        "language": "cedar", "content": {
+            "schema": {"schemaId": "seccore.system", "revision": 1},
+            "text": text
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn runtime_cedar_admission_validates_before_replacing_the_current_revision() {
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let pap = PapService::new(repository.clone());
+    let source = runtime_cedar(
+        r#"@advice("{\"verdict\":\"warn\",\"message\":\"review output\"}")
+permit(principal, action == SecCore::Action::"process.spawn", resource)
+when { principal has agent_type && principal.agent_type == "codex" };"#,
+    );
+    let first = pap.create_policy("baseline", &source).unwrap();
+    assert_eq!(first.template, source);
+    assert_eq!(
+        pap.create_policy("other", &source).unwrap().revision.get(),
+        1
+    );
+    assert_eq!(
+        pap.update_policy(&first.policy_id, "baseline", &source)
+            .unwrap(),
+        first
+    );
+    for invalid in [
+        runtime_cedar("not Cedar"),
+        runtime_cedar(r#"permit(principal, action == SecCore::Action::"missing", resource);"#),
+        runtime_cedar(
+            r#"@advice("{\"verdict\":\"unknown\"}") permit(principal, action, resource);"#,
+        ),
+    ] {
+        assert!(matches!(
+            pap.create_policy("invalid", &invalid),
+            Err(PapError::InvalidCedar(_))
+        ));
+        assert!(matches!(
+            pap.update_policy(&first.policy_id, "invalid", &invalid),
+            Err(PapError::InvalidCedar(_))
+        ));
+        assert_eq!(
+            pap.current_policies(std::slice::from_ref(&first.policy_id))
+                .unwrap(),
+            vec![first.clone()]
+        );
+    }
+    let updated = pap
+        .update_policy(
+            &first.policy_id,
+            "baseline",
+            &runtime_cedar("forbid(principal, action, resource);"),
+        )
+        .unwrap();
+    assert_eq!(updated.revision.get(), 2);
+    assert_eq!(
+        pap.current_policies(std::slice::from_ref(&first.policy_id))
+            .unwrap(),
+        vec![updated.clone()]
+    );
+    assert_eq!(
+        pap.get_policy(&first.policy_id, first.revision),
+        Err(PapError::NotFound)
+    );
+    pap.delete_policy_revision(&updated.policy_id, updated.revision)
+        .unwrap();
+    assert_eq!(
+        pap.current_policies(&[first.policy_id]),
+        Err(PapError::NotFound)
     );
 }

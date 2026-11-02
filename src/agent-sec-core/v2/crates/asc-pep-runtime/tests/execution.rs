@@ -62,6 +62,7 @@ fn bound_execution_rejects_replaced_paths() {
             launch,
             permissions,
             path_facts,
+            mount_aliases: vec![],
         })
         .unwrap_err();
     assert!(error.to_string().contains("path identity changed"));

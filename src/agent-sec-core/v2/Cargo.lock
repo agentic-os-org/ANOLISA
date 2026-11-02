@@ -305,6 +305,7 @@ dependencies = [
  "asc-observability",
  "asc-pap",
  "asc-pcp",
+ "asc-pdp-runtime",
  "asc-persistence-sqlite",
  "asc-policy-repository",
  "asc-policy-repository-sqlite",
@@ -342,6 +343,7 @@ dependencies = [
  "nix",
  "opentelemetry",
  "opentelemetry_sdk",
+ "serde",
  "serde_json",
  "socket2",
  "thiserror",
@@ -357,6 +359,7 @@ version = "1.1.2"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
+ "asc-daemon-protocol",
  "asc-foundation-types",
  "asc-intent",
  "asc-model-client",
@@ -404,8 +407,10 @@ version = "1.1.2"
 dependencies = [
  "asc-foundation-types",
  "asc-policy-types",
+ "asc-sandbox-types",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -580,15 +585,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-pdp-runtime"
+version = "1.1.2"
+dependencies = [
+ "asc-daemon-protocol",
+ "asc-policy-cedar",
+ "asc-policy-types",
+ "cedar-policy",
+ "cedar-policy-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "asc-pep-runtime"
 version = "1.1.2"
 dependencies = [
+ "asc-daemon-client",
+ "asc-daemon-protocol",
  "asc-sandbox-types",
+ "clap",
  "linux-sandbox",
  "rustix",
  "serde_json",
  "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -614,8 +638,8 @@ version = "1.1.2"
 dependencies = [
  "asc-policy-types",
  "cedar-policy",
- "cedar-policy-core",
  "miette",
+ "serde",
  "serde_json",
  "thiserror",
 ]

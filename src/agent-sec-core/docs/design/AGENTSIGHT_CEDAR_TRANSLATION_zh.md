@@ -71,8 +71,7 @@ permit；通用前端仍保留 permit 供其他消费者使用。不补隐含 pe
 create/rename/setattr；`context.input` 下的 `program`、`mode`、`ownerUid`、`ownerGid`、
 `cwd`、`arg_count`、`args` 条件；resource 身份或层级条件；
 任意 like 模式；无界补集；未支持的函数或表达式。常量 false 分支中的不支持条件也拒绝。
-公共前端另行拒绝未知 schema revision、principal 约束及引用、模板槽位和全部 annotations，
-包括 `@id`、`@advice`。
+AgentSight 拒绝带主体约束、主体引用或注解的策略。共享前端校验 schema 版本，拒绝模板槽位，并校验支持的注解。
 
 本目标只接受以下固定的后端语义差异：
 

@@ -8,6 +8,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod authorization;
+pub use authorization::{
+    AuthorizationRequest, ClaimResponse, Decision, DecisionClaim, ExecutionReceipt, ReceiptAck,
+};
+
 mod action;
 pub mod intent;
 mod observability;

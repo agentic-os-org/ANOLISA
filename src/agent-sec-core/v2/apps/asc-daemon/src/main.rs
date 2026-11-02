@@ -166,6 +166,24 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("authorization_config", startup_started);
+    let authorization = match cli
+        .authorization_config
+        .as_deref()
+        .map(|path| {
+            asc_daemon::authorization::PapAuthorizationPolicy::load(
+                path,
+                PapService::new(repository.clone()),
+            )
+        })
+        .transpose()
+    {
+        Ok(policy) => policy,
+        Err(error) => {
+            report_error(telemetry, &error);
+            return (ExitCode::FAILURE, None);
+        }
+    };
     report_startup("skillsec", startup_started);
     let (skill_sec, skillfs_config) = match skill_sec::start(cli.skillsec_config.as_deref()) {
         Ok(service) => service,
@@ -333,6 +351,14 @@ async fn run(
     if let Some(gateway) = gateway {
         dispatcher = dispatcher.with_gateway(gateway);
     }
+    let dispatcher = if let Some(policy) = authorization {
+        dispatcher.with_authorization(asc_daemon_core::AuthorizationService::new(
+            Arc::new(policy),
+            Arc::new(EventSinkAdapter::new(Arc::clone(&durable_sinks.security))),
+        ))
+    } else {
+        dispatcher
+    };
     let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
         dispatcher,
         skillfs.clone(),

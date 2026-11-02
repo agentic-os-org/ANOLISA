@@ -1,9 +1,14 @@
-//! Direct sandbox execution with explicit, fixed OS permissions.
+//! Direct sandbox execution and optional PDP-driven authorization.
 
 pub mod linux_sandbox;
+pub mod runtime;
 pub mod supervisor;
 
 pub use linux_sandbox::{SandboxBackend, execute, prepare_launch, prepare_path_facts};
+pub use runtime::{
+    ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, FixedPermissions, PepOutcome,
+    PepRuntime, PermissionProvider, PreparedInvocation,
+};
 
 /// Failures before a backend outcome is available.
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +25,9 @@ pub enum PepError {
     /// Backend or host lacks a mandatory capability.
     #[error("unsupported sandbox requirement: {0}")]
     Unsupported(String),
+    /// Authorization or decision binding failed.
+    #[error("sandbox authorization failed: {0}")]
+    Authorization(String),
     /// Trusted helper broke its setup handshake.
     #[error("sandbox backend protocol failed: {0}")]
     Protocol(String),

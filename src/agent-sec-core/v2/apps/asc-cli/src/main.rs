@@ -119,7 +119,9 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<u8, RunError> {
     let socket = match cli.plan() {
-        Plan::Sandbox(command) => return command.run().map_err(RunError::Sandbox),
+        Plan::Sandbox(command) => {
+            return Ok(command.run(cli.socket(), cli.timeout())?);
+        }
         // The capability view describes the environment this process inherited,
         // so it must resolve it here rather than through a daemon.
         Plan::Local(command) => {
@@ -200,14 +202,13 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
-    if let Some(format) = cli.pii_format() {
+    let result = if let Some(format) = cli.pii_format() {
         render_pii_scan(
             &response,
             format,
             &mut io::stdout().lock(),
             &mut io::stderr(),
         )
-        .map_err(RunError::Output)
     } else if cli.is_skill_sec() {
         render_skill_sec(
             &response,
@@ -215,17 +216,14 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             &mut io::stderr(),
             |output| cli.after_success(&request, output),
         )
-        .map_err(RunError::Output)
     } else if cli.is_observability_record() {
         asc_cli::output::render_observability_record(&response, &mut io::stderr())
-            .map_err(RunError::Output)
     } else if cli.is_scan_code() {
         render_scan_code(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
     } else {
         render_policy(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
-    }
+    };
+    result.map_err(RunError::Output)
 }
 
 /// Commands that page, review or exec around their own daemon calls.

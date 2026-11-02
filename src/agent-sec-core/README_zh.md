@@ -16,7 +16,10 @@ AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制
 
 Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- command`，
 按明确的文件和网络权限在本地执行，无需 daemon。权限格式、运行要求与隔离边界见
-[Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。
+[Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。应用可通过
+`asc-pep-runtime::PepRuntime` 接入策略授权，由 daemon `--authorization-config`
+选择 PAP 管理的 Cedar 策略。Policy 更新成功后，后续授权请求使用新版本。
+Cosh 可通过 `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 接入这条流程，并复用原生审批界面。
 
 ## 背景
 
