@@ -671,6 +671,11 @@ def headline_lines(
     trace = metrics["trace_completeness"]
     drop = metrics["drop_rate"]
     soak = metrics["soak_rss_slope_mb_per_hour"]
+    soak_direction = soak["delta_pct"]
+    # A negative baseline reverses a relative percentage's sign, but higher
+    # RSS growth remains a regression. Keep the documented percentage intact.
+    if soak["baseline"] is not None and soak["baseline"] < 0 and soak_direction is not None:
+        soak_direction = -soak_direction
     qps_label = f"相同 {highest} QPS" if highest is not None else "最高共同 QPS"
     rss_absolute = (
         rss["optimized"] - rss["baseline"]
@@ -721,7 +726,7 @@ def headline_lines(
         (
             f"| 4 小时 RSS 增长斜率 | {display(soak['baseline'], ' MB/h')} | "
             f"{display(soak['optimized'], ' MB/h')} | {signed(soak['delta_pct'])} | "
-            f"{conclusion(soak['delta_pct'], '长期内存增长', lower_is_better=True)} |"
+            f"{conclusion(soak_direction, '长期内存增长', lower_is_better=True)} |"
         ),
     ]
 
