@@ -58,7 +58,11 @@ def resolve_openclaw_jsonl_trace_source(context: TraceSourceResolveContext) -> T
     metadata = context.metadata
     instance_ids = _resolve_instance_ids(metadata)
     session_ids = _resolve_session_ids(metadata)
-    profile_dirs = _resolve_profile_dirs(metadata)
+    profile_dirs = (
+        None
+        if isinstance(context.source_options.get("openclaw_profiles_dir"), Path)
+        else _resolve_profile_dirs(metadata)
+    )
 
     if context.run_metadata_path is not None and not session_ids:
         raise ExtractionError("OpenClaw JSONL trace collection from run metadata requires session_ids")
