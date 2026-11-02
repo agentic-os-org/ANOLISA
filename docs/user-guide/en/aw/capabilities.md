@@ -81,7 +81,7 @@ and cancellation in the [native matrix](../../../../src/aw/tests/native-matrix.j
 | --- | --- | --- |
 | Qoder SDK | In-process handlers with Query identity | Ordinary resident mode, after all Queries close |
 | QwenPaw App | Explicitly wrapped MCP client calls | Ordinary resident mode, after all replies drain |
-| Claude SDK resident | In-process handlers; successful single-text result compression | Restart required |
+| Claude SDK resident | In-process handlers; single-text result compression, `report` faults keep the original result | Restart required |
 | Pi SDK | MCP clients exposed as managed custom tools | Restart required |
 | Qoder CLI, OpenClaw, Hermes, AgentScope SDK | Exposed native tool callbacks | Ordinary mode requires restart |
 
@@ -100,7 +100,7 @@ are outside the final-input guarantee. See [native configuration](../../../devel
 
 - Ordinary Qoder SDK and QwenPaw accept Post failure action `withhold_result`, withholding delivery and stopping subsequent dispatch. Existing tool side effects remain.
 - AgentScope 2.0.6+ accepts Post failure action `withhold_result` for tool.after: a failed strict check replaces the unchecked native result with an error-state placeholder at the end of the middleware chain, so other after hooks still observe the original result. Admitted only when the bridge supports result replacement.
-- Pi and Claude SDK resident callback failures stop the task. Post checks cannot undo an executed tool.
+- Pi and Claude SDK resident callback failures stop the task. Claude SDK managed MCP `tool.after` steps with `on_error: report` are the exception: transport, timeout and Provider failures keep the checked original result and continue the current task; `on_error: block`, security denial and identity failures still stop it. Post checks cannot undo an executed tool.
 - Public Provider Hooks currently cover the two events above. The other 14 event names, common approval, input replacement, guard, Schema/BeforeModel and Retrieve integration are not available.
 - AW enforces policy through native Hooks. Deploy OS sandbox isolation separately.
 

@@ -148,14 +148,33 @@ def main():
         assert status["bindings"] == status["events"] == 0, status
         if args.scenario in {"mcp", "mcp-failure"}:
             events = []
+            completed = []
             for journal in (state_parent / "s/journal").glob("*.jsonl"):
                 data = journal.read_text()
                 assert "stable fixture data" not in data
                 for line in data.splitlines():
-                    event = json.loads(line)["record"].get("plan", {}).get("event")
+                    record = json.loads(line)["record"]
+                    event = record.get("plan", {}).get("event")
                     if event is not None:
                         events.append(event)
+                    if record.get("phase") == "completed":
+                        completed.append(record)
             assert events and all(event["correlation_source"] == "claude-sdk-mcp/v1" for event in events)
+            if args.scenario == "mcp-failure":
+                # Report faults keep the checked result and continue the task;
+                # the failed compression step stays visible in audit and logs.
+                assert any(record.get("status") == "error"
+                           and record.get("failure_action") == "report" for record in completed), completed
+                diagnostic = (output / "stderr.log").read_text()
+                assert "AW tool.after/tokenless failed" in diagnostic, diagnostic[-3000:]
+            if args.scenario == "mcp":
+                # The result-control rejection of a smuggled result is recorded
+                # as a report fault instead of stopping the task: after-error
+                # and result-control each leave one diagnostic and audit record.
+                assert any(record.get("status") == "error"
+                           and record.get("failure_action") == "report" for record in completed), completed
+                diagnostic = (output / "stderr.log").read_text()
+                assert diagnostic.count("AW tool.after/custom failed") == 2, diagnostic[-3000:]
         result = json.loads((output / "result.json").read_text())
         result["status"] = status
         result["scenario"] = args.scenario

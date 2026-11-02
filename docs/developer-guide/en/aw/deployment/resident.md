@@ -71,8 +71,10 @@ on one session are rejected. Avoid creating unmanaged SDK clients elsewhere.
 The example composes custom Hooks, sec-core Bash scanning and Tokenless PreTool/
 PostTool. Start the sec-core daemon separately and supply a real custom Hook.
 Opaque MCP tools need explicit security semantics. Resident mode stops tasks on
-callback errors even for `on_error: report`; policy denial remains a normal native
-denial. A failed Claude interrupt terminates AW's owned foreground process group,
+callback errors even for `on_error: report`, except Claude SDK managed MCP
+`tool.after` steps, which keep the checked original result and continue the
+current task; policy denial remains a normal native denial. A failed Claude
+interrupt terminates AW's owned foreground process group,
 so configure supervisor restart. Drain requests before sending termination and
 set the target's `shutdown_grace_ms` to allow time for the application's remaining
 cleanup. The outer launcher defaults to a two-second grace from its first signal

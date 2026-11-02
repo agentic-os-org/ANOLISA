@@ -70,7 +70,7 @@ QwenPaw 的 `skill-objects` 另覆盖实际同名选择、来源固定与取消�
 | --- | --- | --- |
 | Qoder SDK | 进程内 handler，提供 Query 身份 | 普通常驻模式支持，全部 Query 关闭后更新 |
 | QwenPaw App | 显式包装 MCP 客户端调用 | 普通常驻模式支持，全部 reply 排空后更新 |
-| Claude SDK resident | 进程内 handler，可压缩成功单文本结果 | 修改需重启 |
+| Claude SDK resident | 进程内 handler，可压缩成功单文本结果，`report` 故障保留原始结果 | 修改需重启 |
 | Pi SDK | 通过受管自定义工具接入 MCP 客户端 | 修改需重启 |
 | Qoder CLI、OpenClaw、Hermes、AgentScope SDK | 覆盖已暴露的原生工具回调 | 普通模式修改需重启 |
 
@@ -88,7 +88,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 
 - 普通 Qoder SDK、QwenPaw 可配置后置故障 `withhold_result`，暂扣结果并停止后续派发；已发生的工具副作用保留。
 - AgentScope 2.0.6+ 的 tool.after 可配置 `withhold_result`：严格检查失败时在中间件链末端以错误态占位结果替换未检查原文，其余 after Hook 仍观察原始结果；仅在桥支持结果替换时准入。
-- Pi、Claude SDK resident 的回调故障会停止任务。后置检查无法撤销已执行工具。
+- Pi、Claude SDK resident 的回调故障会停止任务；例外是 Claude SDK 受管 MCP 配置 `on_error: report` 的 tool.after 步骤：传输、超时和 Provider 故障保留已检查的原始结果并继续当前任务，`on_error: block`、安全拒绝和身份失败仍停止任务。后置检查无法撤销已执行工具。
 - 当前公共 Provider Hook 为上表两个事件。其余 14 个事件名、通用审批、输入替换、guard、Schema/BeforeModel 和 Retrieve 接入尚未开放。
 - AW 通过原生 Hook 执行策略，OS 沙箱隔离需另行部署。
 
