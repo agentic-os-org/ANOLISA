@@ -177,6 +177,25 @@ async fn health_diagnostics_loop(state: &DaemonState) {
     }
 }
 
+/// Cutoff for `Age` retention: `now - secs`, or `None` when unrepresentable.
+///
+/// `parse_duration_secs` admits anything up to `i64::MAX` seconds, but chrono
+/// represents at most ~9.2e15 s (`TimeDelta`'s millisecond bound), and the
+/// subtraction fails once the result leaves the `NaiveDateTime` range (~262k
+/// years of headroom, i.e. ~8.3e12 s). Values above `i64::MAX` cannot pass the
+/// parse guard, but the `Age` fields are public and an `as i64` cast would wrap
+/// negative, forging a future cutoff that expires every snapshot — so they are
+/// rejected here too. The caller treats `None` as "nothing expires".
+fn age_cutoff(
+    now: chrono::DateTime<chrono::Utc>,
+    secs: u64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    i64::try_from(secs)
+        .ok()
+        .and_then(chrono::TimeDelta::try_seconds)
+        .and_then(|delta| now.checked_sub_signed(delta))
+}
+
 /// Auto-cleanup: purge non-pinned snapshots per `CleanupRetention` (pinned always kept).
 /// - `Count(n)`: keep n newest per workspace.
 /// - `Age { secs, .. }`: delete if older than `secs` (strict, no count floor).
@@ -224,14 +243,16 @@ async fn auto_cleanup(state: &DaemonState) {
                             .collect()
                     }
                 }
-                CleanupRetention::Age { secs, .. } => {
-                    let cutoff = now - chrono::Duration::seconds(*secs as i64);
-                    unpinned
+                CleanupRetention::Age { secs, .. } => match age_cutoff(now, *secs) {
+                    Some(cutoff) => unpinned
                         .iter()
                         .filter(|(_, ts)| *ts < cutoff)
                         .map(|(id, _)| id.clone())
-                        .collect()
-                }
+                        .collect(),
+                    // Retention beyond chrono's representable range: the cutoff
+                    // would sit in the unreachable past, so nothing expires yet.
+                    None => Vec::new(),
+                },
             };
 
             (to_remove, state.index_dir(&ws_id))
@@ -382,6 +403,7 @@ mod tests {
 
     // ── Per-workspace effective policy invariants ──
     // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
+    use super::age_cutoff;
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
 
     fn cfg(global_on: bool, keep: CleanupRetention) -> DaemonConfig {
@@ -425,6 +447,53 @@ mod tests {
         // auto_cleanup is inherited from global (true), keep is overridden.
         assert!(eff.auto_cleanup);
         assert_eq!(eff.auto_cleanup_keep, CleanupRetention::Count(5));
+    }
+
+    // ── Age cutoff checked math ──
+    //
+    // `parse_duration_secs` admits anything up to i64::MAX seconds, but the
+    // raw `now - chrono::Duration::seconds(secs)` this module used to run
+    // panics beyond chrono's representable range, killing the spawned
+    // auto-cleanup task for the daemon's lifetime.
+
+    #[test]
+    fn age_cutoff_normal_retention_subtracts_from_now() {
+        let now = chrono::Utc::now();
+        let cutoff = age_cutoff(now, 30 * 86400).expect("30d is representable");
+        // Exact delta, not just `cutoff < now`: a wrong subtraction magnitude
+        // (e.g. 1 s instead of 30 d) must fail this test.
+        assert_eq!(now - cutoff, chrono::TimeDelta::days(30));
+    }
+
+    #[test]
+    fn age_cutoff_huge_retention_does_not_panic() {
+        let now = chrono::Utc::now();
+        // 1e16 s passes parse_duration_secs (1e16 < i64::MAX) but overflows
+        // chrono's TimeDelta seconds bound (~9.2e15 s).
+        let raw = "10000000000000000s";
+        let secs = match CleanupRetention::age(raw).expect("parse accepts 1e16 s") {
+            CleanupRetention::Age { secs, .. } => secs,
+            other => panic!("expected Age, got {other:?}"),
+        };
+        assert_eq!(age_cutoff(now, secs), None);
+    }
+
+    #[test]
+    fn age_cutoff_out_of_datetime_range_does_not_panic() {
+        let now = chrono::Utc::now();
+        // 8.5e15 s fits TimeDelta (max ~9.2e15) but `now - delta` leaves the
+        // representable date range (~262k years, i.e. ~8.3e12 s of headroom).
+        assert_eq!(age_cutoff(now, 8_500_000_000_000_000), None);
+    }
+
+    #[test]
+    fn age_cutoff_rejects_values_above_i64_max() {
+        // Unreachable via parse_duration_secs, but the `Age` fields are public.
+        // An `as i64` cast would wrap negative and forge a future cutoff that
+        // expires every snapshot; the checked conversion must yield None.
+        let now = chrono::Utc::now();
+        assert_eq!(age_cutoff(now, i64::MAX as u64 + 1), None);
+        assert_eq!(age_cutoff(now, u64::MAX), None);
     }
 
     // ── Filesystem-usage health probe (#3053 review P1-a / P2) ──
