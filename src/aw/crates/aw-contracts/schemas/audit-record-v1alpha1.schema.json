@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/audit/record/v1alpha1",
+  "title": "AW public audit record v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "data"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "audit.aw/v1alpha1"
+    },
+    "kind": {
+      "const": "AuditRecord"
+    },
+    "metadata": {
+      "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "eventRef",
+        "eventName",
+        "subject",
+        "chain",
+        "coverage",
+        "details"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "event.observed",
+            "provider.completed",
+            "event.closed"
+          ]
+        },
+        "eventRef": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/reference",
+          "properties": {
+            "apiVersion": {
+              "const": "runtime.aw/v1alpha1"
+            },
+            "kind": {
+              "const": "ExecutionEvent"
+            }
+          }
+        },
+        "eventName": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/eventName"
+        },
+        "subject": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/subject"
+        },
+        "chain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "sequence",
+            "sourceDigest"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+            },
+            "sequence": {
+              "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/uint"
+            },
+            "sourceDigest": {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/digest"
+            }
+          }
+        },
+        "coverage": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/coverage"
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "event.observed"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [],
+              "properties": {}
+            }
+          }
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "provider.completed"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "providerId",
+                "stepId",
+                "requestId",
+                "status",
+                "policyBlock",
+                "failureAction",
+                "failureCode"
+              ],
+              "properties": {
+                "providerId": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+                },
+                "stepId": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+                },
+                "requestId": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+                },
+                "status": {
+                  "enum": [
+                    "ok",
+                    "failed"
+                  ]
+                },
+                "policyBlock": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "failureAction": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "report",
+                        "block",
+                        "withhold_result"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "failureCode": {
+                  "anyOf": [
+                    {
+                      "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/reasonCode"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "oneOf": [
+                {
+                  "properties": {
+                    "status": {
+                      "const": "ok"
+                    },
+                    "failureAction": {
+                      "type": "null"
+                    },
+                    "failureCode": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "status": {
+                      "const": "failed"
+                    },
+                    "policyBlock": {
+                      "type": "null"
+                    },
+                    "failureAction": {
+                      "enum": [
+                        "report",
+                        "block",
+                        "withhold_result"
+                      ]
+                    },
+                    "failureCode": {
+                      "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/reasonCode"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "event.closed"
+            },
+            "details": {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/terminal"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -695,5 +695,155 @@
       "2cf5d7ed16e8fcdac330613fe54b547888e68645b9dd541253be725d5b9adba7"
     ],
     "context_revision": "a99aeeccf39f1573ebf333080974d9de450aeb06ab2077e8821659ba0279bb34"
+  },
+  "object-meta-v1alpha1": {
+    "uid": "event-1",
+    "createdAt": "2026-11-02T00:00:00.000Z",
+    "producer": {
+      "producerId": "aw-fixture",
+      "scopeId": "user-1000",
+      "generation": "service-1"
+    }
+  },
+  "execution-event-v1alpha1": {
+    "apiVersion": "runtime.aw/v1alpha1",
+    "kind": "ExecutionEvent",
+    "metadata": {
+      "uid": "event-1",
+      "createdAt": "2026-11-02T00:00:00.000Z",
+      "producer": {
+        "producerId": "aw-fixture",
+        "scopeId": "user-1000",
+        "generation": "service-1"
+      }
+    },
+    "data": {
+      "name": "tool.after",
+      "subject": {
+        "adapterId": "qoder-sdk",
+        "bindingId": "business",
+        "instanceId": "instance-1",
+        "configRevision": {
+          "algorithm": "sha256",
+          "value": "b7d64a9221007dfd5390f7df6cd5b8f3ea4f82faa1237141e35ebf161f5511a1"
+        },
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "toolCallId": "call-1"
+      },
+      "nativeRefs": {
+        "sessionId": "native-session-1",
+        "turnId": null,
+        "toolCallId": "native-call-1",
+        "modelCallId": null
+      },
+      "association": {
+        "status": "verified",
+        "basis": "native_callback",
+        "verifiedFields": [
+          "sessionId",
+          "toolCallId"
+        ],
+        "gaps": [
+          "aw.native_turn_unavailable"
+        ]
+      },
+      "times": {
+        "occurredAt": null,
+        "receivedAt": "2026-11-02T00:00:00.000Z"
+      },
+      "details": {
+        "name": "Read",
+        "nativeName": "Read",
+        "inputDigest": {
+          "algorithm": "sha256",
+          "value": "c87199666183cb4c265341a38a70d9396a771f1e6fa44c8cf03903525843250f"
+        },
+        "resultDigest": {
+          "algorithm": "sha256",
+          "value": "5cb72f90e968922d30557d0af8f719d21f61792becaa87eb32477767d739dc0b"
+        },
+        "resultStatus": "success"
+      }
+    }
+  },
+  "audit-record-v1alpha1": {
+    "apiVersion": "audit.aw/v1alpha1",
+    "kind": "AuditRecord",
+    "metadata": {
+      "uid": "ee9bfe35a776e92296422db408a39bc97637c6e70c5d39160faa52b4ef8c415e",
+      "createdAt": "2026-11-02T00:00:00.000Z",
+      "producer": {
+        "producerId": "aw-fixture",
+        "scopeId": "user-1000",
+        "generation": "service-1"
+      }
+    },
+    "data": {
+      "kind": "provider.completed",
+      "eventRef": {
+        "apiVersion": "runtime.aw/v1alpha1",
+        "kind": "ExecutionEvent",
+        "uid": "event-1",
+        "producer": {
+          "producerId": "aw-fixture",
+          "scopeId": "user-1000",
+          "generation": "service-1"
+        },
+        "digest": {
+          "algorithm": "sha256",
+          "value": "0c3ae84dbf166827b431e11ade9db11e1c8911604e73c2e6501cf466734c3d8d"
+        }
+      },
+      "eventName": "tool.after",
+      "subject": {
+        "adapterId": "qoder-sdk",
+        "bindingId": "business",
+        "instanceId": "instance-1",
+        "configRevision": {
+          "algorithm": "sha256",
+          "value": "b7d64a9221007dfd5390f7df6cd5b8f3ea4f82faa1237141e35ebf161f5511a1"
+        },
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "toolCallId": "call-1"
+      },
+      "chain": {
+        "id": "chain-1",
+        "sequence": 1,
+        "sourceDigest": {
+          "algorithm": "sha256",
+          "value": "f63454f433146b38086ffd228c41ecd9578c12f177a2790411f7b87a8925752e"
+        }
+      },
+      "coverage": {
+        "status": "unknown",
+        "scope": {
+          "level": "tool",
+          "events": [
+            "tool.before",
+            "tool.after"
+          ]
+        },
+        "interval": {
+          "start": null,
+          "end": null
+        },
+        "observedAt": "2026-11-02T00:00:00.000Z",
+        "gaps": [
+          "aw.coverage_unmeasured"
+        ],
+        "truncated": false
+      },
+      "details": {
+        "providerId": "sec-core",
+        "stepId": "pii-output",
+        "requestId": "request-1",
+        "status": "ok",
+        "policyBlock": false,
+        "failureAction": null,
+        "failureCode": null
+      }
+    }
   }
 }

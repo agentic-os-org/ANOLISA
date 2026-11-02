@@ -34,4 +34,6 @@
 
 ## 证据与观测
 
+[公共运行与审计对象](runtime/public-objects.md)
+
 [来源连接器](integrations/agentsight/agentsight-readonly.md) · [证据上下文](runtime/evidence-context.md) · [集成规划](integrations/agentsight/agentsight-integration.md)
