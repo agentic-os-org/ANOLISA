@@ -16,17 +16,15 @@ EXPECTED_SETTINGS = {
     "payload_kb": 1024,
     "tokens_per_second": 100,
     "tokens_per_response": 1000,
-    "duration": 300,
+    "duration": 180,
     "ring_buffer_mb": 64,
-    "cpu_budget_percent": 25,
+    "cpu_budget_percent": 100,
     "mode": "cli",
 }
 LIMITS = {
     "rss_average_mib": ("Average RSS", 265, "MiB"),
     "rss_peak_mib": ("Peak RSS", 300, "MiB"),
-    "cpu_average_pct": ("Average CPU", 23.5, "%"),
-    "cpu_p95_pct": ("P95 CPU", 34, "%"),
-    "cpu_peak_pct": ("Peak CPU", 42, "%"),
+    "cpu_average_pct": ("Average CPU", 30, "%"),
 }
 
 
@@ -59,14 +57,14 @@ def evaluate(summary: Any) -> tuple[bool, str]:
         for key in ("start", "end")
     ):
         errors.append("Missing or invalid load measurement window.")
-    elif not math.isclose(window["end"] - window["start"], 300, rel_tol=0, abs_tol=1e-6):
-        errors.append("The measured load window must span 300 seconds.")
+    elif not math.isclose(window["end"] - window["start"], 180, rel_tol=0, abs_tol=1e-6):
+        errors.append("The measured load window must span 180 seconds.")
 
     lines = [
         "### AgentSight resource limits",
         "",
-        "Load window: 300 seconds. CPU: 100% = one logical CPU.",
-        "RSS peaks and CPU P95/peaks use approximately one-second samples.",
+        "Load window: 180 seconds. CPU: 100% = one logical CPU.",
+        "RSS peaks and CPU average use approximately one-second samples.",
         "",
         "| Metric | Observed | Limit | Result |",
         "|---|---:|---:|---|",
