@@ -198,6 +198,11 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+每轮 UserAgent 对话会从一次 UTF-8 会话读取中取得对话历史和最新 assistant 工具状态。
+格式错误的记录或内容块会产生源文件行号警告，不会丢弃后续有效消息。
+字符串形式的 assistant 文本与纯文本块一样表示该轮完成；仍有工具调用时不会生成
+模拟用户回复。不可读文件仍保留既有的空历史或部分历史默认行为，并明确输出警告。
+
 ## 故障排查
 
 | 问题 | 修复 |
