@@ -164,12 +164,22 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
         entries.close()
 
 
-def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
-    """Keep only output steps and the call/usage state needed to correlate them."""
+def _nonempty_str(value: object) -> str:
+    """Return the value when it is a nonempty string, else empty."""
+    return value if isinstance(value, str) and value else ""
 
-    # Extract session_id
-    session_id = filepath.stem
-    agent_name = "unknown"
+
+def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
+
+    # Identity precedence mirrors the local converter: explicit runtime-config
+    # metadata wins even when it arrives late, message-level sessionId/version
+    # (Claude) come next, and the filename/path only backfills when the
+    # transcript carries no metadata at all.
+    session_id = ""
+    agent_name = ""
+    agent_version = ""
+    message_session_id = ""
+    message_version = ""
     model_name = None
     # Only known Qoder sources use partial accounting. Unidentified exports
     # retain the existing snapshot convention for backward compatibility.
@@ -184,13 +194,28 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
     for entry in entries:
         entry_type = entry.get("type", "")
 
-        # Detect agent name from runtime-config
+        # Detect agent identity from runtime-config
         if entry_type == "runtime-config":
-            model_name = entry.get("model")
+            if model_name is None:
+                model_name = entry.get("model")
+            if not session_id:
+                session_id = _nonempty_str(entry.get("sessionId"))
+            if not agent_version:
+                agent_version = _nonempty_str(entry.get("version"))
             entrypoint = entry.get("entrypoint")
+            if not agent_name:
+                agent_name = _nonempty_str(entrypoint)
             if entrypoint in ("qoder", "qoderwork", "claude-code"):
                 partial_usage = entrypoint != "claude-code"
             continue
+
+        # Message-level identity (Claude transcripts tag user/assistant
+        # records with the real session and CLI version).
+        if entry_type in ("user", "assistant"):
+            if not message_session_id:
+                message_session_id = _nonempty_str(entry.get("sessionId"))
+            if not message_version:
+                message_version = _nonempty_str(entry.get("version"))
 
         # Detect mode/config entries (skip)
         if entry_type in ("mode", "permission-mode", "file-history-snapshot", "summary"):
@@ -304,19 +329,26 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
     if not steps:
         return None
 
-    # Detect agent name from path
+    # Explicit runtime metadata retains precedence even when it arrives late.
+    if not session_id:
+        session_id = message_session_id
+    if not agent_version:
+        agent_version = message_version
+
+    # Detect agent name from path when the transcript names none.
     path_str = str(filepath)
-    if ".claude" in path_str:
-        agent_name = "claude-code"
-    elif ".qoder" in path_str:
-        agent_name = "qoder"
+    if not agent_name:
+        if ".claude" in path_str:
+            agent_name = "claude-code"
+        elif ".qoder" in path_str:
+            agent_name = "qoder"
 
     return {
         "schema_version": "ATIF-v1.7",
-        "session_id": session_id,
+        "session_id": session_id or filepath.stem,
         "agent": {
-            "name": agent_name,
-            "version": "",
+            "name": agent_name or "unknown",
+            "version": agent_version,
             "model_name": model_name,
         },
         "steps": steps,
