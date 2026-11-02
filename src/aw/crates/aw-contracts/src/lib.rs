@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! AW capability schemas and side-effect-free boundary validation.
+//! AW capability/public-object schemas and side-effect-free validation.
 //!
 //! Callers authenticate authorities, capture native boundaries and persist
 //! records. Validation establishes consistency of supplied evidence, never OS
@@ -7,6 +7,7 @@
 
 pub mod canonical;
 pub mod evidence;
+pub mod objects;
 pub mod orchestration;
 pub mod registry;
 pub mod validation;

@@ -7,6 +7,18 @@ use std::collections::BTreeMap;
 /// Exact bundled schema resources, identified by their local catalogue name.
 pub const SCHEMAS: &[(&str, &str)] = &[
     (
+        "object-meta-v1alpha1",
+        include_str!("../schemas/object-meta-v1alpha1.schema.json"),
+    ),
+    (
+        "execution-event-v1alpha1",
+        include_str!("../schemas/execution-event-v1alpha1.schema.json"),
+    ),
+    (
+        "audit-record-v1alpha1",
+        include_str!("../schemas/audit-record-v1alpha1.schema.json"),
+    ),
+    (
         "evidence-v1",
         include_str!("../schemas/evidence-v1.schema.json"),
     ),
@@ -104,6 +116,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
 pub struct Registry {
     validators: BTreeMap<String, jsonschema::Validator>,
     references: BTreeMap<String, (String, String)>,
+    objects: BTreeMap<(String, String), String>,
     evidence: jsonschema::Validator,
 }
 
@@ -116,6 +129,7 @@ impl Registry {
         let mut resources = jsonschema::Registry::new();
         let mut documents = Vec::new();
         let mut references = BTreeMap::new();
+        let mut objects = BTreeMap::new();
         for (name, text) in SCHEMAS {
             let schema: Value =
                 serde_json::from_str(text).map_err(|_| Error::InvalidSchema((*name).into()))?;
@@ -126,6 +140,17 @@ impl Registry {
             resources = resources
                 .add(&id, schema.clone())
                 .map_err(|_| Error::InvalidSchema((*name).into()))?;
+            if let Some(version) = schema["properties"]["apiVersion"]["const"].as_str() {
+                let kind = schema["properties"]["kind"]["const"]
+                    .as_str()
+                    .ok_or_else(|| Error::InvalidSchema((*name).into()))?;
+                if objects
+                    .insert((version.into(), kind.into()), (*name).into())
+                    .is_some()
+                {
+                    return Err(Error::InvalidSchema("duplicate object identity".into()));
+                }
+            }
             references.insert((*name).into(), (id, canonical::digest(text.as_bytes())));
             documents.push((*name, schema));
         }
@@ -143,6 +168,7 @@ impl Registry {
         for (name, schema) in documents {
             let validator = jsonschema::draft202012::options()
                 .offline()
+                .should_validate_formats(true)
                 .with_registry(&resources)
                 .build(&schema)
                 .map_err(|_| Error::InvalidSchema(name.into()))?;
@@ -151,6 +177,7 @@ impl Registry {
         Ok(Self {
             validators,
             references,
+            objects,
             evidence,
         })
     }
@@ -194,5 +221,16 @@ impl Registry {
             .get(name)
             .ok_or_else(|| Error::UnsupportedSchema(name.into()))?;
         Ok(serde_json::json!({"id": id, "digest": digest}))
+    }
+
+    /// Resolves an exact public object version and kind from bundled schemas.
+    ///
+    /// # Errors
+    /// Rejects unregistered pairs without loading schemas from a caller's URI.
+    pub fn object_schema(&self, api_version: &str, kind: &str) -> Result<&str, Error> {
+        self.objects
+            .get(&(api_version.into(), kind.into()))
+            .map(String::as_str)
+            .ok_or_else(|| Error::UnsupportedSchema("object version or kind".into()))
     }
 }
