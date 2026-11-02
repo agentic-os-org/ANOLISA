@@ -393,7 +393,7 @@ def export_atif(atif: dict, source: Path, directory: Path) -> Path:
     return target
 
 
-def export_files(args: argparse.Namespace) -> None:
+def export_files(args: argparse.Namespace) -> int:
     """Run the local export workflow without entering analyzer execution."""
     if args.file:
         files = [Path(args.file)]
@@ -434,6 +434,7 @@ def export_files(args: argparse.Namespace) -> None:
         f"Done: {counts['exported']} exported, {counts['skipped']} skipped, {counts['failed']} failed",
         file=sys.stderr,
     )
+    return 1 if counts["failed"] else 0
 
 
 def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path]:
@@ -551,7 +552,7 @@ def analyze_ordered(
                 pending.append(executor.submit(analyze_file, filepath, min_steps, command, dim))
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Batch analyze agent trajectories from ~/.claude and ~/.qoder"
     )
@@ -614,8 +615,7 @@ def main():
     if args.export_atif is not None:
         if args.binary:
             parser.error("--binary is only supported with --dim")
-        export_files(args)
-        return
+        return export_files(args)
 
     # Determine analyze command
     if args.binary:
@@ -653,7 +653,8 @@ def main():
         f"Done: {counts['analyzed']} analyzed, {counts['skipped']} skipped, {counts['failed']} failed",
         file=sys.stderr,
     )
+    return 1 if counts["failed"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
