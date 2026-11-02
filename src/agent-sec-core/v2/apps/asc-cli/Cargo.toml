@@ -1,6 +1,6 @@
 [package]
 name = "asc-cli"
-description = "Daemon-only AgentSecCore CLI with Policy, Scope, Binding, and code scanning"
+description = "AgentSecCore daemon client and direct sandbox execution CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ name = "agent-sec-daemon-health"
 path = "src/health.rs"
 
 [dependencies]
+asc-pep-runtime.workspace = true
 chrono = { workspace = true }
 crossterm = { workspace = true }
 signal-hook = { workspace = true }

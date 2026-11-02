@@ -13,6 +13,10 @@
 
 AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)。
 
+Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- command`，
+按明确的文件和网络权限在本地执行，无需 daemon。权限格式、运行要求与隔离边界见
+[Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。
+
 ## 背景
 
 随着 AI Agent 逐步获得操作系统级别的执行能力（文件读写、网络访问、进程管理等），传统应用安全边界已不再适用。Agent Sec Core 从 **OS 层面** 为 Agent 构建纵深防御体系，确保 Agent 在受控、可审计、最小权限的环境中运行。
@@ -35,7 +39,7 @@ AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制
 | **Skill Ledger** | 基于 Ed25519 签名的 Skill 完整性账本，仅追加版本链 | `agent-sec-cli skill-ledger` |
 | **Observability** | Agent 生命周期事件记录、会话复盘报告、交互式审查 TUI | `agent-sec-cli observability` |
 | **Security Events** | 本地 JSONL + SQLite 事件存储，支持查询与聚合 | `agent-sec-cli events` |
-| **Sandbox** | 系统调用级命令隔离（bubblewrap + seccomp），作为架构层使用 | `linux-sandbox` |
+| **Sandbox** | 按明确文件和网络权限隔离命令（bubblewrap + seccomp） | `agent-sec-cli sandbox run` |
 
 V2 源码构建会将 `agent-sec-daemon` 作为 host-level
 `agent-sec-core.service` systemd unit 安装。V2 迁移会通过 Rust 实现保留 hook 使用的

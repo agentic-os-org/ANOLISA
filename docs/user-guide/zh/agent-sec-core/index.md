@@ -8,6 +8,9 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 下文 RPM 选包说明对应 V2 Rust CLI 和 daemon。Agent 接入资源保留既有宿主接口；
 后端命令与服务契约请参阅 V2 指南。
 
+使用 `agent-sec-cli sandbox run` 按明确的文件和网络权限执行命令。
+[Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求。
+
 ## 概述
 
 | 模块 | 说明 |
@@ -16,7 +19,7 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 | Code Scanner | bash/python 静态分析检测危险操作（判定：pass/warn/deny/error） |
 | Skill Ledger | Ed25519 签名完整性追踪，6 状态生命周期（pass/none/drifted/warn/deny/tampered） |
 | PII Checker | 检测文本中的个人信息和凭据（邮箱/手机/身份证/JWT/AccessKey 等） |
-| Sandbox | 基于 seccomp + namespace 的 cosh 命令执行隔离 |
+| Sandbox | 按明确文件和网络权限隔离命令（bubblewrap + seccomp） |
 | Observability | 交互式事件审阅 TUI，4 级下钻 |
 | Security Events | 本地安全事件存储，支持查询与聚合统计 |
 

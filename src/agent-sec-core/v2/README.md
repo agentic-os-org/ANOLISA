@@ -55,12 +55,28 @@ an explicit daemon socket. Its Cargo package and source directory remain `asc-cl
 the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [lifecycle acceptance criteria](../docs/design/POLICY_SCOPE_BINDING_CONTRACT_zh.md#6-可执行验收).
 
+The Rust CLI also provides local sandbox execution:
+
+```bash
+agent-sec-cli sandbox run --permissions permissions.json -- command
+```
+
+`asc-pep-runtime::prepare_launch` resolves the command, and `execute` installs the
+caller-supplied `OsPermissionSet` through the sibling static `linux-sandbox`
+helper. This path does not connect to the daemon. See the
+[sandbox guide](../../../docs/user-guide/en/agent-sec-core/sandbox.md) for the
+permission format and the [execution design](../docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)
+for preparation, installation and process-lifetime boundaries.
+
 The current crates are:
 
 - `asc-foundation-types`: bounded transport-independent identifiers and revisions.
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, template validation, and target Adapter contracts. Snapshots retain
-  `policyId`, `policyName`, `revision` and `template`.
+  `policyId`, `policyName`, `revision` and `template`. It also defines the versioned
+  `OsPermissionSet` and standalone execution contracts.
+- `asc-pep-runtime`: command and path preparation, strict sandbox execution and
+  installation-handshake supervision for caller-supplied permissions.
 - `asc-policy-adapter-agentsight`: deterministic file-deletion and pinned-process
   translation directly from the Binding's template into an AgentSight/ActPlane
   plan, with semantic and encoding checks. Reusable policies contain general

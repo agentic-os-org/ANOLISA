@@ -28,6 +28,7 @@ members = [
     "crates/asc-model-client",
     "crates/asc-agentsight-client",
     "crates/asc-policy-adapter-agentsight",
+    "crates/asc-pep-runtime",
     "crates/asc-pap",
     "crates/asc-pcp",
     "crates/asc-policy-runtime",
@@ -77,6 +78,8 @@ asc-pap = { path = "crates/asc-pap" }
 asc-pcp = { path = "crates/asc-pcp" }
 asc-persistence-sqlite = { path = "crates/asc-persistence-sqlite" }
 asc-policy-adapter-agentsight = { path = "crates/asc-policy-adapter-agentsight" }
+asc-pep-runtime = { path = "crates/asc-pep-runtime" }
+linux-sandbox = { path = "../linux-sandbox" }
 asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }
 asc-policy-repository = { path = "crates/asc-policy-repository" }
 asc-policy-types = { path = "crates/asc-policy-types" }
@@ -97,7 +100,7 @@ nix = { version = "0.31", default-features = false, features = ["user", "fs", "s
 regex = "1.10"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
-rustix = { version = "1.1", features = ["fs", "process", "net"] }
+rustix = { version = "1.1", features = ["fs", "process", "net", "pipe"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 serde_yaml = "0.9"

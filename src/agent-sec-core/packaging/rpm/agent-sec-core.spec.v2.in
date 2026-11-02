@@ -28,6 +28,7 @@ Source1:        %{name}-%{version}-vendor.tar.gz
 BuildRequires:  cargo = 1.93.1
 BuildRequires:  rust = 1.93.1
 BuildRequires:  gcc
+BuildRequires:  glibc-static
 BuildRequires:  make
 BuildRequires:  nodejs
 BuildRequires:  npm

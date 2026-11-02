@@ -45,6 +45,7 @@ Source0:        %{name}-%{version}.tar.gz
 #   - gcc, clang, llvm, openssl-devel, libseccomp-devel, bubblewrap
 # If building outside CI, ensure these are installed manually.
 BuildRequires:  make
+BuildRequires:  glibc-static
 BuildRequires:  systemd-rpm-macros
 
 %{!?systemd_user_post:%{error:missing %%systemd_user_post; install systemd-rpm-macros in the rpmbuild environment}}

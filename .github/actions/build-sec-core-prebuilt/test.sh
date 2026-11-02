@@ -52,4 +52,5 @@ grep -Fq 'requested version 99.0.0 does not match sec-core' "$TEMPORARY/version.
 
 python3 "$ACTION_DIR/test_artifacts.py"
 python3 "$ACTION_DIR/test_python_sbom.py"
+python3 "$ACTION_DIR/../prebuilt-rust-common/test_verify_glibc.py"
 echo 'sec-core prebuilt action tests passed'

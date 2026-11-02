@@ -178,6 +178,13 @@ test-rust-v2: ## Run V2 Rust tests and verify daemon server identity separately
 	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo test --workspace --locked --features asc-daemon-client/testing -- --skip untrusted_server_is_rejected_before_request_bytes_are_sent
 	cd v2 && cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent -- --exact
 
+.PHONY: test-rust-v2-sandbox-coverage
+test-rust-v2-sandbox-coverage: ## Cover V2 sandbox contracts, execution and CLI tests
+	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo llvm-cov --locked --no-fail-fast \
+		--cobertura --output-path ../rust-v2-coverage.xml \
+		--features asc-daemon-client/testing \
+		-p asc-policy-types -p asc-pep-runtime -p asc-cli
+
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
 #

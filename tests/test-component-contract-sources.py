@@ -3,10 +3,12 @@
 
 import io
 import os
+import shutil
 import subprocess
 import tarfile
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -128,7 +130,7 @@ class ContractSourcePublishing(unittest.TestCase):
         (executable / "make").write_text(
             '#!/bin/sh\n[ "$#" -eq 3 ] && [ "$3" = build-openclaw-plugin ] || exit 91\n'
             'mkdir -p "$2/adapters/agent-memory/openclaw/dist"\n'
-            'printf \'// prebuilt plugin\\n\' > "$2/adapters/agent-memory/openclaw/dist/index.js"\n'
+            "printf '// prebuilt plugin\\n' > \"$2/adapters/agent-memory/openclaw/dist/index.js\"\n"
         )
         for command in executable.iterdir():
             command.chmod(0o755)
@@ -140,6 +142,96 @@ class ContractSourcePublishing(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((source / "adapters/agent-memory/openclaw/dist/index.js").is_file())
         self.assertFalse((source / "packaging/anolisa/rpm/component.toml").exists())
+
+    def test_v1_sec_core_archive_keeps_sandbox_path_dependencies(self) -> None:
+        source = self.work / "src/agent-sec-core"
+        original = ROOT / "src/agent-sec-core"
+        for name in (
+            "skills/fixture",
+            "cosh-extension/fixture",
+            "tools/sign-skill.sh",
+            "openclaw-plugin/fixture",
+            "hermes-plugin/src/fixture",
+            "hermes-plugin/scripts/fixture",
+            "qwen-code-extension/fixture",
+            "codex-plugin/hooks-plugin/fixture",
+            "codex-plugin/install.sh",
+            "codex-plugin/.agents/fixture",
+            "qoder-plugin/fixture",
+            "scripts/agent-sec-cli-wrapper.sh",
+            "scripts/agent-sec-daemon-wrapper.sh",
+            "agent-sec-cli/fixture",
+            "v2/apps/fixture/main.rs",
+        ):
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture")
+        for name in (
+            "Makefile",
+            "agent-sec-core.spec.in",
+            "linux-sandbox/Cargo.toml",
+            "v2/Cargo.toml",
+        ):
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(original / name, path)
+        for name in ("packaging", "v2/crates/asc-policy-types", "v2/crates/asc-foundation-types"):
+            shutil.copytree(
+                original / name,
+                source / name,
+                ignore=shutil.ignore_patterns("target", "__pycache__"),
+            )
+        generated = source / "v2/crates/asc-policy-types/target/generated"
+        generated.parent.mkdir()
+        generated.write_text("must not ship")
+        script = self.work / "scripts/rpm-build.sh"
+        script.parent.mkdir()
+        shutil.copyfile(ROOT / "scripts/rpm-build.sh", script)
+        rpmbuild = self.work / "rpmbuild"
+        rpmbuild.write_text("#!/bin/sh\nexit 0\n")
+        rpmbuild.chmod(0o755)
+        self.environment.update(VERSION="9.9.9", RPMBUILD=str(rpmbuild))
+        result = subprocess.run(
+            ["bash", str(script), "agent-sec-core-v1"],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tarball = self.work / "scripts/rpmbuild/SOURCES/agent-sec-core-9.9.9.tar.gz"
+        with tarfile.open(tarball) as archive:
+            prefix = "agent-sec-core-9.9.9/"
+            names = set(archive.getnames())
+
+            def manifest(name: str) -> dict:
+                return tomllib.loads(archive.extractfile(prefix + name).read().decode())
+
+            sandbox = manifest("linux-sandbox/Cargo.toml")
+            dependency = sandbox["target"]['cfg(target_os = "linux")']["dependencies"][
+                "asc-policy-types"
+            ]
+            types = os.path.normpath("linux-sandbox/" + dependency["path"])
+            policy = manifest(types + "/Cargo.toml")
+            self.assertTrue(policy["dependencies"]["asc-foundation-types"]["workspace"])
+            workspace = manifest("v2/Cargo.toml")["workspace"]
+            foundation = "v2/" + workspace["dependencies"]["asc-foundation-types"]["path"]
+            for crate in (types, foundation):
+                self.assertIn(prefix + crate + "/src/lib.rs", names)
+                self.assertTrue(manifest(crate + "/Cargo.toml")["package"]["version"]["workspace"])
+            self.assertIn("version", workspace["package"])
+            self.assertFalse(any("/target/" in name or "/v2/apps/" in name for name in names))
+            archive.extractall(self.work / "unpacked", filter="data")
+        dry_run = subprocess.run(
+            ["make", "-n", "build-all-v1"],
+            cwd=self.work / "unpacked/agent-sec-core-9.9.9",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(dry_run.returncode, 0, dry_run.stdout + dry_run.stderr)
+        self.assertIn("maturin build", dry_run.stdout)
+        self.assertNotIn("cd v2 &&", dry_run.stdout)
 
     def test_prebuilt_actions_select_contracts_only_in_the_selected_source(self) -> None:
         for component in ("cosh-ng", "agentsight", "skillfs", "ws-ckpt", "agent-sec-core"):

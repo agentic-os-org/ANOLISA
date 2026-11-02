@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a release binary's architecture and glibc ceiling."""
+"""Verify a release binary's architecture and glibc ceiling or static linkage."""
 
 from __future__ import annotations
 
@@ -56,7 +56,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
     parser.add_argument("--arch", choices=sorted(MACHINES), required=True)
-    parser.add_argument("--max", dest="maximum", type=version, required=True)
+    linkage = parser.add_mutually_exclusive_group(required=True)
+    linkage.add_argument("--max", dest="maximum", type=version)
+    linkage.add_argument("--require-static", action="store_true")
     args = parser.parse_args()
 
     if not args.binary.is_file():
@@ -64,7 +66,11 @@ def main() -> int:
         return 1
     try:
         header = readelf(args.binary, "-h")
-        symbols = readelf(args.binary, "--version-info")
+        if args.require_static:
+            program_headers = readelf(args.binary, "--program-headers", "--wide")
+            dynamic = readelf(args.binary, "--dynamic", "--wide")
+        else:
+            symbols = readelf(args.binary, "--version-info")
     except RuntimeError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
@@ -78,6 +84,18 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if args.require_static:
+        if not re.search(r"^\s*Type:\s*(?:EXEC|DYN)\b", header, re.MULTILINE):
+            print(f"ERROR: {args.binary} is not an ELF executable", file=sys.stderr)
+            return 1
+        if re.search(r"^\s*INTERP(?:\s|$)", program_headers, re.MULTILINE):
+            print(f"ERROR: {args.binary} has PT_INTERP", file=sys.stderr)
+            return 1
+        if "(NEEDED)" in dynamic:
+            print(f"ERROR: {args.binary} has DT_NEEDED dependencies", file=sys.stderr)
+            return 1
+        print(f"{args.binary}: arch={args.arch} static=true")
+        return 0
     required = {
         tuple(int(item) for item in match.groups(default="0"))
         for match in GLIBC_RE.finditer(symbols)

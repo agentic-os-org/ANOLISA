@@ -1194,6 +1194,41 @@ test_product_install_uses_explicit_legacy_profiles() {
     done
 }
 
+test_sec_core_build_tools_include_static_libc() {
+    reset_preflight_stubs
+    COMPONENTS=(sec-core)
+    cmd_exists() { return 0; }
+    rpm() { [[ "$*" == "-q glibc-static" ]] || fail "unexpected RPM probe: $*"; $STATIC_LIBC_PRESENT; }
+    dpkg() { [[ "$*" == "-s libc6-dev" ]] || fail "unexpected Debian probe: $*"; $STATIC_LIBC_PRESENT; }
+    sudo() { printf '%s\n' "$*" >> "$TEST_OUTPUT"; }
+
+    local distro expected
+    for distro in rpm deb; do
+        PKG_BASE="$distro"
+        PKG_INSTALL="dnf install -y"
+        expected=glibc-static
+        if [[ "$distro" == deb ]]; then
+            PKG_INSTALL="apt-get install -y"
+            expected=libc6-dev
+        fi
+        STATIC_LIBC_PRESENT=false
+        : > "$TEST_OUTPUT"
+        install_build_tools
+        assert_contains "$TEST_OUTPUT" "$PKG_INSTALL $expected"
+
+        STATIC_LIBC_PRESENT=true
+        : > "$TEST_OUTPUT"
+        install_build_tools
+        [[ ! -s "$TEST_OUTPUT" ]] || fail "reinstalled present static libc"
+
+        STATIC_LIBC_PRESENT=false
+        COMPONENTS=(cosh)
+        install_build_tools
+        [[ ! -s "$TEST_OUTPUT" ]] || fail "static libc added to an unrelated component"
+        COMPONENTS=(sec-core)
+    done
+}
+
 run_test() {
     local name="$1" status
     set +e
@@ -1255,3 +1290,5 @@ run_test test_rustup_explicit_servers_are_preserved
 run_test test_rustup_automatic_mirrors_still_select_by_channel
 
 run_test test_product_install_uses_explicit_legacy_profiles
+
+run_test test_sec_core_build_tools_include_static_libc
