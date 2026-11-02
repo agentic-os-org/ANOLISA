@@ -240,11 +240,29 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
                 after,
             );
             if scenario == "malformed" {
-                assert_eq!(
-                    response.status.code(),
-                    Some(1),
-                    "resident callbacks must surface report-mode failures"
-                );
+                // Only the Pi scope CLI converts a tool.after report fault
+                // into a neutral reply; other resident adapters keep
+                // surfacing the failure. Before-tool faults stay fail-closed
+                // for every adapter.
+                if after && adapter == "pi" {
+                    assert!(
+                        response.status.success(),
+                        "{}: {}",
+                        adapter,
+                        String::from_utf8_lossy(&response.stderr)
+                    );
+                } else {
+                    assert_eq!(
+                        response.status.code(),
+                        Some(1),
+                        "resident callbacks must surface {} failures",
+                        if after {
+                            "report-mode after-tool"
+                        } else {
+                            "before-tool"
+                        }
+                    );
+                }
             } else if scenario == "block" {
                 if adapter == "pi" {
                     assert_eq!(
