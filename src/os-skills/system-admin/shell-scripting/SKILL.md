@@ -137,8 +137,8 @@ main "$@"
 ```
 
 The `trap cleanup EXIT` fires on any exit - success, error, or signal - ensuring
-temp files are always removed. `BASH_SOURCE[0]` resolves the script's real location
-even when called via symlink.
+temp files are always removed. `SCRIPT_DIR` uses the directory from `BASH_SOURCE[0]`;
+it does not automatically resolve a symlink to the script's target.
 
 ### Argument parsing with getopts and long opts
 
