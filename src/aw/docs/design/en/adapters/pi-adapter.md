@@ -80,7 +80,12 @@ use model-produced identity, active-state reclamation and configurable concurren
 budgets; see [long sessions](resident-sdk.md). A denial before the final configured step explicitly
 closes the event without running remaining steps, including native invalid JSON,
 nonzero/signal exits and execution failures under `on_error:block`. A failure to
-close is reported and never changes a denial into an allow. SDK cancellation or a
+close is reported and never changes a denial into an allow. A managed
+`tool.after` step whose Provider invocation fails under `on_error: report`
+receives a neutral reply: the audit already records the fault, the unchecked
+original result is kept, and the same session continues with its next prompt.
+Before-tool faults, block/withhold faults, cancellation, identity and cleanup
+failures keep stopping the task. SDK cancellation or a
 local transport limit may terminate the helper before it can acknowledge close;
 any already opened event then reaches its original deadline or binding release,
 without extending its budget. This differs from an awaited policy denial.

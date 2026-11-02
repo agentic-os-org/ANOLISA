@@ -100,7 +100,8 @@ are outside the final-input guarantee. See [native configuration](../../../devel
 
 - Ordinary Qoder SDK and QwenPaw accept Post failure action `withhold_result`, withholding delivery and stopping subsequent dispatch. Existing tool side effects remain.
 - AgentScope 2.0.6+ accepts Post failure action `withhold_result` for tool.after: a failed strict check replaces the unchecked native result with an error-state placeholder at the end of the middleware chain, so other after hooks still observe the original result. Admitted only when the bridge supports result replacement.
-- Pi and Claude SDK resident callback failures stop the task. Claude SDK managed MCP `tool.after` steps with `on_error: report` are the exception: transport, timeout and Provider failures keep the checked original result and continue the current task; `on_error: block`, security denial and identity failures still stop it. Post checks cannot undo an executed tool.
+- Pi managed tool.after steps with `on_error: report` keep the checked original result when a Provider or transport fault occurs, and the same session continues with its next prompt. Before-tool faults, `block`/`withhold_result` faults, cancellation, identity and cleanup failures still stop the task.
+- Claude SDK resident callback failures stop the task. Claude SDK managed MCP `tool.after` steps with `on_error: report` are the exception: transport, timeout and Provider failures keep the checked original result and continue the current task; `on_error: block`, security denial and identity failures still stop it. Post checks cannot undo an executed tool.
 - Public Provider Hooks currently cover the two events above. The other 14 event names, common approval, input replacement, guard, Schema/BeforeModel and Retrieve integration are not available.
 - AW enforces policy through native Hooks. Deploy OS sandbox isolation separately.
 
