@@ -61,10 +61,14 @@ other tools use their exact native names. Invalid identities, cwd, callback even
 or argument shape fail the configured route.
 
 Both native post events map to `tool.after`. Failure results expose the native
-error and interrupt flag without replacing results. CLI 2.1.161 emits
-`PostToolUse` even for SDK MCP responses with `isError: true`, and its callback
-payload omits that flag. A post event is therefore not proof of business success;
-MCP error classification needs an executor/business observation contract.
+error and interrupt flag without replacing results. Measured with SDK 0.2.88
+and CLI 2.1.161, MCP tool failures behave the same on both paths: a tool
+result that reports an error (the SDK handler contract's `is_error`, mapped to
+the wire-level `isError`) reaches hooks as `PostToolUseFailure` with no
+`tool_response` (only `error` and `is_interrupt`), and the model receives the
+original error result. MCP projection therefore covers successful results
+only; failed results stay unchanged, and an executor/business observation
+contract remains the source of truth for business-level success.
 Denied tools do not receive a synthetic after event. Cancellation reaps owned hook
 process groups; it does not promise cancellation of remote tool side effects.
 
@@ -84,12 +88,18 @@ result and allow later steps while budget remains. Independent native matchers
 retain native scheduling and receive copies; their output-rewrite responses are
 rejected when AW replacement is configured.
 
-Only `PostToolUse` for native `Bash`, with non-image, non-interrupted stdout, has a
-replacement projection. The final native `updatedToolOutput` preserves stderr and
-all other envelope fields. Failed tools, MCP tools, media and unknown shapes have
-no projection and remain unchanged. MCP result replacement needs a trusted business
-status contract because this CLI omits `isError`. Attributed RTK retry commands
-reuse the Provider's existing ownership detection to avoid repeated compression.
+`PostToolUse` for native `Bash`, with non-image, non-interrupted stdout, keeps its
+object projection: the final native `updatedToolOutput` preserves stderr and all
+other envelope fields. Native HTTP MCP tools (`mcp__*`) project the model-visible
+string: the serialized structuredContent when present, or the single text content
+block for plain-text results. Replacement returns that string as
+`updatedToolOutput`, and the bundled CLI adopts it in the next model request,
+preserving the CLI's structuredContent-first semantics. MCP failures never
+reach this path: the CLI delivers error results as `PostToolUseFailure`
+without a `tool_response`, so they retain their original error form. Media,
+multi-block and unknown shapes have no projection and remain unchanged.
+Attributed RTK retry commands reuse the Provider's existing ownership
+detection to avoid repeated compression.
 
 ## Validation boundary
 
@@ -100,7 +110,8 @@ rewrites, rejected `PermissionRequest` matchers, native Bash failure, parallel
 calls, two turns, 34 policy/exit-9/SIGTERM fail-closed vetoes followed by an allowed call and durable AW journals.
 Optional `--tokenless` cases use a built Protocol v2 CLI and RTK on PATH to check
 Bash model-visible replacement, original observer views, failure/report behavior,
-retry rejection and skipped MCP error compression.
+retry rejection, skipped managed MCP error compression and preserved HTTP MCP
+error results (`PostToolUseFailure`, uncompressed).
 It invokes no model or cloud business service. Runtime files and transcripts stay
 under its output directory, including private UDS directories removed after service
 shutdown. Overlong socket paths fail with an explicit request for a shorter output path. This does not certify a business deployment or untested SDK versions.

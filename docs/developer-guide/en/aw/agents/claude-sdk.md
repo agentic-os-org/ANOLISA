@@ -67,9 +67,10 @@ bundled binaries are rejected. The worker must not detach or start multiple
 SDK clients/tasks within one launcher binding; Gunicorn and business deployments
 need their own task lifecycle integration.
 
-CLI 2.1.161 emits `PostToolUse` for SDK MCP `isError: true` responses and omits that
-flag from callback data. After observation therefore does not classify every
-business failure. Native Bash execution failure does use `PostToolUseFailure`.
+Measured with SDK 0.2.88 and CLI 2.1.161, MCP tool failures (the SDK handler
+contract's `is_error`, mapped to the wire-level `isError`) reach hooks as
+`PostToolUseFailure`, like native Bash execution failures; after observation
+still does not classify every business failure.
 See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-sdk-adapter.md)
 for identity, cancellation and validation limits.
 
@@ -117,8 +118,12 @@ the new call passes all policies and native permissions again. PostTool replaces
 only completed, non-image, non-interrupted Bash stdout. Put completion observers
 and custom steps before the single final `replace_result` step. They see the
 original result; stderr and other native fields are retained. Failure/report keeps
-the original result. MCP tools on this native callback path remain observable but are not compressed because
-the native callback does not expose reliable business-error status.
+the original result. Native HTTP MCP tools project the model-visible string
+(the serialized structuredContent, or the single text block for plain-text
+results) and a replacement returns that string for the next model request;
+multi-block and media results stay unchanged. The native callback does not
+expose reliable business-error status, so MCP error classification still needs
+the [managed MCP factory](../deployment/resident.md).
 
 Run pinned native tests through [contributing](../../../../../src/aw/CONTRIBUTING.md).
 See [resident deployment](../deployment/resident.md) for resident clients and managed MCP.

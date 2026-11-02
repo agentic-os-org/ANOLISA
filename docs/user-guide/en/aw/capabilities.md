@@ -126,7 +126,7 @@ acceptance. See [configuration](configuration.md#record-native-configuration-sou
 | Resident model endpoint in native settings | Anthropic Messages upstream follows effective native settings | A confirmed session route sends model responses through AW before queries are accepted |
 | Project Skills and local plugins | Preserved; native CLI discovery tested | Internal commands require separate coverage evidence |
 | CLI-loaded settings/project/plugin argument rewrites | Native behavior retained | AW checks public Hook input; a rewritten ordinary tool command can execute without a final AW check |
-| SDK, HTTP and stdio MCP configuration | Preserved without protocol conversion; HTTP tenant header tested | Native tool callbacks support observation and before policies; HTTP results remain unchanged |
+| SDK, HTTP and stdio MCP configuration | Preserved without protocol conversion; HTTP tenant header tested | Native tool callbacks support observation and before policies; HTTP MCP tool.after compression replaces the model-visible string (structuredContent serialization or single text block) in the next model request; a report fault keeps the original projection |
 
 The regular factory regression covers original options and unknown settings fields.
 Pinned native acceptance covers settings/Skills, plugin commands and HTTP MCP.

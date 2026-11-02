@@ -111,7 +111,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 | 常驻模型地址位于原生 settings | Anthropic Messages 上游沿用合并配置 | 接受 query 前确认会话中继路由，模型响应经过 AW |
 | 项目 Skills 和本地插件 | 保留，并验证原生 CLI 发现 | 内部命令需要单独核对覆盖证据 |
 | CLI 加载的 settings、项目或插件 Hook 改参 | 保留原生行为 | AW 检查公共 Hook 输入；改写后的普通工具命令可能执行，缺少最终参数的 AW 终检 |
-| SDK、HTTP 和 stdio MCP 配置 | 原样保留；HTTP 租户请求头已覆盖验收用例 | 原生工具回调支持观察和前置策略；HTTP 结果保持原样 |
+| SDK、HTTP 和 stdio MCP 配置 | 原样保留；HTTP 租户请求头已覆盖验收用例 | 原生工具回调支持观察和前置策略；HTTP MCP 的 tool.after 压缩替换模型可见字符串（structuredContent 序列化或单文本块）并在下一模型请求生效；report 故障保留原投影 |
 
 日常工厂回归覆盖原始选项和未知 settings 字段；固定版本原生验收覆盖 settings/Skills、
 插件命令和 HTTP MCP。Bash 文本替换及显式常驻 SDK MCP 单文本替换沿用既有范围。

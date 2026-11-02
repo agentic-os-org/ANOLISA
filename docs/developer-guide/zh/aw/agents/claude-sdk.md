@@ -60,9 +60,9 @@ worker options cwd 必须等于启动 cwd。真实 SDK initialization 握手接�
 launcher binding 中运行多个 SDK clients/任务；Gunicorn 和业务部署需要自己的任务
 生命周期接线。
 
-CLI 2.1.161 对 SDK MCP `isError: true` 响应仍发 `PostToolUse`，callback 数据不含
-该 flag，因此 after 观察不能分类所有业务失败。原生 Bash 执行失败使用
-`PostToolUseFailure`。身份、取消与验证限制见
+SDK 0.2.88 + CLI 2.1.161 实测：MCP 工具失败（SDK handler 合同的
+`is_error`，映射为线上 `isError`）与原生 Bash 执行失败一样以
+`PostToolUseFailure` 到达钩子；after 观察仍不能分类所有业务失败。身份、取消与验证限制见
 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-sdk-adapter.md)。
 
 工厂保留 `setting_sources`（包括原生默认发现）、内联或文件形式的 `settings`、
@@ -97,7 +97,10 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
 PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一
 最终 `replace_result` 前，看到原始结果；stderr 与其余原生字段保留。失败/report
-保留原始结果。该原生回调路径的 MCP tools 仍可观察，缺少可靠业务错误状态；使用[受管 MCP 工厂](../deployment/resident.md)获得结果压缩接点。
+保留原始结果。原生 HTTP MCP 工具投影模型可见字符串（structuredContent 序列化串，
+或纯文本结果的单一文本块），替换以该字符串在下一模型请求生效；多块与媒体结果
+保持原样。原生回调仍缺少可靠业务错误状态，MCP 错误分类继续依赖
+[受管 MCP 工厂](../deployment/resident.md)。
 
 固定版本原生测试由[贡献指南](../../../../../src/aw/CONTRIBUTING_zh.md)统一运行。
 常驻客户端与受管 MCP 见[常驻部署](../deployment/resident.md)。
