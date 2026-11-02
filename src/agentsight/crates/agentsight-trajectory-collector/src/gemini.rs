@@ -419,7 +419,7 @@ fn gemini_step(
                 };
                 observations.push(ObservationResult {
                     source_call_id: Some(call_id.to_string()),
-                    content: Some(serde_json::Value::String(tool_result_text(result))),
+                    content: Some(serde_json::Value::String(tool_result_text(result, call_id))),
                     subagent_trajectory_ref: None,
                     extra: failed.map(|failed| {
                         HashMap::from([(
@@ -470,8 +470,18 @@ fn gemini_step(
 
 // Keep the response payload (including structured JSON), without serializing
 // binary parts or leaking the function-call envelope into token estimates.
-fn tool_result_text(result: &serde_json::Value) -> String {
-    fn part_text(part: &serde_json::Value) -> Option<String> {
+fn tool_result_text(result: &serde_json::Value, call_id: &str) -> String {
+    let part_text = |part: &serde_json::Value| -> Option<String> {
+        // History sync stores the whole user turn's parts on each call. Keep
+        // only this call's identified responses; old ID-less parts still belong
+        // to their enclosing result, as do plain text parts.
+        if part
+            .pointer("/functionResponse/id")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| id != call_id)
+        {
+            return None;
+        }
         if let Some(response) = part.pointer("/functionResponse/response") {
             return Some(match response {
                 serde_json::Value::String(text) => text.clone(),
@@ -481,7 +491,7 @@ fn tool_result_text(result: &serde_json::Value) -> String {
         part.as_str()
             .or_else(|| part.get("text").and_then(|v| v.as_str()))
             .map(String::from)
-    }
+    };
     let text = match result {
         serde_json::Value::Array(parts) => parts
             .iter()
