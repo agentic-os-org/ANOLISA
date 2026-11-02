@@ -973,8 +973,14 @@ install_build_tools() {
 
     if [[ "$PKG_BASE" == "rpm" ]]; then
         if ! cmd_exists g++; then missing+=("gcc-c++"); fi
+        if want_component sec-core && ! rpm -q glibc-static &>/dev/null; then
+            missing+=("glibc-static")
+        fi
     else
         if ! cmd_exists g++; then missing+=("g++"); fi
+        if want_component sec-core && ! dpkg -s libc6-dev &>/dev/null; then
+            missing+=("libc6-dev")
+        fi
     fi
 
     if [[ ${#missing[@]} -eq 0 ]]; then

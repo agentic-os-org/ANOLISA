@@ -9,6 +9,10 @@ The RPM package selection below describes the V2 Rust CLI and daemon. Agent
 integration resources retain their existing host interfaces; consult the V2
 guide for the backend command and service contracts.
 
+Use `agent-sec-cli sandbox run` to run a command with explicit filesystem and
+network permissions. The [sandbox guide](sandbox.md) covers this local command
+and its runtime requirements.
+
 ## Overview
 
 | Module | Description |
@@ -17,7 +21,7 @@ guide for the backend command and service contracts.
 | Code Scanner | Static analysis of bash/python code for dangerous operations (verdict: pass/warn/deny/error) |
 | Skill Ledger | Ed25519-signed integrity tracking with 6-state lifecycle (pass/none/drifted/warn/deny/tampered) |
 | PII Checker | Detects personal information and credentials in text (email, phone, ID, JWT, AccessKey, etc.) |
-| Sandbox | Syscall-level isolation for cosh command execution (seccomp + namespace) |
+| Sandbox | Command isolation with explicit filesystem and network permissions (bubblewrap + seccomp) |
 | Observability | Interactive event review with 4-level drill-down TUI |
 | Security Events | Local event store for querying and aggregating security findings |
 

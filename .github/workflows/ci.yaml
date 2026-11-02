@@ -155,6 +155,11 @@ jobs:
             KTUNER=true
           fi
 
+          # Run sandbox checks when their workflow changes.
+          if echo "$CHANGED" | grep -Eq '^\.github/workflows/ci\.yaml$'; then
+            AGENT_SEC=true
+          fi
+
           # Exercise cache consumers when the runner image or cache bootstrap changes.
           if echo "$CHANGED" | grep -Eq '^\.github/actions/setup-sccache/|^\.github/runner-images/ubuntu22-ci/|^\.github/workflows/ci\.yaml$'; then
             AGENTSIGHT=true
@@ -355,7 +360,7 @@ jobs:
   # =========================================================================
   test-agent-sec-core:
     name: Test agent-sec-core
-    needs: detect-changes
+    needs: [detect-changes, test-agent-sec-sandbox]
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     environment: ${{ needs.detect-changes.outputs.cache_environment }}
@@ -507,6 +512,12 @@ jobs:
           cd src/agent-sec-core
           make test-rust-coverage
 
+      - name: Download sandbox VM coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: sandbox-coverage
+          path: src/agent-sec-core
+
       - name: Generate Rust coverage summary
         if: always()
         shell: bash
@@ -537,7 +548,8 @@ jobs:
           }
 
           emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
-          emit_rust_cov_row rust-coverage.xml linux-sandbox
+          emit_rust_cov_row rust-sandbox-coverage.xml linux-sandbox
+          emit_rust_cov_row rust-v2-coverage.xml v2
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -666,6 +678,97 @@ jobs:
             echo "::error::Incremental coverage gate failed: new code coverage < ${THRESHOLD}%"
             exit 1
           fi
+
+  # Real isolation needs user namespaces on a VM, outside the Kubernetes test runner.
+  test-agent-sec-sandbox:
+    name: Test sandbox isolation
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agent_sec_core == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            src/agent-sec-core/v2
+            src/agent-sec-core/linux-sandbox
+      - name: Install strict sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc6-dev meson ninja-build pkg-config libcap-dev libseccomp-dev
+          git clone --depth 1 --branch v0.10.0 https://github.com/containers/bubblewrap.git /tmp/asc-bubblewrap
+          meson setup /tmp/asc-bubblewrap/build /tmp/asc-bubblewrap -Dman=disabled
+          ninja -C /tmp/asc-bubblewrap/build
+          sudo install -m 0755 /tmp/asc-bubblewrap/build/bwrap /usr/bin/bwrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+      - name: Verify non-root server rejection
+        working-directory: src/agent-sec-core/v2
+        run: |
+          cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent
+          cargo test --locked -p asc-cli --test health_probe nonroot_server_is_rejected_before_health_request_is_sent
+      - name: Verify actual Linux isolation
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core/linux-sandbox
+        env:
+          ASC_SANDBOX_INTEGRATION: '1'
+        run: |
+          RUSTFLAGS="-C target-feature=+crt-static" cargo llvm-cov --locked --no-fail-fast --no-report --target x86_64-unknown-linux-gnu -- --skip bwrap_seccomp
+          sudo env ASC_SANDBOX_INTEGRATION=1 LLVM_PROFILE_FILE="$PWD/target/llvm-cov-target/root-%p-%m.profraw" "$(find target/llvm-cov-target/x86_64-unknown-linux-gnu/debug/deps -maxdepth 1 -type f -executable -name 'all-*' | head -1)" strict_runtime_enforces_write_and_read_carveouts --nocapture
+          sudo chown "$(id -u):$(id -g)" target/llvm-cov-target/*.profraw
+          cargo llvm-cov report --target x86_64-unknown-linux-gnu --cobertura --output-path ../rust-sandbox-coverage.xml
+      - name: Build runnable CLI and helper
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core
+        run: |
+          cargo build --locked --manifest-path v2/Cargo.toml -p asc-cli
+          cargo rustc --locked --manifest-path linux-sandbox/Cargo.toml --bin linux-sandbox -- -C target-feature=+crt-static
+          python3 ../../.github/actions/prebuilt-rust-common/verify-glibc.py --arch x86_64 --require-static linux-sandbox/target/debug/linux-sandbox
+          cp linux-sandbox/target/debug/linux-sandbox v2/target/debug/linux-sandbox
+          python3 tests/e2e/linux-sandbox/strict_cli.py v2/target/debug/agent-sec-cli
+          ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" make test-rust-v2-sandbox-coverage
+      - name: Normalize coverage paths for the component runner
+        working-directory: src/agent-sec-core
+        run: |
+          python3 - <<'PYTHON'
+          import pathlib
+          import xml.etree.ElementTree as ET
+
+          component = pathlib.Path.cwd()
+          for name in ("rust-sandbox-coverage.xml", "rust-v2-coverage.xml"):
+              tree = ET.parse(name)
+              source = tree.find("sources/source")
+              workspace = pathlib.Path(source.text)
+              classes = tree.findall(".//class")
+              assert classes, f"Empty coverage report: {name}"
+              for item in classes:
+                  path = (workspace / item.attrib["filename"]).resolve()
+                  item.set("filename", path.relative_to(component).as_posix())
+              source.text = "."
+              tree.write(name, encoding="utf-8", xml_declaration=True)
+          PYTHON
+      - name: Upload sandbox coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-coverage
+          path: |
+            src/agent-sec-core/rust-sandbox-coverage.xml
+            src/agent-sec-core/rust-v2-coverage.xml
+          if-no-files-found: error
 
   # =========================================================================
   # Step 5: Test agentsight (Linux only)

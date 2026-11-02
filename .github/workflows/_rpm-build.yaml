@@ -71,7 +71,7 @@ jobs:
               }'
               ;;
             agent-sec-core)
-              dnf_install clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros
+              dnf_install glibc-static clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros
               ;;
             agentsight)
               dnf_install rust cargo make gcc nodejs npm perl perl-IPC-Cmd perl-core perl-FindBin \

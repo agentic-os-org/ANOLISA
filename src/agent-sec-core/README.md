@@ -15,6 +15,11 @@ listed below.
 
 AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md).
 
+Rust V2 supports `agent-sec-cli sandbox run --permissions permissions.json -- command`
+for local execution with explicit filesystem and network permissions, without a
+daemon. See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
+for the permission format, runtime requirements and isolation boundaries.
+
 ## Background
 
 As AI Agents gradually gain OS-level execution capabilities (file I/O, network access, process management, etc.), traditional application security boundaries no longer apply. Agent Sec Core builds a **defense-in-depth** system at the OS layer, ensuring Agents run in a controlled, auditable, least-privilege environment.
@@ -37,7 +42,7 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 | **Skill Ledger** | Ed25519-signed skill integrity ledger with an append-only version chain | `agent-sec-cli skill-ledger` |
 | **Observability** | Agent lifecycle event recording, session debrief, and an interactive review TUI | `agent-sec-cli observability` |
 | **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
-| **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
+| **Sandbox** | Command isolation with explicit filesystem and network permissions (bubblewrap + seccomp) | `agent-sec-cli sandbox run` |
 
 The V2 source build installs `agent-sec-daemon` as the host-level
 `agent-sec-core.service` systemd unit. The V2 migration retains the hook-facing
