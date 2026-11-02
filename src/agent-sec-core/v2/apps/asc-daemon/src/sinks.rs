@@ -25,6 +25,14 @@ impl SecurityEventSink for EventSinkAdapter {
     }
 }
 
+impl asc_daemon_core::AuthorizationReceiptSink for EventSinkAdapter {
+    fn record(&self, event: &SecurityEvent) -> Result<(), asc_daemon_core::AuthorizationError> {
+        self.sinks
+            .record(event)
+            .map_err(|_| asc_daemon_core::AuthorizationError::Storage)
+    }
+}
+
 /// Telemetry is independent of the security-event destinations.
 pub(crate) struct TelemetryAdapter(pub asc_event_sink::telemetry::TelemetryWriter);
 impl asc_action_runtime::TelemetrySink for TelemetryAdapter {

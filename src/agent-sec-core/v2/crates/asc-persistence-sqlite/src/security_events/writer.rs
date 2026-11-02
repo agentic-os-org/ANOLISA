@@ -133,6 +133,14 @@ impl<S: DropSink> SqliteEventWriter<S> {
         self.sink.write(event);
     }
 
+    /// Inserts an event and reports failure even when the normal stream is best effort.
+    ///
+    /// # Errors
+    /// Returns storage failures and skipped inserts; success confirms a row was written.
+    pub fn write_checked(&self, event: &SecurityEvent) -> Result<(), KernelError> {
+        self.sink.write_checked(event)
+    }
+
     /// Runs the gated maintenance pass and drops the connection.
     ///
     /// Uses the current wall clock; [`SqliteEventWriter::close_at`] takes an

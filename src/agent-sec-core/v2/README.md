@@ -68,23 +68,34 @@ helper. This path does not connect to the daemon. See the
 permission format and the [execution design](../docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)
 for preparation, installation and process-lifetime boundaries.
 
+`asc-pep-runtime::PepRuntime` adds authorization for embedding applications through
+`DaemonAuthorizationClient`. The daemon reads current PAP-selected Cedar policies,
+returns ALLOW/DENY/MODIFY/STEP_UP/DEFER, and records owner-bound execution receipts
+through `authorization.evaluate` and `authorization.report`. Approval remains in
+the application, and execution uses the same local backend. `--authorization-config`
+selects Policy IDs and an OS-permission ceiling; it does not load policy snapshot files.
+
 The current crates are:
 
 - `asc-foundation-types`: bounded transport-independent identifiers and revisions.
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, template validation, and target Adapter contracts. Snapshots retain
   `policyId`, `policyName`, `revision` and `template`.
-- `asc-os-permission-types`: versioned OS permissions shared by enforcement backends.
-- `asc-sandbox-types`: the standalone sandbox invocation, path identity and status contracts.
+- `asc-os-permission-types`: the versioned OS permission set.
+- `asc-sandbox-types`: local invocation, path identities, mount plan and backend results.
+- Runtime requests, decisions and receipts live in `asc-daemon-protocol::authorization`.
 - `asc-pep-runtime`: command and path preparation, strict sandbox execution and
-  installation-handshake supervision for caller-supplied permissions.
-- `asc-policy-cedar`: Cedar frontend library with a pinned file/process and
+  installation-handshake supervision, plus upper-PEP authorization, approval and
+  receipt handling for embedding applications.
+- `asc-pdp-runtime`: OS request evaluation using Cedar, policy-range intersection,
+  advice handling and five-state decisions under the requested and environment limits.
+- `asc-policy-cedar`: library-only Cedar frontend with a pinned file/process and
   whole-network permission schema, strict SDK validation, common-subset checks
   through `validate` and official typed PST output through `pst`. Agent Hook
   actions can add separate typed contexts.
-  PAP uses it to validate Cedar sources submitted through CLI/RPC before saving
-  the original text and exact schema reference in SQLite. Cedar file-deletion and ordinary-write
-  translation and deployment are connected. See the
+  PAP/RPC and SQLite retain validated source and exact schema references. Revision 1
+  supports logical subjects, program calls and permit advice for sandbox authorization.
+  The AgentSight adapter translates and deploys supported deletion and write rules. See the
   [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
 - `asc-policy-translator-agentsight`: translates immutable Binding snapshots into
   target plans. Native JSON supports block + file/write + operation=delete without

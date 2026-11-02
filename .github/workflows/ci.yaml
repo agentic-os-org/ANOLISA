@@ -695,6 +695,8 @@ jobs:
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
+      # Keep source locations for coverage without storing full debug types for three workspaces.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
       RUST_BACKTRACE: '1'
     steps:
       - uses: actions/checkout@v4

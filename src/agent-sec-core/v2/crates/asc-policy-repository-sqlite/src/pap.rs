@@ -69,6 +69,23 @@ impl PapRepository for SqlitePolicyRepository {
             .filter(|p| p.revision == revision)
             .ok_or(PapError::NotFound)
     }
+    fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
+        if ids.is_empty() || ids.len() > 32 {
+            return Err(PapError::InvalidPolicy(
+                asc_policy_types::error::ValidationError::new("policyIds", "requires 1..32 IDs"),
+            ));
+        }
+        self.access(false, |tx| {
+            ids.iter()
+                .map(|id| {
+                    read_policy(tx, id)?
+                        .and_then(|state| state.current)
+                        .ok_or_else(|| PapError::NotFound.into())
+                })
+                .collect()
+        })
+        .map_err(RepositoryError::pap)
+    }
     fn list_policies(&self, limit: u32, offset: u32) -> Result<Page<PreparedPolicy>, PapError> {
         self.access(false, |tx| {
             let total = tx.query_row(

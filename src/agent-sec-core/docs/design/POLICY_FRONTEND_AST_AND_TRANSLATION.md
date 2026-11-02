@@ -8,10 +8,10 @@ sections 5–7 retain the earlier Cedar/Dogwood import assessment. Section 8 rec
 the selected architecture, data structures, versioning and persistence contracts.
 The selected design has two frontends and no Cedar/native JSON policy converter.
 
-Design updated: 2026-11-03. Cedar admission and PAP/RPC source persistence
+Cedar admission and PAP/RPC source persistence
 are connected; tests reparse saved source through the existing `pst` interface.
 Cedar deletion/ordinary-write translation and deployment are connected through the existing PEP Adapter;
-runtime authorization remains open. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
+sandbox runtime authorization uses the current PAP-selected policy and schema revision 1. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
 
 Original native-policy and import-assessment baseline:
 `51c781fce6352fb7ff12c4d4e1d3cf3484d05cf6`. Cedar library interfaces were checked
@@ -380,8 +380,7 @@ directory or operation set. Mapping approved constraints to Bindings, and the
 identity/timing needed to install protection before launch, remain open. Existing
 Bindings pin already-identified processes; they do not provide pre-launch admission.
 
-Future support for MODIFY, STEP_UP, DEFER and `@advice` requires SecCore to define
-their handling protocol. The frontend currently rejects policy annotations.
+The OS authorization PDP handles validated permit advice for warnings, approval and command transforms.
 Detailed PIP/Agent Hook detection facts are deferred.
 
 ### 8.2 Translation, deployment access and coordination
@@ -430,10 +429,8 @@ Unsupported semantics must reject the unit as a whole, not disappear during depl
 | D3: Base and runtime composition | PAP policy assembly, PDP loading and decisions | Permission ceiling, composition, conflicts, lifetime and recovery after revocation need separate design; dynamic policies must not implicitly expand permissions |
 | D4: AST and validation placement | Frontend admission, loading, Translator | Native `PolicyTemplate` and Cedar PST; PAP validates and saves source, `pst` reparses saved Cedar source; Cedar file translation is connected to the existing PEP Adapter |
 
-Scope/Binding continues to select execution subjects. Cedar retains the principal
-syntax position, but users do not supply identity constraints; the frontend rejects
-principal constraints/references. Direct evaluation supplies a schema-conformant
-`SecCore::Subject` reference and ensures the request belongs to the selected subject.
+Scope/Binding selects the processes protected by AgentSight. The OS authorization PDP
+evaluates principal conditions against the logical Subject supplied with each request.
 
 The deployment lifecycle diagram expands the deployment path.
 
@@ -573,25 +570,19 @@ on successful `validate`. Error variants identify the failure class;
 SDK diagnostics retain policy IDs and source locations where available. A failed
 call returns no partial PST. Neither interface checks target backend capabilities.
 
-The principal-condition check borrows the parsed SDK AST. This private function
-uses the SDK's hidden `AsRef<ast::Policy>` interface and `subexpressions()` iterator.
-`cedar-policy-core` and `cedar-policy` are both pinned to 4.14.0; SDK upgrades must
-verify this internal access and the principal-reference tests. Only `pst` converts
-the validated policy set to PST. The workspace minimum is Rust 1.89; the build
-environment can continue using Rust 1.93.1.
+Only `pst` converts a validated policy set to the SDK public syntax tree for a consumer.
 
 | File | Responsibility |
 |---|---|
-| `schema/seccore.cedarschema` | Entity, action and per-action input definitions |
+| `schema/seccore.cedarschema` | Revision 1 entity, action and per-action input definitions |
 | `src/schema.rs` | Resolve the exact built-in schema identity and revision |
 | `src/validation.rs` | Shared parsing, schema validation and common-subset checks |
 | `src/lib.rs` | Public `validate` and `pst` functions, PST conversion and typed diagnostics |
 
-The schema covers file access, executable invocation and whole-network permission.
+The revision 1 schema covers file access, executable invocation and whole-network permission.
 It retains `SecCore::File` and `file.read/write/exec`; `file.exec` continues to mean
 an executable invocation, not a Linux filesystem X permission check.
-`SecCore::Subject` is an attribute-free request principal type supplied by the
-integration; process identity remains in Scope/Binding. `SecCore::File.path` is
+The integration supplies a `SecCore::Subject` with optional `agent_type`. Scope/Binding selects processes for AgentSight. `SecCore::File.path` is
 the concrete file or executable path, not a stored policy pattern. Policies
 express path predicates explicitly. `SecCore::Network::"all"` represents network
 use as a whole; it does not model hosts, IP addresses, ports or protocols.
@@ -601,6 +592,7 @@ use as a whole; it does not model hosts, IP addresses, ports or protocols.
 | `file.read` | `File` | `input.program: String` | Requesting executable path |
 | `file.write` | `File` | `input.program: String`, `operation: WriteOperation`, optional `mode`, `ownerUid`, `ownerGid: Long`, all under `input` | Write subtype and requested setattr values |
 | `file.exec` | `File` | `input.cwd: String`, `input.arg_count: Long`, `input.args: Set<ProcessArgument>` | Executable invocation; `resource.path` is the executable path |
+| `process.spawn` | `Process` | Same input as `file.exec` | Command token and resolved executable on the process resource |
 | `network.use` | `Network::"all"` | `{}` | Whole-network permission |
 
 `WriteOperation` is an enum entity with `write`, `create`, `delete`, `rename`,
@@ -649,27 +641,21 @@ prefix predicate used by native `argsPrefix`. An exact argument list also
 requires the corresponding `context.input.arg_count` equality. Native
 `where.file` is expressed with `resource.path`, and `cwd` remains in `context.input`.
 
-The frontend accepts nonempty static policy sets with `permit`/`forbid` and
-schema-valid conditions. It rejects unknown schema revisions, principal constraints
-or principal references in conditions, template slots, and all annotations
-(including `advice`). Agent hooks, history (`previous`) and confirmation workflows
-have no contract in this schema. No native JSON policy conversion occurs, and
-the existing JSON entrypoint remains unchanged.
+The frontend accepts nonempty static policies, including principal conditions, nonempty
+`@id` labels and validated `@advice` on permit. It rejects unknown schema revisions,
+template slots and unsupported annotations. Each target checks its supported subset.
 
 The action-specific `FileReadContext`, `FileWriteContext` and `FileExecContext`
 keep system inputs separate. Future Agent Hook support can add its own resource,
 actions and context types, reusing `SecCore::Subject` from a separate namespace
 if needed. No placeholder Hook entities, scanner verdicts, generic JSON field or
 schema plugin loader are introduced. Hook policy tests use a test-only schema
-extension; the shipped schema still rejects those actions. The initial schema
-is unreleased and stays at revision 1. Once published, extensions must update
-the pinned schema contract and revalidate policies, including policies whose
-unconstrained actions or resources could include new domains.
+extension. The embedded schema rejects those actions.
 
 This is a V2 frontend and policy-management contract. PAP/RPC and source snapshots
 are connected. The existing PEP Adapter translates a Cedar forbid subset for deletion and ordinary
 writes; the Client submits structured protection rules. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
-Runtime request mapping remains open.
+Sandbox runtime requests use schema revision 1.
 Validation establishes frontend acceptance only. The SDK stack-overflow limit
 for deeply nested input remains unresolved; use administrator-reviewed policies
 and add protection before admitting untrusted generated input.
@@ -679,7 +665,7 @@ Acceptance is exercised by
 validate/pst admission parity, returned warnings, official PST round trips,
 file/network fields, argument-prefix decisions, required request
 shapes, a test-only Hook extension, whole-set rejection, pinned schema identity,
-principal restrictions, unsupported templates/annotations and schema diagnostics.
+principal conditions, unsupported templates/annotations and schema diagnostics.
 The existing policy-type fixtures continue to check the native wire format.
 Run from `src/agent-sec-core/v2`:
 
@@ -693,6 +679,14 @@ PAP consumes admission for create/update; CLI process tests cover RPC round trip
 and rejection. SQLite contracts cover all three snapshots, fixed revisions after
 update/deletion and PST loading after close/reopen. Removing Cedar support
 requires handling existing Cedar snapshots; this change adds no SQL migration.
+
+The sandbox PDP evaluates `Subject.agent_type`, principal constraints, `process.spawn` and
+validated `warn`/`escalate`/`transform` advice on permit. It loads current PAP-selected
+source through `pst`, reconstructs the SDK `PolicySet`,
+and evaluates requests in process. Baseline and optional task policies are read
+together; updates affect later requests while Scope/Binding snapshots retain their
+saved revisions. Configuration selects Policy IDs, not policy snapshot files. See
+[sandbox authorization](LINUX_SANDBOX_PEP_DESIGN_zh.md) for decisions and receipts.
 
 ### 8.7 Schema versioning and policy loading
 
@@ -737,9 +731,9 @@ loading path after persistence and file-metadata integration is:
    supported schema; reject loading if none exists.
 2. Check the schema file metadata against that reference. The SDK parses source
    and validates its types against the schema; SecCore checks the common subset.
-3. For translation, pass the PST and schema reference to Translator. A future
-   Cedar PDP uses the SDK's evaluable `PolicySet` and constructs requests under
-   the same schema. Its loading interface remains to be defined.
+3. For translation, pass the PST and schema reference to Translator. The sandbox
+   PDP already reconstructs the SDK's evaluable `PolicySet` from validated PST
+   and constructs requests under revision 1; schema-file metadata remains separate work.
 
 Do not mutate published definitions behind an existing reference. Changing the
 reference creates a new Policy revision. Updating the current Policy record does
@@ -784,11 +778,10 @@ need semantic and deployment validation for the selected backends.
 | Types and Cedar frontend | Source union; embedded revision 1; `validate` returns non-blocking warnings, `pst` validates and returns SDK PST | Schema-file metadata and loading; retain common-subset diagnostics |
 | Policy/PAP/RPC/SQLite | `template: PolicySource`; Cedar admission and source persistence; old requests and three snapshot locations remain compatible | Preserve version and snapshot contracts |
 | Policy loading and translation | Saved Cedar source is loaded through `pst`; deletion/ordinary-write translation and Client deployment are connected for the existing PEP Adapter | Validate live backend enforcement within the documented limits; declare support for other targets |
-| PDP and deployment connection | Existing pipeline is asynchronous deployment, without general Cedar request authorization | Define request/decision contracts, composition, approved-constraint-to-Binding mapping and launch ordering separately |
+| Sandbox runtime authorization | Current PAP reads, OS authorization PDP, five-state decisions, local PEP approval/execution and checked receipts | Confirm Linux and CI results for the final revision; retain separate Binding deployment semantics |
 | Agent Hook/PIP | Not supported by the embedded schema | Define resources, actions, request fields and detection contracts separately, then publish a corresponding schema revision |
 
-Cedar source persistence, loading and file-policy translation for the existing PEP use the shared
-lifecycle. PDP/PEP request handling for runtime scenarios remains separate work.
+The sandbox PDP reads current PAP policies. The AgentSight adapter deploys its supported file-protection subset.
 Version checks apply at admission, loading and translation. Do not introduce an
 external schema registry, persistent AST cache or generic legacy-model converter first.
 

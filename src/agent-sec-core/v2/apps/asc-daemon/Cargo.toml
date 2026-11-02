@@ -41,6 +41,7 @@ asc-model-client.workspace = true
 asc-foundation-types.workspace = true
 asc-pap.workspace = true
 asc-gateway-runtime.workspace = true
+asc-pdp-runtime.workspace = true
 asc-policy-repository-sqlite.workspace = true
 asc-persistence-sqlite.workspace = true
 asc-security-events.workspace = true

@@ -187,9 +187,22 @@ test-rust-v2: ## Run V2 Rust tests and verify daemon server identity separately
 .PHONY: test-rust-v2-sandbox-coverage
 test-rust-v2-sandbox-coverage: ## Cover all V2 workspace members, including sandbox integration tests
 	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo llvm-cov --workspace --locked --no-fail-fast \
-		--cobertura --output-path ../rust-v2-coverage.xml \
+		--no-report \
 		--features asc-daemon-client/testing \
 		-- --skip untrusted_server_is_rejected_before_request_bytes_are_sent
+ifeq ($(ASC_SANDBOX_INTEGRATION),1)
+	cargo build --locked --manifest-path ../cosh-ng/Cargo.toml -p cosh-core --bin cosh-core --target-dir ../cosh-ng/target
+	set -eu; cd v2; \
+		eval "$$(CARGO_TARGET_DIR="$$PWD/target/llvm-cov-target" cargo llvm-cov show-env --sh)"; \
+		bin="$$CARGO_LLVM_COV_TARGET_DIR/debug"; \
+		cargo build --locked --target-dir "$$CARGO_LLVM_COV_TARGET_DIR" -p asc-cli -p asc-daemon; \
+		cargo build --locked --target-dir "$$CARGO_LLVM_COV_TARGET_DIR" -p asc-pep-runtime --example authorized_sandbox; \
+		cp "$(abspath $(ASC_SANDBOX_HELPER))" "$$bin/linux-sandbox"; \
+		sudo env LLVM_PROFILE_FILE="$$LLVM_PROFILE_FILE" ASC_COSH_CORE="$(abspath ../cosh-ng/target/debug/cosh-core)" \
+			python3 ../tests/e2e/linux-sandbox/authorized_cli.py "$$bin/agent-sec-daemon" "$$bin/examples/authorized_sandbox" "$$bin/linux-sandbox"; \
+		sudo chown "$$(id -u):$$(id -g)" "$$CARGO_LLVM_COV_TARGET_DIR"/*.profraw
+endif
+	cd v2 && cargo llvm-cov report --cobertura --output-path ../rust-v2-coverage.xml
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.

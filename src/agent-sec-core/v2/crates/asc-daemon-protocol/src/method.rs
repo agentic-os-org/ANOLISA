@@ -35,6 +35,30 @@ pub const POLICY_BINDINGS_GET: &str = "policy.bindings.get";
 /// List current Bindings and lifecycle statuses.
 pub const POLICY_BINDINGS_LIST: &str = "policy.bindings.list";
 
+/// Authorize an OS execution request without launching the target.
+pub const AUTHORIZATION_EVALUATE: &str = "authorization.evaluate";
+/// Record the result of applying a previously issued decision.
+pub const AUTHORIZATION_REPORT: &str = "authorization.report";
+/// Accept or consume a host handoff without reevaluating its policy.
+pub const AUTHORIZATION_CLAIM: &str = "authorization.claim";
+/// Complete runtime authorization inventory.
+pub const AUTHORIZATION_METHODS: [&str; 3] = [
+    AUTHORIZATION_EVALUATE,
+    AUTHORIZATION_REPORT,
+    AUTHORIZATION_CLAIM,
+];
+
+/// One authorization operation resolved before parameter decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizationMethod {
+    /// Evaluate one execution request.
+    Evaluate,
+    /// Persist an execution receipt.
+    Report,
+    /// Transfer an accepted invocation between host processes.
+    Claim,
+}
+
 /// Append one observability record using `OTel` attribution.
 pub const OBS_RECORD: &str = "obs.record";
 
@@ -250,6 +274,8 @@ pub enum GatewayMethod {
 pub enum MethodId {
     /// Local-peer proposals over submitted materials, without authorization or publication.
     IntentPropose,
+    /// Runtime authorization and owner-bound execution reporting.
+    Authorization(AuthorizationMethod),
     /// Process health for any authenticated local peer.
     Health,
     /// Read-only owner-authorized observability query.
@@ -310,6 +336,7 @@ impl MethodId {
             Self::Health
             | Self::IntentPropose
             | Self::Gateway(GatewayMethod::Status | GatewayMethod::Credentials)
+            | Self::Authorization(_)
             | Self::Action(_)
             | Self::ObservabilityRecord
             | Self::Query(_)
@@ -325,6 +352,9 @@ pub fn resolve(method: &str) -> Option<MethodId> {
     match method {
         DAEMON_HEALTH => Some(MethodId::Health),
         INTENT_PROPOSE => Some(MethodId::IntentPropose),
+        AUTHORIZATION_EVALUATE => Some(MethodId::Authorization(AuthorizationMethod::Evaluate)),
+        AUTHORIZATION_REPORT => Some(MethodId::Authorization(AuthorizationMethod::Report)),
+        AUTHORIZATION_CLAIM => Some(MethodId::Authorization(AuthorizationMethod::Claim)),
         POLICY_TEMPLATES_CREATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Create))),
         POLICY_TEMPLATES_UPDATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Update))),
         POLICY_TEMPLATES_GET => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Get))),
@@ -368,4 +398,19 @@ pub fn resolve(method: &str) -> Option<MethodId> {
 /// Returns metadata for an exact registered method.
 pub fn metadata(method: &str) -> Option<Metadata> {
     resolve(method).map(MethodId::metadata)
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_authorization_is_an_explicit_local_peer_inventory() {
+        for method in AUTHORIZATION_METHODS {
+            let resolved = resolve(method).expect("registered");
+            assert!(matches!(resolved, MethodId::Authorization(_)));
+            assert_eq!(resolved.metadata().access, AccessPolicy::LocalUser);
+        }
+        assert!(resolve("authorization.execute").is_none());
+    }
 }

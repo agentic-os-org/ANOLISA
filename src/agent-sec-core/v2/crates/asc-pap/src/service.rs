@@ -272,6 +272,14 @@ where
         self.repository.get_policy(id, revision)
     }
 
+    /// Reads selected current policies together, in requested order.
+    ///
+    /// # Errors
+    /// Rejects empty or oversized selections, missing policies, and storage failures.
+    pub fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.repository.current_policies(ids)
+    }
+
     /// Lists current Policy records.
     ///
     /// # Errors

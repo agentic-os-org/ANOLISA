@@ -33,7 +33,7 @@ pub struct Cli {
 /// How a parsed invocation reaches its result.
 #[derive(Debug)]
 pub enum Plan<'a> {
-    /// Run a local sandbox with explicit permissions, independently of the daemon.
+    /// Run a direct sandbox or the internal host authorization handoff.
     Sandbox(&'a sandbox::SandboxCommand),
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
@@ -130,8 +130,11 @@ impl Cli {
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
             None if arguments.command.is_observability_schema()
-                || arguments.command.sandbox().is_some()
-                || arguments.command.policy_default().is_some() =>
+                || arguments.command.policy_default().is_some()
+                || arguments
+                    .command
+                    .sandbox()
+                    .is_some_and(|command| !command.requires_daemon()) =>
             {
                 None
             }

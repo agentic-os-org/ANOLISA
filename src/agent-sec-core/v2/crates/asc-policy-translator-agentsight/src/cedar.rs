@@ -8,7 +8,9 @@ use asc_agentsight_protocol::{
     FileProtectionTopologyMode, FileProtections,
 };
 use asc_policy_types::{cedar::CedarPolicySource, target::TranslationRejection};
-use cedar_policy::pst::{ActionConstraint, Clause, Effect, ResourceConstraint};
+use cedar_policy::pst::{
+    ActionConstraint, Clause, Effect, PrincipalConstraint, ResourceConstraint,
+};
 
 use expressions::{Branch, DELETE, WRITE, and, expression};
 use paths::target;
@@ -24,6 +26,12 @@ pub(super) fn translate(
     for (index, policy) in policies.policies.values().enumerate() {
         let body = policy.body();
         let translated = (|| {
+            if body.principal != PrincipalConstraint::Any {
+                return Err("UNSUPPORTED_PRINCIPAL_CONSTRAINT");
+            }
+            if !body.annotations.is_empty() {
+                return Err("UNSUPPORTED_ANNOTATION");
+            }
             if body.effect != Effect::Forbid {
                 return Err("UNSUPPORTED_EFFECT");
             }

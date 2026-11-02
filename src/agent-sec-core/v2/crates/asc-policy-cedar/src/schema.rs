@@ -10,7 +10,7 @@ use crate::CedarError;
 pub const SCHEMA_ID: &str = "seccore.system";
 /// Revision of the embedded field and action contract.
 pub const SCHEMA_REVISION: u32 = 1;
-/// Cedar definitions shared by frontend validation and future request mapping.
+/// Cedar definitions shared by frontend validation and runtime request mapping.
 pub const SCHEMA_TEXT: &str = include_str!("../schema/seccore.cedarschema");
 
 /// Embedded schema identity and immutable revision as a source reference.

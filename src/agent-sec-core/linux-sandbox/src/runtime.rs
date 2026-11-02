@@ -13,7 +13,8 @@ use std::process::{Child, Command, ExitStatus};
 
 use crate::error::{Result, SandboxError};
 use asc_sandbox_types::{
-    BackendStatus, ExecutionSpec, FileRight, NetworkMode, PathFact, RuleEffect, Validate,
+    BackendCapabilities, BackendStatus, ExecutionSpec, FileRight, NetworkMode, PathFact,
+    RuleEffect, Validate,
 };
 
 const MAX_SPEC_BYTES: u64 = 4 * 1024 * 1024;
@@ -39,6 +40,7 @@ struct Mount {
 struct Prepared {
     mounts: Vec<Mount>,
     hidden: Vec<(String, bool)>,
+    aliases: Vec<(PathBuf, PathBuf)>,
     root_writable: bool,
     noexec: Vec<String>,
 }
@@ -116,6 +118,21 @@ fn bind_parent_lifetime(command: &mut Command) {
 /// Malformed descriptors and unsupported setup fail before target execution.
 pub fn try_run() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|s| s == "--capabilities") {
+        let result = capabilities().and_then(|capabilities| {
+            serde_json::to_writer(std::io::stdout(), &capabilities)
+                .map_err(|e| unsupported(e.to_string()))?;
+            println!();
+            Ok(0)
+        });
+        return Some(match result {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("{error}");
+                125
+            }
+        });
+    }
     let inner = args.get(1).is_some_and(|s| s == "--strict-inner");
     if !inner && args.get(1).is_none_or(|s| s != "--execution-spec-fd") {
         return None;
@@ -313,6 +330,56 @@ fn open_parent(path: &Path, objects: &[Object]) -> Result<File> {
     Ok(directory)
 }
 
+/// Checks the same pinned mount plan used at installation, before prompting a user.
+///
+/// # Errors
+/// Rejects path identities and restrictions that cannot be installed exactly.
+pub fn check_mount_plan(spec: &ExecutionSpec) -> Result<()> {
+    prepare(spec).map(drop)
+}
+
+// Only synthesize links in the private tmpfs. Never create an entry in a host bind.
+fn mount_aliases(
+    spec: &ExecutionSpec,
+    objects: &[Object],
+    mounts: &[Mount],
+    hidden: &[(String, bool)],
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut links = BTreeMap::new();
+    for alias in &spec.mount_aliases {
+        let pinned = open_object(alias, &spec.path_facts)?;
+        let name = Path::new(alias);
+        if name == pinned.canonical || reserved(name) || reserved(&pinned.canonical) {
+            return Err(unsupported(format!("invalid mount alias: {alias}")));
+        }
+        if !access(spec, objects, &pinned.canonical).0 {
+            continue;
+        }
+        let destinations = mounts
+            .iter()
+            .map(|m| Path::new(&m.path))
+            .chain(hidden.iter().map(|(p, _)| Path::new(p)));
+        if destinations.clone().any(|p| name.starts_with(p)) {
+            continue; // The host-backed parent already supplies this directory entry.
+        }
+        if destinations.clone().any(|p| p.starts_with(name)) {
+            return Err(unsupported(format!(
+                "mount alias would cover a restriction: {alias}"
+            )));
+        }
+        links.insert(name.to_owned(), pinned.canonical);
+    }
+    // A nested destination could follow an earlier link into a host-backed directory.
+    if links.keys().any(|p| {
+        p.ancestors()
+            .skip(1)
+            .any(|ancestor| links.contains_key(ancestor))
+    }) {
+        return Err(unsupported("overlapping synthetic mount aliases"));
+    }
+    Ok(links.into_iter().collect())
+}
+
 fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
     let objects = spec
         .permissions
@@ -454,7 +521,9 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
             hidden_roots.push((path, directory));
         }
     }
+    let aliases = mount_aliases(spec, &objects, &mounts, &hidden_roots)?;
     Ok(Prepared {
+        aliases,
         mounts,
         hidden: hidden_roots,
         root_writable: access(spec, &objects, Path::new("/")).1,
@@ -581,6 +650,29 @@ fn checked_bwrap() -> Result<&'static str> {
     Ok(bwrap)
 }
 
+fn capabilities() -> Result<BackendCapabilities> {
+    checked_helper()?;
+    checked_bwrap()?;
+    // A null pathname never changes a mount; ENOSYS distinguishes an absent
+    // syscall. Actual namespace permissions are still checked at installation.
+    unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            libc::AT_FDCWD,
+            std::ptr::null::<libc::c_char>(),
+            0,
+            std::ptr::null::<MountAttr>(),
+            0,
+        );
+    }
+    let noexec = std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS);
+    Ok(BackendCapabilities {
+        strict_filesystem: true,
+        noexec,
+        network_off: true,
+    })
+}
+
 fn run_outer(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
     validate_stdio()?;
     let helper = checked_helper()?;
@@ -617,6 +709,9 @@ fn run_outer(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
             .arg(mount.source.as_raw_fd().to_string())
             .arg(mount.path);
         preserved.push(mount.source);
+    }
+    for (name, target) in prepared.aliases {
+        command.arg("--symlink").arg(target).arg(name);
     }
     for (path, directory) in prepared.hidden {
         if directory {

@@ -331,6 +331,15 @@ records, so preserve a pre-upgrade database backup when planning rollback.
 The known SDK stack-overflow limit for deeply nested source remains unresolved;
 use administrator-reviewed policies rather than untrusted generated input.
 
+Sandbox runtime authorization uses the same Policy objects with
+`schema: {schemaId: "seccore.system", revision: 1}`. The OS authorization PDP evaluates
+Agent subjects, `process.spawn` and supported permit advice. Select the baseline and
+optional task Policy IDs in the daemon's authorization configuration, as shown in
+the [sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads
+their current revisions together. Successful updates affect subsequent requests;
+missing or deleted policies stop new authorization. Existing Scope/Binding
+snapshots and accepted decisions retain their own bound versions.
+
 ## Manage Scopes
 
 Create an assignment with a Policy ID and exact revision, plus one selector:

@@ -50,6 +50,9 @@ pub struct ExecutionSpec {
     pub permissions: OsPermissionSet,
     /// Path identities observed during preparation.
     pub path_facts: Vec<PathFact>,
+    /// Original names of explicitly requested grants, linked to the final restricted mounts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mount_aliases: Vec<String>,
 }
 
 /// Setup handshake emitted by the trusted helper as JSON lines.
@@ -130,6 +133,9 @@ impl Validate for ExecutionSpec {
         }
         self.launch.validate()?;
         self.permissions.validate()?;
+        for alias in &self.mount_aliases {
+            validate_os_path(alias)?;
+        }
         validate_facts(&self.path_facts)
     }
 }
@@ -147,4 +153,16 @@ fn validate_facts(facts: &[PathFact]) -> Result<(), ValidationError> {
         }
     }
     Ok(())
+}
+
+/// Local helper capability probe used before asking for approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackendCapabilities {
+    /// Supports default-deny filesystem views.
+    pub strict_filesystem: bool,
+    /// Supports recursive mount noexec.
+    pub noexec: bool,
+    /// Supports IP network isolation.
+    pub network_off: bool,
 }

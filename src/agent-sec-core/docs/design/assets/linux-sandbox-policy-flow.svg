@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="374" viewBox="0 0 860 374"
+     role="img" aria-labelledby="title desc" lang="zh-CN">
+  <title id="title">Sandbox 的授权与执行</title>
+  <desc id="desc">PDP 读取 PAP 管理的当前策略，用 Cedar 和 advice 判定 PEP 提交的请求。PEP 按决策调用 linux-sandbox，运行结束后向 daemon 上报回执。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1 L6 4 L1 7" fill="none" stroke="#44576e" stroke-width="1.7" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #15283d; }
+      .head { font-size: 23px; font-weight: 650; }
+      .body { font-size: 17px; fill: #354c65; }
+      .label { font-size: 16px; fill: #354c65; }
+      .flow { stroke: #44576e; stroke-width: 1.7; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="860" height="374" rx="16" fill="#f8fafc"/>
+  <g>
+    <rect x="30" y="28" width="294" height="102" rx="12" fill="#eef3fd" stroke="#b4c6e5"/>
+    <text x="51" y="69" class="head">PAP · 策略管理</text>
+    <text x="51" y="103" class="body">管理基线策略与任务策略</text>
+
+    <rect x="536" y="28" width="294" height="102" rx="12" fill="#eef3fd" stroke="#b4c6e5"/>
+    <text x="557" y="69" class="head">PDP · 授权决策</text>
+    <text x="557" y="103" class="body">Cedar 求值与 @advice 五态决策</text>
+
+    <rect x="536" y="244" width="294" height="102" rx="12" fill="#e9f5f0" stroke="#a5cdbb"/>
+    <text x="557" y="285" class="head">PEP · 授权执行</text>
+    <text x="557" y="319" class="body">接入 Cosh Hook，按需请用户确认</text>
+
+    <rect x="30" y="244" width="294" height="102" rx="12" fill="#e9f5f0" stroke="#a5cdbb"/>
+    <text x="51" y="285" class="head">linux-sandbox</text>
+    <text x="51" y="319" class="body">按文件与网络权限启动目标进程</text>
+  </g>
+  <g class="flow">
+    <path d="M324 84 H530"/>
+    <path d="M638 244 V136"/>
+    <path d="M737 130 V238"/>
+    <path d="M536 276 H330"/>
+    <path d="M324 313 H530"/>
+  </g>
+  <g class="label">
+    <text x="430" y="71" text-anchor="middle">当前生效策略</text>
+    <text x="622" y="181" text-anchor="end">申请命令与权限</text>
+    <text x="622" y="205" text-anchor="end">完成后上报回执</text>
+    <text x="749" y="181">决策</text>
+    <text x="749" y="205">有效权限</text>
+    <text x="430" y="266" text-anchor="middle">执行计划</text>
+    <text x="430" y="337" text-anchor="middle">执行结果</text>
+  </g>
+</svg>

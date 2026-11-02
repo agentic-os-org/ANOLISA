@@ -9,7 +9,8 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 后端命令与服务契约请参阅 V2 指南。
 
 使用 `agent-sec-cli sandbox run` 按明确的文件和网络权限执行命令。
-[Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求。
+[Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求，以及应用如何接入策略授权、
+本地审批和执行回执。
 
 ## 概述
 

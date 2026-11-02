@@ -3,10 +3,9 @@
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::cedar::CedarPolicySource;
-use cedar_policy::{PolicySet, PrincipalConstraint, ValidationMode, ValidationWarning, Validator};
-use cedar_policy_core::ast::{ExprKind, Var};
+use cedar_policy::{PolicySet, ValidationMode, ValidationWarning, Validator};
 
-use crate::{CedarError, schema::load_schema};
+use crate::{CedarError, advice::Advice, schema::load_schema};
 
 pub(super) fn parse_and_validate(
     source: &CedarPolicySource,
@@ -30,14 +29,6 @@ pub(super) fn parse_and_validate(
         });
     }
 
-    for policy in policies.policies() {
-        if references_principal(policy) {
-            return Err(unsupported(
-                policy.id().as_ref(),
-                "principal conditions are assigned through Scope/Binding",
-            ));
-        }
-    }
     Ok((
         policies,
         validation.validation_warnings().cloned().collect(),
@@ -58,31 +49,27 @@ fn check_subset(policies: &PolicySet) -> Result<(), CedarError> {
         ));
     }
     for policy in policies.policies() {
-        if policy.principal_constraint() != PrincipalConstraint::Any {
-            return Err(unsupported(
-                policy.id().as_ref(),
-                "principal constraints are assigned through Scope/Binding",
-            ));
-        }
-        if policy.annotations().next().is_some() {
-            return Err(unsupported(
-                policy.id().as_ref(),
-                "annotations, including advice, are not supported",
-            ));
+        for (name, value) in policy.annotations() {
+            match name {
+                "id" if !value.is_empty() => {}
+                "advice" if policy.effect() == cedar_policy::Effect::Permit => {
+                    Advice::parse(value).map_err(|_| {
+                        unsupported(
+                            policy.id().as_ref(),
+                            "advice must follow the supported execution contract",
+                        )
+                    })?;
+                }
+                _ => {
+                    return Err(unsupported(
+                        policy.id().as_ref(),
+                        "unsupported annotation or advice on forbid",
+                    ));
+                }
+            }
         }
     }
     Ok(())
-}
-
-fn references_principal(policy: &cedar_policy::Policy) -> bool {
-    // This SDK-internal AST access keeps admission independent of PST conversion.
-    // cedar-policy-core is pinned to the SDK version for this boundary.
-    let ast: &cedar_policy_core::ast::Policy = policy.as_ref();
-    ast.non_scope_constraints().is_some_and(|expression| {
-        expression
-            .subexpressions()
-            .any(|node| matches!(node.expr_kind(), ExprKind::Var(Var::Principal)))
-    })
 }
 
 fn unsupported(policy_id: &str, reason: &'static str) -> CedarError {

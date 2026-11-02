@@ -20,6 +20,7 @@ Owned data-directory permissions are repaired to 0700 after ancestor validation.
 Without AGENT_SEC_DATA_DIR, unsafe default ancestors select /var/lib/agent-sec/policy.\n\
 Conflicting databases or a directory selection that bypasses existing Policy state refuse startup.\n\
 Scopes start discovery jobs which create and reconcile their Bindings automatically.\n\
+--authorization-config <ABSOLUTE_PATH> selects PAP policies and OS ceilings with root-owned JSON.\n\
 PII rules: --pii-rules <ABSOLUTE_PATH>, default /etc/agent-sec/pii-checker/rules.yaml.\n\
 Rules are compiled at startup; restart to apply updates.\n";
 
@@ -34,6 +35,8 @@ pub struct Cli {
     pub pii_rules: Option<PathBuf>,
     /// Optional root-owned `SkillSec` settings file.
     pub skillsec_config: Option<PathBuf>,
+    /// Root-owned PAP selection and OS ceilings; absent disables authorization RPCs.
+    pub authorization_config: Option<PathBuf>,
 }
 
 /// Successful command-line parse outcome.
@@ -79,6 +82,7 @@ impl Cli {
         let mut policy_admin_uids = BTreeSet::new();
         let mut pii_rules = None;
         let mut skillsec_config = None;
+        let mut authorization_config = None;
 
         while let Some(argument) = arguments.next() {
             if argument == OsStr::new("--help") || argument == OsStr::new("-h") {
@@ -121,6 +125,17 @@ impl Cli {
                 pii_rules = Some(path);
                 continue;
             }
+            if argument == OsStr::new("--authorization-config") {
+                let path = arguments
+                    .next()
+                    .map(PathBuf::from)
+                    .ok_or(CliError::InvalidAuthorizationConfig)?;
+                if authorization_config.is_some() || !path.is_absolute() {
+                    return Err(CliError::InvalidAuthorizationConfig);
+                }
+                authorization_config = Some(path);
+                continue;
+            }
             if argument == OsStr::new("--skillsec-config") {
                 let path = arguments
                     .next()
@@ -151,19 +166,7 @@ impl Cli {
             return Err(CliError::UnknownArgument(rendered));
         }
 
-        let socket_path = if let Some(path) = socket_path {
-            path
-        } else {
-            daemon_socket_path_from_env(
-                socket_env
-                    .filter(|path| !path.is_empty())
-                    .or(Some(OsStr::new("/run/agent-sec-core/daemon.sock"))),
-            )
-            .map_err(|_| CliError::RelativeSocket)?
-        };
-        if !socket_path.is_absolute() {
-            return Err(CliError::RelativeSocket);
-        }
+        let socket_path = resolve_socket_path(socket_path, socket_env)?;
         let mut bootstrap = BootstrapConfig::new(socket_path);
         // The host service accepts local users; embedders retain a private default.
         bootstrap.socket_mode = 0o666;
@@ -172,8 +175,29 @@ impl Cli {
             policy_admin_uids,
             pii_rules,
             skillsec_config,
+            authorization_config,
         })))
     }
+}
+
+fn resolve_socket_path(
+    explicit: Option<PathBuf>,
+    socket_env: Option<&OsStr>,
+) -> Result<PathBuf, CliError> {
+    let path = if let Some(path) = explicit {
+        path
+    } else {
+        daemon_socket_path_from_env(
+            socket_env
+                .filter(|path| !path.is_empty())
+                .or(Some(OsStr::new("/run/agent-sec-core/daemon.sock"))),
+        )
+        .map_err(|_| CliError::RelativeSocket)?
+    };
+    if !path.is_absolute() {
+        return Err(CliError::RelativeSocket);
+    }
+    Ok(path)
 }
 
 fn parse_admin_uid(value: &OsStr) -> Result<u32, CliError> {
@@ -187,6 +211,9 @@ fn parse_admin_uid(value: &OsStr) -> Result<u32, CliError> {
 /// Invalid daemon command-line input.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CliError {
+    /// Deployment settings must be selected with one absolute path.
+    #[error("--authorization-config requires one absolute path")]
+    InvalidAuthorizationConfig,
     /// The rule option requires a nonempty path.
     #[error("--pii-rules requires an absolute path")]
     MissingPiiRules,
@@ -222,6 +249,38 @@ pub enum CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_config_path_is_explicit_and_unique() {
+        let ParseOutcome::Serve(cli) = Cli::parse_from([
+            "daemon",
+            "--authorization-config",
+            "/etc/agent-sec/authorization.json",
+        ])
+        .unwrap() else {
+            panic!("serve");
+        };
+        assert_eq!(
+            cli.authorization_config,
+            Some(PathBuf::from("/etc/agent-sec/authorization.json"))
+        );
+        for args in [
+            vec!["daemon", "--authorization-config"],
+            vec!["daemon", "--authorization-config", "relative.json"],
+            vec![
+                "daemon",
+                "--authorization-config",
+                "/one",
+                "--authorization-config",
+                "/two",
+            ],
+        ] {
+            assert!(matches!(
+                Cli::parse_from(args),
+                Err(CliError::InvalidAuthorizationConfig)
+            ));
+        }
+    }
 
     #[test]
     fn pii_configuration_is_one_explicit_absolute_path() {

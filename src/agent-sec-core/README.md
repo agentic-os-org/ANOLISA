@@ -20,6 +20,10 @@ Rust V2 supports `agent-sec-cli sandbox run --permissions permissions.json -- co
 for local execution with explicit filesystem and network permissions, without a
 daemon. See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
 for the permission format, runtime requirements and isolation boundaries.
+Applications can add policy authorization through `asc-pep-runtime::PepRuntime`,
+using PAP-managed Cedar policies selected by daemon `--authorization-config`.
+Successful Policy updates apply to subsequent authorization requests.
+Cosh can opt into this flow with `AGENT_SEC_COSH_SANDBOX_PERMISSIONS`, using its native approval UI.
 
 ## Background
 

@@ -162,7 +162,7 @@ fn rejects_invalid_sources_and_empty_policy_sets() {
 }
 
 #[test]
-fn rejects_principal_logic_in_headers_and_nested_conditions() {
+fn accepts_principal_logic_in_headers_and_nested_conditions() {
     for text in [
         r#"permit(principal == SecCore::Subject::"worker", action, resource);"#,
         "permit(principal is SecCore::Subject, action, resource);",
@@ -185,10 +185,7 @@ fn rejects_principal_logic_in_headers_and_nested_conditions() {
         "permit(principal, action, resource)
            when { { subject: principal } has subject };",
     ] {
-        assert!(
-            matches!(validate(&source(text)), Err(CedarError::Unsupported { .. })),
-            "{text}"
-        );
+        validate(&source(text)).unwrap_or_else(|error| panic!("{text}: {error:?}"));
     }
 }
 
@@ -198,7 +195,7 @@ fn rejects_templates_and_annotations_without_an_execution_contract() {
         "permit(principal == ?principal, action, resource);",
         "permit(principal, action, resource == ?resource);",
         r#"@advice("require_confirmation") permit(principal, action, resource);"#,
-        r#"@id("label") permit(principal, action, resource);"#,
+        r#"@unknown("label") permit(principal, action, resource);"#,
     ] {
         assert!(matches!(
             validate(&source(text)),
