@@ -21,7 +21,7 @@
           ],
           "timeout_seconds": 120,
           "report": "unittest",
-          "tests": 31
+          "tests": 32
         },
         {
           "name": "native",
