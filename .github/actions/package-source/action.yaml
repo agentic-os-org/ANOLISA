@@ -159,6 +159,15 @@ runs:
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
         fi
 
+        # The standalone Sight archive also needs its existing checkpoint client.
+        if [ "${{ inputs.component }}" = "agentsight" ]; then
+          ckpt_deps="/tmp/build/cosh-ng"
+          mkdir -p "${ckpt_deps}/crates"
+          cp "${SRC_DIR}/../cosh-ng/Cargo.toml" "${ckpt_deps}/"
+          cp -r "${SRC_DIR}/../cosh-ng/crates/cosh-types" "${ckpt_deps}/crates/"
+          cp -r "${SRC_DIR}/../cosh-ng/crates/cosh-platform" "${ckpt_deps}/crates/"
+        fi
+
         # Substitute resolved LICENSE into the build tree without touching the source.
         # Remove the dangling symlink first (cp -r preserves symlinks, which become
         # dangling in /tmp/build since the symlink target no longer exists there).
@@ -276,11 +285,15 @@ runs:
       run: |
         mkdir -p /tmp/archives
         SOURCE_EXCLUDES=()
+        SOURCE_ENTRIES=("${ARCHIVE_NAME}")
+        if [ "${{ inputs.component }}" = "agentsight" ]; then
+          SOURCE_ENTRIES+=(cosh-ng)
+        fi
         case "${{ inputs.component }}" in
           tokenless|agent-memory) SOURCE_EXCLUDES+=(--exclude="${ARCHIVE_NAME}/target") ;;
         esac
         tar -czf "/tmp/archives/${ARCHIVE_FILE}" "${SOURCE_EXCLUDES[@]}" \
-          -C /tmp/build "${ARCHIVE_NAME}"
+          -C /tmp/build "${SOURCE_ENTRIES[@]}"
 
     - name: Verify tokenless component contract in archive
       if: inputs.component == 'tokenless'

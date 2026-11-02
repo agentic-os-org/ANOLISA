@@ -474,6 +474,10 @@ tool calls, and wrapped SSE token usage into the observation pipeline.
 See the [configuration guide](../../docs/user-guide/en/agentsight/configuration.md)
 for existing-config migration and protocol coverage limits.
 
+On Linux, the optional `ws_ckpt` settings connect AgentSight to a local checkpoint
+daemon. Rollback is disabled by default. See the
+[workspace snapshot configuration](../../docs/user-guide/en/agentsight/configuration.md#workspace-snapshot-backend-linux).
+
 ### SQLite Storage (`storage`)
 
 `agentsight.json` schema v5 gives every AgentSight-owned SQLite store the same three policy keys:

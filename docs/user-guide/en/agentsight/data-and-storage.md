@@ -224,6 +224,7 @@ Endpoint groups in 0.11:
 | Tokenless records | `POST /api/tokenless/refresh`, `GET /api/tokenless/records`, `GET /api/tokenless/records/{cache_id}` | Refresh saved statistics, list metadata, and read details; content requires explicit `include_content=true`. All three routes require Dashboard credentials, including on loopback |
 | Token savings | `GET /api/token-savings`, `GET /api/token-savings/session/{id}` | Tokenless savings |
 | ATIF export | `GET /api/export/atif/session/{id}` (also `trace` and `conversation`) | Trajectory export |
+| Workspace snapshots | `GET /api/ws-ckpt/{kind}/{id}/snapshots`, `POST /api/ws-ckpt/diff`, `POST /api/ws-ckpt/restore/{prepare,execute,result}` | Local ws-ckpt queries and explicit guarded file restore; credentials required, including loopback |
 | Trajectories | `GET /api/trajectories`, `/filters`, `/steps`, `/{session_id}` | Collected trajectories. The list accepts optional `label`, `exclude_label`, and `human_backed` filters; `label` is comma-separated effective labels such as `good,bad` |
 | Reuse labels | `POST /api/reuse/triage`, `GET /api/reuse/sessions`, `POST /api/reuse/sessions/{session_id}/label`, `POST /api/reuse/sessions/labels:batch-confirm`, `GET /api/reuse/label-stats`, `POST /api/reuse/judge` | Rule triage and human label decisions. The judge requires `features.reuse_llm_judge=true` and configured LLM credentials; it makes billed model calls |
 | Preferences | `GET /api/preferences`, `/export`, `/turns` | User preference analysis, Markdown export, and source user turns for agent-side reasoning |
@@ -325,6 +326,52 @@ sudo systemctl start agentsight.service
 ```
 
 Stopping the service first ensures the WAL is checkpointed, so the archive is consistent.
+
+## Workspace snapshot API
+
+These Linux-only routes use local ws-ckpt storage and create no additional
+snapshot database. Reading snapshot data and restoring files require Dashboard
+credentials even on loopback.
+
+- `HEAD /api/ws-ckpt/{kind}/{id}/snapshots`: for `session` and `conversation`,
+  the Dashboard can check whether to prompt for a token. Returns an empty
+  `204` for a registered workspace or `404` when unavailable. Normal trajectory
+  access rules apply, including read access on loopback.
+- `GET /api/ws-ckpt/{kind}/{id}/snapshots`: `kind` is `session`, `conversation`,
+  or `trajectory` (collected ATIF). Session queries prefer captured events, then
+  collected ATIF. A confirmed successful ws-ckpt operation selects the workspace;
+  omitted parameters use only an explicitly bound plugin configuration. The
+  response includes `trajectory`, `scope`, `step_snapshots`, `unassigned`,
+  `association` and `completeness`. An unresolved workspace returns `scope: null`.
+  Pass `completeness.next_cursor` as `cursor` to continue; all pages retain the
+  same Step boundaries and `as_of` cutoff. A changed revision requires a reload.
+  Snapshots before the first Step or at/after the cutoff appear only in
+  `unassigned` diagnostics, never as a Step action.
+- `POST /api/ws-ckpt/diff`: body `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`.
+  Returns existing file-level `changes`, authoritative `scope`, the snapshot ID
+  and comparison time. When rollback is enabled, it also returns `restore_preview`
+  with the workspace generation and the digest of the full file change list.
+  No line-by-line contents are returned.
+- `POST /api/ws-ckpt/restore/prepare`: body contains the same `target`,
+  `writers_stopped: true` and `expected_preview` copied from `restore_preview`.
+  The operator must ensure there are no concurrent writes during rollback.
+  The backend rechecks the workspace generation and diff digest and returns a
+  sealed `confirmation_token` and operation ID. If either value has changed,
+  refresh the file list before confirming again.
+- `POST /api/ws-ckpt/restore/execute`: body `{"confirmation_token":"<TOKEN>"}`.
+  Applies only the bound target after guarded generation/diff validation. Returns
+  `status: "succeeded"` or `"unknown"`; a refusal is non-success. A classified
+  no-effect refusal includes `effect: "known_no_effect"`: discard its confirmation,
+  and prepare a new confirmation if the operator retries. Other HTTP or transport failures do not
+  prove no effect; use the result endpoint with the original token.
+- `POST /api/ws-ckpt/restore/result`: accepts the same token and returns durable
+  `evidence`. Missing evidence does not establish that restore had no effect.
+
+Snapshots use `[Agent Step start, next Agent Step start)`, with the last interval
+ending at `as_of`. Association does not prove who created the snapshot; automatic
+hooks, independent CLI and other sessions' snapshots in that workspace are also
+included. Configure restore separately as described in
+[configuration](configuration.md#workspace-snapshot-backend-linux).
 
 ## Related pages
 

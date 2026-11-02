@@ -193,6 +193,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | Tokenless 记录 | `POST /api/tokenless/refresh`、`GET /api/tokenless/records`、`GET /api/tokenless/records/{cache_id}` | 刷新已保存统计、列出元数据和读取详情；内容需显式指定 `include_content=true`。三条路由即使来自 loopback 也需要 Dashboard 凭据 |
 | Token 节省 | `GET /api/token-savings`、`GET /api/token-savings/session/{id}` | Tokenless 节省量 |
 | ATIF 导出 | `GET /api/export/atif/session/{id}`（还有 `trace`、`conversation`） | 轨迹导出 |
+| 工作区快照 | `GET /api/ws-ckpt/{kind}/{id}/snapshots`、`POST /api/ws-ckpt/diff`、`POST /api/ws-ckpt/restore/{prepare,execute,result}` | 本机 ws-ckpt 查询与显式确认的文件恢复；包括回环地址在内均要求认证 |
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
 | 复用标签 | `POST /api/reuse/triage`、`GET /api/reuse/sessions`、`POST /api/reuse/sessions/{session_id}/label`、`POST /api/reuse/sessions/labels:batch-confirm`、`GET /api/reuse/label-stats`、`POST /api/reuse/judge` | 规则分诊与人工标签决定。judge 需要 `features.reuse_llm_judge=true` 与已配置的 LLM 凭据，并会产生付费模型调用 |
 | 偏好 | `GET /api/preferences`、`/export`、`/turns` | 用户偏好分析、Markdown 导出，以及供 Agent 侧推理使用的用户原始轮次 |
@@ -286,6 +287,42 @@ sudo systemctl start agentsight.service
 ```
 
 先停服务可以确保 WAL 已 checkpoint，归档内容才是一致的。
+
+## 工作区快照 API
+
+以下接口使用 Linux 本机 ws-ckpt 存储。读取快照数据和恢复文件均要求 Dashboard 凭据，
+包括回环地址。
+
+- `HEAD /api/ws-ckpt/{kind}/{id}/snapshots`：对 `session` 或 `conversation` 查询
+  是否有可用工作区。存在注册工作区时返回空的 `204`，不可用时返回 `404`。
+  沿用普通轨迹的访问规则，供 Dashboard 决定是否提示登录。
+- `GET /api/ws-ckpt/{kind}/{id}/snapshots`：`kind` 为 `session`、`conversation` 或
+  `trajectory`（已采集 ATIF）。session 优先读取捕获事件，再回退到已采集轨迹。
+  由已确认成功的 ws-ckpt 操作确定工作区；省略参数时仅使用已明确绑定的插件配置。
+  返回 `trajectory`、`scope`、`step_snapshots`、`unassigned`、`association` 与
+  `completeness`；未解析工作区时 `scope: null`。把 `completeness.next_cursor` 作为
+  `cursor` 继续读取，各页共享 Step 边界和 `as_of`；轨迹版本变化时需重新查询。
+  首 Step 之前或截止时刻及之后的快照仅保留在 `unassigned` 诊断中，不生成 Step 按钮。
+- `POST /api/ws-ckpt/diff`：请求体为
+  `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`。返回文件级 `changes`、权威
+  `scope`、快照 ID 和比较时间。开启回滚时还返回 `restore_preview`，包含工作区版本和
+  完整文件变化列表的摘要。不返回逐行文件内容。
+- `POST /api/ws-ckpt/restore/prepare`：请求体包含上述目标 `target`、
+  `writers_stopped: true`，以及从 `restore_preview` 复制的 `expected_preview`。
+  操作者必须确保回滚期间没有其他写入。后台重新核对工作区版本和差异摘要，返回密封的
+  `confirmation_token` 和操作 ID。任一值发生变化时，需刷新文件列表后重新确认。
+- `POST /api/ws-ckpt/restore/execute`：请求体为 `{"confirmation_token":"<TOKEN>"}`。
+  使用已绑定目标，经过 guarded generation/diff 校验后执行。返回
+  `status: "succeeded"` 或 `"unknown"`；拒绝时返回非成功状态。确定未执行的拒绝包含
+  `effect: "known_no_effect"`，此时丢弃旧确认。操作者选择重试时需重新准备确认。其他 HTTP
+  或传输错误不能证明未执行，应保留原 token 查询结果，不盲目重发执行请求。
+- `POST /api/ws-ckpt/restore/result`：使用同一 token 查询持久化 `evidence`。
+  evidence 缺失不能证明恢复未发生。
+
+关联区间为 `[当前 Agent Step 开始, 下一个 Agent Step 开始)`，最后一段截至
+`as_of`。这不证明创建者；同工作区的自动 hook、独立 CLI 和其他会话快照也会包含在内。
+恢复另需启用
+[配置开关](configuration.md#工作区快照后端linux)。
 
 ## 相关页面
 

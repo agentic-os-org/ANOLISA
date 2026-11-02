@@ -23,6 +23,7 @@ edition = "2024"
 [workspace.dependencies]
 url = "2"
 anyhow = "1.0.86"
+bincode = "1.3"
 actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 async-trait = "0.1.89"
 chrono = { version = "0.4.41", features = ["serde"] }
@@ -45,6 +46,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 sha2 = "0.10.8"
+serde_yaml = "0.9"
+shlex = "1.3"
+cosh-platform = { path = "../cosh-ng/crates/cosh-platform" }
+cosh-types = { path = "../cosh-ng/crates/cosh-types" }
 tempfile = "3"
 thiserror = "1.0.63"
 tokio = "1"
@@ -118,6 +123,7 @@ dirs = { workspace = true }
 sysinfo = "0.33"
 
 [dev-dependencies]
+bincode = { workspace = true }
 dirs = { workspace = true }
 actix-web = { version = "4", features = ["macros"] }
 agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
@@ -126,6 +132,10 @@ tempfile = { workspace = true }
 
 # Linux-only dependencies (eBPF, process inspection, HTTP parsing, etc.)
 [target.'cfg(target_os = "linux")'.dependencies]
+cosh-platform = { workspace = true }
+cosh-types = { workspace = true }
+serde_yaml = { workspace = true }
+shlex = { workspace = true }
 libbpf-rs = { workspace = true }
 pagemap = "0.1.0"
 perf-event-open-sys = "4.0.0"

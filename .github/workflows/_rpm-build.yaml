@@ -196,7 +196,7 @@ jobs:
           # Build it from the full source archive, then replace Source0 with the
           # compact payload expected by agentsight.spec.
           if [ "$COMPONENT" = "agentsight" ]; then
-            SOURCE_ROOT=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)
+            SOURCE_ROOT=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'agentsight-*' | head -1)
             if [ -z "$SOURCE_ROOT" ]; then
               echo "ERROR: agentsight source root not found"
               exit 1
