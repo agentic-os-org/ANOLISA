@@ -18,6 +18,31 @@ struct Prepared {
     version: String,
 }
 
+/// The bridge withholds an unchecked final result only when `ToolResponse`
+/// replacement already works; older SDKs cannot express the withheld reply.
+fn withholding_supported(version: &str) -> bool {
+    // Leading dotted numeric segments order releases; a suffix such as
+    // 2.0.6.post1 parses to a zero extra segment and stays supported.
+    fn segments(value: &str) -> Vec<u64> {
+        value
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let supported = segments("2.0.6");
+    let provided = segments(version);
+    for (index, segment) in provided.iter().enumerate() {
+        let floor = supported.get(index).copied().unwrap_or(0);
+        if *segment != floor {
+            return *segment > floor;
+        }
+    }
+    // Short metadata ("2", "2.0") is missing segments; missing segments are
+    // zero and must still clear every remaining floor segment. Extra segments
+    // ("2.0.6.post1") compare as zero against an implicit zero floor.
+    provided.len() >= supported.len() || supported[provided.len()..].iter().all(|floor| *floor == 0)
+}
+
 impl Adapter for AgentScope {
     fn prepare(
         &self,
@@ -73,7 +98,14 @@ impl Adapter for AgentScope {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::AGENTSCOPE.capabilities(&self.version, "factory")
+        let mut capabilities =
+            super::super::adapter::catalog::AGENTSCOPE.capabilities(&self.version, "factory");
+        if withholding_supported(&self.version) {
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+        }
+        capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         event_routes(&self.input.document, steps).map(|_| ())
@@ -214,6 +246,19 @@ mod tests {
     use super::*;
     use aw_provider::admission::StepExecution;
     use std::path::PathBuf;
+
+    #[test]
+    fn withholding_requires_a_bridge_capable_sdk_version() {
+        assert!(withholding_supported("2.0.6"));
+        assert!(withholding_supported("2.0.6.0"));
+        assert!(withholding_supported("2.0.6.post1"));
+        assert!(withholding_supported("2.0.10"));
+        assert!(withholding_supported("3.0.0"));
+        assert!(!withholding_supported("2.0.5"));
+        assert!(!withholding_supported("1.9.9"));
+        assert!(!withholding_supported("2"));
+        assert!(!withholding_supported("2.0"));
+    }
 
     #[test]
     fn replacement_registers_outermost_so_observers_unwind_first() {

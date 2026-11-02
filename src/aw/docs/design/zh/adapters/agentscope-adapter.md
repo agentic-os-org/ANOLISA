@@ -68,6 +68,13 @@ AW 使用 AgentScope 的 `on_acting`，位于原生参数校验和权限检查�
   观察步骤和原生用户 Hook 先收到原始结果，压缩再修改模型可见的最终文本。
   回调故障按 report 处理后仍继续压缩。所有步骤共享 deadline 和 once-only 声明，
   事件预算仍为 **1..55000 ms**。
+- 严格 after 步骤（`on_error: withhold_result`）对完成的响应把关。传输失败、Hook
+  非零退出和无法解码的 Hook stdout 会标记本次调用，由最外层 AW 包装在所有 after
+  Hook 展开后以 `ToolResponse(state=ERROR)` 占位结果替换未检查原文：模型不会收到
+  原始文本，外层 after Hook 仍持有关联准入的原始 payload，且不受 hook 顺序或
+  `replace_result` 组合影响。该故障动作仅在桥支持完成响应替换的 SDK 版本上准入。
+  中间 `ToolChunk` 帧不缓冲：AgentScope 中间件接缝没有流门控，失败工具的部分
+  chunk 对完成响应边界之外的流式消费者仍可见。
 - 生成的 Hook 配置只向最后一个已准入的结构化替换步骤授予替换权限。native 和观察
   Hook 的 stdout 不能替换结果，所有回调在最终步骤之前保留相同的关联响应。
   Bridge 校验该权限必须为布尔值，且只能用于 after。

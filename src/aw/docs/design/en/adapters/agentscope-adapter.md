@@ -82,6 +82,18 @@ permission checks and immediately outside `Toolkit.call_tool`.
   then compression changes the final model-visible text. Reported callback failures
   do not skip compression. All steps share one deadline and once-only claims;
   event budgets remain **1..55000 ms**.
+- A strict after step (`on_error: withhold_result`) gates the completed response.
+  Transport failure, nonzero Hook exit and undecodable Hook stdout mark the
+  invocation; the outermost AW wrapper then substitutes the unchecked native
+  result with a `ToolResponse(state=ERROR)` placeholder once every after hook
+  has unwound. The model never receives the original text, while outer after
+  hooks keep observing the correlated original payload they were admitted
+  against, whatever the hook order or `replace_result` composition. Admission
+  grants this failure action only on SDK versions whose bridge supports
+  completed-response replacement. Intermediate `ToolChunk` frames are not
+  buffered: the AgentScope middleware seam exposes no stream gate, so partial
+  chunks of a failing tool remain visible to streaming consumers outside the
+  completed-response boundary.
 - Generated hook configuration grants replacement authority only to the final
   admitted structured replacement step. Native and observation Hook stdout cannot
   replace the result, so every callback keeps the same correlated response until

@@ -87,6 +87,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 ## 使用边界
 
 - 普通 Qoder SDK、QwenPaw 可配置后置故障 `withhold_result`，暂扣结果并停止后续派发；已发生的工具副作用保留。
+- AgentScope 2.0.6+ 的 tool.after 可配置 `withhold_result`：严格检查失败时在中间件链末端以错误态占位结果替换未检查原文，其余 after Hook 仍观察原始结果；仅在桥支持结果替换时准入。
 - Pi、Claude SDK resident 的回调故障会停止任务。后置检查无法撤销已执行工具。
 - 当前公共 Provider Hook 为上表两个事件。其余 14 个事件名、通用审批、输入替换、guard、Schema/BeforeModel 和 Retrieve 接入尚未开放。
 - AW 通过原生 Hook 执行策略，OS 沙箱隔离需另行部署。

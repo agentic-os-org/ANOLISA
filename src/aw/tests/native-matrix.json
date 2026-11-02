@@ -11,7 +11,7 @@
       "requirements": [
         "agentscope==2.0.6"
       ],
-      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model.",
+      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model. Strict tool.after withholding replaces an unchecked native result with an error-state placeholder at the end of the middleware chain on timeout, hook error and invalid reply, keeping the original payload correlated for outer after hooks, and requires SDK 2.0.6+.",
       "cases": [
         {
           "name": "middleware",
@@ -21,7 +21,7 @@
           ],
           "timeout_seconds": 120,
           "report": "unittest",
-          "tests": 26
+          "tests": 31
         },
         {
           "name": "native",
@@ -137,6 +137,30 @@
                 "after": 7,
                 "status/bindings": 0,
                 "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/agentscope_strict.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/strict"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "withheld": 3,
+                "healthy": 1,
+                "observer_callbacks": 4
               }
             }
           ]
